@@ -230,6 +230,32 @@ try {
     }
     changeMain("pnpm-lock.yaml", lock.replace("unrelated@5.0.0", "unrelated@6.0.0")); await route();
     assert.ok(!all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
+  } else if (scenario === "importer_scope") {
+    f.addIssue(1); f.modes.set(1, "grep"); await route(); await success();
+    const lock = JSON.parse(readFileSync("seed/pnpm-lock.yaml", "utf8"));
+    const bump = (name, version) => {
+      const entry = lock.importers["."].devDependencies[name];
+      const old = name + "@" + entry.version, next = name + "@" + version;
+      delete lock.packages[old]; delete lock.snapshots[old];
+      lock.packages[next] = { resolution: { integrity: version } }; lock.snapshots[next] = {};
+      entry.specifier = version; entry.version = version;
+    };
+    bump("unrelated", "2.0.0");
+    changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "2.0.0" } }));
+    changeMain("pnpm-lock.yaml", JSON.stringify(lock)); await route();
+    assert.ok(!all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
+    for (const update of [
+      () => bump("wrangler", "2.0.0"),
+      () => { lock.importers["."].devDependencies.alternate = { specifier: "npm:wrangler@2.0.0", version: "wrangler@2.0.0" }; },
+      () => { lock.importers["."].devDependencies.unrelated = { specifier: "workspace:*", version: "link:../unrelated" }; },
+      () => { lock.importers["."].injectedSetting = true; },
+      () => { lock.importers["."].devDependencies.unrelated = "3.0.0"; },
+      () => { lock.importers["packages/new"] = {}; },
+    ]) {
+      update(); changeMain("pnpm-lock.yaml", JSON.stringify(lock)); await route();
+      assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
+      f.reset(1, "grep"); await success();
+    }
   } else if (scenario === "unicode_scope") {
     f.addIssue(1); await route(); await success();
     assert.ok(f.requests.some((r) => r.request.messages.some((m) => m.role === "tool" && JSON.stringify(m.content).includes("export const special = 1;"))));

@@ -11,7 +11,7 @@ async function githubForRepository(repository: string, access: "read" | "write" 
   const permissions = {
     read: { issues: "read", pull_requests: "read", metadata: "read" },
     write: { issues: "write", pull_requests: "write", metadata: "read" },
-    pull_request: { pull_requests: "write", metadata: "read" },
+    pull_request: { pull_requests: "write", contents: "read", metadata: "read" },
     contents_read: { contents: "read", metadata: "read" },
     contents_write: { contents: "write", metadata: "read" },
   } as const;

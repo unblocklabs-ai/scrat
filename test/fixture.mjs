@@ -32,7 +32,7 @@ export async function fixture(scenario) {
   const modes = new Map(), steps = new Map(), requests = [], issues = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set() };
   const tokens = new Map();
-  let onModel;
+  let onModel, nextCommentId = 1000;
   const server = createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
     const request = JSON.parse(body);
@@ -124,10 +124,17 @@ export async function fixture(scenario) {
       const permission = prs.some((pr) => pr.number === n) ? "pull_requests" : "issues";
       if (tokens.get(token)?.[permission] !== "write") return reply({ message: "Resource not accessible by integration" }, 403);
       writes.push({ type: "comment", number: n, body: body.body });
-      const comment = { id: 1000 + n, body: body.body, user: { login: config.github.botLogin }, updated_at: "2026-10-19T01:00:00Z", html_url: `https://github.com/fixture/project/issues/${n}#comment` };
+      const comment = { id: ++nextCommentId, body: body.body, user: { login: config.github.botLogin }, updated_at: "2026-10-19T01:00:00Z", html_url: `https://github.com/fixture/project/issues/${n}#comment` };
       comments.set(n, [...(comments.get(n) ?? []), comment]);
       if (faults.cleanup.delete(n)) { const run = db.select().from(schema.runs).all().find((run) => !run.finishedAt); const workspace = db.select().from(schema.workspaces).all().find((w) => w.id === run.workspaceId); writeFileSync(workspace.path + "/keep.txt", "preserve\n"); }
       return faults.comment.delete(n) ? reply({ message: "Lost response" }, 502) : reply(comment, 201);
+    }
+    match = path.match(/\/issues\/comments\/(\d+)$/);
+    if (match && method === "PATCH") {
+      const comment = [...comments.values()].flat().find((comment) => comment.id === Number(match[1]));
+      if (!comment) return reply({ message: "Not Found" }, 404);
+      comment.body = body.body; writes.push({ type: "comment_update", id: comment.id });
+      return reply(comment);
     }
     match = path.match(/\/issues\/(\d+)\/labels(?:\/scrat)?$/);
     if (match) { const n = Number(match[1]); writes.push({ type: "label", number: n }); if (faults.label.delete(n)) return reply({ message: "Label failure" }, 503); issues.get(n).labels = method === "DELETE" ? [] : [{ name: "scrat" }]; return reply(issues.get(n).labels); }

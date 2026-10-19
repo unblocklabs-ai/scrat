@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
@@ -52,9 +52,15 @@ export async function publishRun(task: typeof tasks.$inferSelect, run: typeof ru
       return;
     }
   }
-  const body = `${result.text}\n\n${marker}`;
+  const reviewMarker = "<!-- scrat-review -->";
+  const body = `${result.text}\n\n${task.action === "review_pr" ? reviewMarker + "\n" : ""}${marker}`;
   if (!publication.commentId) {
-    const existing = current.comments.find((comment) => comment.id.startsWith("issue:") && comment.author === config.github.botLogin && comment.body.includes(marker));
+    const reviewIds = task.action === "review_pr" ? new Set(db.select({ publication: runs.publication }).from(runs)
+      .innerJoin(tasks, eq(runs.taskId, tasks.id)).where(and(eq(tasks.itemId, task.itemId), eq(tasks.action, "review_pr")))
+      .all().flatMap(({ publication }) => publication.commentId ? [publication.commentId] : [])) : new Set<number>();
+    const existing = current.comments.findLast((comment) => comment.id.startsWith("issue:") && comment.author === config.github.botLogin
+      && (comment.body.includes(marker) || (task.action === "review_pr"
+        && (comment.body.includes(reviewMarker) || reviewIds.has(Number(comment.id.slice("issue:".length)))))));
     let commentId: number;
     if (existing) {
       commentId = Number(existing.id.slice("issue:".length));

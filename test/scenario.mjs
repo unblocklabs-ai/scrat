@@ -57,6 +57,13 @@ try {
     assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === 201).length, 1);
     assert.match(f.comments.get(201)[0].body, /Consolidated/);
     for (const req of f.requests.filter((r) => r.context.action === "review_pr" && !r.consolidating)) assert.ok(!req.text.includes("Independent review from"));
+    // Adopt a pre-upgrade review comment too, without deleting its historical run.
+    f.comments.get(201)[0].body = f.comments.get(201)[0].body.replace("<!-- scrat-review -->\n", "");
+    changeMain("src/app.ts", "export const value = 99;\n"); await route();
+    const rereview = await success();
+    assert.equal(rereview.publication.commentId, review.publication.commentId);
+    assert.equal(f.comments.get(201).length, 1);
+    assert.equal(f.writes.filter((w) => w.type === "comment_update").length, 1);
   } else if (scenario === "reviewer_failure") {
     await implement(2); await route(); f.modes.set(202, "reviewer-failure");
     const r = await run(); assert.ok(r.error); assert.ok(r.reviewers.some((r) => r.error));

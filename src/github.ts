@@ -58,7 +58,7 @@ export async function postComment(repository: string, issueNumber: number, body:
     operation.complete({ commentId, status: response.status, requestId: response.headers["x-github-request-id"] });
     return response;
   } catch (error) {
-    operation.fail(error, { stage, remoteSucceeded: stage === "journal" ? true : undefined, commentId });
+    operation.fail(error, { stage, commentId });
     throw error;
   }
 }
@@ -78,7 +78,7 @@ export async function updateComment(repository: string, commentId: number, body:
     operation.complete({ commentId: response.data.id, status: response.status, requestId: response.headers["x-github-request-id"] });
     return response;
   } catch (error) {
-    operation.fail(error, { stage, remoteSucceeded: stage === "journal" ? true : undefined });
+    operation.fail(error, { stage });
     throw error;
   }
 }
@@ -96,7 +96,7 @@ export async function addLabels(repository: string, issueNumber: number, labels:
     operation.complete({ status: response.status, requestId: response.headers["x-github-request-id"] });
     return response;
   } catch (error) {
-    operation.fail(error, { stage, remoteSucceeded: stage === "journal" ? true : undefined });
+    operation.fail(error, { stage });
     throw error;
   }
 }
@@ -120,7 +120,7 @@ export async function removeLabels(repository: string, issueNumber: number, labe
     operation.complete({ removedLabels: responses.length });
     return responses;
   } catch (error) {
-    operation.fail(error, { stage, remoteSucceeded: stage === "journal" ? true : undefined, label, removedLabels: responses.length });
+    operation.fail(error, { stage, label, removedLabels: responses.length });
     throw error;
   }
 }

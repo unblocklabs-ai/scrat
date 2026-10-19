@@ -3,18 +3,20 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
+import { childEnvironment } from "./secrets.ts";
 
 const executeFile = promisify(execFile);
 const repositoryFetches = new Map<string, Promise<string>>();
 
-export async function git(repositoryPath: string, args: string[], env = process.env) {
+// Workspace Git commands can run repository hooks, so they get the child environment.
+export async function git(repositoryPath: string, args: string[], env = childEnvironment()) {
   const { stdout } = await executeFile("git", ["-C", repositoryPath, ...args], { env, maxBuffer: 16 * 1024 * 1024 });
   // Path inventories and source blobs are byte-sensitive; only command metadata
   // (SHAs, refs, etc.) should have surrounding whitespace removed.
   return args.includes("-z") || args[0] === "show" ? stdout : stdout.trim();
 }
 
-export async function fetchRepository(repositoryPath: string, remote: string, baseBranch: string, env = process.env) {
+export async function fetchRepository(repositoryPath: string, remote: string, baseBranch: string, env = childEnvironment()) {
   repositoryPath = resolve(repositoryPath);
   const previous = repositoryFetches.get(repositoryPath);
   const pending = (async () => {
@@ -34,7 +36,7 @@ export async function fetchRepository(repositoryPath: string, remote: string, ba
   }
 }
 
-export async function fetchPullRequestHead(repositoryPath: string, remote: string, number: number, env = process.env) {
+export async function fetchPullRequestHead(repositoryPath: string, remote: string, number: number, env = childEnvironment()) {
   const ref = `refs/remotes/origin/pr/${number}`;
   await git(repositoryPath, ["fetch", "--", remote, `+refs/pull/${number}/head:${ref}`], env);
   return ref;
@@ -55,7 +57,7 @@ export async function hasConflicts(repositoryPath: string, base: string, head: s
   }
 }
 
-export async function branchContainsCommit(repositoryPath: string, remote: string, branch: string, commitSha: string, env = process.env) {
+export async function branchContainsCommit(repositoryPath: string, remote: string, branch: string, commitSha: string, env = childEnvironment()) {
   const advertised = await git(repositoryPath, ["ls-remote", "--heads", "--", remote, `refs/heads/${branch}`], env);
   const remoteSha = advertised.split(/\s+/)[0];
   if (!remoteSha) return false;

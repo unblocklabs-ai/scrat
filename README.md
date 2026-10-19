@@ -16,6 +16,8 @@ GitHub access uses a repository-scoped client with shared, permission-specific a
 
 Implementations use isolated worktrees and branches; follow-ups reuse their workspace and Pi session. Checks must pass against the exact tree being committed before publication. Optional Docker PostgreSQL databases isolate mutating runs. PR closure triggers workspace cleanup; failed work is retained for recovery.
 
+Repository commands, Git hooks and Pi's Bash receive a minimal inherited environment, never Scrat's credentials. Pi's file tools stay inside the worktree. Comments, PR bodies and commits that contain configured credentials are refused rather than published.
+
 The newest complete PR assessment is authoritative. Context and observed source/dependency changes determine freshness—a relevance heuristic, not a full dependency graph. Stale assessments lose their grade and require a fresh review; older opinions never regain authority. Publication-only retries reuse saved results. Scrat does not automatically merge PRs.
 
 ## Configure and run
@@ -80,7 +82,7 @@ Workspace commands are argument arrays, not shell strings: `["pnpm", "verify"]`.
 
 | Setting | Purpose |
 | --- | --- |
-| `workspace.environment` | Environment variables added to Pi's Bash commands and harness preparation/validation commands. Test-process limits belong here; task concurrency does not serialize tests. |
+| `workspace.environment` | Environment variables added to Pi's Bash commands and harness preparation/validation commands. These commands inherit only path, home, user, locale, temporary-directory, proxy, certificate and `DOCKER_HOST` settings, so any other variable they need belongs here. Test-process limits belong here too; task concurrency does not serialize tests. |
 | `workspace.prepare` | Setup commands, including dependency installation and code generation. Also used for read-only reviews, and rerun before mutating-work validation. |
 | `workspace.validate` | Required checks for mutating tasks before committing or publishing. Not run as a harness gate for read-only reviews. |
 | `workspace.database` | Optional per-run PostgreSQL container configuration for mutating tasks; omit or set to `null` to disable. |
@@ -131,6 +133,7 @@ The checked-in configuration currently uses six task slots, priorities **PR 100 
 - `src/pi.ts`, `src/pr-review.ts` — Pi sessions and dual-model reviews.
 - `src/pr-assessment.ts`, `src/pr-review-publication.ts` — assessment authority, freshness, and canonical delivery.
 - `src/workspaces.ts`, `src/databases.ts` — Git and database resource lifecycles.
+- `src/secrets.ts` — child-process environment and credential checks before publication.
 - `skills/` — action prompts; `scrat.config.json` selects their models and settings.
 - `data/` — SQLite queue, run history, event journal, workspaces, and Pi sessions. Back it up alongside credentials before deployment.
 

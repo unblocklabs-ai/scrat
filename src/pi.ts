@@ -1,8 +1,8 @@
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAgentSession, createBashToolDefinition, createReadToolDefinition, detectSupportedImageMimeTypeFromFile, defineTool, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, createBashToolDefinition, createFindToolDefinition, createGrepToolDefinition, createLsToolDefinition, createReadToolDefinition, detectSupportedImageMimeTypeFromFile, defineTool, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
 import { Type } from "typebox";
@@ -12,6 +12,7 @@ import { runs } from "./schema.ts";
 import { parseResult, type Reviewer } from "./results.ts";
 import { git } from "./git.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
+import { childEnvironment } from "./secrets.ts";
 
 export function saveReviewer(runId: string, index: number, patch: Partial<Reviewer>) {
   db.transaction((transaction) => {
@@ -54,8 +55,32 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     ? SessionManager.open(sessionFile, resolve("data/pi-sessions"), cwd)
     : SessionManager.create(cwd, resolve("data/pi-sessions"));
   const bash = createBashToolDefinition(cwd, {
-    spawnHook: (context) => ({ ...context, env: { ...context.env, ...environment } }),
+    spawnHook: (context) => ({ ...context, env: { ...childEnvironment(context.env), ...environment } }),
   });
+  // File tools stay inside the workspace, including through absolute paths, ~,
+  // .. and symlinks committed to the repository under review.
+  const root = await realpath(cwd);
+  async function insideWorkspace(path: string) {
+    const real = await realpath(path).catch((error: unknown) => {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return resolve(path);
+      throw error;
+    });
+    const local = relative(root, real);
+    if (local === ".." || local.startsWith("../")) throw new Error(`Path is outside the workspace: ${path}`);
+    return real;
+  }
+  // Search roots mirror Pi's resolution: a leading @ is dropped and ~ means home.
+  async function searchRoot(path = ".") {
+    const requested = path.startsWith("@") ? path.slice(1) : path;
+    if (requested === "~" || requested.startsWith("~/")) throw new Error(`Path is outside the workspace: ${path}`);
+    await insideWorkspace(resolve(cwd, requested));
+  }
+  const sdkGrep = createGrepToolDefinition(cwd);
+  const grep: typeof sdkGrep = { ...sdkGrep, async execute(...args) { await searchRoot(args[1].path); return sdkGrep.execute(...args); } };
+  const sdkFind = createFindToolDefinition(cwd);
+  const find: typeof sdkFind = { ...sdkFind, async execute(...args) { await searchRoot(args[1].path); return sdkFind.execute(...args); } };
+  const sdkLs = createLsToolDefinition(cwd);
+  const ls: typeof sdkLs = { ...sdkLs, async execute(...args) { await searchRoot(args[1].path); return sdkLs.execute(...args); } };
   const paths = new Set<string>();
   const basePaths = new Set<string>();
   const sdkRead = createReadToolDefinition(cwd);
@@ -66,9 +91,9 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
       // Unicode/path expansion, images, truncation and cancellation behavior.
       let absolute: string | undefined;
       const tool = createReadToolDefinition(cwd, { operations: {
-        access: (path) => access(path, constants.R_OK),
-        detectImageMimeType: detectSupportedImageMimeTypeFromFile,
-        readFile: async (path) => { absolute = path; return readFile(path); },
+        access: async (path) => access(await insideWorkspace(path), constants.R_OK),
+        detectImageMimeType: async (path) => detectSupportedImageMimeTypeFromFile(await insideWorkspace(path)),
+        readFile: async (path) => { const real = await insideWorkspace(path); absolute = path; return readFile(real); },
       } });
       const result = await tool.execute(...args);
       if (absolute) {
@@ -93,7 +118,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     cwd, modelRuntime, model, thinkingLevel, settingsManager, sessionManager, resourceLoader,
     tools: readOnly ? ["read", "grep", "find", "ls", ...(readBase ? ["read_base"] : [])] : ["read", "grep", "find", "ls", "bash", "edit", "write"],
     customTools: [
-      { ...read, renderCall: undefined, renderResult: undefined },
+      ...[read, grep, find, ls].map((tool) => ({ ...tool, renderCall: undefined, renderResult: undefined })),
       ...(readOnly ? (readBase ? [readBase] : []) : [{ ...bash, renderCall: undefined, renderResult: undefined }]),
     ],
   });

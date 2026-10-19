@@ -24,6 +24,7 @@ export async function fixture(scenario) {
     writeFileSync("seed/src/renamed.ts", "export const renamed = 1;\n");
     writeFileSync("seed/ leading.ts", "export const leading = 1;\n");
   }
+  if (scenario === "isolation") { writeFileSync("outside-secret.txt", "outside-secret-content\n"); symlinkSync(resolve("outside-secret.txt"), "seed/src/link.txt"); }
   if (scenario === "unicode_scope") writeFileSync("seed/src/a b.ts", "export const special = 1;\n");
   if (scenario === "unicode_nfd") writeFileSync("seed/src/caf\u00e9.ts", "export const unicode = 1;\n");
   if (["panel", "relevance", "lockfile_scope", "importer_scope"].includes(scenario)) writeFileSync("seed/.gitignore", "node_modules/\n");
@@ -79,8 +80,14 @@ export async function fixture(scenario) {
           : { name: "write", args: { path: "src/app.ts", content: `export const value = ${context.item.number + 10};\n${scenario === "verification" ? "\n" : ""}` } };
     }
     if (!review && context.database && step === 1) tool = { name: "write", args: { path: "migration.sql", content: "ALTER TABLE identities ADD COLUMN IF NOT EXISTS extra integer;\n" } };
+    if (review && mode === "outside") tool = [{ name: "read", args: { path: resolve("outside-secret.txt") } }, { name: "read", args: { path: "src/link.txt" } },
+      { name: "grep", args: { pattern: "outside", path: resolve(".") } }, { name: "ls", args: { path: ".." } }][step];
+    if (!review && mode === "probe") tool = [{ name: "bash", args: { command: `${process.execPath} ${resolve("probe.mjs")} bash` } },
+      { name: "write", args: { path: "src/app.ts", content: "export const value = 3;\n" } }][step];
+    if (!review && mode === "leak-file") tool = step === 0 ? { name: "write", args: { path: "src/app.ts", content: process.env.GITHUB_APP_PRIVATE_KEY } } : undefined;
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : "complete";
     const output = (review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : "Implemented the change.")
+      + (mode === "leak-report" ? "\n" + process.env.GITHUB_APP_PRIVATE_KEY : "")
       + (mode.startsWith("quoted-") ? "\n```\nSCRAT_GRADE: F\nSCRAT_READY\n```" : "")
       + (mode === "ready" ? "\nSCRAT_READY" : "")
       + (context.action === "review_pr" && !["missing-grade", "quoted-only"].includes(mode) ? `\nSCRAT_GRADE: ${["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : "B"}` : "")
@@ -110,6 +117,11 @@ export async function fixture(scenario) {
   if (["relevance", "lockfile_scope", "importer_scope"].includes(scenario)) {
     writeFileSync("prepare.mjs", 'import{mkdirSync,writeFileSync}from"node:fs";for(const name of ["wrangler","string-width-cjs"]){mkdirSync("node_modules/"+name,{recursive:true});writeFileSync("node_modules/"+name+"/package.json",JSON.stringify({name,version:"1.0.0"}));}');
     config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
+  }
+  if (scenario === "isolation") {
+    writeFileSync("probe.mjs", 'import{appendFileSync}from"node:fs";const leaked=Object.entries(process.env).filter(([name,value])=>/PRIVATE_KEY|API_KEY/.test(name)||value.includes("PRIVATE KEY-----")).map(([name])=>name);'
+      + 'appendFileSync(' + JSON.stringify(resolve("isolation.jsonl")) + ',JSON.stringify({phase:process.argv[2],leaked,configured:process.env.SCRAT_WORKSPACE_VALUE})+"\\n");');
+    config.workspace = { environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, prepare: [[process.execPath, resolve("probe.mjs"), "prepare"]], validate: [[process.execPath, resolve("probe.mjs"), "validate"]] };
   }
   if (scenario === "verification" || scenario === "validation_mutation") {
     writeFileSync("check.mjs", scenario === "validation_mutation" ? 'import{writeFileSync}from"node:fs";writeFileSync("src/app.ts","unexpected verification change\\n");' : 'import{existsSync}from"node:fs";if(existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed");process.exit(7);}console.log("checked actual source");');

@@ -14,8 +14,9 @@ import { publishRun } from "./publication.ts";
 import { reviewChanges } from "./relevance.ts";
 import { hasValidationCheckpoint } from "./results.ts";
 import { items, runs } from "./schema.ts";
+import { childEnvironment } from "./secrets.ts";
 import { claimTask, finishRun } from "./tasks.ts";
-import { checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
+import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
 
 export async function runNextTask() {
   const claimed = claimTask();
@@ -81,7 +82,7 @@ export async function runNextTask() {
       const environment = { ...config.workspace?.environment,
         ...Object.fromEntries((databaseConfig?.environment ?? []).map((name) => [name, database!.url])),
       };
-      const commandEnvironment = { ...process.env, ...environment };
+      const commandEnvironment = { ...childEnvironment(), ...environment };
       let result = run.result;
       if (!validationOnly) {
         const previous = !readOnly ? db.select().from(runs).where(and(
@@ -149,6 +150,8 @@ export async function runNextTask() {
         const commands = await runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references);
         await git(workspace.path, ["add", "--all"]);
         if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
+        // A validation-only retry keeps the original run's pre-agent head.
+        await assertNoCommittedSecrets(workspace, validationOnly ? run.headSha ?? baseRef : headSha, validationTree);
         const commitSha = await commitWorkspace(workspace, `fix: ${context.item.title}`, {
           name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com`,
         }, references);

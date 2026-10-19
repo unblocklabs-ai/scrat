@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, readFile, readlink, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { eq } from "drizzle-orm";
 import { db } from "./db.ts";
@@ -7,6 +7,7 @@ import { recordEvent, type EventReferences } from "./events.ts";
 import { git, hasPendingMerge } from "./git.ts";
 import { startOperation } from "./logging.ts";
 import { runs, workspaces } from "./schema.ts";
+import { containsSecret } from "./secrets.ts";
 
 export function getWorkspace(workspaceId: string) {
   return db.select().from(workspaces).where(eq(workspaces.id, workspaceId)).get();
@@ -40,6 +41,22 @@ export async function validateCheckpoint(workspace: typeof workspaces.$inferSele
   const untracked = await git(workspace.path, ["ls-files", "--others", "--exclude-standard", "-z"]);
   if (headSha !== checkpoint.headSha || mergeHead !== checkpoint.mergeHead || changed || untracked) {
     throw new Error("Validation checkpoint source changed; use normal retry to repair the current workspace");
+  }
+}
+
+// Pushed history is the most durable place for a credential to leak.
+export async function assertNoCommittedSecrets(workspace: typeof workspaces.$inferSelect, base: string, tree: string) {
+  const changed = (await git(workspace.path, ["diff", "--name-only", "--no-renames", "-z", base, tree])).split("\0").filter(Boolean);
+  for (const path of changed) {
+    const file = resolve(workspace.path, path);
+    const stats = await lstat(file).catch((error: unknown) => {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    const content = stats?.isSymbolicLink() ? await readlink(file) : stats?.isFile() ? (await readFile(file)).toString("latin1") : "";
+    if (containsSecret(content)) {
+      throw Object.assign(new Error(`Refusing to commit credential material in ${path}`), { code: "SECRET_IN_OUTPUT" });
+    }
   }
 }
 

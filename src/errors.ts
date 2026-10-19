@@ -1,5 +1,6 @@
 import { DrizzleQueryError } from "drizzle-orm";
 import { RequestError } from "octokit";
+import { secretValues } from "./secrets.ts";
 
 export type ErrorDetails = {
   name: string;
@@ -15,9 +16,7 @@ export type ErrorDetails = {
 };
 
 export function redactSecrets(value: string) {
-  for (const secret of [process.env.GITHUB_APP_PRIVATE_KEY, process.env.CODEX_LB_API_KEY]) {
-    if (secret) value = value.replaceAll(secret, "[redacted]");
-  }
+  for (const secret of secretValues()) value = value.replaceAll(secret, "[redacted]");
   return value
     .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, "[redacted]")
     .replace(/\b(?:gh[oprsu]_|github_pat_)[A-Za-z0-9_]+\b/g, "[redacted]")

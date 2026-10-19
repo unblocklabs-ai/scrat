@@ -5,6 +5,7 @@ import { config } from "./config.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
 import { logger, startOperation } from "./logging.ts";
 import type { GithubComment, GithubContext, GithubIssue, GithubPullRequest } from "./github-types.ts";
+import { assertPublishable, childEnvironment } from "./secrets.ts";
 
 const permissions = {
   read: { issues: "read", pull_requests: "read", metadata: "read" },
@@ -76,12 +77,15 @@ export class GitHubRepository {
 
   async getGitEnvironment(write = false) {
     const { token } = await githubForRepository(this.repository, write ? "contents_write" : "contents_read");
+    // Repository hooks must never run with the installation token in their environment.
     return {
-      ...process.env,
+      ...childEnvironment(),
       GIT_TERMINAL_PROMPT: "0",
-      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_COUNT: "2",
       GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
       GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+      GIT_CONFIG_KEY_1: "core.hooksPath",
+      GIT_CONFIG_VALUE_1: "/dev/null",
     };
   }
 
@@ -156,9 +160,11 @@ export class GitHubRepository {
     const { repository } = this;
     const operation = startOperation("github.post_comment", { ...references, repository, issueNumber });
     const eventReferences = { ...references, operationId: operation.operationId };
-    let stage = "authentication";
+    let stage = "inspection";
     let commentId: number | undefined;
     try {
+      assertPublishable(body);
+      stage = "authentication";
       const { github, owner, repo } = await githubForRepository(repository, "write");
       stage = "request";
       const response = await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body });
@@ -179,8 +185,10 @@ export class GitHubRepository {
     const { repository } = this;
     const operation = startOperation("github.update_comment", { ...references, repository, commentId });
     const eventReferences = { ...references, operationId: operation.operationId };
-    let stage = "authentication";
+    let stage = "inspection";
     try {
+      assertPublishable(body);
+      stage = "authentication";
       const { github, owner, repo } = await githubForRepository(repository, "write");
       stage = "request";
       const response = await github.rest.issues.updateComment({ owner, repo, comment_id: commentId, body });
@@ -251,9 +259,11 @@ export class GitHubRepository {
     const { repository } = this;
     const operation = startOperation("github.create_pull_request", { ...references, repository, head, base });
     const eventReferences = { ...references, operationId: operation.operationId };
-    let stage = "authentication";
+    let stage = "inspection";
     let pullRequestNumber: number | undefined;
     try {
+      assertPublishable(title, body);
+      stage = "authentication";
       const { github, owner, repo } = await githubForRepository(repository, "pull_request");
       stage = "request";
       const response = await github.rest.pulls.create({ owner, repo, title, body, head, base, draft: false });

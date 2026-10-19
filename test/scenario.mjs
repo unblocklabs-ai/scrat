@@ -683,6 +683,33 @@ try {
     };
     const r = await run(); assert.match(r.error.message, /Committed tree differs/);
     assert.equal(r.verification, null); assert.equal(f.prs.length, 0);
+  } else if (scenario === "isolation") {
+    const key = process.env.GITHUB_APP_PRIVATE_KEY;
+    f.addIssue(1); f.reset(1, "outside"); f.enqueue(1); await success();
+    const transcript = f.requests.filter(({ context }) => context.item.number === 1).at(-1).request.messages;
+    assert.equal(transcript.filter((message) => message.role === "tool" && JSON.stringify(message.content).includes("outside the workspace")).length, 4);
+    assert.ok(!JSON.stringify(f.requests.map(({ request }) => request.messages)).includes("outside-secret-content"));
+    f.addIssue(2); f.reset(2, "leak-report"); f.enqueue(2);
+    const report = await run(); assert.equal(report.error.code, "SECRET_IN_OUTPUT");
+    assert.ok(!f.writes.some((write) => write.number === 2));
+    f.onModel = (context, step) => {
+      if (step || context.action !== "implement" || context.item.number !== 3) return;
+      for (const name of ["pre-commit", "pre-push"]) {
+        const hook = resolve(f.config.github.repositoryPath, ".git/hooks", name);
+        copyFileSync(hook + ".sample", hook); writeFileSync(hook, `#!/bin/sh\nexec ${process.execPath} ${resolve("probe.mjs")} ${name}\n`);
+      }
+    };
+    f.addIssue(3, ["scrat"]); f.reset(3, "probe"); f.enqueue(3, "implement"); await success();
+    const probes = readFileSync("isolation.jsonl", "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual([...new Set(probes.map(({ phase }) => phase))].sort(), ["bash", "pre-commit", "prepare", "validate"]);
+    for (const probe of probes) {
+      assert.deepEqual(probe.leaked, [], JSON.stringify(probe));
+      if (probe.phase !== "pre-commit") assert.equal(probe.configured, "isolated");
+    }
+    f.addIssue(4, ["scrat"]); f.reset(4, "leak-file"); f.enqueue(4, "implement");
+    const committed = await run(); assert.equal(committed.error.code, "SECRET_IN_OUTPUT");
+    assert.equal(committed.verification, null); assert.ok(!f.writes.some((write) => write.type === "pr" && write.number === 4));
+    assert.ok(!JSON.stringify(all(s.runs).map((r) => r.error)).includes(key.split("\n")[1]));
   } else if (scenario === "database") {
     const original = process.env.DATABASE_URL; f.addIssue(1); f.addIssue(2); f.enqueue(1, "implement"); f.enqueue(2, "implement");
     const runs = await Promise.all([f.runNextTask(), f.runNextTask()]);

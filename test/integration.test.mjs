@@ -17,6 +17,7 @@ const scenarios = {
   ambiguous_pr: "a lost PR response is reconciled without another PR or inference",
   freshness: "requirements changed during inference cannot receive an approval label",
   relevance: "root searches and unrelated development dependencies do not trigger re-review",
+  lockfile_scope: "mixed lockfile changes cannot hide inspected packages, aliases or importer changes",
   review_scope: "Pi path aliases and supplied PR diff files participate in freshness and re-review",
   unicode_scope: "Pi filename normalization cannot hide relevant base changes",
   legacy_scope: "historical unknown scope remains conservative even alongside known paths",

@@ -155,6 +155,22 @@ try {
     await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "Unrelated dev dependencies must not trigger review");
     changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "2.0.0", unrelated: "2.0.0" } }));
     await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"), "Inspected dependency changes must trigger review");
+  } else if (scenario === "lockfile_scope") {
+    f.addIssue(1); f.modes.set(1, "grep"); await route(); await success();
+    let lock = readFileSync("seed/pnpm-lock.yaml", "utf8");
+    for (const update of [
+      (text) => text.replace("integrity: old", "integrity: changed").replace("unrelated@1.0.0", "unrelated@2.0.0"),
+      (text) => text.replace("npm:string-width@4.2.2", "npm:string-width@4.2.3").replace("unrelated@2.0.0", "unrelated@3.0.0"),
+      (text) => text.replace("nested: 1.0.0", "nested: 2.0.0").replace("unrelated@3.0.0", "unrelated@4.0.0"),
+      (text) => text.replace("version: 1.0.0}", "version: 2.0.0}").replace("unrelated@4.0.0", "unrelated@5.0.0"),
+      (text) => text + "unknownSetting: changed\n",
+    ]) {
+      lock = update(lock); changeMain("pnpm-lock.yaml", lock); await route();
+      assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"), lock);
+      f.reset(1, "grep"); await success();
+    }
+    changeMain("pnpm-lock.yaml", lock.replace("unrelated@5.0.0", "unrelated@6.0.0")); await route();
+    assert.ok(!all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
   } else if (scenario === "unicode_scope") {
     f.addIssue(1); await route(); await success();
     assert.ok(f.requests.some((r) => r.request.messages.some((m) => m.role === "tool" && JSON.stringify(m.content).includes("export const special = 1;"))));

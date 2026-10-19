@@ -1,8 +1,35 @@
 import { isDeepStrictEqual } from "node:util";
+import { parse } from "yaml";
 import { git } from "./git.ts";
 
 function affectsPaths(changed: string[], scope: string[]) {
   return changed.length > 0 && (!scope.length || changed.some((file) => scope.includes(file)));
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function lockfileChanged(before: string, after: string, dependencies: Set<string>) {
+  const documents = [before, after].map((text) => {
+    const value: unknown = parse(text);
+    if (!record(value)) throw new Error("Unrecognized lockfile");
+    const { packages = {}, snapshots = {}, ...rest } = value;
+    if (!record(packages) || !record(snapshots)) throw new Error("Unrecognized lockfile records");
+    return { packages, snapshots, rest };
+  });
+  // Importers, settings and unknown sections are not proven unrelated.
+  if (!isDeepStrictEqual(documents[0].rest, documents[1].rest)) return true;
+  for (const section of ["packages", "snapshots"] as const) {
+    const previous = documents[0][section], current = documents[1][section];
+    for (const key of new Set([...Object.keys(previous), ...Object.keys(current)])) {
+      if (isDeepStrictEqual(previous[key], current[key])) continue;
+      const name = key.match(/^((?:@[^/]+\/)?[^@/:]+)@.+$/)?.[1];
+      if (!name || dependencies.has(name) || (previous[key] !== undefined && !record(previous[key]))
+        || (current[key] !== undefined && !record(current[key]))) return true;
+    }
+  }
+  return false;
 }
 
 export async function reviewChanges(repository: string, before: string, after: string, scope: string[]) {
@@ -23,10 +50,8 @@ export async function reviewChanges(repository: string, before: string, after: s
         || [...dependencies].some((name) => manifests[0].devDependencies[name] !== manifests[1].devDependencies[name])) return { paths, relevant: true };
     }
     if (paths.includes("pnpm-lock.yaml") && (scope.includes("pnpm-lock.yaml") || dependencies.size)) {
-      const diff = await git(repository, ["diff", "--unified=0", before, after, "--", "pnpm-lock.yaml"]);
-      const changedPackages = [...diff.matchAll(/^[+-] {2}['"]?((?:@[^/'"\s]+\/)?[^@:'"\s]+)@[^:\n]+:\s*$/gm)].map((match) => match[1]);
-      // Unknown lockfile edits remain conservative; recognized unrelated package updates do not widen scope.
-      if (!changedPackages.length || changedPackages.some((name) => dependencies.has(name))) return { paths, relevant: true };
+      const contents = await Promise.all([before, after].map((sha) => git(repository, ["show", `${sha}:pnpm-lock.yaml`])));
+      if (lockfileChanged(contents[0], contents[1], dependencies)) return { paths, relevant: true };
     }
   } catch {
     // Missing or malformed metadata is itself worth reviewing, not evidence of no impact.

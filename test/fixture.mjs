@@ -18,10 +18,12 @@ export async function fixture(scenario) {
   execFileSync("git", ["init", "-b", "main", "seed"], { stdio: "ignore" });
   mkdirSync("seed/src"); writeFileSync("seed/src/app.ts", "export const value = 1;\n");
   if (scenario === "unicode_scope") writeFileSync("seed/src/a b.ts", "export const special = 1;\n");
-  if (["panel", "relevance"].includes(scenario)) writeFileSync("seed/.gitignore", "node_modules/\n");
-  if (scenario === "relevance") {
+  if (["panel", "relevance", "lockfile_scope"].includes(scenario)) writeFileSync("seed/.gitignore", "node_modules/\n");
+  if (["relevance", "lockfile_scope"].includes(scenario)) {
     writeFileSync("seed/package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "1.0.0" } }));
     writeFileSync("seed/pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: old}\n  unrelated@1.0.0:\n    resolution: {integrity: old}\n");
+    if (scenario === "lockfile_scope") writeFileSync("seed/pnpm-lock.yaml", readFileSync("seed/pnpm-lock.yaml", "utf8")
+      + "  string-width-cjs@npm:string-width@4.2.2:\n    resolution: {integrity: alias}\nsnapshots:\n  wrangler@1.0.0:\n    dependencies: {nested: 1.0.0}\nimporters:\n  .:\n    devDependencies:\n      wrangler: {specifier: 1.0.0, version: 1.0.0}\n");
   }
   git(resolve("seed"), "add", "."); commit(resolve("seed"), "Initial source");
   git(resolve("seed"), "push", resolve("remote.git"), "main");
@@ -51,7 +53,8 @@ export async function fixture(scenario) {
     let tool;
     if (review && step === 0) tool = mode === "grep" ? { name: "grep", args: { pattern: "value" } } : { name: "read", args: { path: scenario === "unicode_scope" ? "src/a\u00a0b.ts" : scenario === "panel" ? "node_modules/pinned-runtime/package.json" : mode === "helper" ? "src/helper.ts" : mode === "at" ? "@src/app.ts" : "src/app.ts" } };
     if (review && mode === "grep" && step === 1) tool = { name: "read", args: { path: "src/app.ts" } };
-    if (review && scenario === "relevance" && step >= 2 && step <= 4) tool = { name: "read", args: { path: ["package.json", "pnpm-lock.yaml", "node_modules/wrangler/package.json"][step - 2] } };
+    if (review && ["relevance", "lockfile_scope"].includes(scenario) && step >= 2 && step <= 4) tool = { name: "read", args: { path: ["package.json", "pnpm-lock.yaml", "node_modules/wrangler/package.json"][step - 2] } };
+    if (review && scenario === "lockfile_scope" && step === 5) tool = { name: "read", args: { path: "node_modules/string-width-cjs/package.json" } };
     if (review && scenario === "panel" && step === 1) tool = { name: "read_base", args: { path: "src/app.ts" } };
     if (!review && step === 0) {
       tool = mode === "merge-failure" ? { name: "bash", args: { command: `git -c user.name=Fixture -c user.email=fixture@example.invalid merge --no-commit ${git(resolve("seed"), "rev-parse", "main")}` } }
@@ -83,8 +86,8 @@ export async function fixture(scenario) {
     writeFileSync("prepare.mjs", 'import{mkdirSync,writeFileSync}from"node:fs";mkdirSync("node_modules/pinned-runtime",{recursive:true});writeFileSync("node_modules/pinned-runtime/package.json",JSON.stringify({name:"pinned-runtime",version:"9.8.7"}));');
     config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
   }
-  if (scenario === "relevance") {
-    writeFileSync("prepare.mjs", 'import{mkdirSync,writeFileSync}from"node:fs";mkdirSync("node_modules/wrangler",{recursive:true});writeFileSync("node_modules/wrangler/package.json",JSON.stringify({name:"wrangler",version:"1.0.0"}));');
+  if (["relevance", "lockfile_scope"].includes(scenario)) {
+    writeFileSync("prepare.mjs", 'import{mkdirSync,writeFileSync}from"node:fs";for(const name of ["wrangler","string-width-cjs"]){mkdirSync("node_modules/"+name,{recursive:true});writeFileSync("node_modules/"+name+"/package.json",JSON.stringify({name,version:"1.0.0"}));}');
     config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
   }
   if (scenario === "verification" || scenario === "validation_mutation") {

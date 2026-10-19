@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 const [phase, owner] = process.argv.slice(2);
+assert.equal(process.env.SCRAT_WORKSPACE_VALUE, "isolated");
 assert.equal(process.env.DATABASE_URL, process.env.TEST_DATABASE_URL);
 const url = new URL(process.env.DATABASE_URL);
 assert.equal(url.hostname, "127.0.0.1");

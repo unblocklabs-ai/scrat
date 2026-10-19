@@ -13,6 +13,9 @@
     "fetchIntervalSeconds": 300
   },
   "workspace": {
+    "environment": {
+      "VITEST_MAX_WORKERS": "1"
+    },
     "prepare": [
       ["pnpm", "install", "--frozen-lockfile"],
       ["pnpm", "prisma-typegen"]

@@ -6,6 +6,7 @@ const configUrl = new URL("../scrat.config.json", import.meta.url);
 export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 type WorkspaceConfig = {
+  environment?: Record<string, string>;
   prepare?: string[][];
   database?: { image: string; environment: string[]; migrate: string[] } | null;
   validate?: string[][];

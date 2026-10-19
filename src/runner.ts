@@ -88,7 +88,9 @@ export async function runNextTask() {
         databaseRequested = true;
         database = await createRunDatabase(run.id, databaseConfig.image, references);
       }
-      const environment = Object.fromEntries((databaseConfig?.environment ?? []).map((name) => [name, database!.url]));
+      const environment = { ...config.workspace?.environment,
+        ...Object.fromEntries((databaseConfig?.environment ?? []).map((name) => [name, database!.url])),
+      };
       const commandEnvironment = { ...process.env, ...environment };
       const preparationDeferred = mergeInProgress || Boolean(run.retryOfRunId);
       if (readOnly || !preparationDeferred) {

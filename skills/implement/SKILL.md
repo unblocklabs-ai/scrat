@@ -22,7 +22,7 @@ Think like a systems designer, not a code generator. Optimize for abstractions t
 
 Find the smallest correct change. Inspect the owning source, actual callers and existing patterns before choosing the repair. Routine choices supported by those patterns do not need human signoff. Name a genuine unresolved requirement or product/security/compatibility decision rather than inventing an answer or broadening the change.
 
-When the supplied session/workspace contains prior work or `previousFailure`, continue it and address the actual failure; do not rebuild from scratch or discard partial work.
+When the supplied session/workspace contains prior work or the previous failure file (`files.previousFailure`), continue it and address the actual failure (`previous`, when present, holds the base and head SHAs of the last handled state); do not rebuild from scratch or discard partial work.
 
 Inspect the repository's package metadata, lockfile and available environment before choosing commands. Do not assume a database, browser or installed dependencies are present. Use available repository checks and the relevant real execution path. Distinguish a code failure from infrastructure or checks that never ran. Do not obtain production secrets or use shared databases to fill environment gaps.
 
@@ -44,4 +44,4 @@ Return concise Markdown with **Summary** and **Validation** sections. Usually tw
 
 Keep validation separate: list checks actually run, their results, material unverified behavior and unresolved limitations. Omit setup details, exhaustive test counts, retry history, routine file-by-file narration and notes such as "changes remain uncommitted". Do not repeat the issue link, title or authorship footer; Scrat adds the issue link when creating the PR.
 
-Questions in the discussion are questions, not additional edit instructions. Answer relevant ones briefly. Challenge ideas that would worsen the solution with concrete evidence and a simpler alternative. Do not present a partial or blocked implementation as a completed fix. Return Markdown, not JSON.
+Questions in the discussion (`files.discussion`) are questions, not additional edit instructions. Answer relevant ones briefly. Challenge ideas that would worsen the solution with concrete evidence and a simpler alternative. Do not present a partial or blocked implementation as a completed fix. Return Markdown, not JSON.

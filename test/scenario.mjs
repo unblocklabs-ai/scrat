@@ -170,7 +170,7 @@ try {
     assert.equal(replied.publication.publishedCommitSha, head); assert.equal(f.prs.length, 1);
     assert.equal(f.comments.get(202).length, 1); assert.equal(replied.workspaceId, implemented.workspaceId);
   } else if (scenario === "panel") {
-    await implement(1); f.prs[0].labels.push({ name: "human-label" }); await route();
+    const implemented = await implement(1); f.prs[0].labels.push({ name: "human-label" }); await route();
     const review = await success();
     assert.equal(review.reviewers.length, 2);
     assert.deepEqual(review.reviewers.map((r) => r.model), ["gpt-6.1-sol", "deepseek/deepseek-v4.1-flash"]);
@@ -188,16 +188,57 @@ try {
     assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === 201).length, 1);
     assert.match(f.comments.get(201)[0].body, /Consolidated/);
     assert.equal(review.result.grade, "B");
+    // The prompt is a manifest: no patch bodies, with context in files outside the worktree and never committed.
+    const prompts = (request) => request.request.messages.filter((m) => m.role === "user").map((m) => JSON.stringify(m.content)).join("\n");
+    const toolText = (request, text) => request.request.messages.some((m) => m.role === "tool" && JSON.stringify(m.content).includes(text));
+    for (const request of f.requests) {
+      assert.ok(!prompts(request).includes("diff --git"), "No model prompt may embed a patch"); assert.ok(!("diff" in request.context) && !("mainChanges" in request.context));
+    }
+    const panel = f.requests.filter((r) => r.context.action === "review_pr" && !r.consolidating);
+    const consolidation = f.requests.filter((r) => r.consolidating);
+    for (const model of ["gpt-6.1-sol", "deepseek/deepseek-v4.1-flash"]) {
+      const mine = panel.filter((r) => r.request.model === model).at(-1);
+      assert.ok(toolText(mine, "src/app.ts | 2"), "diff_stat output reaches the model");
+      assert.ok(toolText(mine, "node_modules/"), "show reads the immutable base file");
+      assert.ok(toolText(mine, "diff --git") && toolText(mine, "truncated: bytes 0-20"), "capped diff pages");
+      assert.ok(toolText(mine, "[]"), "The agent can read its context directory");
+      assert.ok(toolText(mine, "must be repository-relative"), "option-like paths are rejected");
+      for (const message of ["revision must be a hex commit SHA"]) assert.ok(toolText(mine, message), message);
+      assert.ok(toolText(mine, "Path is outside the workspace"), "reads outside the worktree and run directory stay refused");
+    }
+    assert.ok(consolidation.some((r) => toolText(r, "Independent review from")), "consolidator reads reviewer report files");
+    assert.ok(!consolidation.some((r) => prompts(r).includes("Independent review from")));
+    assert.ok(review.reviewers.every((r) => r.result.paths.includes(".gitignore")), "git show records its path in scope");
+    assert.ok(review.result.paths.every((path) => !path.startsWith("./")) && review.reviewers.every((r) => r.result.paths.every((path) => !path.startsWith("./"))), "paths are canonical");
+    assert.ok(review.result.paths.includes(".gitignore") && review.result.paths.every((path) => !path.includes("runs")));
+    for (const run of [implemented, review]) {
+      const directory = resolve("data/runs", run.id);
+      assert.ok(existsSync(resolve(directory, "discussion.json")));
+      if (run === implemented) assert.ok(!git(f.row(s.workspaces, run.workspaceId).path, "ls-files").includes("discussion"));
+    }
+    assert.equal(git(resolve("remote.git"), "ls-tree", "-r", "--name-only", f.prs[0].head.ref), ".gitignore\nsrc/app.ts");
     assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["B · Solid", "human-label"]);
     for (const req of f.requests.filter((r) => r.context.action === "review_pr" && !r.consolidating)) assert.ok(!req.text.includes("Independent review from"));
     // Adopt a pre-upgrade review comment too, without deleting its historical run.
     f.comments.get(201)[0].body = f.comments.get(201)[0].body.replace("<!-- scrat-review -->\n", "");
-    f.modes.set(201, "grade-A");
-    changeMain("src/app.ts", "export const value = 99;\n"); await route();
+    f.reset(201, "grade-A");
+    changeMain("src/app.ts", "export const value = 99;\n");
+    for (let n = 0; n < 250; n++) writeFileSync(resolve("seed", `src/many-${n}.txt`), `${n}\n`);
+    git(resolve("seed"), "add", "."); commit(resolve("seed"), "Many files"); git(resolve("seed"), "push", resolve("remote.git"), "main");
+    changeMain("src/bulk.txt", Array.from({ length: 30000 }, (_, n) => `bulk line ${n}`).join("\n") + "\n"); await route();
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["human-label"]);
     f.faults.label.add(201); const failed = await run(); assert.ok(failed.error); const calls = f.requests.length;
     tasks.retryTask(failed.taskId); const rereview = await success(); assert.equal(f.requests.length, calls);
     assert.equal(rereview.publication.commentId, review.publication.commentId);
+    const second = f.requests.filter((r) => r.context.revision && r.context.previous);
+    assert.ok(second.length >= 3 && second.every((r) => prompts(r).length < 20_000), "Prompt size is independent of base-branch changes");
+    assert.ok(second.every((r) => /^[a-f0-9]{40}$/.test(r.context.previous.mainSha) && r.context.previous.mainSha !== r.context.workspace.mainSha));
+    assert.ok(failed.result.paths.includes("src/bulk.txt"), "Paths inspected through the git tool join review scope");
+    assert.ok(second.some((r) => toolText(r, "src/bulk.txt")));
+    for (const r of second) {
+      assert.ok(!("changedPaths" in r.context.input) && r.context.input.changedPathCount >= 250);
+      assert.ok(readFileSync(r.context.files.changedPaths, "utf8").split("\n").includes("src/many-249.txt"));
+    }
     assert.equal(f.comments.get(201).length, 1);
     assert.equal(f.writes.filter((w) => w.type === "comment_update").length, 1);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["A · Strong", "human-label"]);

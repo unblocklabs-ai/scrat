@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { actionContracts } from "./actions.ts";
 import { config, getRepositoryPath } from "./config.ts";
@@ -17,6 +19,8 @@ import { items, runs } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { claimTask, finishRun } from "./tasks.ts";
 import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
+
+const inlineDiffPaths = 200;
 
 export async function runNextTask() {
   const claimed = claimTask();
@@ -87,7 +91,6 @@ export async function runNextTask() {
         const previous = !readOnly ? db.select().from(runs).where(and(
           eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile),
         )).orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
-        const diff = pullRequest ? await git(repositoryPath, ["diff", `${mainSha}...${preparedHead}`]) : undefined;
         const diffBaseSha = pullRequest ? await git(repositoryPath, ["merge-base", mainSha, preparedHead]) : mainSha;
         const diffPaths = pullRequest ? (await git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", `${mainSha}...${preparedHead}`])).split("\0").filter(Boolean) : [];
         const requested = run.input.commentRevisions;
@@ -102,12 +105,8 @@ export async function runNextTask() {
           commentRevisions: evaluatedComments.map((comment) => `${comment.id}@${comment.revision}`),
         };
         db.update(runs).set({ context: evaluated }).where(eq(runs.id, run.id)).run();
-        const previousMainSha = task.input.previousMainSha;
-        const previousHeadSha = task.input.previousHeadSha;
-        const mainChanges = typeof previousMainSha === "string" && previousMainSha !== mainSha
-          ? await git(repositoryPath, ["diff", previousMainSha, mainSha]) : undefined;
-        const prChanges = pullRequest && typeof previousHeadSha === "string" && previousHeadSha !== headSha
-          ? await git(repositoryPath, ["diff", previousHeadSha, headSha]) : undefined;
+        const previousMainSha = typeof task.input.previousMainSha === "string" ? task.input.previousMainSha : undefined;
+        const previousHeadSha = pullRequest && typeof task.input.previousHeadSha === "string" ? task.input.previousHeadSha : undefined;
         const preparationDeferred = mergeInProgress || Boolean(run.retryOfRunId);
         if (readOnly || !preparationDeferred) {
           await runCommands(config.workspace?.prepare ?? [], workspace.path, commandEnvironment, references);
@@ -116,22 +115,39 @@ export async function runNextTask() {
         db.update(runs).set({ stage: "agent" }).where(eq(runs.id, run.id)).run();
         const input = { ...run.input };
         delete input.comments;
+        const changedPaths = Array.isArray(input.changedPaths) ? input.changedPaths.filter((path: unknown) => typeof path === "string") : [];
+        if (changedPaths.length > inlineDiffPaths) { delete input.changedPaths; input.changedPathCount = changedPaths.length; }
+        // Larger context lives beside, not inside, the worktree: `git add --all` would commit it.
+        const contextDir = resolve("data/runs", run.id);
+        await mkdir(contextDir, { recursive: true });
+        const files: Record<string, string> = { directory: contextDir };
+        const writeContext = async (key: string, name: string, content: string) => {
+          files[key] = resolve(contextDir, name);
+          await writeFile(files[key], content);
+        };
+        await writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2));
+        const failure = run.retryOfRunId ? db.select().from(runs).where(eq(runs.id, run.retryOfRunId)).get()?.error : undefined;
+        if (failure) await writeContext("previousFailure", "previous-failure.json", JSON.stringify(failure, null, 2));
+        if (diffPaths.length > inlineDiffPaths) await writeContext("diffPaths", "diff-paths.txt", diffPaths.join("\n") + "\n");
+        if (changedPaths.length > inlineDiffPaths) await writeContext("changedPaths", "changed-paths.txt", changedPaths.join("\n") + "\n");
+        const revisions = { head: headSha, base: diffBaseSha, main: mainSha, ...(previousMainSha && { previousMain: previousMainSha }), ...(previousHeadSha && { previousHead: previousHeadSha }) };
         const prompt = JSON.stringify({
           action: task.action,
           reason: task.reason,
-          ...evaluated,
+          revision, baseBranch, headSha: pullRequest?.head.sha, item: evaluated.item, commentRevisions: evaluated.commentRevisions,
           input,
-          previousFailure: run.retryOfRunId ? db.select().from(runs).where(eq(runs.id, run.retryOfRunId)).get()?.error : undefined,
           workspace: { path: workspace.path, branch: workspace.branch, baseRef, baseBranch, mainSha, headSha, mergeInProgress },
-          diff, diffBaseSha, diffPaths, mainChanges, prChanges,
+          diffBaseSha, previous: previousMainSha || previousHeadSha ? { mainSha: previousMainSha, headSha: previousHeadSha } : undefined,
+          ...(diffPaths.length > inlineDiffPaths ? { diffPathCount: diffPaths.length } : { diffPaths }),
+          files,
           database: database ? {
             ...database, environment, schemaPrepared: !preparationDeferred,
             prepare: config.workspace?.prepare, migrate: databaseConfig?.migrate,
           } : undefined,
         }, null, 2);
         const agentResult = contract.agent === "panel"
-          ? await reviewPullRequest(run, workspace.path, prompt, operation.log, diffBaseSha)
-          : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, log: operation.log, sessionFile: previous?.piSessionFile ?? undefined, environment });
+          ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { baseSha: diffBaseSha, contextDir, revisions })
+          : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, log: operation.log, sessionFile: previous?.piSessionFile ?? undefined, environment, contextDir, revisions });
         result = { ...agentResult, paths: [...new Set([...diffPaths, ...agentResult.paths])] };
         db.update(runs).set({ result, stage: "validating" }).where(eq(runs.id, run.id)).run();
       }

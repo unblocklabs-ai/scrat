@@ -11,6 +11,7 @@ import { db } from "./db.ts";
 import { runs } from "./schema.ts";
 import { parseResult, type Reviewer } from "./results.ts";
 import { git } from "./git.ts";
+import { createReviewGitTool } from "./review-git.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
 import { childEnvironment } from "./secrets.ts";
 
@@ -35,7 +36,7 @@ function sharedModelRuntime() {
   return modelRuntimeCreation;
 }
 
-export async function executePi({ run, cwd, context, readOnly, log, sessionFile, environment = {}, reviewerIndex, baseSha }: {
+export async function executePi({ run, cwd, context, readOnly, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {} }: {
   run: typeof runs.$inferSelect;
   cwd: string;
   context: string;
@@ -45,6 +46,8 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
   environment?: NodeJS.ProcessEnv;
   reviewerIndex?: number;
   baseSha?: string;
+  contextDir?: string;
+  revisions?: Record<string, string>;
 }) {
   const modelRuntime = await sharedModelRuntime();
   const model = modelRuntime.getModel(run.provider, run.model);
@@ -72,15 +75,15 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     spawnHook: (context) => ({ ...context, env: { ...childEnvironment(context.env), ...environment } }),
   });
   // File tools stay inside the workspace, including through absolute paths, ~,
-  // .. and symlinks committed to the repository under review.
-  const root = await realpath(cwd);
+  // .. and symlinks committed to the repository under review. The run's own
+  // context directory is also readable; it is never part of review scope.
+  const roots = [await realpath(cwd), ...contextDir ? [await realpath(contextDir)] : []];
   async function insideWorkspace(path: string) {
     const real = await realpath(path).catch((error: unknown) => {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") return resolve(path);
       throw error;
     });
-    const local = relative(root, real);
-    if (local === ".." || local.startsWith("../")) throw new Error(`Path is outside the workspace: ${path}`);
+    if (!roots.some((root) => { const local = relative(root, real); return local !== ".." && !local.startsWith("../"); })) throw new Error(`Path is outside the workspace: ${path}`);
     return real;
   }
   // Search roots mirror Pi's resolution: a leading @ is dropped and ~ means home.
@@ -96,6 +99,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
   const sdkLs = createLsToolDefinition(cwd);
   const ls: typeof sdkLs = { ...sdkLs, async execute(...args) { await searchRoot(args[1].path); return sdkLs.execute(...args); } };
   const paths = new Set<string>();
+  const gitPaths = new Set<string>();
   const basePaths = new Set<string>();
   const sdkRead = createReadToolDefinition(cwd);
   const read: typeof sdkRead = {
@@ -128,12 +132,13 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
       return { content: [{ type: "text", text }], details: { path, baseSha } };
     },
   }) : undefined;
+  const gitTool = readOnly ? createReviewGitTool(cwd, revisions, gitPaths) : undefined;
   const { session } = await createAgentSession({
     cwd, modelRuntime, model, thinkingLevel, settingsManager, sessionManager, resourceLoader,
-    tools: readOnly ? ["read", "grep", "find", "ls", ...(readBase ? ["read_base"] : [])] : ["read", "grep", "find", "ls", "bash", "edit", "write"],
+    tools: readOnly ? ["read", "grep", "find", "ls", "git", ...(readBase ? ["read_base"] : [])] : ["read", "grep", "find", "ls", "bash", "edit", "write"],
     customTools: [
       ...[read, grep, find, ls].map((tool) => ({ ...tool, renderCall: undefined, renderResult: undefined })),
-      ...(readOnly ? (readBase ? [readBase] : []) : [{ ...bash, renderCall: undefined, renderResult: undefined }]),
+      ...(gitTool ? [gitTool, ...(readBase ? [readBase] : [])] : [{ ...bash, renderCall: undefined, renderResult: undefined }]),
     ],
   });
   try {
@@ -160,10 +165,11 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     const output = session.getLastAssistantText()?.trim();
     if (!output) throw new Error("Pi returned an empty response");
     const tracked = (await git(cwd, ["ls-files", "-z"])).split("\0").filter(Boolean);
-    const baseTracked = baseSha && basePaths.size
+    const baseTracked = baseSha && (basePaths.size || gitPaths.size)
       ? (await git(cwd, ["ls-tree", "-r", "--name-only", "-z", baseSha])).split("\0").filter(Boolean) : [];
     return parseResult(output, [...new Set([
       ...canonicalReviewPaths([...paths], tracked), ...canonicalReviewPaths([...basePaths], baseTracked),
+      ...canonicalReviewPaths([...gitPaths], tracked), ...canonicalReviewPaths([...gitPaths], baseTracked),
     ])]);
   } finally {
     session.dispose();

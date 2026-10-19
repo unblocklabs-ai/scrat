@@ -71,6 +71,23 @@ export async function fixture(scenario) {
     if (review && ["relevance", "lockfile_scope", "importer_scope"].includes(scenario) && step >= 2 && step <= 4) tool = { name: "read", args: { path: ["package.json", "pnpm-lock.yaml", "node_modules/wrangler/package.json"][step - 2] } };
     if (review && scenario === "lockfile_scope" && step === 5) tool = { name: "read", args: { path: "node_modules/string-width-cjs/package.json" } };
     if (review && scenario === "panel" && step === 1) tool = { name: "read_base", args: { path: "src/app.ts" } };
+    if (review && scenario === "panel" && step >= 2) {
+      const dir = context.files.directory;
+      tool = [{ name: "git", args: { operation: "diff_stat", from: "base", to: "head" } },
+        { name: "git", args: { operation: "show", revision: "base", path: ".gitignore" } },
+        { name: "git", args: { operation: "diff", from: "base", to: "head", path: "src/app.ts", limit: 20 } },
+        { name: "read", args: { path: context.files.discussion } },
+        { name: "git", args: { operation: "show", revision: "head", path: "--output=x" } },
+        { name: "read", args: { path: resolve(dir, "../../pi-models-store.json") } },
+        { name: "git", args: { operation: "show", revision: "head", path: "./src/app.ts" } },
+        { name: "git", args: { operation: "show", revision: "head", path: "../outside" } },
+        { name: "git", args: { operation: "show", revision: "head", path: "/etc/passwd" } },
+        { name: "git", args: { operation: "show", revision: "HEAD@{1}", path: "src/app.ts" } },
+        { name: "git", args: { operation: "show", revision: ":/x", path: "src/app.ts" } },
+        context.previous && { name: "git", args: { operation: "diff_stat", from: "previousMain", to: "main" } },
+        consolidating && { name: "read", args: { path: dir + "/reviewer-1.md" } },
+      ].filter(Boolean)[step - 2];
+    }
     if (review && scenario === "scope_snapshots" && step === 0) tool = { name: "read_base", args: { path: "src/deleted.ts" } };
     if (review && scenario === "scope_snapshots" && step === 1) tool = { name: "read", args: { path: " leading.ts" } };
     if (review && scenario === "scope_snapshots" && step === 2) tool = { name: "read", args: { path: "src/generated.ts" } };

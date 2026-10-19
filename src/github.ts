@@ -2,7 +2,7 @@ import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "octokit";
 import type { Logger } from "pino";
 import { config } from "./config.ts";
-import { recordEvent, type EventReferences, type JournalEvent } from "./events.ts";
+import { recordEvent, type EventReferences } from "./events.ts";
 import { logger, startOperation } from "./logging.ts";
 
 async function githubForRepository(repository: string, access: "read" | "write", log: Logger) {
@@ -41,94 +41,86 @@ export async function fetchOpenItems(repository: string, log: Logger = logger) {
   return { items, pullRequests };
 }
 
-function recordPublishedEvent(event: JournalEvent, log: Logger) {
-  try {
-    recordEvent(event);
-  } catch (err) {
-    log.error({ event: "journal.failed", journalEventType: event.type, remoteSucceeded: true, err }, "Journal write failed");
-    throw err;
-  }
-}
-
 export async function postComment(repository: string, issueNumber: number, body: string, references: EventReferences = {}) {
   const operation = startOperation("github.post_comment", { ...references, repository, issueNumber });
   const eventReferences = { ...references, operationId: operation.operationId };
   let stage = "authentication";
-  const response = await githubForRepository(repository, "write", operation.log)
-    .then(({ github, owner, repo }) => {
-      stage = "request";
-      return github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body });
-    })
-    .catch((error: unknown) => {
-      operation.fail(error, { stage });
-      throw error;
-    });
-  operation.complete({ stage: "remote_write", commentId: response.data.id, status: response.status, requestId: response.headers["x-github-request-id"] });
-  recordPublishedEvent({ ...eventReferences, type: "github.comment_created", data: {
-    repository, issueNumber, commentId: response.data.id, url: response.data.html_url,
-  } }, operation.log);
-  return response;
+  let commentId: number | undefined;
+  try {
+    const { github, owner, repo } = await githubForRepository(repository, "write", operation.log);
+    stage = "request";
+    const response = await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body });
+    commentId = response.data.id;
+    stage = "journal";
+    recordEvent({ ...eventReferences, type: "github.comment_created", data: {
+      repository, issueNumber, commentId, url: response.data.html_url,
+    } });
+    operation.complete({ commentId, status: response.status, requestId: response.headers["x-github-request-id"] });
+    return response;
+  } catch (error) {
+    operation.fail(error, { stage, remoteSucceeded: stage === "journal" ? true : undefined, commentId });
+    throw error;
+  }
 }
 
 export async function updateComment(repository: string, commentId: number, body: string, references: EventReferences = {}) {
   const operation = startOperation("github.update_comment", { ...references, repository, commentId });
   const eventReferences = { ...references, operationId: operation.operationId };
   let stage = "authentication";
-  const response = await githubForRepository(repository, "write", operation.log)
-    .then(({ github, owner, repo }) => {
-      stage = "request";
-      return github.rest.issues.updateComment({ owner, repo, comment_id: commentId, body });
-    })
-    .catch((error: unknown) => {
-      operation.fail(error, { stage });
-      throw error;
-    });
-  operation.complete({ stage: "remote_write", commentId: response.data.id, status: response.status, requestId: response.headers["x-github-request-id"] });
-  recordPublishedEvent({ ...eventReferences, type: "github.comment_updated", data: {
-    repository, commentId: response.data.id, url: response.data.html_url,
-  } }, operation.log);
-  return response;
+  try {
+    const { github, owner, repo } = await githubForRepository(repository, "write", operation.log);
+    stage = "request";
+    const response = await github.rest.issues.updateComment({ owner, repo, comment_id: commentId, body });
+    stage = "journal";
+    recordEvent({ ...eventReferences, type: "github.comment_updated", data: {
+      repository, commentId: response.data.id, url: response.data.html_url,
+    } });
+    operation.complete({ commentId: response.data.id, status: response.status, requestId: response.headers["x-github-request-id"] });
+    return response;
+  } catch (error) {
+    operation.fail(error, { stage, remoteSucceeded: stage === "journal" ? true : undefined });
+    throw error;
+  }
 }
 
 export async function addLabels(repository: string, issueNumber: number, labels: string[], references: EventReferences = {}) {
   const operation = startOperation("github.add_labels", { ...references, repository, issueNumber, labels });
   const eventReferences = { ...references, operationId: operation.operationId };
   let stage = "authentication";
-  const response = await githubForRepository(repository, "write", operation.log)
-    .then(({ github, owner, repo }) => {
-      stage = "request";
-      return github.rest.issues.addLabels({ owner, repo, issue_number: issueNumber, labels });
-    })
-    .catch((error: unknown) => {
-      operation.fail(error, { stage });
-      throw error;
-    });
-  operation.complete({ stage: "remote_write", status: response.status, requestId: response.headers["x-github-request-id"] });
-  recordPublishedEvent({ ...eventReferences, type: "github.labels_added", data: { repository, issueNumber, labels } }, operation.log);
-  return response;
+  try {
+    const { github, owner, repo } = await githubForRepository(repository, "write", operation.log);
+    stage = "request";
+    const response = await github.rest.issues.addLabels({ owner, repo, issue_number: issueNumber, labels });
+    stage = "journal";
+    recordEvent({ ...eventReferences, type: "github.labels_added", data: { repository, issueNumber, labels } });
+    operation.complete({ status: response.status, requestId: response.headers["x-github-request-id"] });
+    return response;
+  } catch (error) {
+    operation.fail(error, { stage, remoteSucceeded: stage === "journal" ? true : undefined });
+    throw error;
+  }
 }
 
 export async function removeLabels(repository: string, issueNumber: number, labels: string[], references: EventReferences = {}) {
   if (labels.length === 0) return [];
-  const clientOperation = startOperation("github.remove_labels", { ...references, repository, issueNumber, labels });
-  const eventReferences = { ...references, operationId: clientOperation.operationId };
-  const client = githubForRepository(repository, "write", clientOperation.log);
+  const operation = startOperation("github.remove_labels", { ...references, repository, issueNumber, labels });
+  const eventReferences = { ...references, operationId: operation.operationId };
   const responses = [];
   let stage = "authentication";
-  for (const label of labels) {
-    const response = await client
-      .then(({ github, owner, repo }) => {
-        stage = "request";
-        return github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name: label });
-      })
-      .catch((error: unknown) => {
-        clientOperation.fail(error, { stage, label, removedLabels: responses.length });
-        throw error;
-      });
-    clientOperation.log.info({ event: "github.label_removed", stage: "remote_write", label, status: response.status, requestId: response.headers["x-github-request-id"] });
-    recordPublishedEvent({ ...eventReferences, type: "github.label_removed", data: { repository, issueNumber, label } }, clientOperation.log);
-    responses.push(response);
+  let label: string | undefined;
+  try {
+    const { github, owner, repo } = await githubForRepository(repository, "write", operation.log);
+    for (label of labels) {
+      stage = "request";
+      const response = await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name: label });
+      responses.push(response);
+      stage = "journal";
+      recordEvent({ ...eventReferences, type: "github.label_removed", data: { repository, issueNumber, label } });
+    }
+    operation.complete({ removedLabels: responses.length });
+    return responses;
+  } catch (error) {
+    operation.fail(error, { stage, remoteSucceeded: stage === "journal" ? true : undefined, label, removedLabels: responses.length });
+    throw error;
   }
-  clientOperation.complete({ removedLabels: responses.length });
-  return responses;
 }

@@ -79,6 +79,65 @@ try {
     assert.equal(superseded.publication.status, "not_needed");
     assert.equal(f.writes.length, writes); assert.equal(f.requests.length, inferences);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["A · Strong", "human-label"]);
+  } else if (scenario === "canonical") {
+    await implement(1); await route(); f.faults.comment.add(201);
+    const lost = await run(); assert.ok(lost.error); assert.equal(lost.stage, "publishing");
+    const original = f.comments.get(201)[0];
+    const feedback = { ...original, id: 9000, body: "Feedback quoting the review:\n```\n" + original.body + "\n```\n<!-- scrat-task:feedback -->" };
+    f.comments.get(201).push(feedback);
+    const calls = f.requests.length; tasks.retryTask(lost.taskId); const recovered = await success();
+    assert.equal(f.requests.length, calls); assert.equal(recovered.publication.commentId, original.id);
+    f.reset(201, "grade-A");
+    tasks.enqueueTask({ itemId: f.row(s.tasks, lost.taskId).itemId, action: "review_pr", reason: "New assessment", input: {} });
+    const updated = await success(); assert.equal(updated.publication.commentId, original.id);
+    assert.equal(f.comments.get(201).length, 2); assert.equal(f.comments.get(201)[1].body, feedback.body);
+    assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
+  } else if (scenario === "grade_race") {
+    await implement(1); await route(); const reviewed = await success();
+    tasks.enqueueTask({ itemId: f.row(s.tasks, reviewed.taskId).itemId, action: "review_pr", reason: "Fresh review", input: {} });
+    f.reset(201, "normal"); changeMain("src/app.ts", "export const value = 99;\n");
+    let unblock, sawRemoval, sawPublicationContext;
+    const blocked = new Promise((resolve) => { unblock = resolve; });
+    const removal = new Promise((resolve) => { sawRemoval = resolve; });
+    const context = new Promise((resolve) => { sawPublicationContext = resolve; });
+    const fetch = globalThis.fetch, before = f.requests.length;
+    let held = false;
+    globalThis.fetch = async (input, options = {}) => {
+      const url = new URL(typeof input === "string" ? input : input.url);
+      if (!held && options.method === "DELETE" && url.pathname.includes("/issues/201/labels/")) {
+        held = true; sawRemoval(); await blocked;
+      }
+      const response = await fetch(input, options);
+      if (url.pathname.endsWith("/pulls/201") && f.requests.slice(before).some((r) => r.consolidating)) sawPublicationContext();
+      return response;
+    };
+    try {
+      const syncing = route(); await removal;
+      const working = run(); await context; unblock();
+      const [, published] = await Promise.all([syncing, working]);
+      assert.equal(published.error, null, JSON.stringify(published.error));
+      assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["B · Solid"]);
+    } finally { unblock(); globalThis.fetch = fetch; }
+  } else if (scenario === "grade_failure") {
+    await implement(1); await implement(2); await route(); await success(); await success();
+    changeMain("src/app.ts", "export const value = 99;\n");
+    f.faults.label.add(201); await route();
+    for (const number of [201, 202]) assert.ok(all(s.tasks).some((t) => t.status === "queued" && f.row(s.items, t.itemId).payload.number === number));
+    assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["B · Solid"]);
+    await route(); assert.deepEqual(f.prs[0].labels, []);
+  } else if (scenario === "absent_labels") {
+    f.addIssue(1); const { reconcileLabels } = await f.app("labels.ts");
+    const request = () => reconcileLabels("fixture/project", 1, { current: ["scrat"], desired: [], managed: ["scrat"] });
+    await request();
+    assert.equal(all(s.events).filter((e) => e.type === "github.label_removed").length, 0);
+    f.issues.get(1).labels = [{ name: "scrat" }];
+    const fetch = globalThis.fetch;
+    globalThis.fetch = async (input, options = {}) => options.method === "DELETE"
+      ? new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } }) : fetch(input, options);
+    try { await assert.rejects(request(), (error) => error.status === 404); }
+    finally { globalThis.fetch = fetch; }
+    f.issues.delete(1);
+    await assert.rejects(request(), (error) => error.status === 404);
   } else if (scenario === "footer") {
     await implement(1); f.modes.set(201, "quoted-grade"); await route();
     const reviewed = await success();

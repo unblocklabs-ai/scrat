@@ -8,7 +8,7 @@ import { fetchItemContext, getGitEnvironment, githubRevision } from "./github.ts
 import { items, runs, tasks } from "./schema.ts";
 import { cancelQueuedTasks, enqueueTask } from "./tasks.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
-import { gradeLabels, reconcileLabels } from "./labels.ts";
+import { reconcilePrReview } from "./pr-review-state.ts";
 
 type Item = typeof items.$inferSelect;
 type Action = typeof tasks.$inferSelect.action;
@@ -111,38 +111,42 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
         });
       } else cancelQueuedTasks(item.id, "Feedback already handled", "address_pr_feedback");
     }
-    const action = item.kind === "issue" ? "review_issue" : "review_pr";
-    const revision = githubRevision(context.item, comments);
-    const latest = latestTask(item.id, action);
-    const triggerKey = JSON.stringify({ revision, mainSha });
-    if (latest?.status !== "cancelled" && latest?.input.triggerKey === triggerKey) continue;
-    const attempt = latest ? db.select().from(runs).where(eq(runs.taskId, latest.id))
-      .orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
-    if (latest?.status !== "cancelled" && attempt?.context?.revision === revision && attempt.mainSha === mainSha) continue;
-    const completed = db.select({ run: runs, task: tasks }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-      .where(and(eq(tasks.itemId, item.id), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
-      .orderBy(desc(runs.startedAt)).limit(1).get();
-    let changedPaths: string[] = [];
-    if (completed?.run.context?.revision === revision && completed.run.mainSha) {
-      if (completed.run.mainSha === mainSha) {
-        cancelQueuedTasks(item.id, "No changes since the last review", action);
-        continue;
+    try {
+      const action = item.kind === "issue" ? "review_issue" : "review_pr";
+      const revision = githubRevision(context.item, comments);
+      const latest = latestTask(item.id, action);
+      const triggerKey = JSON.stringify({ revision, mainSha });
+      if (latest?.status !== "cancelled" && latest?.input.triggerKey === triggerKey) continue;
+      const attempt = latest ? db.select().from(runs).where(eq(runs.taskId, latest.id))
+        .orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
+      if (latest?.status !== "cancelled" && attempt?.context?.revision === revision && attempt.mainSha === mainSha) continue;
+      const completed = db.select({ run: runs, task: tasks }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
+        .where(and(eq(tasks.itemId, item.id), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
+        .orderBy(desc(runs.startedAt)).limit(1).get();
+      let changedPaths: string[] = [];
+      if (completed?.run.context?.revision === revision && completed.run.mainSha) {
+        if (completed.run.mainSha === mainSha) {
+          cancelQueuedTasks(item.id, "No changes since the last review", action);
+          continue;
+        }
+        const changes = await reviewChanges(repositoryPath, completed.run.mainSha, mainSha, completed.run.result?.paths ?? []);
+        changedPaths = changes.paths;
+        if (!changes.relevant) {
+          cancelQueuedTasks(item.id, "Base changes do not affect the reviewed scope", action);
+          continue;
+        }
       }
-      const changes = await reviewChanges(repositoryPath, completed.run.mainSha, mainSha, completed.run.result?.paths ?? []);
-      changedPaths = changes.paths;
-      if (!changes.relevant) {
-        cancelQueuedTasks(item.id, "Base changes do not affect the reviewed scope", action);
-        continue;
+      queued += queue(item, action, completed ? "Relevant GitHub or base-branch changes" : "Initial GitHub review", {
+        triggerKey, revision, mainSha, changedPaths,
+        previousMainSha: completed?.run.mainSha ?? null,
+        previousHeadSha: completed?.run.headSha ?? null,
+      });
+    } finally {
+      if (item.kind === "pr") {
+        try { await reconcilePrReview(repository, item.id, item.payload.number, { itemId: item.id }); }
+        catch (error) { log.warn({ event: "github.review_reconciliation_pending", itemId: item.id, err: error }); }
       }
     }
-    if (item.kind === "pr") await reconcileLabels(repository, item.payload.number, {
-      current: context.item.labels ?? [], desired: [], managed: Object.values(gradeLabels),
-    }, { itemId: item.id });
-    queued += queue(item, action, completed ? "Relevant GitHub or base-branch changes" : "Initial GitHub review", {
-      triggerKey, revision, mainSha, changedPaths,
-      previousMainSha: completed?.run.mainSha ?? null,
-      previousHeadSha: completed?.run.headSha ?? null,
-    });
   }
   return queued;
 }

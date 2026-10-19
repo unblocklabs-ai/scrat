@@ -1,10 +1,11 @@
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
 import { branchContainsCommit } from "./git.ts";
 import { createPullRequest, fetchItemContext, findPullRequest, getGitEnvironment, postComment, updateComment } from "./github.ts";
-import { gradeLabels, reconcileLabels } from "./labels.ts";
+import { reconcileLabels } from "./labels.ts";
+import { reconcilePrReview } from "./pr-review-state.ts";
 import { upsertItem } from "./items.ts";
 import { items, runs, tasks } from "./schema.ts";
 import { getWorkspace, pushWorkspace } from "./workspaces.ts";
@@ -53,20 +54,13 @@ export async function publishRun(task: typeof tasks.$inferSelect, run: typeof ru
       return;
     }
   }
-  const reviewMarker = "<!-- scrat-review -->";
-  const body = `${result.text}\n\n${task.action === "review_pr" ? reviewMarker + "\n" : ""}${marker}`;
-  const reviews = task.action === "review_pr" ? db.select({ publication: runs.publication, taskId: tasks.id, createdAt: tasks.createdAt }).from(runs)
-    .innerJoin(tasks, eq(runs.taskId, tasks.id)).where(and(eq(tasks.itemId, task.itemId), eq(tasks.action, "review_pr"))).all() : [];
-  const reviewIds = new Set(reviews.flatMap(({ publication }) => publication.commentId ? [publication.commentId] : []));
-  const existing = current.comments.findLast((comment) => comment.id.startsWith("issue:") && comment.author === config.github.botLogin
-    && (comment.body.includes(marker) || (task.action === "review_pr"
-      && (comment.body.includes(reviewMarker) || reviewIds.has(Number(comment.id.slice("issue:".length)))))));
-  // A publication-only retry retains its original task order, not its new run's timestamp.
-  if (existing && reviews.some((review) => review.publication.commentId === Number(existing.id.slice("issue:".length))
-    && (review.createdAt > task.createdAt || (review.createdAt === task.createdAt && review.taskId > task.id)))) {
-    saveReceipt({ status: "not_needed" });
+  if (task.action === "review_pr") {
+    await reconcilePrReview(repository, task.itemId, context.item.number, references, { task, run });
     return;
   }
+  const body = `${result.text}\n\n${marker}`;
+  const existing = current.comments.findLast((comment) => comment.id.startsWith("issue:") && comment.author === config.github.botLogin
+    && comment.body.trimEnd().endsWith(marker));
   if (!publication.commentId) {
     let commentId: number;
     if (existing) {
@@ -83,8 +77,5 @@ export async function publishRun(task: typeof tasks.$inferSelect, run: typeof ru
     }, references);
     saveReceipt({ scratLabel: result.ready });
   }
-  if (task.action === "review_pr" && result.grade) await reconcileLabels(repository, context.item.number, {
-    current: current.item.labels ?? [], desired: [gradeLabels[result.grade]], managed: Object.values(gradeLabels),
-  }, references);
   saveReceipt({ status: "published" });
 }

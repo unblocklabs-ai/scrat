@@ -181,7 +181,15 @@ export async function removeLabels(repository: string, issueNumber: number, labe
     const { github, owner, repo } = await githubForRepository(repository, "write", operation.log);
     for (label of labels) {
       stage = "request";
-      const response = await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name: label });
+      let response: Awaited<ReturnType<typeof github.rest.issues.removeLabel>>;
+      try {
+        response = await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name: label });
+      } catch (error) {
+        if (!(error instanceof Error && "status" in error && error.status === 404)) throw error;
+        const { data } = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
+        if (data.labels.some((current) => (typeof current === "string" ? current : current.name)?.toLowerCase() === label!.toLowerCase())) throw error;
+        continue;
+      }
       responses.push(response);
       stage = "journal";
       recordEvent({ ...eventReferences, type: "github.label_removed", data: { repository, issueNumber, label } });

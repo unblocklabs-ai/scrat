@@ -8,6 +8,10 @@ const execute = promisify(execFile);
 const scenarios = {
   queue: "SQLite queue coalesces input, orders priorities, excludes busy workspaces and caps six tasks",
   panel: "Scrat-authored PR gets two independent Pi sessions and one consolidated comment",
+  canonical: "publication recovery and re-review preserve the recorded comment when feedback quotes its markers",
+  grade_race: "sync invalidation and publication reconcile one current PR grade under concurrent execution",
+  grade_failure: "grade delivery failures cannot prevent durable review tasks or block other PRs",
+  absent_labels: "already absent labels reconcile without false removal events or hidden access failures",
   reviewer_failure: "a failed reviewer prevents consolidation and publication",
   footer: "quoted control markers stay report text and cannot supply a PR grade or issue approval",
   incomplete: "partial or undecided implementations never become PRs",

@@ -120,7 +120,10 @@ export async function fixture(scenario) {
     }
     if (path.endsWith("/issues") && method === "GET") return reply([...issues.values(), ...prs.map((pr) => ({ ...pr, pull_request: {} }))].filter((item) => item.state === "open"));
     let match = path.match(/\/(issues|pulls)\/(\d+)$/);
-    if (match && method === "GET") return reply(match[1] === "issues" ? issues.get(Number(match[2])) : prs.find((pr) => pr.number === Number(match[2])));
+    if (match && method === "GET") {
+      const item = (match[1] === "issues" ? issues.get(Number(match[2])) : undefined) ?? prs.find((pr) => pr.number === Number(match[2]));
+      return item ? reply(item) : reply({ message: "Not Found" }, 404);
+    }
     match = path.match(/\/pulls\/(\d+)\/reviews$/);
     if (match) return reply(reviews.get(Number(match[1])) ?? []);
     if (/\/pulls\/\d+\/comments$/.test(path)) return reply([]);
@@ -146,7 +149,9 @@ export async function fixture(scenario) {
     match = path.match(/\/issues\/(\d+)\/labels(?:\/(.+))?$/);
     if (match) {
       const n = Number(match[1]), item = issues.get(n) ?? prs.find((pr) => pr.number === n);
+      if (!item) return reply({ message: "Not Found" }, 404);
       writes.push({ type: "label", number: n }); if (faults.label.delete(n)) return reply({ message: "Label failure" }, 503);
+      if (method === "GET") return reply(item.labels);
       if (method === "DELETE") {
         const name = decodeURIComponent(match[2]);
         if (!item.labels.some((label) => label.name === name)) return reply({ message: "Label does not exist" }, 404);

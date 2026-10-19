@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { type AnySQLiteColumn, integer, sqliteTable, text, unique, uniqueIndex } from "drizzle-orm/sqlite-core";
 import type { ErrorDetails } from "./errors.ts";
+import type { AgentResult, Reviewer } from "./results.ts";
 import type { GithubComment, fetchItemContext, fetchOpenItems } from "./github.ts";
 
 type OpenItems = Awaited<ReturnType<typeof fetchOpenItems>>;
@@ -79,7 +80,12 @@ export const runs = sqliteTable("runs", {
   stage: text("stage", { enum: runStages }).notNull().default("preparing"),
   startedAt: text("started_at"),
   finishedAt: text("finished_at"),
-  result: text("result", { mode: "json" }).$type<{ text: string; ready: boolean; paths: string[] }>(),
+  reviewers: text("reviewers", { mode: "json" }).$type<Reviewer[]>().notNull().default([]),
+  verification: text("verification", { mode: "json" }).$type<{
+    headSha: string;
+    commands: { command: string[]; durationMs: number; stdout: string; stderr: string }[];
+  }>(),
+  result: text("result", { mode: "json" }).$type<AgentResult>(),
   error: text("error", { mode: "json" }).$type<ErrorDetails>(),
   publication: text("publication", { mode: "json" }).$type<{
     status: "pending" | "published" | "not_needed";

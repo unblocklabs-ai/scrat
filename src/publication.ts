@@ -11,6 +11,7 @@ import { getWorkspace, pushWorkspace } from "./workspaces.ts";
 export async function publishRun(task: typeof tasks.$inferSelect, run: typeof runs.$inferSelect, current: Awaited<ReturnType<typeof fetchItemContext>>, references: EventReferences) {
   const { result, context } = run;
   if (!result || !context) throw new Error("Run has no evaluated result to publish");
+  if (result.outcome !== "complete") throw new Error("Incomplete agent work cannot be published");
   const repository = new URL(context.item.url).pathname.split("/").slice(1, 3).join("/");
   const remote = `https://github.com/${repository}.git`;
   const marker = `<!-- scrat-task:${task.id} -->`;

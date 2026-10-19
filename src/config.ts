@@ -14,7 +14,7 @@ type WorkspaceConfig = {
 export const config: Omit<typeof settings, "workspace"> & { workspace?: WorkspaceConfig } = settings;
 
 export function getRepositoryPath() {
-  return resolve(fileURLToPath(new URL(".", configUrl)), config.github.repositoryPath);
+  return resolve(fileURLToPath(new URL(".", configUrl)), process.env.SCRAT_REPOSITORY_PATH ?? config.github.repositoryPath);
 }
 
 export function getActionConfig(action: keyof typeof config.actions) {
@@ -25,5 +25,10 @@ export function getActionConfig(action: keyof typeof config.actions) {
     ...actionConfig,
     thinkingLevel,
     skill: fileURLToPath(new URL(actionConfig.skill, configUrl)),
+    reviewers: "reviewers" in actionConfig ? actionConfig.reviewers.map((reviewer) => {
+      const thinkingLevel = thinkingLevels.find((level) => level === reviewer.thinkingLevel);
+      if (!thinkingLevel) throw new Error(`Invalid reviewer thinking level: ${reviewer.thinkingLevel}`);
+      return { ...reviewer, thinkingLevel };
+    }) : [],
   };
 }

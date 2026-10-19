@@ -7,9 +7,21 @@ import type { Logger } from "pino";
 import { thinkingLevels } from "./config.ts";
 import { db } from "./db.ts";
 import { runs } from "./schema.ts";
+import { parseResult, type Reviewer } from "./results.ts";
 
-export async function executePi(run: typeof runs.$inferSelect, cwd: string, context: string, readOnly: boolean, log: Logger, sessionFile?: string, environment: NodeJS.ProcessEnv = {}) {
-  const modelRuntime = await ModelRuntime.create({ modelsPath: fileURLToPath(new URL("../scrat.config.json", import.meta.url)) });
+export function saveReviewer(runId: string, index: number, patch: Partial<Reviewer>) {
+  db.transaction((transaction) => {
+    const current = transaction.select().from(runs).where(eq(runs.id, runId)).get()!;
+    transaction.update(runs).set({ reviewers: current.reviewers.map((reviewer, i) => i === index ? { ...reviewer, ...patch } : reviewer) })
+      .where(eq(runs.id, runId)).run();
+  });
+}
+
+export async function executePi(run: typeof runs.$inferSelect, cwd: string, context: string, readOnly: boolean, log: Logger, sessionFile?: string, environment: NodeJS.ProcessEnv = {}, reviewerIndex?: number) {
+  const modelRuntime = await ModelRuntime.create({
+    modelsPath: fileURLToPath(new URL("../scrat.config.json", import.meta.url)),
+    modelsStorePath: resolve("data/pi-models-store.json"),
+  });
   const model = modelRuntime.getModel(run.provider, run.model);
   if (!model) throw new Error(modelRuntime.getError() ?? `Configure a Pi model for ${run.provider}/${run.model}`);
   const thinkingLevel = thinkingLevels.find((level) => level === run.thinkingLevel);
@@ -17,7 +29,10 @@ export async function executePi(run: typeof runs.$inferSelect, cwd: string, cont
   const settingsManager = SettingsManager.inMemory();
   const resourceLoader = new DefaultResourceLoader({
     cwd, agentDir: getAgentDir(), settingsManager, noExtensions: true, noSkills: true,
-    appendSystemPromptOverride: (base) => [...base, "Scrat handles Git commits, pushes, GitHub comments, labels, and PR creation. Do not publish or commit changes yourself."],
+    appendSystemPromptOverride: (base) => [...base,
+      "Scrat handles Git commits, pushes, GitHub comments, labels, and PR creation. Do not publish or commit changes yourself.",
+      "End your final Markdown response with exactly one line: SCRAT_STATUS: complete, SCRAT_STATUS: incomplete, or SCRAT_STATUS: needs_decision. Complete means the assigned work is finished, not merely that this session ended. For reviews, a complete assessment may contain defects or find the issue unready; use incomplete only if the assessment itself cannot be completed. For implementation, partial work or unresolved blockers are not complete. The harness withholds incomplete implementations from publication. Put an issue's SCRAT_READY marker before the status line, only when warranted.",
+    ],
   });
   await resourceLoader.reload();
   const sessionManager = sessionFile
@@ -33,10 +48,12 @@ export async function executePi(run: typeof runs.$inferSelect, cwd: string, cont
   });
   const paths = new Set<string>();
   try {
-    db.update(runs).set({
+    const sessionDetails = {
       piSessionId: session.sessionId, piSessionFile: session.sessionFile,
       thinkingLevel: session.thinkingLevel,
-    }).where(eq(runs.id, run.id)).run();
+    };
+    if (reviewerIndex === undefined) db.update(runs).set(sessionDetails).where(eq(runs.id, run.id)).run();
+    else saveReviewer(run.id, reviewerIndex, sessionDetails);
     session.subscribe((event) => {
       if (event.type === "tool_execution_start") {
         log.debug({ event: "pi.tool_started", tool: event.toolName, toolCallId: event.toolCallId });
@@ -63,9 +80,7 @@ export async function executePi(run: typeof runs.$inferSelect, cwd: string, cont
     }
     const output = session.getLastAssistantText()?.trim();
     if (!output) throw new Error("Pi returned an empty response");
-    const ready = output.split("\n").some((line) => line.trim() === "SCRAT_READY");
-    const text = output.split("\n").filter((line) => line.trim() !== "SCRAT_READY").join("\n").trim();
-    return { text, ready, paths: [...paths] };
+    return parseResult(output, [...paths]);
   } finally {
     session.dispose();
   }

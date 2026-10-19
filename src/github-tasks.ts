@@ -26,10 +26,10 @@ function hasScratLabel(item: Item) {
   return item.payload.labels?.some((label) => typeof label === "string" ? label === "scrat" : label.name === "scrat");
 }
 
-function queue(item: Item, action: Action, priority: number, reason: string, input: Record<string, unknown> & { triggerKey: string }) {
+function queue(item: Item, action: Action, reason: string, input: Record<string, unknown> & { triggerKey: string }) {
   const latest = latestTask(item.id, action);
   if (latest?.status !== "cancelled" && latest?.input.triggerKey === input.triggerKey) return 0;
-  enqueueTask({ itemId: item.id, action, priority, reason, input });
+  enqueueTask({ itemId: item.id, action, reason, input });
   return 1;
 }
 
@@ -38,6 +38,9 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
   const remote = `https://github.com/${repository}.git`;
   const env = await getGitEnvironment(repository);
   const defaultBaseSha = await fetchRepository(repositoryPath, remote, config.github.baseBranch, env);
+  const implemented = new Set(current.filter((item) => item.kind === "pr" && item.state === "open")
+    .flatMap((item) => [...(item.payload.body ?? "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi)]
+      .map((match) => Number(match[1]))));
   let queued = 0;
   for (const item of current) {
     let mainSha = defaultBaseSha;
@@ -60,10 +63,14 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
     }
     if (item.kind === "issue" && hasScratLabel(item)) {
       cancelQueuedTasks(item.id, "Issue selected for implementation", "review_issue");
+      if (implemented.has(item.payload.number)) {
+        cancelQueuedTasks(item.id, "An open PR already implements this issue", "implement");
+        continue;
+      }
       const latest = latestTask(item.id, "implement");
       const wasLabelled = previous.get(item.externalId);
       if (!item.workspaceId && (!latest || latest.status === "queued" || latest.status === "cancelled" || (wasLabelled && !hasScratLabel(wasLabelled)))) {
-        queued += queue(item, "implement", 60, "Issue has the scrat label", {
+        queued += queue(item, "implement", "Issue has the scrat label", {
           triggerKey: JSON.stringify({ labelledAt: item.payload.updated_at, mainSha }), mainSha,
         });
       }
@@ -83,7 +90,7 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
       const headRef = await fetchPullRequestHead(repositoryPath, remote, pr.number, env);
       const headSha = await git(repositoryPath, ["rev-parse", headRef]);
       if (await hasConflicts(repositoryPath, mainSha, headSha)) {
-        queued += queue(item, "resolve_conflicts", 100, "Scrat PR conflicts with its base branch", {
+        queued += queue(item, "resolve_conflicts", "Scrat PR conflicts with its base branch", {
           triggerKey: JSON.stringify({ mainSha, headSha }), mainSha, headSha,
         });
       } else cancelQueuedTasks(item.id, "PR no longer conflicts", "resolve_conflicts");
@@ -97,11 +104,10 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
       const pending = comments.filter((comment) => !consumed.has(`${comment.id}@${comment.updatedAt}`));
       if (pending.length) {
         const commentRevisions = pending.map((comment) => `${comment.id}@${comment.updatedAt}`).sort();
-        queued += queue(item, "address_pr_feedback", 80, "New feedback on a Scrat PR", {
-          triggerKey: JSON.stringify(commentRevisions), comments: pending, commentRevisions,
+        queued += queue(item, "address_pr_feedback", "New feedback on a Scrat PR", {
+          triggerKey: JSON.stringify(commentRevisions), commentRevisions,
         });
       } else cancelQueuedTasks(item.id, "Feedback already handled", "address_pr_feedback");
-      continue;
     }
     const action = item.kind === "issue" ? "review_issue" : "review_pr";
     const revision = githubRevision(context.item, comments);
@@ -126,8 +132,8 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
         continue;
       }
     }
-    queued += queue(item, action, 10, completed ? "Relevant GitHub or base-branch changes" : "Initial GitHub review", {
-      triggerKey, revision, mainSha, changedPaths, comments,
+    queued += queue(item, action, completed ? "Relevant GitHub or base-branch changes" : "Initial GitHub review", {
+      triggerKey, revision, mainSha, changedPaths,
       previousMainSha: completed?.run.mainSha ?? null,
       previousHeadSha: completed?.run.headSha ?? null,
     });

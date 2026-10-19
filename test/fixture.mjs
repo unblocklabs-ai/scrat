@@ -1,0 +1,126 @@
+import { execFileSync } from "node:child_process";
+import { generateKeyPairSync } from "node:crypto";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, resolve } from "node:path";
+import { createServer } from "node:http";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+export async function fixture(scenario) {
+  const repository = fileURLToPath(new URL("..", import.meta.url));
+  const root = mkdtempSync(resolve(tmpdir(), "scrat-integration-"));
+  for (const path of ["src", "skills", "scrat.config.json", "package.json"]) cpSync(resolve(repository, path), resolve(root, "app", path), { recursive: true });
+  symlinkSync(resolve(repository, "node_modules"), resolve(root, "app/node_modules"));
+  process.chdir(root);
+  const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const commit = (cwd, message) => git(cwd, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", message);
+  execFileSync("git", ["init", "--bare", "remote.git"], { stdio: "ignore" });
+  execFileSync("git", ["init", "-b", "main", "seed"], { stdio: "ignore" });
+  mkdirSync("seed/src"); writeFileSync("seed/src/app.ts", "export const value = 1;\n");
+  git(resolve("seed"), "add", "."); commit(resolve("seed"), "Initial source");
+  git(resolve("seed"), "push", resolve("remote.git"), "main");
+  execFileSync("git", ["--git-dir=" + resolve("remote.git"), "symbolic-ref", "HEAD", "refs/heads/main"]);
+  writeFileSync("gitconfig", `[url "${resolve("remote.git")}"]\n insteadOf = https://github.com/fixture/project.git\n`);
+  process.env.GIT_CONFIG_GLOBAL = resolve("gitconfig");
+  process.env.GITHUB_APP_PRIVATE_KEY = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+  process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
+  const modes = new Map(), steps = new Map(), requests = [], issues = new Map(), prs = [], comments = new Map(), writes = [];
+  const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set() };
+  let onModel;
+  const server = createServer(async (req, res) => {
+    let body = ""; for await (const chunk of req) body += chunk;
+    const request = JSON.parse(body);
+    const user = request.messages.findLast((message) => message.role === "user");
+    const text = typeof user.content === "string" ? user.content : user.content.map((part) => part.text ?? "").join("\n");
+    const start = text.indexOf('{\n  "action"');
+    const context = JSON.parse(text.slice(start, text.indexOf("\n}", start) + 2));
+    const consolidating = text.includes("Consolidate the two independent reviews below");
+    const mode = modes.get(context.item.number) ?? "normal";
+    const key = `${context.item.number}/${request.model}/${consolidating}/${context.database?.container ?? ""}`;
+    const step = steps.get(key) ?? 0; steps.set(key, step + 1);
+    requests.push({ request, text, context, consolidating });
+    onModel?.(context, step);
+    const review = context.action.startsWith("review");
+    let tool;
+    if (review && step === 0) tool = mode === "grep" ? { name: "grep", args: { pattern: "value" } } : { name: "read", args: { path: "src/app.ts" } };
+    if (review && mode === "grep" && step === 1) tool = { name: "read", args: { path: "src/app.ts" } };
+    if (!review && step === 0) {
+      tool = mode === "merge-failure" ? { name: "bash", args: { command: `git -c user.name=Fixture -c user.email=fixture@example.invalid merge --no-commit ${git(resolve("seed"), "rev-parse", "main")}` } }
+        : context.database ? { name: "bash", args: { command: `${process.execPath} ${resolve("database-command.mjs")} query ${context.item.number}` } }
+          : { name: "write", args: { path: "src/app.ts", content: `export const value = ${context.item.number + 10};\n` } };
+    }
+    if (!review && context.database && step === 1) tool = { name: "write", args: { path: "migration.sql", content: "ALTER TABLE identities ADD COLUMN IF NOT EXISTS extra integer;\n" } };
+    const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : "complete";
+    const output = (review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : "Implemented the change.")
+      + (mode === "ready" ? "\nSCRAT_READY" : "") + (mode === "no-status" ? "" : `\nSCRAT_STATUS: ${outcome}`);
+    const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] } : { role: "assistant", content: output };
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end("data: " + JSON.stringify({ id: "local_" + requests.length, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: request.model,
+      choices: [{ index: 0, delta, finish_reason: tool ? "tool_calls" : (mode === "reviewer-failure" && request.model.includes("deepseek")) || mode === "merge-failure" ? "length" : "stop" }],
+      usage: { prompt_tokens: 100, completion_tokens: 30, total_tokens: 130 } }) + "\n\ndata: [DONE]\n\n");
+  });
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  const config = JSON.parse(readFileSync("app/scrat.config.json", "utf8"));
+  config.workspace = {}; config.github.repository = "fixture/project"; config.github.repositoryPath = resolve("checkout");
+  config.providers = { fixture: { api: "openai-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: "fixture", models: [
+    { id: "gpt-6.1-sol", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
+    { id: "deepseek/deepseek-v4.1-flash", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
+  ] } };
+  for (const action of Object.values(config.actions)) { action.provider = "fixture"; for (const reviewer of action.reviewers ?? []) reviewer.provider = "fixture"; }
+  if (scenario === "verification" || scenario === "validation_mutation") {
+    writeFileSync("check.mjs", scenario === "validation_mutation" ? 'import{writeFileSync}from"node:fs";writeFileSync("src/app.ts","unexpected verification change\\n");' : 'import{existsSync}from"node:fs";if(existsSync("fail-validation"))throw new Error("Verification failed");console.log("checked actual source");');
+    config.workspace.validate = [[process.execPath, resolve("check.mjs")]];
+  }
+  if (scenario === "database") {
+    const helper = fileURLToPath(new URL("database-command.mjs", import.meta.url)); cpSync(helper, "database-command.mjs");
+    config.workspace = { database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), "validate"]] };
+  }
+  writeFileSync("app/scrat.config.json", JSON.stringify(config));
+  mkdirSync("data");
+  execFileSync(process.execPath, [resolve(repository, "node_modules/drizzle-kit/bin.cjs"), "push", "--dialect=sqlite", "--schema=./app/src/schema.ts", "--url=./data/scrat.sqlite"], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+  const app = async (path) => import(pathToFileURL(resolve("app/src", path)));
+  const { db } = await app("db.ts"), schema = await app("schema.ts"), tasks = await app("tasks.ts"), { runNextTask } = await app("runner.ts");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, options = {}) => {
+    const url = new URL(typeof input === "string" ? input : input.url);
+    if (url.hostname === "127.0.0.1") return originalFetch(input, options);
+    if (url.hostname !== "api.github.com") throw new Error("External network disabled");
+    const path = url.pathname, method = options.method ?? "GET", body = options.body ? JSON.parse(options.body) : {};
+    const reply = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
+    if (path.endsWith("/access_tokens")) return reply({ token: "ghs_fixture", expires_at: new Date(Date.now() + 3600000).toISOString() }, 201);
+    if (path.endsWith("/issues") && method === "GET") return reply([...issues.values(), ...prs.map((pr) => ({ ...pr, pull_request: {} }))].filter((item) => item.state === "open"));
+    let match = path.match(/\/(issues|pulls)\/(\d+)$/);
+    if (match && method === "GET") return reply(match[1] === "issues" ? issues.get(Number(match[2])) : prs.find((pr) => pr.number === Number(match[2])));
+    if (/\/pulls\/\d+\/(comments|reviews)$/.test(path)) return reply([]);
+    match = path.match(/\/issues\/(\d+)\/comments$/);
+    if (match) {
+      const n = Number(match[1]); if (method === "GET") return reply(comments.get(n) ?? []);
+      writes.push({ type: "comment", number: n, body: body.body });
+      const comment = { id: 1000 + n, body: body.body, user: { login: config.github.botLogin }, updated_at: "2026-10-19T01:00:00Z", html_url: `https://github.com/fixture/project/issues/${n}#comment` };
+      comments.set(n, [...(comments.get(n) ?? []), comment]);
+      if (faults.cleanup.delete(n)) { const run = db.select().from(schema.runs).all().find((run) => !run.finishedAt); const workspace = db.select().from(schema.workspaces).all().find((w) => w.id === run.workspaceId); writeFileSync(workspace.path + "/keep.txt", "preserve\n"); }
+      return faults.comment.delete(n) ? reply({ message: "Lost response" }, 502) : reply(comment, 201);
+    }
+    match = path.match(/\/issues\/(\d+)\/labels(?:\/scrat)?$/);
+    if (match) { const n = Number(match[1]); writes.push({ type: "label", number: n }); if (faults.label.delete(n)) return reply({ message: "Label failure" }, 503); issues.get(n).labels = method === "DELETE" ? [] : [{ name: "scrat" }]; return reply(issues.get(n).labels); }
+    if (path.endsWith("/pulls") && method === "GET") return reply(prs.filter((pr) => (!url.searchParams.get("head") || pr.head.ref === url.searchParams.get("head").split(":").slice(1).join(":")) && (url.searchParams.get("state") !== "open" || pr.state === "open")));
+    if (path.endsWith("/pulls") && method === "POST") {
+      const n = Number(body.body.match(/Closes #(\d+)/)[1]); writes.push({ type: "pr", number: n });
+      const pr = { id: 200 + n, node_id: "PR_" + n, number: 200 + n, title: body.title, body: body.body, state: "open", html_url: `https://github.com/fixture/project/pull/${200 + n}`, labels: [], updated_at: "2026-10-19T01:00:00Z", user: { login: config.github.botLogin }, head: { ref: body.head, sha: git(resolve("remote.git"), "rev-parse", body.head), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } } };
+      prs.push(pr); git(resolve("remote.git"), "update-ref", `refs/pull/${pr.number}/head`, pr.head.sha);
+      return faults.pr.delete(n) ? reply({ message: "Lost PR response" }, 502) : reply(pr, 201);
+    }
+    throw new Error(`Unexpected GitHub call: ${method} ${path}`);
+  };
+  const addIssue = (number, labels = []) => {
+    const payload = { id: number, node_id: "ISSUE_" + number, number, title: "Issue " + number, body: "Inspect app.ts", state: "open", html_url: `https://github.com/fixture/project/issues/${number}`, updated_at: "2026-10-19T00:00:00Z", labels: labels.map((name) => ({ name })), user: { login: "human" } };
+    issues.set(number, payload); return db.insert(schema.items).values({ id: "issue-" + number, source: "github", externalId: payload.node_id, kind: "issue", payload }).returning().get();
+  };
+  const enqueue = (number, action = "review_issue", input = {}) => tasks.enqueueTask({ itemId: "issue-" + number, action, reason: "Integration", input });
+  const row = (table, id) => db.select().from(table).all().find((entry) => entry.id === id);
+  return { root, app, db, schema, tasks, runNextTask, git, commit, config, modes, requests, issues, prs, comments, writes, faults, addIssue, enqueue, row,
+    set onModel(value) { onModel = value; },
+    reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },
+    async close() { globalThis.fetch = originalFetch; db.$client.close(); server.closeAllConnections(); await new Promise((done) => server.close(done)); },
+  };
+}

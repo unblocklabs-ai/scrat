@@ -1,6 +1,6 @@
 {
   "harness": {
-    "maxConcurrency": 2,
+    "maxConcurrency": 6,
     "logLevel": "info"
   },
   "github": {
@@ -35,6 +35,13 @@
       "authHeader": true,
       "models": [
         {
+          "id": "deepseek/deepseek-v4.1-flash",
+          "name": "DeepSeek V4.1 Flash",
+          "reasoning": true,
+          "contextWindow": 1000000,
+          "maxTokens": 32768
+        },
+        {
           "id": "gpt-6.1-sol",
           "name": "GPT-6.1 Sol",
           "reasoning": true,
@@ -55,30 +62,39 @@
   },
   "actions": {
     "review_issue": {
+      "priority": 10,
       "skill": "skills/review_issue/SKILL.md",
       "provider": "codex-lb",
       "model": "gpt-6.1-sol",
       "thinkingLevel": "high"
     },
     "review_pr": {
+      "priority": 100,
+      "reviewers": [
+        { "provider": "codex-lb", "model": "gpt-6.1-sol", "thinkingLevel": "high" },
+        { "provider": "codex-lb", "model": "deepseek/deepseek-v4.1-flash", "thinkingLevel": "high" }
+      ],
       "skill": "skills/review_pr/SKILL.md",
       "provider": "codex-lb",
       "model": "gpt-6.1-sol",
       "thinkingLevel": "high"
     },
     "implement": {
+      "priority": 60,
       "skill": "skills/implement/SKILL.md",
       "provider": "codex-lb",
       "model": "gpt-6.1-sol",
       "thinkingLevel": "high"
     },
     "resolve_conflicts": {
+      "priority": 60,
       "skill": "skills/resolve_conflicts/SKILL.md",
       "provider": "codex-lb",
       "model": "gpt-6.1-sol",
       "thinkingLevel": "high"
     },
     "address_pr_feedback": {
+      "priority": 60,
       "skill": "skills/address_pr_feedback/SKILL.md",
       "provider": "codex-lb",
       "model": "gpt-6.1-sol",

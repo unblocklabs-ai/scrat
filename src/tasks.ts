@@ -17,7 +17,7 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
       const previous = transaction.select().from(tasks).where(and(
         eq(tasks.itemId, task.itemId), eq(tasks.action, task.action), eq(tasks.status, "queued"),
       )).get();
-      const queuedTask = transaction.insert(tasks).values(task).onConflictDoUpdate({
+      const queuedTask = transaction.insert(tasks).values({ ...task, priority: task.priority ?? config.actions[task.action].priority }).onConflictDoUpdate({
         target: [tasks.itemId, tasks.action],
         targetWhere: sql`${tasks.status} = 'queued'`,
         set: {
@@ -72,7 +72,8 @@ export function claimTask() {
     const previousRun = transaction.select().from(runs).where(eq(runs.taskId, next.task.id))
       .orderBy(desc(runs.startedAt), desc(runs.id)).limit(1).get();
     const retry = previousRun?.error && isDeepStrictEqual(previousRun.input, next.task.input) ? previousRun : undefined;
-    const settings = retry ?? getActionConfig(next.task.action);
+    const actionSettings = getActionConfig(next.task.action);
+    const settings = retry ?? actionSettings;
     const resume = retry?.stage === "publishing" && retry.result && retry.context ? retry : undefined;
     const task = transaction.update(tasks).set({ status: "running" }).where(eq(tasks.id, next.task.id)).returning().get()!;
     const run = transaction.insert(runs).values({
@@ -83,11 +84,14 @@ export function claimTask() {
       provider: settings.provider,
       model: settings.model,
       thinkingLevel: settings.thinkingLevel,
+      reviewers: resume ? resume.reviewers : (retry?.reviewers ?? actionSettings.reviewers)
+        .map(({ provider, model, thinkingLevel }) => ({ provider, model, thinkingLevel })),
       workspaceId: resume?.workspaceId ?? next.item.workspaceId,
       ...(resume ? {
         context: resume.context, result: resume.result, mainSha: resume.mainSha, headSha: resume.headSha,
         piSessionId: resume.piSessionId, piSessionFile: resume.piSessionFile,
         stage: "publishing", publication: { ...resume.publication, status: "pending" },
+        verification: resume.verification,
       } : {}),
       startedAt: new Date().toISOString(),
     }).returning().get()!;

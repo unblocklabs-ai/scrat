@@ -7,11 +7,12 @@ import { fetchPullRequestHead, fetchRepository, git, hasConflicts, hasPendingMer
 import { fetchItemContext, getGitEnvironment, githubRevision } from "./github.ts";
 import { startOperation } from "./logging.ts";
 import { executePi } from "./pi.ts";
+import { reviewPullRequest } from "./pr-review.ts";
 import { publishRun } from "./publication.ts";
 import { affectsPaths } from "./relevance.ts";
 import { items, runs } from "./schema.ts";
 import { claimTask, finishRun } from "./tasks.ts";
-import { commitWorkspace, createWorkspace, getWorkspace, removeWorkspace } from "./workspaces.ts";
+import { commitWorkspace, createWorkspace, getWorkspace, removeWorkspace, validateWorkspace } from "./workspaces.ts";
 
 export async function runNextTask() {
   const claimed = claimTask();
@@ -42,6 +43,7 @@ export async function runNextTask() {
       const preparedHead = await git(repositoryPath, ["rev-parse", headRef]);
       let workspace = !readOnly && item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
       if (workspace?.removedAt) throw new Error(`Workspace was removed: ${workspace.id}`);
+      if (workspace) await validateWorkspace(workspace);
       if (!workspace) {
         if (!readOnly && pullRequest && pullRequest.head.repo?.full_name !== repository) {
           throw new Error("Cannot update a PR branch in a different repository");
@@ -93,11 +95,13 @@ export async function runNextTask() {
         if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, commandEnvironment, references);
       }
       db.update(runs).set({ stage: "agent" }).where(eq(runs.id, run.id)).run();
-      const result = await executePi(run, workspace.path, JSON.stringify({
+      const input = { ...run.input };
+      delete input.comments;
+      const prompt = JSON.stringify({
         action: task.action,
         reason: task.reason,
         ...evaluated,
-        input: run.input,
+        input,
         previousFailure: run.retryOfRunId ? db.select().from(runs).where(eq(runs.id, run.retryOfRunId)).get()?.error : undefined,
         workspace: { path: workspace.path, branch: workspace.branch, baseRef, baseBranch, mainSha, headSha, mergeInProgress },
         diff,
@@ -107,16 +111,26 @@ export async function runNextTask() {
           ...database, environment, schemaPrepared: !preparationDeferred,
           prepare: config.workspace?.prepare, migrate: databaseConfig?.migrate,
         } : undefined,
-      }, null, 2), readOnly, operation.log, previous?.piSessionFile ?? undefined, environment);
+      }, null, 2);
+      const result = task.action === "review_pr"
+        ? await reviewPullRequest(run, workspace.path, prompt, operation.log)
+        : await executePi(run, workspace.path, prompt, readOnly, operation.log, previous?.piSessionFile ?? undefined, environment);
       db.update(runs).set({ result, stage: "validating" }).where(eq(runs.id, run.id)).run();
+      if (result.outcome !== "complete") {
+        throw Object.assign(new Error(`Agent returned ${result.outcome}: ${result.text}`), { code: "AGENT_INCOMPLETE" });
+      }
       if (!readOnly) {
         await runCommands(config.workspace?.prepare ?? [], workspace.path, commandEnvironment, references);
         if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, commandEnvironment, references);
-        await runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references);
+        await git(workspace.path, ["add", "--all"]);
+        const validationTree = await git(workspace.path, ["write-tree"]);
+        const commands = await runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references);
+        await git(workspace.path, ["add", "--all"]);
+        if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
         const commitSha = await commitWorkspace(workspace, `fix: ${context.item.title}`, {
           name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com`,
         }, references);
-        db.update(runs).set({ headSha: commitSha, publication: { status: "pending", commitSha } }).where(eq(runs.id, run.id)).run();
+        db.update(runs).set({ headSha: commitSha, publication: { status: "pending", commitSha }, verification: { headSha: commitSha, commands } }).where(eq(runs.id, run.id)).run();
         if (task.action === "resolve_conflicts" && await hasConflicts(repositoryPath, mainSha, commitSha)) {
           throw new Error("PR still conflicts with its base branch after resolution");
         }

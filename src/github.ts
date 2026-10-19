@@ -1,4 +1,5 @@
 import { createAppAuth } from "@octokit/auth-app";
+import { createHash } from "node:crypto";
 import { Octokit } from "octokit";
 import type { Logger } from "pino";
 import { config } from "./config.ts";
@@ -95,10 +96,10 @@ export async function fetchItemContext(repository: string, kind: "issue" | "pr",
 }
 
 export function githubRevision(item: { title: string; body?: string | null; head?: { sha: string } }, comments: GithubComment[]) {
-  return JSON.stringify({
+  return createHash("sha256").update(JSON.stringify({
     title: item.title, body: item.body, head: item.head?.sha,
     comments: comments.map((comment) => `${comment.id}@${comment.updatedAt}`).sort(),
-  });
+  })).digest("hex");
 }
 
 export async function findPullRequest(repository: string, branch: string, base: string) {

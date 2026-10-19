@@ -9,6 +9,7 @@ import { recordEvent } from "./events.ts";
 import { startOperation } from "./logging.ts";
 import { hasPublicationSnapshot, hasValidationCheckpoint } from "./results.ts";
 import { events, items, runs, tasks } from "./schema.ts";
+import { signalWork } from "./work-signal.ts";
 
 function runHistory(taskId: string, database: Pick<typeof db, "select">) {
   return database.select({ run: runs, sequence: events.id }).from(runs)
@@ -74,6 +75,7 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
       return queuedTask;
     }, { behavior: "immediate" });
     operation.complete({ taskId: queued.id, priority: queued.priority });
+    signalWork();
     return queued;
   } catch (err) {
     operation.fail(err);
@@ -165,6 +167,7 @@ export function retryTask(taskId: string, mode: typeof tasks.$inferSelect.retryM
       return updated;
     }, { behavior: "immediate" });
     operation.complete();
+    signalWork();
     return task;
   } catch (error) {
     operation.fail(error);
@@ -174,7 +177,7 @@ export function retryTask(taskId: string, mode: typeof tasks.$inferSelect.retryM
 
 export function finishRun(runId: string, outcome: { status: "completed" } | { status: "failed"; error: unknown }) {
   const error = outcome.status === "failed" ? describeError(outcome.error) : null;
-  return db.transaction((transaction) => {
+  const finished = db.transaction((transaction) => {
     const run = transaction.update(runs).set({ error, finishedAt: new Date().toISOString() })
       .where(and(eq(runs.id, runId), isNull(runs.finishedAt))).returning().get();
     if (!run) throw new Error(`Run not active: ${runId}`);
@@ -189,6 +192,8 @@ export function finishRun(runId: string, outcome: { status: "completed" } | { st
     }, transaction);
     return run;
   }, { behavior: "immediate" });
+  signalWork();
+  return finished;
 }
 
 export function cancelQueuedTasks(itemId: string, reason: string, action?: typeof tasks.$inferSelect.action) {

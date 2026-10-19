@@ -50,6 +50,7 @@ const scenarios = {
   feedback: "edited review summaries and same-commit PR retargets produce fresh tasks",
   commit_hook: "commit hooks cannot attach verification receipts to an unverified tree",
   isolation: "workspace commands, hooks and agent tools cannot reach Scrat credentials, and credential material is never published",
+  wakeup: "idle workers wake on enqueue, keep signals sent while busy, fall back on timeout and release on abort",
   database: "real PostgreSQL runs isolate databases, apply new migrations and remove resources",
 };
 

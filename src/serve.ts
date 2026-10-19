@@ -5,7 +5,10 @@ import { syncGitHub } from "./github-sync.ts";
 import { logger } from "./logging.ts";
 import { runNextTask } from "./runner.ts";
 import { validateStaticConfig } from "./startup.ts";
+import { signalWork, waitForWork, workGeneration } from "./work-signal.ts";
 
+// Other processes (enqueue, retry) cannot signal this one, so idle workers also re-check periodically.
+const idleWorkerFallbackMs = 30_000;
 const shutdown = new AbortController();
 const wait = (ms: number) => setTimeout(ms, undefined, { signal: shutdown.signal }).catch((error: unknown) => {
   if (!(error instanceof Error) || error.name !== "AbortError") throw error;
@@ -18,13 +21,14 @@ async function poll() {
   while (!shutdown.signal.aborted) {
     await wait(config.github.fetchIntervalSeconds * 1000);
     if (shutdown.signal.aborted) break;
-    try { await syncGitHub(); }
+    try { await syncGitHub(); signalWork(); }
     catch { /* sync owns its failure log; the next poll can recover. */ }
   }
 }
 async function worker() {
   while (!shutdown.signal.aborted) {
-    try { if (!await runNextTask()) await wait(1000); }
+    const seen = workGeneration();
+    try { if (!await runNextTask()) await waitForWork(seen, idleWorkerFallbackMs, shutdown.signal); }
     catch (error) {
       logger.error({ err: error }, "Worker failed");
       await wait(1000);

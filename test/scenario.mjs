@@ -820,6 +820,23 @@ try {
     const committed = await run(); assert.equal(committed.error.code, "SECRET_IN_OUTPUT");
     assert.equal(committed.verification, null); assert.ok(!f.writes.some((write) => write.type === "pr" && write.number === 4));
     assert.ok(!JSON.stringify(all(s.runs).map((r) => r.error)).includes(key.split("\n")[1]));
+  } else if (scenario === "wakeup") {
+    const { signalWork, waitForWork, workGeneration } = await f.app("work-signal.ts");
+    const timed = async (promise) => { const start = Date.now(); await promise; return Date.now() - start; };
+    f.addIssue(1);
+    const woken = await timed(((since) => { const waiting = waitForWork(since, 5_000); f.enqueue(1); return waiting; })(workGeneration()));
+    assert.ok(woken < 1000, `Enqueue should wake the waiter, took ${woken}ms`);
+    f.addIssue(2); const since = workGeneration(); f.enqueue(2);
+    const retained = await timed(waitForWork(since, 5_000));
+    assert.ok(retained < 1000, `A signal sent before waiting must not be lost, took ${retained}ms`);
+    const fallback = await timed(waitForWork(workGeneration(), 100));
+    assert.ok(fallback >= 90 && fallback < 1000, `Timeout should resolve the waiter, took ${fallback}ms`);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 20);
+    const aborted = await timed(waitForWork(workGeneration(), 5_000, controller.signal));
+    assert.ok(aborted < 1000, `Abort should release the waiter, took ${aborted}ms`);
+    const notified = await timed(((since) => { const waiting = waitForWork(since, 5_000); signalWork(); return waiting; })(workGeneration()));
+    assert.ok(notified < 1000, `Explicit signal should wake the waiter, took ${notified}ms`);
   } else if (scenario === "database") {
     const original = process.env.DATABASE_URL; f.addIssue(1); f.addIssue(2); f.enqueue(1, "implement"); f.enqueue(2, "implement");
     const runs = await Promise.all([f.runNextTask(), f.runNextTask()]);

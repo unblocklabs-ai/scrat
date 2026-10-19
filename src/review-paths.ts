@@ -27,9 +27,3 @@ export function reviewScope(paths: string[], tracked: string[]): ReviewScope {
   const canonical = canonicalReviewPaths(paths, tracked);
   return !canonical.length || canonical.includes(".") ? { kind: "unknown" } : { kind: "observed", paths: canonical };
 }
-
-// Capture successful reads against their own snapshot, not the comparison trees.
-export function observedReviewPaths(paths: string[], tracked: string[]) {
-  return canonicalReviewPaths(paths, tracked).map((path) =>
-    tracked.includes(path) || path.split("/").includes("node_modules") ? path : ".");
-}

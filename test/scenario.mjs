@@ -176,7 +176,7 @@ try {
     f.onModel = () => { if (!changed) { changed = true; changeMain("notes.md", "Unrelated during review\n"); } };
     const reviewed = await success(); f.onModel = undefined;
     assert.ok(!reviewed.result.paths.includes("."));
-    for (const path of ["src/added.ts", "src/deleted.ts", "src/renamed.ts", "src/moved.ts", " leading.ts"]) assert.ok(reviewed.result.paths.includes(path), path);
+    for (const path of ["src/added.ts", "src/deleted.ts", "src/renamed.ts", "src/moved.ts", " leading.ts", "src/generated.ts"]) assert.ok(reviewed.result.paths.includes(path), path);
     assert.ok(f.requests.some((r) => r.request.messages.some((m) => m.role === "tool"
       && JSON.stringify(m.content).includes("export const deleted = 1;\\n"))), "Base reads preserve the deleted source blob, including whitespace");
     changeMain("notes.md", "Unrelated after review\n"); await route();

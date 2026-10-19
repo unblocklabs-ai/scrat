@@ -18,6 +18,7 @@ export async function fixture(scenario) {
   execFileSync("git", ["init", "-b", "main", "seed"], { stdio: "ignore" });
   mkdirSync("seed/src"); writeFileSync("seed/src/app.ts", "export const value = 1;\n");
   if (scenario === "scope_snapshots") {
+    writeFileSync("seed/.gitignore", "/src/generated.ts\n");
     writeFileSync("seed/src/deleted.ts", "export const deleted = 1;\n");
     writeFileSync("seed/src/renamed.ts", "export const renamed = 1;\n");
     writeFileSync("seed/ leading.ts", "export const leading = 1;\n");
@@ -70,6 +71,7 @@ export async function fixture(scenario) {
     if (review && scenario === "panel" && step === 1) tool = { name: "read_base", args: { path: "src/app.ts" } };
     if (review && scenario === "scope_snapshots" && step === 0) tool = { name: "read_base", args: { path: "src/deleted.ts" } };
     if (review && scenario === "scope_snapshots" && step === 1) tool = { name: "read", args: { path: " leading.ts" } };
+    if (review && scenario === "scope_snapshots" && step === 2) tool = { name: "read", args: { path: "src/generated.ts" } };
     if (!review && step === 0) {
       tool = mode === "merge-failure" ? { name: "bash", args: { command: `git -c user.name=Fixture -c user.email=fixture@example.invalid merge --no-commit ${git(resolve("seed"), "rev-parse", "main")}` } }
         : context.database ? { name: "bash", args: { command: `${process.execPath} ${resolve("database-command.mjs")} query ${context.item.number}` } }
@@ -98,6 +100,10 @@ export async function fixture(scenario) {
   for (const action of Object.values(config.actions)) { action.provider = "fixture"; for (const reviewer of action.reviewers ?? []) reviewer.provider = "fixture"; }
   if (scenario === "panel") {
     writeFileSync("prepare.mjs", 'import{mkdirSync,writeFileSync}from"node:fs";mkdirSync("node_modules/pinned-runtime",{recursive:true});writeFileSync("node_modules/pinned-runtime/package.json",JSON.stringify({name:"pinned-runtime",version:"9.8.7"}));');
+    config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
+  }
+  if (scenario === "scope_snapshots") {
+    writeFileSync("prepare.mjs", 'import{writeFileSync}from"node:fs";writeFileSync("src/generated.ts","export const generated = 1;\\n");');
     config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
   }
   if (["relevance", "lockfile_scope", "importer_scope"].includes(scenario)) {

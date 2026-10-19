@@ -11,7 +11,7 @@ import { db } from "./db.ts";
 import { runs } from "./schema.ts";
 import { parseResult, type Reviewer } from "./results.ts";
 import { git } from "./git.ts";
-import { canonicalReviewPaths, observedReviewPaths } from "./review-paths.ts";
+import { canonicalReviewPaths } from "./review-paths.ts";
 
 export function saveReviewer(runId: string, index: number, patch: Partial<Reviewer>) {
   db.transaction((transaction) => {
@@ -124,7 +124,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     const baseTracked = baseSha && basePaths.size
       ? (await git(cwd, ["ls-tree", "-r", "--name-only", "-z", baseSha])).split("\0").filter(Boolean) : [];
     return parseResult(output, [...new Set([
-      ...observedReviewPaths([...paths], tracked), ...canonicalReviewPaths([...basePaths], baseTracked),
+      ...canonicalReviewPaths([...paths], tracked), ...canonicalReviewPaths([...basePaths], baseTracked),
     ])]);
   } finally {
     session.dispose();

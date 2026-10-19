@@ -75,7 +75,7 @@ export async function fixture(scenario) {
     config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
   }
   if (scenario === "verification" || scenario === "validation_mutation") {
-    writeFileSync("check.mjs", scenario === "validation_mutation" ? 'import{writeFileSync}from"node:fs";writeFileSync("src/app.ts","unexpected verification change\\n");' : 'import{existsSync}from"node:fs";if(existsSync("fail-validation"))throw new Error("Verification failed");console.log("checked actual source");');
+    writeFileSync("check.mjs", scenario === "validation_mutation" ? 'import{writeFileSync}from"node:fs";writeFileSync("src/app.ts","unexpected verification change\\n");' : 'import{existsSync}from"node:fs";if(existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed");process.exit(7);}console.log("checked actual source");');
     config.workspace.validate = [[process.execPath, resolve("check.mjs")]];
   }
   if (scenario === "database") {

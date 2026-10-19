@@ -7,6 +7,9 @@ export type ErrorDetails = {
   stack?: string;
   status?: number;
   code?: string;
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
   requestId?: string;
   cause?: ErrorDetails;
 };
@@ -37,6 +40,9 @@ export function describeError(error: unknown, seen = new Set<unknown>()): ErrorD
     stack: error.stack ? redactSecrets(error.stack.replace(error.message, message)) : undefined,
     status: "status" in error && typeof error.status === "number" ? error.status : undefined,
     code: "code" in error && typeof error.code === "string" ? error.code : undefined,
+    exitCode: "code" in error && typeof error.code === "number" ? error.code : undefined,
+    stdout: "stdout" in error && typeof error.stdout === "string" ? redactSecrets(error.stdout) : undefined,
+    stderr: "stderr" in error && typeof error.stderr === "string" ? redactSecrets(error.stderr) : undefined,
     requestId: typeof requestId === "string" ? requestId : undefined,
     cause: error.cause === undefined ? undefined : describeError(error.cause, seen),
   };

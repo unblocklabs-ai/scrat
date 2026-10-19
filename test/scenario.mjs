@@ -78,6 +78,10 @@ try {
     changeMain("fail-validation", "fail\n");
     f.addIssue(2); f.enqueue(2, "implement"); const failed = await run();
     assert.ok(failed.error); assert.equal(f.prs.length, 1); assert.equal(failed.verification, null);
+    assert.equal(failed.error.exitCode, 7);
+    assert.match(failed.error.stdout, /validation detail \[redacted\]/);
+    assert.match(failed.error.stderr, /Verification failed/);
+    assert.ok(!JSON.stringify(failed.error).includes("ghs_fixture_sensitive"));
   } else if (scenario === "validation_mutation") {
     f.addIssue(1); f.enqueue(1, "implement"); const r = await run();
     assert.match(r.error.message, /Validation changed/); assert.equal(f.prs.length, 0);

@@ -44,8 +44,10 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
       const previous = transaction.select().from(tasks).where(and(
         eq(tasks.itemId, task.itemId), eq(tasks.action, task.action), eq(tasks.status, "queued"),
       )).get();
-      // Coalescing replaces input; a queued manual task keeps its mark so routing cannot later cancel it.
-      const input = previous?.input.manual === true ? { ...task.input, manual: true } : task.input;
+      // Coalescing replaces input. A queued manual task keeps its mark so routing cannot later cancel it;
+      // a manual enqueue keeps the queued task's routing fields and adds the mark.
+      const input = task.input.manual === true && previous ? { ...previous.input, ...task.input, manual: true }
+        : previous?.input.manual === true ? { ...task.input, manual: true } : task.input;
       const queuedTask = transaction.insert(tasks).values({ ...task, input, priority: task.priority ?? config.actions[task.action].priority }).onConflictDoUpdate({
         target: [tasks.itemId, tasks.action],
         targetWhere: sql`${tasks.status} = 'queued'`,
@@ -82,6 +84,8 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
   });
 }
 
+const issueActions: ReadonlySet<string> = new Set(["review_issue", "implement"]);
+
 export type ManualEnqueueResult = { target: string; number?: number; itemId?: string; taskId?: string; error?: string };
 
 // Targets are PR/issue numbers in the configured repository or internal item ids. Tasks are marked
@@ -99,6 +103,8 @@ export function enqueueManualTasks(action: string, targets: string[], priority?:
     if (!item) return { target, error: `No item ${target} in ${config.github.repository}` };
     const base = { target, number: item.payload.number, itemId: item.id };
     if (item.state !== "open") return { ...base, error: "Item is closed" };
+    const needs = issueActions.has(action) ? "issue" : "pr";
+    if (item.kind !== needs) return { ...base, error: `${action} needs ${needs === "pr" ? "a PR" : "an issue"}, but ${target} is ${item.kind === "pr" ? "a PR" : "an issue"}` };
     try { return { ...base, taskId: enqueueTask({ itemId: item.id, action, priority, reason: "Manually enqueued", input: { manual: true } }).id }; }
     catch (error) { return { ...base, error: error instanceof Error ? error.message : String(error) }; }
   });

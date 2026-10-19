@@ -104,7 +104,8 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
         added += applyDecisions(item.id, planReview({ kind: "pr", state, latest, attempt, revision, mainSha }));
         const { maxSelfRepairs = 2 } = config.actions.address_review;
         const repair = planSelfRepair({
-          owned, state, feedbackTask: latestTask(item.id, "address_pr_feedback"), repairTask: latestTask(item.id, "address_review"),
+          owned, state, feedbackTask: latestTask(item.id, "address_pr_feedback"),
+          reviewTask: latestTask(item.id, "review_pr"), repairTask: latestTask(item.id, "address_review"),
           count: db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count, limit: maxSelfRepairs,
         });
         if (repair.limited && state.kind === "current" && !limitLogged.has(state.assessment.originId)) {

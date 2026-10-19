@@ -11,6 +11,7 @@ import { freshness, savedEvaluation } from "./freshness.ts";
 import { startOperation } from "./logging.ts";
 import { assertConfiguredRepository, itemRepository, observe } from "./observation.ts";
 import { executePi } from "./pi.ts";
+import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { reviewPullRequest } from "./pr-review.ts";
 import { publishRun } from "./publication.ts";
 import { hasValidationCheckpoint } from "./results.ts";
@@ -80,6 +81,13 @@ export async function runNextTask() {
     const gitEnvironment = await github.getGitEnvironment();
     const mainSha = await fetchRepository(repositoryPath, remote, baseBranch, gitEnvironment);
     if (run.stage !== "publishing") {
+      // A repair is queued from one assessment; a newer review or a moved head must not let it run and push.
+      if (task.action === "address_review") {
+        const state = await resolvePrReview(prReviewHistory(item.id), observation, mainSha);
+        if (state.kind !== "current" || state.assessment.originId !== task.input.assessmentRunId) {
+          throw new Error("The review this repair addresses is no longer the current assessment");
+        }
+      }
       const validationOnly = run.stage === "validating";
       const baseRef = mainSha;
       const headRef = pullRequest

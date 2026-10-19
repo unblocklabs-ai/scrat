@@ -54,11 +54,12 @@ const lowGrades: readonly (string | undefined)[] = ["C", "D", "F"];
 
 // A low grade on a current assessment of a Scrat PR queues one repair per assessment, up to the item's cap.
 // Anything else cancels a queued repair, so it never runs against a stale assessment or ahead of human feedback.
-export function planSelfRepair({ owned, state, feedbackTask, repairTask, count, limit }: {
-  owned: boolean; state: PrReviewState; feedbackTask?: TaskFacts; repairTask?: TaskFacts; count: number; limit: number;
+export function planSelfRepair({ owned, state, feedbackTask, reviewTask, repairTask, count, limit }: {
+  owned: boolean; state: PrReviewState; feedbackTask?: TaskFacts; reviewTask?: TaskFacts; repairTask?: TaskFacts; count: number; limit: number;
 }): { decisions: RoutingDecision[]; limited: boolean } {
   const cancel: RoutingDecision[] = [{ type: "cancel", action: "address_review", reason: "No current low-graded review to repair" }];
-  if (!owned || state.kind !== "current" || !lowGrades.includes(state.assessment.result.grade) || feedbackTask?.status === "queued") {
+  const reviewActive = reviewTask?.status === "queued" || reviewTask?.status === "running";
+  if (!owned || state.kind !== "current" || !lowGrades.includes(state.assessment.result.grade) || feedbackTask?.status === "queued" || reviewActive) {
     return { decisions: cancel, limited: false };
   }
   const { originId } = state.assessment, grade = state.assessment.result.grade;
@@ -75,6 +76,7 @@ type ReviewTriggerFacts = {
 export function reviewTrigger({ latest, attempt, revision, mainSha }: ReviewTriggerFacts) {
   const triggerKey = JSON.stringify({ revision, mainSha });
   const covered = latest?.status !== "cancelled" && (latest?.input.triggerKey === triggerKey
+    || (latest?.status === "running" && latest.input.manual === true)
     || (attempt?.context?.revision === revision && attempt.mainSha === mainSha));
   return { triggerKey, covered };
 }

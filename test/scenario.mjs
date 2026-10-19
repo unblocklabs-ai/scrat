@@ -395,6 +395,28 @@ try {
     f.addIssue(5); const mixed = tasks.enqueueManualTasks("review_issue", ["5", "404", "issue-5"]);
     assert.deepEqual(mixed.map((r) => Boolean(r.taskId)), [true, false, true]);
     assert.equal(mixed[0].taskId, mixed[2].taskId);
+    // A manual enqueue merging into a queued routing task keeps its routing fields.
+    await implement(2); await route();
+    const item2 = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 202).id;
+    const reviews2 = () => all(s.tasks).filter((t) => t.itemId === item2 && t.action === "review_pr");
+    const routed = reviews2().find((t) => t.status === "queued"); assert.ok(routed.input.triggerKey);
+    const merge = tasks.enqueueManualTasks("review_pr", ["202"])[0];
+    assert.equal(merge.taskId, routed.id);
+    assert.deepEqual(f.row(s.tasks, routed.id).input, { ...routed.input, manual: true });
+    await success(); await route();
+    // Actions must fit the item kind.
+    const [prOnIssue] = tasks.enqueueManualTasks("review_pr", ["5"]), [issueOnPr] = tasks.enqueueManualTasks("review_issue", ["202"]);
+    assert.match(prOnIssue.error, /review_pr needs a PR/); assert.match(issueOnPr.error, /review_issue needs an issue/);
+    assert.match(tasks.enqueueManualTasks("implement", ["202"])[0].error, /needs an issue/);
+    assert.match(tasks.enqueueManualTasks("resolve_conflicts", ["5"])[0].error, /needs a PR/);
+    assert.match(tasks.enqueueManualTasks("address_pr_feedback", ["5"])[0].error, /needs a PR/);
+    assert.ok(!all(s.tasks).some((t) => t.itemId === "issue-5" && t.action === "review_pr"));
+    // A sync during a running manual review must not queue a duplicate.
+    f.prs.find((pr) => pr.number === 202).title = "Retitled after the review";
+    const running = tasks.enqueueManualTasks("review_pr", ["202"])[0];
+    const claimed = tasks.claimTask(); assert.equal(claimed.task.id, running.taskId);
+    await route();
+    assert.deepEqual(reviews2().filter((t) => t.status === "queued"), [], "a running manual review covers the sync");
   } else if (scenario === "run_sequence") {
     const { eq } = await import("drizzle-orm");
     for (let n = 1; n <= 5; n++) f.addIssue(n);
@@ -992,6 +1014,34 @@ try {
     tasks.cancelQueuedTasks(prItem(205).id, "Drain"); await implement(6); await review(206, "grade-C"); await route(); assert.equal(repairs(206)[0].status, "queued");
     f.comments.set(206, [{ id: 9200, body: "Please rename it", user: { login: "human" }, updated_at: "2026-10-19T01:00:00Z", html_url: "https://github.com/fixture/project/pull/206#comment" }]);
     await route(); assert.equal(repairs(206)[0].status, "cancelled", "Human feedback arriving later cancels the queued repair");
+    // A queued or running review cancels a queued repair at sync time.
+    for (const pr of f.prs) pr.state = "closed"; // retire earlier PRs so their leftovers cannot be claimed
+    await route(); await implement(7); await review(207, "grade-C"); await route();
+    assert.equal(repairs(207)[0].status, "queued");
+    tasks.enqueueManualTasks("review_pr", ["207"]); await route();
+    assert.equal(repairs(207)[0].status, "cancelled", "A queued review cancels the queued repair");
+    f.prs.find((pr) => pr.number === 207).state = "closed"; await route();
+    // A repair whose review was superseded before a worker claimed it must fail without a model call or push.
+    await implement(8); const graded8 = await review(208, "grade-C"); await route();
+    const repair8 = repairs(208)[0]; assert.equal(repair8.status, "queued"); assert.equal(repair8.input.assessmentRunId, graded8.id);
+    tasks.enqueueManualTasks("review_pr", ["208"]); f.reset(208, "grade-A");
+    const regraded = await success(); assert.equal(regraded.result.grade, "A");
+    const guarded = "The review this repair addresses is no longer the current assessment";
+    const modelCalls = f.requests.length, head208 = () => git(resolve("remote.git"), "rev-parse", f.prs.find((pr) => pr.number === 208).head.ref);
+    const headBefore = head208(); f.reset(208, "no-change");
+    const superseded = await run(); assert.equal(superseded.taskId, repair8.id); assert.equal(superseded.error.message, guarded);
+    assert.equal(f.requests.length, modelCalls, "no model call"); assert.equal(head208(), headBefore, "no push");
+    assert.equal(f.row(s.tasks, repair8.id).status, "failed");
+    // A repair whose PR head moved after it was queued fails the same way.
+    await implement(9); await review(209, "grade-C"); await route();
+    const repair9 = repairs(209)[0]; assert.equal(repair9.status, "queued");
+    const branch9 = f.prs.find((pr) => pr.number === 209).head.ref;
+    git(".", "clone", "-b", branch9, resolve("remote.git"), "pr-edit-209");
+    writeFileSync("pr-edit-209/src/app.ts", "export const value = 4242;\n");
+    git(resolve("pr-edit-209"), "add", "."); commit(resolve("pr-edit-209"), "Human change"); git(resolve("pr-edit-209"), "push", "origin", branch9);
+    const calls9 = f.requests.length, head9 = git(resolve("remote.git"), "rev-parse", branch9); f.reset(209, "no-change");
+    const moved = await run(); assert.equal(moved.taskId, repair9.id); assert.equal(moved.error.message, guarded);
+    assert.equal(f.requests.length, calls9); assert.equal(git(resolve("remote.git"), "rev-parse", branch9), head9);
   } else if (scenario === "commit_hook") {
     f.addIssue(1); f.enqueue(1, "implement");
     f.onModel = (_context, step) => {

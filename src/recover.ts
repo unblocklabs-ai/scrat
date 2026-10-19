@@ -1,4 +1,6 @@
 import { db } from "./db.ts";
+import { config } from "./config.ts";
+import { removeRunDatabase } from "./databases.ts";
 import { logger } from "./logging.ts";
 import { finishRun } from "./tasks.ts";
 
@@ -9,6 +11,7 @@ try {
     status: "failed",
     error: Object.assign(new Error("Interrupted run recovered manually after stopping workers"), { code: "RUN_INTERRUPTED" }),
   });
+  if (config.workspace?.database) await removeRunDatabase(run.id, { taskId: run.taskId });
   logger.info({ event: "run.recovered", runId, taskId: run.taskId });
 } catch (error) {
   logger.error({ err: error }, "Run recovery failed");

@@ -1,5 +1,7 @@
 import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { config, getRepositoryPath } from "./config.ts";
+import { runCommands } from "./commands.ts";
+import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts, hasPendingMerge } from "./git.ts";
 import { fetchItemContext, getGitEnvironment, githubRevision } from "./github.ts";
@@ -19,6 +21,7 @@ export async function runNextTask() {
   const operation = startOperation("run.execute", { ...references, action: task.action });
   const readOnly = task.action === "review_issue" || task.action === "review_pr";
   let reviewWorkspace: Awaited<ReturnType<typeof createWorkspace>> | undefined;
+  let databaseRequested = false;
   try {
     const repository = new URL(item.payload.html_url).pathname.split("/").slice(1, 3).join("/");
     const remote = `https://github.com/${repository}.git`;
@@ -53,7 +56,7 @@ export async function runNextTask() {
       const mergeInProgress = !readOnly && await hasPendingMerge(workspace.path);
       if (!readOnly && pullRequest && !mergeInProgress) await git(workspace.path, ["merge", "--ff-only", preparedHead]);
       const headSha = await git(workspace.path, ["rev-parse", "HEAD"]);
-      db.update(runs).set({ workspaceId: workspace.id, mainSha, headSha, stage: "agent" }).where(eq(runs.id, run.id)).run();
+      db.update(runs).set({ workspaceId: workspace.id, mainSha, headSha }).where(eq(runs.id, run.id)).run();
       const previous = !readOnly ? db.select().from(runs).where(and(
         eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile),
       )).orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
@@ -76,6 +79,20 @@ export async function runNextTask() {
         ? await git(repositoryPath, ["diff", previousMainSha, mainSha]) : undefined;
       const prChanges = pullRequest && typeof previousHeadSha === "string" && previousHeadSha !== headSha
         ? await git(repositoryPath, ["diff", previousHeadSha, headSha]) : undefined;
+      const databaseConfig = !readOnly ? config.workspace?.database : undefined;
+      let database: Awaited<ReturnType<typeof createRunDatabase>> | undefined;
+      if (databaseConfig) {
+        databaseRequested = true;
+        database = await createRunDatabase(run.id, databaseConfig.image, references);
+      }
+      const environment = Object.fromEntries((databaseConfig?.environment ?? []).map((name) => [name, database!.url]));
+      const commandEnvironment = { ...process.env, ...environment };
+      const preparationDeferred = mergeInProgress || Boolean(run.retryOfRunId);
+      if (!readOnly && !preparationDeferred) {
+        await runCommands(config.workspace?.prepare ?? [], workspace.path, commandEnvironment, references);
+        if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, commandEnvironment, references);
+      }
+      db.update(runs).set({ stage: "agent" }).where(eq(runs.id, run.id)).run();
       const result = await executePi(run, workspace.path, JSON.stringify({
         action: task.action,
         reason: task.reason,
@@ -86,9 +103,16 @@ export async function runNextTask() {
         diff,
         mainChanges,
         prChanges,
-      }, null, 2), readOnly, operation.log, previous?.piSessionFile ?? undefined);
+        database: database ? {
+          ...database, environment, schemaPrepared: !preparationDeferred,
+          prepare: config.workspace?.prepare, migrate: databaseConfig?.migrate,
+        } : undefined,
+      }, null, 2), readOnly, operation.log, previous?.piSessionFile ?? undefined, environment);
       db.update(runs).set({ result, stage: "validating" }).where(eq(runs.id, run.id)).run();
       if (!readOnly) {
+        await runCommands(config.workspace?.prepare ?? [], workspace.path, commandEnvironment, references);
+        if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, commandEnvironment, references);
+        await runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references);
         const commitSha = await commitWorkspace(workspace, `fix: ${context.item.title}`, {
           name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com`,
         }, references);
@@ -129,6 +153,10 @@ export async function runNextTask() {
     operation.fail(error);
     return failed;
   } finally {
+    if (databaseRequested) {
+      try { await removeRunDatabase(run.id, references); }
+      catch { operation.log.warn({ event: "run.cleanup_pending", resource: "database" }); }
+    }
     if (reviewWorkspace) {
       try { await removeWorkspace(reviewWorkspace.id, references); }
       catch { operation.log.warn({ event: "run.cleanup_pending", workspaceId: reviewWorkspace.id }); }

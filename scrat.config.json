@@ -12,6 +12,21 @@
     "installationId": 163420479,
     "fetchIntervalSeconds": 300
   },
+  "workspace": {
+    "prepare": [
+      ["pnpm", "install", "--frozen-lockfile"],
+      ["pnpm", "prisma-typegen"]
+    ],
+    "database": {
+      "image": "postgres:16-alpine",
+      "environment": ["DATABASE_URL", "TEST_DATABASE_URL"],
+      "migrate": ["pnpm", "db:migrate"]
+    },
+    "validate": [
+      ["env", "TEST_DATABASE_URL=", "pnpm", "verify"],
+      ["pnpm", "test:db:ci"]
+    ]
+  },
   "providers": {
     "codex-lb": {
       "baseUrl": "http://192.168.1.27:2455/backend-api/codex",

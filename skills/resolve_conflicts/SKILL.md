@@ -11,6 +11,8 @@ If `workspace.mergeInProgress` is true, continue the existing merge and partial 
 
 Resolve conflicts deliberately; never choose ours/theirs indiscriminately. Inspect and stage resolved files with `git add`, checking for unresolved index entries and conflict markers. Keep the repair focused; do not add unrelated refactors or rebuild the PR. Use type safety and existing abstractions instead of unnecessary machinery.
 
+When `database` is supplied, its current environment is injected into bash. Use it instead of old session URLs. Retained failed work or a merge may leave `database.schemaPrepared` false: repair failed setup/schema files and resolve conflicts before running the supplied prepare/migration commands and database checks. Scrat reruns preparation, migrations and validation after inference and owns container cleanup. Preserve both branches' migration history; do not rewrite applied migrations or replace the database yourself.
+
 Review the resulting diff, verify affected callers and run relevant repository checks and supported real execution paths. Choose commands from the repository's package metadata and actual environment. Do not assume a database or browser is present, and do not obtain production secrets to compensate. Distinguish infrastructure failures from code failures; never weaken checks or claim checks that did not run. Preserve any unresolved work and describe the blocker honestly.
 
 Leave changes uncommitted, including the merge. Scrat handles the merge commit, push and PR comment on the existing branch. Do not rebase, force-push, open a replacement PR, publish comments, change labels, merge the PR or edit other repositories.

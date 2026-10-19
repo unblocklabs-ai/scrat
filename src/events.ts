@@ -6,6 +6,8 @@ type TaskDetails = Pick<typeof tasks.$inferSelect, "action" | "priority" | "reas
 export type EventReferences = { itemId?: string; taskId?: string; runId?: string };
 
 export type JournalEvent = (
+  | { type: "database.created"; data: { container: string; image: string } }
+  | { type: "database.removed"; data: { container: string } }
   | { type: "run.started"; data: { action: TaskDetails["action"]; skill: string; provider: string; model: string; thinkingLevel: string } }
   | { type: "run.completed"; data: { stage: string } }
   | { type: "run.failed"; data: { stage: string; error: ErrorDetails } }

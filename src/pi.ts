@@ -1,14 +1,14 @@
 import { readFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, createBashToolDefinition, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
 import { thinkingLevels } from "./config.ts";
 import { db } from "./db.ts";
 import { runs } from "./schema.ts";
 
-export async function executePi(run: typeof runs.$inferSelect, cwd: string, context: string, readOnly: boolean, log: Logger, sessionFile?: string) {
+export async function executePi(run: typeof runs.$inferSelect, cwd: string, context: string, readOnly: boolean, log: Logger, sessionFile?: string, environment: NodeJS.ProcessEnv = {}) {
   const modelRuntime = await ModelRuntime.create({ modelsPath: fileURLToPath(new URL("../scrat.config.json", import.meta.url)) });
   const model = modelRuntime.getModel(run.provider, run.model);
   if (!model) throw new Error(modelRuntime.getError() ?? `Configure a Pi model for ${run.provider}/${run.model}`);
@@ -23,9 +23,13 @@ export async function executePi(run: typeof runs.$inferSelect, cwd: string, cont
   const sessionManager = sessionFile
     ? SessionManager.open(sessionFile, resolve("data/pi-sessions"), cwd)
     : SessionManager.create(cwd, resolve("data/pi-sessions"));
+  const bash = createBashToolDefinition(cwd, {
+    spawnHook: (context) => ({ ...context, env: { ...context.env, ...environment } }),
+  });
   const { session } = await createAgentSession({
     cwd, modelRuntime, model, thinkingLevel, settingsManager, sessionManager, resourceLoader,
     tools: readOnly ? ["read", "grep", "find", "ls"] : ["read", "grep", "find", "ls", "bash", "edit", "write"],
+    customTools: readOnly ? [] : [{ ...bash, renderCall: undefined, renderResult: undefined }],
   });
   const paths = new Set<string>();
   try {

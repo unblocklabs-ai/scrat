@@ -1,6 +1,8 @@
 import { and, eq, inArray, isNotNull, isNull, notExists } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
+import { config } from "./config.ts";
 import { db } from "./db.ts";
+import { listRunDatabases, removeRunDatabase } from "./databases.ts";
 import { logger } from "./logging.ts";
 import { runs, tasks, workspaces } from "./schema.ts";
 import { removeWorkspace } from "./workspaces.ts";
@@ -15,6 +17,13 @@ try {
   for (const { workspace } of pending) {
     try { await removeWorkspace(workspace.id); }
     catch { process.exitCode = 1; }
+  }
+  for (const runId of config.workspace?.database ? await listRunDatabases() : []) {
+    const run = db.select().from(runs).where(eq(runs.id, runId)).get();
+    if (run?.finishedAt) {
+      try { await removeRunDatabase(runId, { taskId: run.taskId }); }
+      catch { process.exitCode = 1; }
+    }
   }
 } catch (error) {
   logger.error({ err: error }, "Cleanup command failed");

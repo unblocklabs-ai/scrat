@@ -26,6 +26,8 @@ When the supplied session/workspace contains prior work or `previousFailure`, co
 
 Inspect the repository's package metadata, lockfile and available environment before choosing commands. Do not assume a database, browser or installed dependencies are present. Use available repository checks and the relevant real execution path. Distinguish a code failure from infrastructure or checks that never ran. Do not obtain production secrets or use shared databases to fill environment gaps.
 
+When `database` is supplied, Scrat owns a fresh PostgreSQL container for this run. Its `environment` values are already injected into bash commands; use this run's values, not URLs from earlier session history. Scrat runs configured preparation and migrations before inference and again after your changes, followed by configured validation. Retained failed work may need repair first: when `database.schemaPrepared` is false, finish any merge or repair the failed proposal, then run the supplied prepare/migration commands before database-dependent checks. Add new migrations for schema changes rather than rewriting applied history. Do not remove or replace the run's container or connect to a shared database.
+
 - Tests should catch bugs we care about, not increase coverage or freeze the implementation. If the need for a new test is doubtful, skip it.
 - For a complex user flow, exercise the real path end to end when the available environment supports it; unit tests are not a substitute.
 - Run relevant checks and move on once they pass. Rerun only when something changed, failed or remains unresolved.

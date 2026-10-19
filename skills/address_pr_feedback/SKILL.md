@@ -17,6 +17,8 @@ Distinguish code failures from infrastructure flakes or checks that never ran. D
 
 Continue retained work and address `previousFailure` when supplied. Preserve an unfinished merge and partial resolutions rather than resetting or rebuilding the PR. Scrat owns the branch/worktree lifecycle; do not create a replacement PR, rebase or force-push.
 
+When `database` is supplied, use its current `environment` values, already injected into bash, rather than an old session URL. Scrat owns this run's disposable PostgreSQL container and applies configured migrations before and after inference, with final validation afterward. If `schemaPrepared` is false, repair retained failed work or resolve the merge first, then run the supplied prepare/migration commands before database checks. Add new migrations instead of rewriting applied history, and leave container cleanup to Scrat.
+
 After changes, review the complete diff against the original request and verified feedback, fix concrete self-review findings, and run relevant checks and supported real-path validation. Prefer meaningful behavior checks over coverage or implementation-coupled tests. Stop once relevant checks pass; rerun only after a change, failure or unresolved concern. Report checks you could not run as limitations, never passes.
 
 Leave changes uncommitted. Scrat handles commits, pushes and the reply. Do not publish comments yourself, change labels, approve/merge/close a PR, alter runtime credentials or edit other repositories.

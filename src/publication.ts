@@ -7,7 +7,7 @@ import { branchContainsCommit } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { reconcileLabels } from "./labels.ts";
-import { reconcilePrReview } from "./pr-review-state.ts";
+import { reconcilePrReview } from "./pr-review-publication.ts";
 import { upsertItem } from "./items.ts";
 import { items, runs, tasks } from "./schema.ts";
 import { getWorkspace, pushWorkspace } from "./workspaces.ts";
@@ -69,7 +69,7 @@ export async function publishRun(github: GitHubRepository, task: typeof tasks.$i
       commentId = Number(existing.id.slice("issue:".length));
       if (existing.body !== body) await github.updateComment(commentId, body, references);
     } else {
-      commentId = (await github.postComment(context.item.number, body, references)).data.id;
+      commentId = await github.postComment(context.item.number, body, references);
     }
     saveReceipt({ commentId });
   }

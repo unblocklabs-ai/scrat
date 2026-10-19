@@ -5,7 +5,8 @@ import { runCommands } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts, hasPendingMerge } from "./git.ts";
-import { GitHubRepository, githubRevision } from "./github.ts";
+import { GitHubRepository } from "./github.ts";
+import { evaluateGithubContext } from "./github-context.ts";
 import { startOperation } from "./logging.ts";
 import { executePi } from "./pi.ts";
 import { reviewPullRequest } from "./pr-review.ts";
@@ -37,8 +38,7 @@ export async function runNextTask() {
     const baseBranch = pullRequest?.base.ref ?? config.github.baseBranch;
     const gitEnvironment = await github.getGitEnvironment();
     const mainSha = await fetchRepository(repositoryPath, remote, baseBranch, gitEnvironment);
-    const comments = context.comments.filter((comment) => comment.author !== config.github.botLogin && comment.body.trim());
-    const revision = githubRevision(context.item, comments);
+    const { comments, revision } = evaluateGithubContext(context, config.github.botLogin);
     if (run.stage !== "publishing") {
       const validationOnly = run.stage === "validating";
       const baseRef = mainSha;
@@ -168,14 +168,14 @@ export async function runNextTask() {
       ? await github.fetchItemContext(item.kind, item.payload.number) : context;
     if (publicationContext.item.state !== "open") throw new Error("GitHub item is no longer open");
     const currentBaseBranch = "head" in publicationContext.item ? publicationContext.item.base.ref : config.github.baseBranch;
-    const currentComments = publicationContext.comments.filter((comment) => comment.author !== config.github.botLogin && comment.body.trim());
     let revisionItem = publicationContext.item;
     if (!readOnly && "head" in revisionItem && evaluatedRun.context?.headSha) {
       if (revisionItem.head.sha !== evaluatedRun.context.headSha && revisionItem.head.sha !== evaluatedRun.publication.publishedCommitSha
         && revisionItem.head.sha !== evaluatedRun.publication.commitSha) throw new Error("GitHub PR head changed during execution");
       revisionItem = { ...revisionItem, head: { ...revisionItem.head, sha: evaluatedRun.context.headSha } };
     }
-    if (contract.publication !== "pr-assessment" && (evaluatedRun.context?.revision !== githubRevision(revisionItem, currentComments)
+    const { revision: currentRevision } = evaluateGithubContext({ ...publicationContext, item: revisionItem }, config.github.botLogin);
+    if (contract.publication !== "pr-assessment" && (evaluatedRun.context?.revision !== currentRevision
       || evaluatedRun.context.baseBranch !== currentBaseBranch)) {
       throw new Error("GitHub task context changed; enqueue a fresh task instead of retrying publication");
     }

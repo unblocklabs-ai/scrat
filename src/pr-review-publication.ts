@@ -57,7 +57,7 @@ async function reconcile(github: GitHubRepository, itemId: string, number: numbe
     if (existing) {
       commentId = Number(existing.id.slice("issue:".length));
       if (existing.body !== body) await github.updateComment(commentId, body, deliveryReferences);
-    } else commentId = (await github.postComment(number, body, deliveryReferences)).data.id;
+    } else commentId = await github.postComment(number, body, deliveryReferences);
     run.publication = { ...run.publication, commentId };
     db.update(runs).set({ publication: run.publication }).where(eq(runs.id, run.id)).run();
   }

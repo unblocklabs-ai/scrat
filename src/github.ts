@@ -152,7 +152,7 @@ export class GitHubRepository {
     return found ? pullRequestView(found) : undefined;
   }
 
-  async postComment(issueNumber: number, body: string, references: EventReferences = {}) {
+  async postComment(issueNumber: number, body: string, references: EventReferences = {}): Promise<number> {
     const { repository } = this;
     const operation = startOperation("github.post_comment", { ...references, repository, issueNumber });
     const eventReferences = { ...references, operationId: operation.operationId };
@@ -168,14 +168,14 @@ export class GitHubRepository {
         repository, issueNumber, commentId, url: response.data.html_url,
       } });
       operation.complete({ commentId, status: response.status, requestId: response.headers["x-github-request-id"] });
-      return response;
+      return commentId;
     } catch (error) {
       operation.fail(error, { stage, commentId });
       throw error;
     }
   }
 
-  async updateComment(commentId: number, body: string, references: EventReferences = {}) {
+  async updateComment(commentId: number, body: string, references: EventReferences = {}): Promise<void> {
     const { repository } = this;
     const operation = startOperation("github.update_comment", { ...references, repository, commentId });
     const eventReferences = { ...references, operationId: operation.operationId };
@@ -189,14 +189,13 @@ export class GitHubRepository {
         repository, commentId: response.data.id, url: response.data.html_url,
       } });
       operation.complete({ commentId: response.data.id, status: response.status, requestId: response.headers["x-github-request-id"] });
-      return response;
     } catch (error) {
       operation.fail(error, { stage });
       throw error;
     }
   }
 
-  async addLabels(issueNumber: number, labels: string[], references: EventReferences = {}) {
+  async addLabels(issueNumber: number, labels: string[], references: EventReferences = {}): Promise<void> {
     const { repository } = this;
     const operation = startOperation("github.add_labels", { ...references, repository, issueNumber, labels });
     const eventReferences = { ...references, operationId: operation.operationId };
@@ -208,42 +207,39 @@ export class GitHubRepository {
       stage = "journal";
       recordEvent({ ...eventReferences, type: "github.labels_added", data: { repository, issueNumber, labels } });
       operation.complete({ status: response.status, requestId: response.headers["x-github-request-id"] });
-      return response;
     } catch (error) {
       operation.fail(error, { stage });
       throw error;
     }
   }
 
-  async removeLabels(issueNumber: number, labels: string[], references: EventReferences = {}) {
+  async removeLabels(issueNumber: number, labels: string[], references: EventReferences = {}): Promise<void> {
     const { repository } = this;
-    if (labels.length === 0) return [];
+    if (labels.length === 0) return;
     const operation = startOperation("github.remove_labels", { ...references, repository, issueNumber, labels });
     const eventReferences = { ...references, operationId: operation.operationId };
-    const responses = [];
+    let removedLabels = 0;
     let stage = "authentication";
     let label: string | undefined;
     try {
       const { github, owner, repo } = await githubForRepository(repository, "write");
       for (label of labels) {
         stage = "request";
-        let response: Awaited<ReturnType<typeof github.rest.issues.removeLabel>>;
         try {
-          response = await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name: label });
+          await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name: label });
         } catch (error) {
           if (!(error instanceof Error && "status" in error && error.status === 404)) throw error;
           const { data } = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
           if (data.labels.some((current) => (typeof current === "string" ? current : current.name)?.toLowerCase() === label!.toLowerCase())) throw error;
           continue;
         }
-        responses.push(response);
+        removedLabels++;
         stage = "journal";
         recordEvent({ ...eventReferences, type: "github.label_removed", data: { repository, issueNumber, label } });
       }
-      operation.complete({ removedLabels: responses.length });
-      return responses;
+      operation.complete({ removedLabels });
     } catch (error) {
-      operation.fail(error, { stage, label, removedLabels: responses.length });
+      operation.fail(error, { stage, label, removedLabels });
       throw error;
     }
   }
@@ -273,11 +269,4 @@ export class GitHubRepository {
       throw error;
     }
   }
-}
-
-export function githubRevision(item: { title: string; body?: string | null; head?: { sha: string }; base?: { ref: string } }, comments: GithubComment[]) {
-  return createHash("sha256").update(JSON.stringify({
-    title: item.title, body: item.body, head: item.head?.sha, base: item.base?.ref,
-    comments: comments.map((comment) => `${comment.id}@${comment.revision}`).sort(),
-  })).digest("hex");
 }

@@ -120,11 +120,12 @@ The checked-in configuration currently uses six task slots, priorities **PR 100 
 
 - `src/github-tasks.ts` — GitHub observations, queue effects, and closure cleanup.
 - `src/github.ts`, `src/github-types.ts` — repository client, scoped authentication, and narrow issue/PR views; raw sync snapshots remain in SQLite and `tmp/responses/github/` for diagnostics.
+- `src/github-context.ts` — pure shared comment filtering and context revisions for routing, execution, and freshness checks.
 - `src/actions.ts` — typed execution, acceptance, and publication contracts; workspace lifetime follows action mode.
 - `src/github-routing.ts` — pure issue-selection, PR-maintenance, and review-routing decisions.
 - `src/tasks.ts`, `src/runner.ts` — atomic claims and task/run lifecycle.
 - `src/pi.ts`, `src/pr-review.ts` — Pi sessions and dual-model reviews.
-- `src/pr-assessment.ts`, `src/pr-review-state.ts` — assessment authority, freshness, and canonical delivery.
+- `src/pr-assessment.ts`, `src/pr-review-publication.ts` — assessment authority, freshness, and canonical delivery.
 - `src/workspaces.ts`, `src/databases.ts` — Git and database resource lifecycles.
 - `skills/` — action prompts; `scrat.config.json` selects their models and settings.
 - `data/` — SQLite queue, run history, event journal, workspaces, and Pi sessions. Back it up alongside credentials before deployment.

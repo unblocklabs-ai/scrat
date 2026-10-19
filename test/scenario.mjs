@@ -660,6 +660,10 @@ try {
     assert.ok(all(s.tasks).some((t) => t.itemId === "issue-2" && t.status === "queued"));
   } else if (scenario === "feedback") {
     await implement(1); await route(); await success();
+    const ignored = { id: 9000, body: "My own follow-up", user: { login: f.config.github.botLogin }, updated_at: "2026-10-19T02:00:00Z", html_url: "https://github.com/fixture/project/pull/201#comment" };
+    f.comments.get(201).push(ignored, { ...ignored, id: 9001, body: " \n\t ", user: { login: "human" } });
+    await route();
+    assert.ok(!all(s.tasks).some((task) => task.status === "queued"), "Bot and empty comments must not change review or feedback context");
     const summary = { id: 55, body: "Please change the implementation", user: { login: "human" }, submitted_at: "2026-10-19T00:00:00Z", html_url: "https://github.com/fixture/project/pull/201#review" };
     f.reviews.set(201, [summary]); await route(); await success(); await success();
     summary.body = "Edited request with different requirements"; await route();

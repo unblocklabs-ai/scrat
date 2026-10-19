@@ -1,7 +1,7 @@
 import { and, desc, eq } from "drizzle-orm";
 import { config, getRepositoryPath } from "./config.ts";
 import { db } from "./db.ts";
-import { githubRevision } from "./github.ts";
+import { evaluateGithubContext } from "./github-context.ts";
 import type { GithubContext } from "./github-types.ts";
 import { reviewChanges } from "./relevance.ts";
 import { hasPublicationSnapshot } from "./results.ts";
@@ -57,8 +57,8 @@ export async function resolvePrReview(history: History, current: GithubContext, 
   if (!assessment) return { kind: "missing" };
   const { run, result } = assessment;
   const baseBranch = "base" in current.item ? current.item.base.ref : config.github.baseBranch;
-  const comments = current.comments.filter((comment) => comment.author !== config.github.botLogin && comment.body.trim());
-  if (current.item.state !== "open" || run.context?.revision !== githubRevision(current.item, comments)
+  const { revision } = evaluateGithubContext(current, config.github.botLogin);
+  if (current.item.state !== "open" || run.context?.revision !== revision
     || run.context.baseBranch !== baseBranch || !run.mainSha) {
     return { kind: "stale", assessment, changedPaths: [] };
   }

@@ -2,21 +2,25 @@ import type { Action } from "./actions.ts";
 import type { PrReviewState } from "./pr-assessment.ts";
 import type { runs, tasks } from "./schema.ts";
 
-type Task = typeof tasks.$inferSelect;
+type TaskFacts = Pick<typeof tasks.$inferSelect, "status" | "input">;
 type Run = typeof runs.$inferSelect;
+type ReviewAttempt = Pick<Run, "mainSha"> & {
+  context: Pick<NonNullable<Run["context"]>, "revision"> | null;
+};
+type PreviousReview = ReviewAttempt & Pick<Run, "headSha">;
 type QueueInput = Record<string, unknown> & { triggerKey: string };
 export type RoutingDecision =
   | { type: "enqueue"; action: Action; reason: string; input: QueueInput }
   | { type: "cancel"; action: Action; reason: string };
 
-function queue(latest: Task | undefined, action: Action, reason: string, input: QueueInput): RoutingDecision[] {
+function queue(latest: TaskFacts | undefined, action: Action, reason: string, input: QueueInput): RoutingDecision[] {
   if (latest?.status !== "cancelled" && latest?.input.triggerKey === input.triggerKey) return [];
   return [{ type: "enqueue", action, reason, input }];
 }
 
 export function planIssueTasks({ labelled, implemented, workspaceId, previouslyLabelled, latest, updatedAt, mainSha }: {
   labelled: boolean; implemented: boolean; workspaceId: string | null; previouslyLabelled?: boolean;
-  latest?: Task; updatedAt: string; mainSha: string;
+  latest?: TaskFacts; updatedAt: string; mainSha: string;
 }): { review: boolean; decisions: RoutingDecision[] } {
   if (!labelled) return { review: true, decisions: [{ type: "cancel", action: "implement", reason: "Scrat label removed" }] };
   const decisions: RoutingDecision[] = [{ type: "cancel", action: "review_issue", reason: "Issue selected for implementation" }];
@@ -31,7 +35,7 @@ export function planIssueTasks({ labelled, implemented, workspaceId, previouslyL
 
 export function planPrMaintenance({ conflicts, mainSha, headSha, pendingComments, conflictTask, feedbackTask }: {
   conflicts: boolean; mainSha: string; headSha: string; pendingComments: string[];
-  conflictTask?: Task; feedbackTask?: Task;
+  conflictTask?: TaskFacts; feedbackTask?: TaskFacts;
 }): RoutingDecision[] {
   const decisions: RoutingDecision[] = conflicts
     ? queue(conflictTask, "resolve_conflicts", "Scrat PR conflicts with its base branch", {
@@ -46,7 +50,7 @@ export function planPrMaintenance({ conflicts, mainSha, headSha, pendingComments
 }
 
 type ReviewTriggerFacts = {
-  revision: string; mainSha: string; latest?: Task; attempt?: Run;
+  revision: string; mainSha: string; latest?: TaskFacts; attempt?: ReviewAttempt;
 };
 
 // Shared by observation gathering and final policy: covered work must not need
@@ -60,7 +64,7 @@ export function reviewTrigger({ latest, attempt, revision, mainSha }: ReviewTrig
 
 type ReviewFacts = ReviewTriggerFacts & (
   | { kind: "pr"; state: PrReviewState }
-  | { kind: "issue"; completed?: Run; baseChanges?: { paths: string[]; relevant: boolean } }
+  | { kind: "issue"; completed?: PreviousReview; baseChanges?: { paths: string[]; relevant: boolean } }
 );
 
 // Observations in, intents out. Queue transactions and external effects belong

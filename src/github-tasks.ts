@@ -4,11 +4,12 @@ import { config, getRepositoryPath } from "./config.ts";
 import { reviewChanges } from "./relevance.ts";
 import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts } from "./git.ts";
-import { githubRevision, type GitHubRepository } from "./github.ts";
+import type { GitHubRepository } from "./github.ts";
+import { evaluateGithubContext } from "./github-context.ts";
 import { items, runs, tasks } from "./schema.ts";
 import { cancelQueuedTasks, enqueueTask } from "./tasks.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
-import { reconcilePrReview } from "./pr-review-state.ts";
+import { reconcilePrReview } from "./pr-review-publication.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { planIssueTasks, planPrMaintenance, planReview, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
 
@@ -86,7 +87,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
     if ("head" in context.item && context.item.base.ref !== config.github.baseBranch) {
       mainSha = await fetchRepository(repositoryPath, remote, context.item.base.ref, env);
     }
-    const comments = context.comments.filter((comment) => comment.author !== config.github.botLogin && comment.body.trim());
+    const { comments, revision } = evaluateGithubContext(context, config.github.botLogin);
     const owned = item.kind === "pr" && context.item.user?.login === config.github.botLogin;
     if (owned && "head" in context.item) {
       const pr = context.item;
@@ -109,7 +110,6 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
     }
     try {
       const action = item.kind === "issue" ? "review_issue" : "review_pr";
-      const revision = githubRevision(context.item, comments);
       const latest = latestTask(item.id, action);
       const reviews = item.kind === "pr" ? prReviewHistory(item.id) : undefined;
       const attempt = reviews ? reviews.find(({ task }) => task.id === latest?.id)?.run

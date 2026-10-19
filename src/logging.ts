@@ -11,7 +11,7 @@ export const logger = pino({
     err: describeError,
     msg(value: unknown) {
       return typeof value === "string"
-        ? redactSecrets(value.replace(/(\nparams:)[\s\S]*/, "$1 [redacted]"))
+        ? redactSecrets(value)
         : value;
     },
   },
@@ -23,7 +23,7 @@ export const logger = pino({
 
 export function startOperation(operation: string, context: Record<string, unknown> = {}) {
   const operationId = randomUUID();
-  const log = logger.child({ ...context, parentOperationId: context.operationId, operation, operationId });
+  const log = logger.child({ ...context, operation, operationId });
   const startedAt = performance.now();
   log.info({ event: "operation.started" });
   return {
@@ -33,17 +33,7 @@ export function startOperation(operation: string, context: Record<string, unknow
       log.info({ ...details, event: "operation.completed", durationMs: Math.round(performance.now() - startedAt) });
     },
     fail(err: unknown, details: Record<string, unknown> = {}) {
-      log.error({ ...details, event: "operation.failed", durationMs: Math.round(performance.now() - startedAt), err });
+      log.error({ ...details, event: "operation.failed", durationMs: Math.round(performance.now() - startedAt), err }, "Operation failed");
     },
   };
 }
-
-process.on("uncaughtException", (err, origin) => {
-  logger.fatal({ event: "process.uncaught_exception", origin, err });
-  process.exit(1);
-});
-
-process.on("unhandledRejection", (err) => {
-  logger.fatal({ event: "process.unhandled_rejection", err });
-  process.exit(1);
-});

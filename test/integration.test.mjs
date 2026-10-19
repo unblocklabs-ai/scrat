@@ -18,6 +18,8 @@ const scenarios = {
   freshness: "requirements changed during inference cannot receive an approval label",
   relevance: "root searches and unrelated development dependencies do not trigger re-review",
   review_scope: "Pi path aliases and supplied PR diff files participate in freshness and re-review",
+  unicode_scope: "Pi filename normalization cannot hide relevant base changes",
+  legacy_scope: "historical unknown scope remains conservative even alongside known paths",
   merge: "retry resumes an unfinished merge and preserves partial work",
   reopen: "fetch-only reopening cannot keep a deleted workspace attached",
   existing_pr: "existing implementation PRs suppress duplicate implementation tasks",

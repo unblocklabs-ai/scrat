@@ -155,6 +155,24 @@ try {
     await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "Unrelated dev dependencies must not trigger review");
     changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "2.0.0", unrelated: "2.0.0" } }));
     await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"), "Inspected dependency changes must trigger review");
+  } else if (scenario === "unicode_scope") {
+    f.addIssue(1); await route(); await success();
+    assert.ok(f.requests.some((r) => r.request.messages.some((m) => m.role === "tool" && JSON.stringify(m.content).includes("export const special = 1;"))));
+    changeMain("src/a b.ts", "export const special = 2;\n"); await route();
+    assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
+    f.reset(1, "normal");
+    let changed = false;
+    f.onModel = (_context, step) => { if (step === 1 && !changed) { changed = true; changeMain("src/a b.ts", "export const special = 3;\n"); } };
+    const stale = await run(); assert.match(stale.error.message, /Reviewed code changed/);
+  } else if (scenario === "legacy_scope") {
+    f.addIssue(1); await route(); let reviewed = await success();
+    const { eq } = await import("drizzle-orm");
+    for (const paths of [[".", "src/app.ts"], ["."]]) {
+      db.update(s.runs).set({ result: { ...reviewed.result, paths } }).where(eq(s.runs.id, reviewed.id)).run();
+      changeMain("notes.md", JSON.stringify(paths)); await route();
+      assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
+      reviewed = await success();
+    }
   } else if (scenario === "review_scope") {
     f.addIssue(1); f.modes.set(1, "at"); await route();
     const reviewed = await success(); assert.ok(reviewed.result.paths.includes("src/app.ts"));

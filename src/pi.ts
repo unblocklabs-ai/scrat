@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -87,11 +88,15 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
           if (args && typeof args === "object") {
             const path = "path" in args && typeof args.path === "string" ? args.path : undefined;
             if (path !== undefined) {
-              const requested = path.replace(/^@/, "");
-              const absolute = requested.startsWith("file://") ? fileURLToPath(requested)
+              const requested = event.toolName === "read" ? path.replace(/^@/, "") : path;
+              const absolute = event.toolName === "read_base" ? resolve(cwd, requested)
+                : requested.startsWith("file://") ? fileURLToPath(requested)
                 : requested === "~" ? homedir() : requested.startsWith("~/") ? resolve(homedir(), requested.slice(2)) : resolve(cwd, requested);
               const local = relative(cwd, absolute);
-              if (local && local !== ".." && !local.startsWith("../")) reads.set(event.toolCallId, local);
+              if (local !== ".." && !local.startsWith("../")) {
+                // Pi can open Unicode filename variants without exposing the resolved path.
+                reads.set(event.toolCallId, event.toolName === "read" && !existsSync(absolute) ? "." : local || ".");
+              }
             }
           }
         }

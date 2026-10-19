@@ -17,6 +17,7 @@ export async function fixture(scenario) {
   execFileSync("git", ["init", "--bare", "remote.git"], { stdio: "ignore" });
   execFileSync("git", ["init", "-b", "main", "seed"], { stdio: "ignore" });
   mkdirSync("seed/src"); writeFileSync("seed/src/app.ts", "export const value = 1;\n");
+  if (scenario === "unicode_scope") writeFileSync("seed/src/a b.ts", "export const special = 1;\n");
   if (["panel", "relevance"].includes(scenario)) writeFileSync("seed/.gitignore", "node_modules/\n");
   if (scenario === "relevance") {
     writeFileSync("seed/package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "1.0.0" } }));
@@ -48,7 +49,7 @@ export async function fixture(scenario) {
     onModel?.(context, step);
     const review = context.action.startsWith("review");
     let tool;
-    if (review && step === 0) tool = mode === "grep" ? { name: "grep", args: { pattern: "value" } } : { name: "read", args: { path: scenario === "panel" ? "node_modules/pinned-runtime/package.json" : mode === "helper" ? "src/helper.ts" : mode === "at" ? "@src/app.ts" : "src/app.ts" } };
+    if (review && step === 0) tool = mode === "grep" ? { name: "grep", args: { pattern: "value" } } : { name: "read", args: { path: scenario === "unicode_scope" ? "src/a\u00a0b.ts" : scenario === "panel" ? "node_modules/pinned-runtime/package.json" : mode === "helper" ? "src/helper.ts" : mode === "at" ? "@src/app.ts" : "src/app.ts" } };
     if (review && mode === "grep" && step === 1) tool = { name: "read", args: { path: "src/app.ts" } };
     if (review && scenario === "relevance" && step >= 2 && step <= 4) tool = { name: "read", args: { path: ["package.json", "pnpm-lock.yaml", "node_modules/wrangler/package.json"][step - 2] } };
     if (review && scenario === "panel" && step === 1) tool = { name: "read_base", args: { path: "src/app.ts" } };

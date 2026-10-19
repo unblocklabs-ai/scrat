@@ -7,7 +7,7 @@ function affectsPaths(changed: string[], scope: string[]) {
 
 export async function reviewChanges(repository: string, before: string, after: string, scope: string[]) {
   const paths = (await git(repository, ["diff", "--name-only", "--no-renames", "-z", before, after])).split("\0").filter(Boolean);
-  if (!scope.length) return { paths, relevant: paths.length > 0 };
+  if (!scope.length || scope.includes(".")) return { paths, relevant: paths.length > 0 };
   const metadata = new Set(["package.json", "pnpm-lock.yaml"]);
   if (affectsPaths(paths.filter((path) => !metadata.has(path)), scope)) return { paths, relevant: true };
   const dependencies = new Set(scope.flatMap((path) => [...path.matchAll(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)/g)]

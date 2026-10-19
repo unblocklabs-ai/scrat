@@ -19,6 +19,8 @@ export const items = sqliteTable("items", {
   source: text("source", { enum: ["github"] }).notNull(),
   externalId: text("external_id").notNull(),
   kind: text("kind", { enum: ["issue", "pr"] }).notNull(),
+  state: text("state", { enum: ["open", "closed"] }).notNull().default("open"),
+  workspaceId: text("workspace_id").references(() => workspaces.id),
   payload: text("payload", { mode: "json" })
     .$type<OpenItems["items"][number] | OpenItems["pullRequests"][number]>().notNull(),
 }, (table) => [unique().on(table.source, table.externalId)]);
@@ -26,7 +28,7 @@ export const items = sqliteTable("items", {
 export const tasks = sqliteTable("tasks", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
   itemId: text("item_id").notNull().references(() => items.id),
-  action: text("action", { enum: ["review", "implement"] }).notNull(),
+  action: text("action", { enum: ["review_issue", "review_pr", "implement", "resolve_conflicts", "address_pr_feedback"] }).notNull(),
   priority: integer("priority").notNull().default(0),
   reason: text("reason").notNull(),
   input: text("input", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
@@ -61,6 +63,8 @@ export const runs = sqliteTable("runs", {
   model: text("model").notNull(),
   thinkingLevel: text("thinking_level").notNull(),
   piSessionId: text("pi_session_id"),
+  piSessionFile: text("pi_session_file"),
+  workspaceId: text("workspace_id").references(() => workspaces.id),
   mainSha: text("main_sha"),
   headSha: text("head_sha"),
   stage: text("stage", { enum: runStages }).notNull().default("preparing"),

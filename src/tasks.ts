@@ -1,9 +1,12 @@
 import { isDeepStrictEqual } from "node:util";
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, isNotNull, isNull, notExists, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/sqlite-core";
+import { config, getActionConfig } from "./config.ts";
 import { db } from "./db.ts";
+import { describeError } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { startOperation } from "./logging.ts";
-import { tasks } from "./schema.ts";
+import { items, runs, tasks } from "./schema.ts";
 
 export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
   "itemId" | "action" | "priority" | "reason" | "input"
@@ -46,4 +49,59 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
     operation.fail(err);
     throw err;
   }
+}
+
+export function claimTask() {
+  return db.transaction((transaction) => {
+    const active = transaction.select({ count: count() }).from(tasks).where(eq(tasks.status, "running")).get()!;
+    if (active.count >= config.harness.maxConcurrency) return;
+    const busyTasks = alias(tasks, "busy_tasks");
+    const busyItems = alias(items, "busy_items");
+    const next = transaction.select({ task: tasks, item: items }).from(tasks)
+      .innerJoin(items, eq(tasks.itemId, items.id))
+      .where(and(eq(tasks.status, "queued"), eq(items.state, "open"), notExists(
+        transaction.select({ id: busyTasks.id }).from(busyTasks)
+          .innerJoin(busyItems, eq(busyTasks.itemId, busyItems.id))
+          .where(and(eq(busyTasks.status, "running"), or(
+            eq(busyTasks.itemId, tasks.itemId),
+            and(isNotNull(items.workspaceId), eq(busyItems.workspaceId, items.workspaceId)),
+          ))),
+      )))
+      .orderBy(desc(tasks.priority), asc(tasks.createdAt), asc(tasks.id)).limit(1).get();
+    if (!next) return;
+    const settings = getActionConfig(next.task.action);
+    const task = transaction.update(tasks).set({ status: "running" }).where(eq(tasks.id, next.task.id)).returning().get()!;
+    const run = transaction.insert(runs).values({
+      taskId: task.id,
+      skill: settings.skill,
+      provider: settings.provider,
+      model: settings.model,
+      thinkingLevel: settings.thinkingLevel,
+      workspaceId: next.item.workspaceId,
+      startedAt: new Date().toISOString(),
+    }).returning().get()!;
+    recordEvent({ itemId: task.itemId, taskId: task.id, runId: run.id, type: "run.started", data: {
+      action: task.action, skill: run.skill, provider: run.provider, model: run.model, thinkingLevel: run.thinkingLevel,
+    } }, transaction);
+    return { task, item: next.item, run };
+  }, { behavior: "immediate" });
+}
+
+export function finishRun(runId: string, outcome: { status: "completed" } | { status: "failed"; error: unknown }) {
+  const error = outcome.status === "failed" ? describeError(outcome.error) : null;
+  return db.transaction((transaction) => {
+    const run = transaction.update(runs).set({ error, finishedAt: new Date().toISOString() })
+      .where(and(eq(runs.id, runId), isNull(runs.finishedAt))).returning().get();
+    if (!run) throw new Error(`Run not active: ${runId}`);
+    const task = transaction.update(tasks).set({ status: outcome.status })
+      .where(and(eq(tasks.id, run.taskId), eq(tasks.status, "running"))).returning().get();
+    if (!task) throw new Error(`Task not running: ${run.taskId}`);
+    const references = { itemId: task.itemId, taskId: task.id, runId };
+    recordEvent(error ? {
+      ...references, type: "run.failed", data: { stage: run.stage, error },
+    } : {
+      ...references, type: "run.completed", data: { stage: run.stage },
+    }, transaction);
+    return run;
+  }, { behavior: "immediate" });
 }

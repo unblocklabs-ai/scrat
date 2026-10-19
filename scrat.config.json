@@ -5,19 +5,40 @@
   },
   "github": {
     "repository": "unblocklabs-ai/agent-platform",
+    "repositoryPath": "../agent-platform",
+    "baseBranch": "main",
+    "botLogin": "scrat-unblock[bot]",
     "appId": 5017746,
     "installationId": 163420479,
     "fetchIntervalSeconds": 300
   },
   "actions": {
-    "review": {
-      "skill": "skills/review/SKILL.md",
+    "review_issue": {
+      "skill": "skills/review_issue/SKILL.md",
+      "provider": "provider-name",
+      "model": "review-model",
+      "thinkingLevel": "medium"
+    },
+    "review_pr": {
+      "skill": "skills/review_pr/SKILL.md",
       "provider": "provider-name",
       "model": "review-model",
       "thinkingLevel": "medium"
     },
     "implement": {
       "skill": "skills/implement/SKILL.md",
+      "provider": "provider-name",
+      "model": "implementation-model",
+      "thinkingLevel": "high"
+    },
+    "resolve_conflicts": {
+      "skill": "skills/resolve_conflicts/SKILL.md",
+      "provider": "provider-name",
+      "model": "implementation-model",
+      "thinkingLevel": "high"
+    },
+    "address_pr_feedback": {
+      "skill": "skills/address_pr_feedback/SKILL.md",
       "provider": "provider-name",
       "model": "implementation-model",
       "thinkingLevel": "high"

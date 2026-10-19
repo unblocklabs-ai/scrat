@@ -1,10 +1,14 @@
 import { db } from "./db.ts";
+import type { ErrorDetails } from "./errors.ts";
 import { events, type tasks } from "./schema.ts";
 
 type TaskDetails = Pick<typeof tasks.$inferSelect, "action" | "priority" | "reason">;
 export type EventReferences = { itemId?: string; taskId?: string; runId?: string };
 
 export type JournalEvent = (
+  | { type: "run.started"; data: { action: TaskDetails["action"]; skill: string; provider: string; model: string; thinkingLevel: string } }
+  | { type: "run.completed"; data: { stage: string } }
+  | { type: "run.failed"; data: { stage: string; error: ErrorDetails } }
   | { type: "task.enqueued"; data: TaskDetails }
   | { type: "task.coalesced"; data: {
       action: TaskDetails["action"];

@@ -1046,6 +1046,31 @@ try {
     const urls = new Set(f.requests.map((r) => r.context.database.url)); assert.equal(urls.size, 2);
     assert.equal(process.env.DATABASE_URL, original);
     for (const r of runs) assert.equal(execFileSync("docker", ["ps", "-a", "--filter", `name=^/scrat-v2-db-${r.id}$`, "--format", "{{.ID}}"], { encoding: "utf8" }).trim(), "");
+  } else if (scenario === "operations") {
+    const { withOperation, withOperationSync } = await f.app("logging.ts"), { sql } = await import("drizzle-orm");
+    const { default: fs } = await import("node:fs"), lines = [], write = fs.writeSync;
+    fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string") { lines.push(...data.split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } })); return data.length; } return write(fd, data, ...rest); };
+    try {
+      assert.equal(await withOperation("test.ok", { a: 1 }, async (op) => { op.stage("one"); op.complete({ done: true }); return 42; }), 42);
+      const boom = new Error("boom");
+      await assert.rejects(withOperation("test.fail", { a: 2 }, async (op) => { op.stage("one"); op.stage("two"); op.failure({ extra: 7 }); throw boom; }), (error) => error === boom);
+      await assert.rejects(withOperation("test.plain", {}, async () => { throw boom; }), (error) => error === boom);
+      db.run(sql`create table op_check (n integer)`);
+      assert.equal(withOperationSync("test.sync", {}, (op) => db.transaction((transaction) => {
+        transaction.run(sql`insert into op_check values (1)`); op.complete(); return "sync";
+      })), "sync");
+      assert.throws(() => withOperationSync("test.sync_fail", {}, (op) => { op.stage("tx"); throw boom; }), (error) => error === boom);
+    } finally { fs.writeSync = write; }
+    const events = (operation) => lines.filter((line) => line.operation === operation).map((line) => line.event);
+    assert.deepEqual(events("test.ok"), ["operation.started", "operation.completed"]);
+    assert.equal(lines.find((line) => line.operation === "test.ok" && line.event === "operation.completed").done, true);
+    assert.deepEqual(events("test.fail"), ["operation.started", "operation.failed"]);
+    const failed = lines.find((line) => line.operation === "test.fail" && line.event === "operation.failed");
+    assert.equal(failed.stage, "two"); assert.equal(failed.extra, 7); assert.equal(failed.a, 2); assert.equal(typeof failed.durationMs, "number");
+    assert.ok(!("stage" in lines.find((line) => line.operation === "test.plain" && line.event === "operation.failed")));
+    assert.deepEqual(events("test.sync"), ["operation.started", "operation.completed"]);
+    assert.equal(lines.find((line) => line.operation === "test.sync_fail" && line.event === "operation.failed").stage, "tx");
+    assert.equal(db.all(sql`select n from op_check`).length, 1);
   } else throw new Error("Unknown scenario " + scenario);
   console.log("SCENARIO_PASSED " + scenario);
 } finally { await f.close(); }

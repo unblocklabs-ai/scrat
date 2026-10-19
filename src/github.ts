@@ -2,8 +2,8 @@ import { createAppAuth } from "@octokit/auth-app";
 import { createHash } from "node:crypto";
 import { Octokit } from "octokit";
 import { config } from "./config.ts";
-import { recordEvent, type EventReferences } from "./events.ts";
-import { logger, startOperation } from "./logging.ts";
+import { recordEvent, type EventReferences, type JournalEvent } from "./events.ts";
+import { logger, withOperation } from "./logging.ts";
 import type { GithubComment, GithubContext, GithubIssue, GithubItem, GithubPullRequest } from "./github-types.ts";
 import { assertPublishable, childEnvironment } from "./secrets.ts";
 
@@ -78,6 +78,7 @@ async function conditionalFetch(input: string | URL | Request, init: RequestInit
   }
   return response;
 }
+type GithubEvent = Extract<JournalEvent, { type: `github.${string}` }>;
 const clients = new Map<string, { token: string; github: Octokit; invalid: boolean }>();
 
 async function githubForRepository(repository: string, access: keyof typeof permissions) {
@@ -226,100 +227,95 @@ export class GitHubRepository {
     return found ? pullRequestView(found) : undefined;
   }
 
+  private write<R extends { status: number; headers: { "x-github-request-id"?: string } }>(
+    name: string,
+    context: Record<string, unknown>,
+    references: EventReferences,
+    access: keyof typeof permissions,
+    { inspect, request, journal }: {
+      inspect?: () => void;
+      request: (client: { github: Octokit; owner: string; repo: string }) => Promise<R>;
+      journal: (response: R) => { event: GithubEvent; details?: Record<string, unknown>; failure?: Record<string, unknown> };
+    },
+  ) {
+    return withOperation(name, { ...references, repository: this.repository, ...context }, async (operation) => {
+      if (inspect) {
+        operation.stage("inspection");
+        inspect();
+      }
+      operation.stage("authentication");
+      const client = await githubForRepository(this.repository, access);
+      operation.stage("request");
+      const response = await request(client);
+      const { event, details, failure } = journal(response);
+      if (failure) operation.failure(failure);
+      operation.stage("journal");
+      recordEvent({ ...references, operationId: operation.operationId, ...event });
+      operation.complete({ ...details, status: response.status, requestId: response.headers["x-github-request-id"] });
+      return response;
+    });
+  }
+
   async postComment(issueNumber: number, body: string, references: EventReferences = {}): Promise<number> {
     const { repository } = this;
-    const operation = startOperation("github.post_comment", { ...references, repository, issueNumber });
-    const eventReferences = { ...references, operationId: operation.operationId };
-    let stage = "inspection";
-    let commentId: number | undefined;
-    try {
-      assertPublishable(body);
-      stage = "authentication";
-      const { github, owner, repo } = await githubForRepository(repository, "write");
-      stage = "request";
-      const response = await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body });
-      commentId = response.data.id;
-      stage = "journal";
-      recordEvent({ ...eventReferences, type: "github.comment_created", data: {
-        repository, issueNumber, commentId, url: response.data.html_url,
-      } });
-      operation.complete({ commentId, status: response.status, requestId: response.headers["x-github-request-id"] });
-      return commentId;
-    } catch (error) {
-      operation.fail(error, { stage, commentId });
-      throw error;
-    }
+    const response = await this.write("github.post_comment", { issueNumber }, references, "write", {
+      inspect: () => assertPublishable(body),
+      request: ({ github, owner, repo }) => github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body }),
+      journal: ({ data }) => ({
+        event: { type: "github.comment_created", data: { repository, issueNumber, commentId: data.id, url: data.html_url } },
+        details: { commentId: data.id },
+        failure: { commentId: data.id },
+      }),
+    });
+    return response.data.id;
   }
 
   async updateComment(commentId: number, body: string, references: EventReferences = {}): Promise<void> {
     const { repository } = this;
-    const operation = startOperation("github.update_comment", { ...references, repository, commentId });
-    const eventReferences = { ...references, operationId: operation.operationId };
-    let stage = "inspection";
-    try {
-      assertPublishable(body);
-      stage = "authentication";
-      const { github, owner, repo } = await githubForRepository(repository, "write");
-      stage = "request";
-      const response = await github.rest.issues.updateComment({ owner, repo, comment_id: commentId, body });
-      stage = "journal";
-      recordEvent({ ...eventReferences, type: "github.comment_updated", data: {
-        repository, commentId: response.data.id, url: response.data.html_url,
-      } });
-      operation.complete({ commentId: response.data.id, status: response.status, requestId: response.headers["x-github-request-id"] });
-    } catch (error) {
-      operation.fail(error, { stage });
-      throw error;
-    }
+    await this.write("github.update_comment", { commentId }, references, "write", {
+      inspect: () => assertPublishable(body),
+      request: ({ github, owner, repo }) => github.rest.issues.updateComment({ owner, repo, comment_id: commentId, body }),
+      journal: ({ data }) => ({
+        event: { type: "github.comment_updated", data: { repository, commentId: data.id, url: data.html_url } },
+        details: { commentId: data.id },
+      }),
+    });
   }
 
   async addLabels(issueNumber: number, labels: string[], references: EventReferences = {}): Promise<void> {
     const { repository } = this;
-    const operation = startOperation("github.add_labels", { ...references, repository, issueNumber, labels });
-    const eventReferences = { ...references, operationId: operation.operationId };
-    let stage = "authentication";
-    try {
-      const { github, owner, repo } = await githubForRepository(repository, "write");
-      stage = "request";
-      const response = await github.rest.issues.addLabels({ owner, repo, issue_number: issueNumber, labels });
-      stage = "journal";
-      recordEvent({ ...eventReferences, type: "github.labels_added", data: { repository, issueNumber, labels } });
-      operation.complete({ status: response.status, requestId: response.headers["x-github-request-id"] });
-    } catch (error) {
-      operation.fail(error, { stage });
-      throw error;
-    }
+    await this.write("github.add_labels", { issueNumber, labels }, references, "write", {
+      request: ({ github, owner, repo }) => github.rest.issues.addLabels({ owner, repo, issue_number: issueNumber, labels }),
+      journal: () => ({ event: { type: "github.labels_added", data: { repository, issueNumber, labels } } }),
+    });
   }
 
   async removeLabels(issueNumber: number, labels: string[], references: EventReferences = {}): Promise<void> {
     const { repository } = this;
     if (labels.length === 0) return;
-    const operation = startOperation("github.remove_labels", { ...references, repository, issueNumber, labels });
-    const eventReferences = { ...references, operationId: operation.operationId };
-    let removedLabels = 0;
-    let stage = "authentication";
-    let label: string | undefined;
-    try {
+    await withOperation("github.remove_labels", { ...references, repository, issueNumber, labels }, async (operation) => {
+      let removedLabels = 0;
+      operation.failure({ removedLabels });
+      operation.stage("authentication");
       const { github, owner, repo } = await githubForRepository(repository, "write");
-      for (label of labels) {
-        stage = "request";
+      for (const label of labels) {
+        operation.failure({ label, removedLabels });
+        operation.stage("request");
         try {
           await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name: label });
         } catch (error) {
           if (!(error instanceof Error && "status" in error && error.status === 404)) throw error;
           const { data } = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
-          if (data.labels.some((current) => (typeof current === "string" ? current : current.name)?.toLowerCase() === label!.toLowerCase())) throw error;
+          if (data.labels.some((current) => (typeof current === "string" ? current : current.name)?.toLowerCase() === label.toLowerCase())) throw error;
           continue;
         }
         removedLabels++;
-        stage = "journal";
-        recordEvent({ ...eventReferences, type: "github.label_removed", data: { repository, issueNumber, label } });
+        operation.failure({ removedLabels });
+        operation.stage("journal");
+        recordEvent({ ...references, operationId: operation.operationId, type: "github.label_removed", data: { repository, issueNumber, label } });
       }
       operation.complete({ removedLabels });
-    } catch (error) {
-      operation.fail(error, { stage, label, removedLabels });
-      throw error;
-    }
+    });
   }
 
   async createPullRequest(
@@ -327,26 +323,15 @@ export class GitHubRepository {
     references: EventReferences = {},
   ) {
     const { repository } = this;
-    const operation = startOperation("github.create_pull_request", { ...references, repository, head, base });
-    const eventReferences = { ...references, operationId: operation.operationId };
-    let stage = "inspection";
-    let pullRequestNumber: number | undefined;
-    try {
-      assertPublishable(title, body);
-      stage = "authentication";
-      const { github, owner, repo } = await githubForRepository(repository, "pull_request");
-      stage = "request";
-      const response = await github.rest.pulls.create({ owner, repo, title, body, head, base, draft: false });
-      pullRequestNumber = response.data.number;
-      stage = "journal";
-      recordEvent({ ...eventReferences, type: "github.pull_request_created", data: {
-        repository, pullRequestNumber, url: response.data.html_url, head, base,
-      } });
-      operation.complete({ pullRequestNumber, status: response.status, requestId: response.headers["x-github-request-id"] });
-      return pullRequestView(response.data);
-    } catch (error) {
-      operation.fail(error, { stage, pullRequestNumber });
-      throw error;
-    }
+    const response = await this.write("github.create_pull_request", { head, base }, references, "pull_request", {
+      inspect: () => assertPublishable(title, body),
+      request: ({ github, owner, repo }) => github.rest.pulls.create({ owner, repo, title, body, head, base, draft: false }),
+      journal: ({ data }) => ({
+        event: { type: "github.pull_request_created", data: { repository, pullRequestNumber: data.number, url: data.html_url, head, base } },
+        details: { pullRequestNumber: data.number },
+        failure: { pullRequestNumber: data.number },
+      }),
+    });
+    return pullRequestView(response.data);
   }
 }

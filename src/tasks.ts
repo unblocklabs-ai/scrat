@@ -7,7 +7,7 @@ import { itemRepository, sameRepository } from "./observation.ts";
 import { db } from "./db.ts";
 import { describeError } from "./errors.ts";
 import { recordEvent } from "./events.ts";
-import { startOperation } from "./logging.ts";
+import { withOperationSync } from "./logging.ts";
 import { hasPublicationSnapshot, hasValidationCheckpoint } from "./results.ts";
 import { items, runs, tasks } from "./schema.ts";
 import { signalWork } from "./work-signal.ts";
@@ -39,8 +39,7 @@ function checkClaimable({ task, item }: { task: typeof tasks.$inferSelect; item:
 export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
   "itemId" | "action" | "priority" | "reason" | "input"
 >) {
-  const operation = startOperation("task.enqueue", { itemId: task.itemId, action: task.action });
-  try {
+  return withOperationSync("task.enqueue", { itemId: task.itemId, action: task.action }, (operation) => {
     const queued = db.transaction((transaction) => {
       const previous = transaction.select().from(tasks).where(and(
         eq(tasks.itemId, task.itemId), eq(tasks.action, task.action), eq(tasks.status, "queued"),
@@ -75,10 +74,7 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
     operation.complete({ taskId: queued.id, priority: queued.priority });
     signalWork();
     return queued;
-  } catch (err) {
-    operation.fail(err);
-    throw err;
-  }
+  });
 }
 
 export function claimTask() {
@@ -145,8 +141,7 @@ export function claimTask() {
 }
 
 export function retryTask(taskId: string, mode: typeof tasks.$inferSelect.retryMode = "repair") {
-  const operation = startOperation("task.retry", { taskId });
-  try {
+  return withOperationSync("task.retry", { taskId }, (operation) => {
     const task = db.transaction((transaction) => {
       const failed = transaction.select().from(tasks).where(and(eq(tasks.id, taskId), eq(tasks.status, "failed"))).get();
       if (!failed) throw new Error(`Task is not failed: ${taskId}`);
@@ -168,10 +163,7 @@ export function retryTask(taskId: string, mode: typeof tasks.$inferSelect.retryM
     operation.complete();
     signalWork();
     return task;
-  } catch (error) {
-    operation.fail(error);
-    throw error;
-  }
+  });
 }
 
 export function finishRun(runId: string, outcome: { status: "completed" } | { status: "failed"; error: unknown }) {

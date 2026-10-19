@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { setTimeout } from "node:timers/promises";
 import { promisify } from "node:util";
 import { recordEvent, type EventReferences } from "./events.ts";
-import { startOperation } from "./logging.ts";
+import { withOperation } from "./logging.ts";
 
 const executeFile = promisify(execFile);
 const runLabel = "ai.unblock.scrat.v2.database";
@@ -15,8 +15,7 @@ async function docker(args: string[]) {
 
 export async function createRunDatabase(runId: string, image: string, references: EventReferences = {}) {
   const container = containerName(runId);
-  const operation = startOperation("database.create", { ...references, runId, container, image });
-  try {
+  return withOperation("database.create", { ...references, runId, container, image }, async (operation) => {
     await docker(["create", "--name", container, "--label", `${runLabel}=${runId}`,
       "--publish", "127.0.0.1::5432", "--env", "POSTGRES_PASSWORD=postgres", "--env", "POSTGRES_DB=scrat_test",
       "--health-cmd", "pg_isready -h 127.0.0.1 -U postgres -d scrat_test",
@@ -35,25 +34,18 @@ export async function createRunDatabase(runId: string, image: string, references
     recordEvent({ ...references, runId, operationId: operation.operationId, type: "database.created", data: { container, image } });
     operation.complete();
     return { container, url: `postgresql://postgres:postgres@${address}/scrat_test` };
-  } catch (error) {
-    operation.fail(error);
-    throw error;
-  }
+  });
 }
 
 export async function removeRunDatabase(runId: string, references: EventReferences = {}) {
   const container = containerName(runId);
-  const operation = startOperation("database.remove", { ...references, runId, container });
-  try {
+  return withOperation("database.remove", { ...references, runId, container }, async (operation) => {
     const id = await docker(["ps", "--all", "--filter", `name=^/${container}$`, "--filter", `label=${runLabel}=${runId}`, "--format", "{{.ID}}"]);
     if (!id) { operation.complete({ alreadyRemoved: true }); return; }
     await docker(["rm", "--force", "--volumes", id]);
     recordEvent({ ...references, runId, operationId: operation.operationId, type: "database.removed", data: { container } });
     operation.complete();
-  } catch (error) {
-    operation.fail(error);
-    throw error;
-  }
+  });
 }
 
 export async function listRunDatabases() {

@@ -37,3 +37,47 @@ export function startOperation(operation: string, context: Record<string, unknow
     },
   };
 }
+
+export type OperationScope = {
+  operationId: string;
+  log: typeof logger;
+  stage(name: string): void;
+  // Merged into the `operation.failed` event alongside the last stage.
+  failure(details: Record<string, unknown>): void;
+  // Callers log completion themselves, once, so early returns can report their own details.
+  complete(details?: Record<string, unknown>): void;
+};
+
+function beginOperation(name: string, context: Record<string, unknown>) {
+  const operation = startOperation(name, context);
+  let stage: string | undefined;
+  let failure: Record<string, unknown> = {};
+  const scope: OperationScope = {
+    operationId: operation.operationId,
+    log: operation.log,
+    stage(next) { stage = next; },
+    failure(details) { failure = { ...failure, ...details }; },
+    complete: operation.complete,
+  };
+  return { scope, fail: (err: unknown) => operation.fail(err, { ...(stage === undefined ? {} : { stage }), ...failure }) };
+}
+
+export async function withOperation<T>(name: string, context: Record<string, unknown>, fn: (operation: OperationScope) => Promise<T>): Promise<T> {
+  const { scope, fail } = beginOperation(name, context);
+  try {
+    return await fn(scope);
+  } catch (error) {
+    fail(error);
+    throw error;
+  }
+}
+
+export function withOperationSync<T>(name: string, context: Record<string, unknown>, fn: (operation: OperationScope) => T): T {
+  const { scope, fail } = beginOperation(name, context);
+  try {
+    return fn(scope);
+  } catch (error) {
+    fail(error);
+    throw error;
+  }
+}

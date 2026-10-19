@@ -5,7 +5,7 @@ import { eq } from "drizzle-orm";
 import { db } from "./db.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
 import { git, hasPendingMerge } from "./git.ts";
-import { startOperation } from "./logging.ts";
+import { withOperation } from "./logging.ts";
 import { runs, workspaces } from "./schema.ts";
 import { containsSecret } from "./secrets.ts";
 
@@ -67,18 +67,17 @@ export async function createWorkspace(
   const workspaceId = randomUUID();
   branch ??= `scrat/${workspaceId}`;
   let path = resolve("data/workspaces", workspaceId);
-  const operation = startOperation("workspace.create", {
+  return withOperation("workspace.create", {
     ...references, workspaceId, repositoryPath, path, branch, baseRef,
-  });
-  let stage = "resolve_base";
-  try {
+  }, async (operation) => {
+    operation.stage("resolve_base");
     repositoryPath = await git(resolve(repositoryPath), ["rev-parse", "--show-toplevel"]);
     const baseSha = await git(repositoryPath, ["rev-parse", "--verify", "--end-of-options", `${baseRef}^{commit}`]);
-    stage = "create_worktree";
+    operation.stage("create_worktree");
     await mkdir(dirname(path), { recursive: true });
     path = resolve(await realpath(dirname(path)), workspaceId);
     await git(repositoryPath, ["worktree", "add", "-b", branch, "--", path, baseSha]);
-    stage = "persistence";
+    operation.stage("persistence");
     const workspace = db.transaction((transaction) => {
       const created = transaction.insert(workspaces).values({
         id: workspaceId, repositoryPath, path, branch, baseRef, baseSha,
@@ -93,16 +92,12 @@ export async function createWorkspace(
     });
     operation.complete({ baseSha, path });
     return workspace;
-  } catch (error) {
-    operation.fail(error, { stage });
-    throw error;
-  }
+  });
 }
 
 export async function removeWorkspace(workspaceId: string, references: EventReferences = {}) {
-  const operation = startOperation("workspace.remove", { ...references, workspaceId });
-  let stage = "lookup";
-  try {
+  return withOperation("workspace.remove", { ...references, workspaceId }, async (operation) => {
+    operation.stage("lookup");
     const workspace = getWorkspace(workspaceId);
     if (!workspace) throw new Error(`Workspace not found: ${workspaceId}`);
     if (workspace.removedAt) {
@@ -114,7 +109,7 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
       if (error instanceof Error && "code" in error && error.code === "ENOENT") return workspace.path;
       throw error;
     });
-    stage = "remove_worktree";
+    operation.stage("remove_worktree");
     const registered = await git(repositoryPath, ["worktree", "list", "--porcelain", "-z"]);
     if (registered.split("\0").includes(`worktree ${path}`)) {
       await validateWorkspace(workspace);
@@ -124,10 +119,10 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
       if (head !== workspace.baseSha && !published) throw new Error("Workspace has unpublished commits; retain it for recovery");
       await git(repositoryPath, ["worktree", "remove", "--", path]);
     }
-    stage = "delete_branch";
+    operation.stage("delete_branch");
     const existingBranch = await git(repositoryPath, ["branch", "--list", "--format=%(refname)", branch]);
     if (existingBranch) await git(repositoryPath, ["branch", "-D", "--", branch]);
-    stage = "persistence";
+    operation.stage("persistence");
     const removed = db.transaction((transaction) => {
       const updated = transaction.update(workspaces).set({ path, removedAt: new Date().toISOString() })
         .where(eq(workspaces.id, workspaceId)).returning().get()!;
@@ -141,10 +136,7 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
     });
     operation.complete();
     return removed;
-  } catch (error) {
-    operation.fail(error, { stage });
-    throw error;
-  }
+  });
 }
 
 export async function commitWorkspace(workspace: typeof workspaces.$inferSelect, message: string, author: { name: string; email: string }, references: EventReferences = {}) {

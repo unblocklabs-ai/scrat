@@ -5,12 +5,14 @@ import { config } from "./config.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
 import { logger, startOperation } from "./logging.ts";
 
-async function githubForRepository(repository: string, access: "read" | "write" | "pull_request", log: Logger) {
+async function githubForRepository(repository: string, access: "read" | "write" | "pull_request" | "contents_read" | "contents_write", log: Logger) {
   const [owner, repo] = repository.split("/");
   const permissions = {
     read: { issues: "read", pull_requests: "read", metadata: "read" },
     write: { issues: "write", metadata: "read" },
     pull_request: { pull_requests: "write", metadata: "read" },
+    contents_read: { contents: "read", metadata: "read" },
+    contents_write: { contents: "write", metadata: "read" },
   } as const;
   const authenticate = createAppAuth({
     appId: config.github.appId,
@@ -28,7 +30,18 @@ async function githubForRepository(repository: string, access: "read" | "write" 
     log: log.child({ component: "octokit" }),
     ...(access !== "read" ? { retry: { enabled: false }, throttle: { enabled: false } } : {}),
   });
-  return { github, owner, repo };
+  return { github, owner, repo, token };
+}
+
+export async function getGitEnvironment(repository: string, write = false) {
+  const { token } = await githubForRepository(repository, write ? "contents_write" : "contents_read", logger);
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+    GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+  };
 }
 
 export async function fetchOpenItems(repository: string, log: Logger = logger) {
@@ -42,6 +55,41 @@ export async function fetchOpenItems(repository: string, log: Logger = logger) {
       })
     : [];
   return { items, pullRequests };
+}
+
+export type GithubComment = {
+  id: string;
+  body: string;
+  author?: string;
+  updatedAt: string;
+  url: string;
+  path?: string;
+  line?: number | null;
+};
+
+export async function fetchItemContext(repository: string, kind: "issue" | "pr", number: number, log: Logger = logger) {
+  const { github, owner, repo } = await githubForRepository(repository, "read", log);
+  const item = kind === "issue"
+    ? (await github.rest.issues.get({ owner, repo, issue_number: number })).data
+    : (await github.rest.pulls.get({ owner, repo, pull_number: number })).data;
+  const comments: GithubComment[] = (await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 }))
+    .map((comment) => ({
+      id: `issue:${comment.id}`, body: comment.body ?? "", author: comment.user?.login,
+      updatedAt: comment.updated_at, url: comment.html_url,
+    }));
+  if (kind === "pr") {
+    const inline = await github.paginate(github.rest.pulls.listReviewComments, { owner, repo, pull_number: number, per_page: 100 });
+    comments.push(...inline.map((comment) => ({
+      id: `inline:${comment.id}`, body: comment.body, author: comment.user?.login,
+      updatedAt: comment.updated_at, url: comment.html_url, path: comment.path, line: comment.line,
+    })));
+    const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: number, per_page: 100 });
+    comments.push(...reviews.filter((review) => review.body).map((review) => ({
+      id: `review:${review.id}`, body: review.body, author: review.user?.login,
+      updatedAt: review.submitted_at ?? "", url: review.html_url,
+    })));
+  }
+  return { item, comments };
 }
 
 export async function postComment(repository: string, issueNumber: number, body: string, references: EventReferences = {}) {

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { integer, sqliteTable, text, unique, uniqueIndex } from "drizzle-orm/sqlite-core";
 import type { ErrorDetails } from "./errors.ts";
-import type { fetchOpenItems } from "./github.ts";
+import type { fetchItemContext, fetchOpenItems } from "./github.ts";
 
 type OpenItems = Awaited<ReturnType<typeof fetchOpenItems>>;
 
@@ -22,7 +22,7 @@ export const items = sqliteTable("items", {
   state: text("state", { enum: ["open", "closed"] }).notNull().default("open"),
   workspaceId: text("workspace_id").references(() => workspaces.id),
   payload: text("payload", { mode: "json" })
-    .$type<OpenItems["items"][number] | OpenItems["pullRequests"][number]>().notNull(),
+    .$type<OpenItems["items"][number] | OpenItems["pullRequests"][number] | Awaited<ReturnType<typeof fetchItemContext>>["item"]>().notNull(),
 }, (table) => [unique().on(table.source, table.externalId)]);
 
 export const tasks = sqliteTable("tasks", {

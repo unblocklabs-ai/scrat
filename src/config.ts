@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import settings from "../scrat.config.json" with { type: "json" };
 
 const configUrl = new URL("../scrat.config.json", import.meta.url);
-const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export const config = settings;
 

@@ -12,6 +12,8 @@ GitHub sync turns repository state into a persistent task queue:
 
 Concurrency, priorities, models, and reasoning levels come from configuration. Queued tasks coalesce by item and action; tasks sharing an item or workspace cannot execute together. Bot-authored comments do not trigger feedback tasks, and low grades do not automatically trigger self-repair.
 
+GitHub access uses a repository-scoped client with shared, permission-specific authentication. Sync reads up to four item contexts concurrently and applies routing effects in order; startup sync still finishes before workers claim tasks. Credentials are cached, responses are not: publication and serialized PR reconciliation fetch fresh state. A rejected credential is refreshed on the next operation, without automatically replaying a failed write.
+
 Implementations use isolated worktrees and branches; follow-ups reuse their workspace and Pi session. Checks must pass against the exact tree being committed before publication. Optional Docker PostgreSQL databases isolate mutating runs. PR closure triggers workspace cleanup; failed work is retained for recovery.
 
 The newest complete PR assessment is authoritative. Context and observed source/dependency changes determine freshness—a relevance heuristic, not a full dependency graph. Stale assessments lose their grade and require a fresh review; older opinions never regain authority. Publication-only retries reuse saved results. Scrat does not automatically merge PRs.
@@ -117,6 +119,7 @@ The checked-in configuration currently uses six task slots, priorities **PR 100 
 ## Project layout
 
 - `src/github-tasks.ts` — GitHub observations, queue effects, and closure cleanup.
+- `src/github.ts`, `src/github-types.ts` — repository client, scoped authentication, and narrow issue/PR views; raw sync snapshots remain in SQLite and `tmp/responses/github/` for diagnostics.
 - `src/actions.ts` — typed execution, acceptance, and publication contracts; workspace lifetime follows action mode.
 - `src/github-routing.ts` — pure issue-selection, PR-maintenance, and review-routing decisions.
 - `src/tasks.ts`, `src/runner.ts` — atomic claims and task/run lifecycle.

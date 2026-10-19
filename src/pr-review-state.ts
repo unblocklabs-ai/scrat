@@ -3,7 +3,8 @@ import { config, getRepositoryPath } from "./config.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
 import { git } from "./git.ts";
-import { fetchItemContext, postComment, updateComment, type GithubComment } from "./github.ts";
+import type { GitHubRepository } from "./github.ts";
+import type { GithubComment } from "./github-types.ts";
 import { gradeLabels, reconcileLabels } from "./labels.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { runs, tasks } from "./schema.ts";
@@ -29,8 +30,8 @@ function canonicalComment(comments: GithubComment[], reviews: ReturnType<typeof 
   }
 }
 
-async function reconcile(repository: string, itemId: string, number: number, references: EventReferences, publication?: { task: Task; run: Run }) {
-  const current = await fetchItemContext(repository, "pr", number);
+async function reconcile(github: GitHubRepository, itemId: string, number: number, references: EventReferences, publication?: { task: Task; run: Run }) {
+  const current = await github.fetchItemContext("pr", number);
   const reviews = prReviewHistory(itemId);
   const existing = canonicalComment(current.comments, reviews);
   const baseBranch = "base" in current.item ? current.item.base.ref : config.github.baseBranch;
@@ -44,7 +45,7 @@ async function reconcile(repository: string, itemId: string, number: number, ref
   if (!desired || replacing) {
     // GitHub cannot atomically replace a report and its grade. Prefer no grade
     // over a grade attached to the wrong report if either write fails.
-    await reconcileLabels(repository, number, { current: labels, desired: [], managed: Object.values(gradeLabels) }, deliveryReferences);
+    await reconcileLabels(github, number, { current: labels, desired: [], managed: Object.values(gradeLabels) }, deliveryReferences);
     const managed = new Set<string>(Object.values(gradeLabels).map((name) => name.toLowerCase()));
     labels = labels.filter((label) => !managed.has((typeof label === "string" ? label : label.name ?? "").toLowerCase()));
   }
@@ -55,14 +56,14 @@ async function reconcile(repository: string, itemId: string, number: number, ref
     let commentId: number;
     if (existing) {
       commentId = Number(existing.id.slice("issue:".length));
-      if (existing.body !== body) await updateComment(repository, commentId, body, deliveryReferences);
-    } else commentId = (await postComment(repository, number, body, deliveryReferences)).data.id;
+      if (existing.body !== body) await github.updateComment(commentId, body, deliveryReferences);
+    } else commentId = (await github.postComment(number, body, deliveryReferences)).data.id;
     run.publication = { ...run.publication, commentId };
     db.update(runs).set({ publication: run.publication }).where(eq(runs.id, run.id)).run();
   }
 
   const grade = desired?.result.grade;
-  await reconcileLabels(repository, number, {
+  await reconcileLabels(github, number, {
     current: labels, desired: grade ? [gradeLabels[grade]] : [], managed: Object.values(gradeLabels),
   }, deliveryReferences);
   if (desired) db.update(runs).set({ publication: { ...desired.run.publication, status: "published" } })
@@ -71,12 +72,12 @@ async function reconcile(repository: string, itemId: string, number: number, ref
     .where(eq(runs.id, publication.run.id)).run();
 }
 
-export async function reconcilePrReview(repository: string, itemId: string, number: number, references: EventReferences = {}, publication?: { task: Task; run: Run }) {
-  const key = `${repository}#${number}`;
+export async function reconcilePrReview(github: GitHubRepository, itemId: string, number: number, references: EventReferences = {}, publication?: { task: Task; run: Run }) {
+  const key = `${github.repository}#${number}`;
   const previous = pendingReviews.get(key);
   const pending = (async () => {
     if (previous) await previous.catch(() => {});
-    await reconcile(repository, itemId, number, references, publication);
+    await reconcile(github, itemId, number, references, publication);
   })();
   pendingReviews.set(key, pending);
   try { await pending; }

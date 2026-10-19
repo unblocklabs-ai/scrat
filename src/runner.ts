@@ -5,7 +5,7 @@ import { runCommands } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts, hasPendingMerge } from "./git.ts";
-import { fetchItemContext, getGitEnvironment, githubRevision } from "./github.ts";
+import { GitHubRepository, githubRevision } from "./github.ts";
 import { startOperation } from "./logging.ts";
 import { executePi } from "./pi.ts";
 import { reviewPullRequest } from "./pr-review.ts";
@@ -30,11 +30,12 @@ export async function runNextTask() {
     const repository = new URL(item.payload.html_url).pathname.split("/").slice(1, 3).join("/");
     const remote = `https://github.com/${repository}.git`;
     const repositoryPath = getRepositoryPath();
-    const context = await fetchItemContext(repository, item.kind, item.payload.number, operation.log);
+    const github = new GitHubRepository(repository);
+    const context = await github.fetchItemContext(item.kind, item.payload.number);
     if (context.item.state !== "open") throw new Error("GitHub item is no longer open");
     const pullRequest = "head" in context.item ? context.item : undefined;
     const baseBranch = pullRequest?.base.ref ?? config.github.baseBranch;
-    const gitEnvironment = await getGitEnvironment(repository);
+    const gitEnvironment = await github.getGitEnvironment();
     const mainSha = await fetchRepository(repositoryPath, remote, baseBranch, gitEnvironment);
     const comments = context.comments.filter((comment) => comment.author !== config.github.botLogin && comment.body.trim());
     const revision = githubRevision(context.item, comments);
@@ -164,7 +165,7 @@ export async function runNextTask() {
     }
     const evaluatedRun = db.select().from(runs).where(eq(runs.id, run.id)).get()!;
     const publicationContext = run.stage !== "publishing"
-      ? await fetchItemContext(repository, item.kind, item.payload.number, operation.log) : context;
+      ? await github.fetchItemContext(item.kind, item.payload.number) : context;
     if (publicationContext.item.state !== "open") throw new Error("GitHub item is no longer open");
     const currentBaseBranch = "head" in publicationContext.item ? publicationContext.item.base.ref : config.github.baseBranch;
     const currentComments = publicationContext.comments.filter((comment) => comment.author !== config.github.botLogin && comment.body.trim());
@@ -180,13 +181,13 @@ export async function runNextTask() {
     }
     if (readOnly) {
       const currentMainSha = run.stage === "publishing" ? mainSha
-        : await fetchRepository(repositoryPath, remote, currentBaseBranch, await getGitEnvironment(repository));
+        : await fetchRepository(repositoryPath, remote, currentBaseBranch, await github.getGitEnvironment());
       if (contract.publication !== "pr-assessment" && evaluatedRun.mainSha && evaluatedRun.mainSha !== currentMainSha) {
         const changes = await reviewChanges(repositoryPath, evaluatedRun.mainSha, currentMainSha, evaluatedRun.result?.paths ?? []);
         if (changes.relevant) throw new Error("Reviewed code changed; enqueue a fresh review instead of retrying publication");
       }
     }
-    await publishRun(task, evaluatedRun, publicationContext, references);
+    await publishRun(github, task, evaluatedRun, publicationContext, references);
     finishRun(run.id, { status: "completed" });
     operation.complete();
     return db.select().from(runs).where(eq(runs.id, run.id)).get()!;

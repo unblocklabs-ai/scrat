@@ -4,16 +4,14 @@ import { type AnySQLiteColumn, integer, sqliteTable, text, unique, uniqueIndex }
 import { actionIds } from "./actions.ts";
 import type { ErrorDetails } from "./errors.ts";
 import type { AgentResult, Reviewer } from "./results.ts";
-import type { GithubComment, fetchItemContext, fetchOpenItems } from "./github.ts";
-
-type OpenItems = Awaited<ReturnType<typeof fetchOpenItems>>;
+import type { GithubComment, GithubItem } from "./github-types.ts";
 
 export const githubSnapshots = sqliteTable("github_snapshots", {
   id: integer("id").primaryKey(),
   repository: text("repository").notNull(),
   fetchedAt: text("fetched_at").notNull(),
-  items: text("items", { mode: "json" }).$type<OpenItems["items"]>().notNull(),
-  pullRequests: text("pull_requests", { mode: "json" }).$type<OpenItems["pullRequests"]>().notNull(),
+  items: text("items", { mode: "json" }).$type<unknown[]>().notNull(),
+  pullRequests: text("pull_requests", { mode: "json" }).$type<unknown[]>().notNull(),
 });
 
 export const items = sqliteTable("items", {
@@ -24,7 +22,7 @@ export const items = sqliteTable("items", {
   state: text("state", { enum: ["open", "closed"] }).notNull().default("open"),
   workspaceId: text("workspace_id").references(() => workspaces.id),
   payload: text("payload", { mode: "json" })
-    .$type<OpenItems["items"][number] | OpenItems["pullRequests"][number] | Awaited<ReturnType<typeof fetchItemContext>>["item"]>().notNull(),
+    .$type<GithubItem>().notNull(),
 }, (table) => [unique().on(table.source, table.externalId)]);
 
 export const tasks = sqliteTable("tasks", {

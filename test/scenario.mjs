@@ -38,6 +38,68 @@ try {
     db.update(s.items).set({ workspaceId: w.id }).where(eq(s.items.id, "issue-9")).run();
     const claimed = []; let next; while ((next = tasks.claimTask())) claimed.push(next);
     assert.equal(claimed.filter((c) => ["issue-8", "issue-9"].includes(c.item.id)).length, 1);
+  } else if (scenario === "repository_sync") {
+    for (let number = 1; number <= 8; number++) f.addIssue(number);
+    f.addIssue(9, ["scrat"]);
+    f.issues.get(1).diagnosticOnly = { retained: true };
+    const fetch = globalThis.fetch, exchanges = [], credentials = new Map(), revoked = new Set();
+    const { mock } = await import("node:test");
+    let active = 0, peak = 0, fail = false;
+    globalThis.fetch = async (input, options = {}) => {
+      const url = new URL(typeof input === "string" ? input : input.url);
+      if (url.pathname.endsWith("/access_tokens")) {
+        const exchange = JSON.parse(options.body); exchanges.push(exchange);
+        const response = await fetch(input, options), data = await response.clone().json();
+        credentials.set(data.token, { ...exchange, expiresAt: Date.parse(data.expires_at) });
+        return response;
+      }
+      if (url.hostname === "api.github.com") {
+        const token = new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");
+        if (!credentials.has(token) || credentials.get(token).expiresAt <= Date.now() || revoked.has(token)) {
+          return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401, headers: { "content-type": "application/json" } });
+        }
+      }
+      const read = options.method === "GET" && /\/issues\/\d+(?:\/comments)?$/.test(url.pathname);
+      if (!read) return fetch(input, options);
+      active++; peak = Math.max(peak, active);
+      try {
+        await new Promise((done) => setTimeout(done, 15));
+        if (fail && url.pathname.endsWith("/issues/3")) return new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } });
+        return await fetch(input, options);
+      } finally { active--; }
+    };
+    try {
+      await route();
+      assert.ok(peak > 1 && peak <= 4, `Expected bounded concurrent reads, saw ${peak}`);
+      assert.equal(all(s.tasks).filter((task) => task.status === "queued").length, 9);
+      assert.equal(f.row(s.items, "issue-1").payload.diagnosticOnly, undefined);
+      assert.equal(all(s.githubSnapshots)[0].items.find((item) => item.number === 1).diagnosticOnly.retained, true);
+      const count = (permission) => exchanges.filter((exchange) => JSON.stringify(exchange.permissions) === JSON.stringify(permission)).length;
+      const read = { issues: "read", pull_requests: "read", metadata: "read" }, contents = { contents: "read", metadata: "read" };
+      assert.equal(count(read), 1); assert.equal(count(contents), 1);
+      await route(); assert.equal(count(read), 1); assert.equal(count(contents), 1);
+      mock.timers.enable({ apis: ["Date"], now: Date.now() });
+      // Keep time monotonic until all cached clients have finished their work.
+      mock.timers.tick(60 * 60 * 1000);
+      await route(); assert.equal(count(read), 2); assert.equal(count(contents), 2);
+      // Exercise real publication with distinct contents-write and PR scopes.
+      const implemented = await success(); assert.equal(implemented.publication.pullRequestNumber, 209);
+      assert.equal(count({ contents: "write", metadata: "read" }), 1);
+      assert.equal(count({ pull_requests: "write", contents: "read", metadata: "read" }), 1);
+      const { GitHubRepository } = await f.app("github.ts");
+      const github = new GitHubRepository("fixture/project"), write = { issues: "write", pull_requests: "write", metadata: "read" };
+      await github.addLabels(1, ["human-note"]);
+      const writeToken = [...credentials].find(([, entry]) => JSON.stringify(entry.permissions) === JSON.stringify(write))[0];
+      revoked.add(writeToken); const writes = f.writes.length;
+      await assert.rejects(github.addLabels(1, ["another-note"]), (error) => error.status === 401);
+      assert.equal(f.writes.length, writes); assert.equal(count(write), 1, "Do not replay a failed write with new credentials");
+      await github.addLabels(1, ["another-note"]);
+      assert.equal(count(write), 2); assert.equal(count(read), 2, "Refresh only the revoked scope");
+      assert.ok(f.issues.get(1).labels.some((label) => label.name === "another-note"));
+      fail = true;
+      await assert.rejects(route(), (error) => error.status === 404);
+      assert.equal(active, 0, "A failed sync must wait for its other in-flight readers");
+    } finally { mock.timers.reset(); globalThis.fetch = fetch; }
   } else if (scenario === "routing") {
     f.addIssue(1); f.addIssue(2, ["scrat"]); await route();
     const queued = () => all(s.tasks).filter((t) => t.status === "queued");
@@ -290,7 +352,8 @@ try {
     await route(); assert.deepEqual(f.prs[0].labels, []);
   } else if (scenario === "absent_labels") {
     f.addIssue(1); const { reconcileLabels } = await f.app("labels.ts");
-    const request = () => reconcileLabels("fixture/project", 1, { current: ["scrat"], desired: [], managed: ["scrat"] });
+    const { GitHubRepository } = await f.app("github.ts");
+    const request = () => reconcileLabels(new GitHubRepository("fixture/project"), 1, { current: ["scrat"], desired: [], managed: ["scrat"] });
     await request();
     assert.equal(all(s.events).filter((e) => e.type === "github.label_removed").length, 0);
     f.issues.get(1).labels = [{ name: "scrat" }];

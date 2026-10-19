@@ -4,18 +4,19 @@ import { config } from "./config.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
 import { branchContainsCommit } from "./git.ts";
-import { createPullRequest, fetchItemContext, findPullRequest, getGitEnvironment, postComment, updateComment } from "./github.ts";
+import type { GitHubRepository } from "./github.ts";
+import type { GithubContext } from "./github-types.ts";
 import { reconcileLabels } from "./labels.ts";
 import { reconcilePrReview } from "./pr-review-state.ts";
 import { upsertItem } from "./items.ts";
 import { items, runs, tasks } from "./schema.ts";
 import { getWorkspace, pushWorkspace } from "./workspaces.ts";
 
-export async function publishRun(task: typeof tasks.$inferSelect, run: typeof runs.$inferSelect, current: Awaited<ReturnType<typeof fetchItemContext>>, references: EventReferences) {
+export async function publishRun(github: GitHubRepository, task: typeof tasks.$inferSelect, run: typeof runs.$inferSelect, current: GithubContext, references: EventReferences) {
   const { result, context } = run;
   if (!result || !context) throw new Error("Run has no evaluated result to publish");
   if (result.outcome !== "complete") throw new Error("Incomplete agent work cannot be published");
-  const repository = new URL(context.item.url).pathname.split("/").slice(1, 3).join("/");
+  const { repository } = github;
   const remote = `https://github.com/${repository}.git`;
   const marker = `<!-- scrat-task:${task.id} -->`;
   let publication = run.publication;
@@ -30,7 +31,7 @@ export async function publishRun(task: typeof tasks.$inferSelect, run: typeof ru
     const commitSha = publication.commitSha;
     if (!commitSha) throw new Error("Run has no validated commit to publish");
     if (publication.publishedCommitSha !== commitSha) {
-      const env = await getGitEnvironment(repository, true);
+      const env = await github.getGitEnvironment(true);
       if (!await branchContainsCommit(workspace.repositoryPath, remote, workspace.branch, commitSha, env)) {
         await pushWorkspace(workspace, remote, commitSha, env, references);
       }
@@ -38,12 +39,12 @@ export async function publishRun(task: typeof tasks.$inferSelect, run: typeof ru
     }
     if (contract.publication === "pull-request") {
       if (!publication.pullRequestNumber) {
-        let pr: Awaited<ReturnType<typeof findPullRequest>> | Awaited<ReturnType<typeof createPullRequest>>["data"] = await findPullRequest(repository, workspace.branch, context.baseBranch);
+        let pr = await github.findPullRequest(workspace.branch, context.baseBranch);
         if (pr?.state === "closed") throw new Error("The workspace PR was already closed");
-        pr ??= (await createPullRequest(repository, {
+        pr ??= await github.createPullRequest({
           title: `fix: ${context.item.title}`, body: `${result.text}\n\nCloses #${context.item.number}\n\n${marker}`,
           head: workspace.branch, base: context.baseBranch,
-        }, references)).data;
+        }, references);
         const publishedPr = pr;
         db.transaction((transaction) => {
           const created = upsertItem({ source: "github", externalId: publishedPr.node_id, kind: "pr", payload: publishedPr }, transaction);
@@ -56,7 +57,7 @@ export async function publishRun(task: typeof tasks.$inferSelect, run: typeof ru
     }
   }
   if (contract.publication === "pr-assessment") {
-    await reconcilePrReview(repository, task.itemId, context.item.number, references, { task, run });
+    await reconcilePrReview(github, task.itemId, context.item.number, references, { task, run });
     return;
   }
   const body = `${result.text}\n\n${marker}`;
@@ -66,14 +67,14 @@ export async function publishRun(task: typeof tasks.$inferSelect, run: typeof ru
     let commentId: number;
     if (existing) {
       commentId = Number(existing.id.slice("issue:".length));
-      if (existing.body !== body) await updateComment(repository, commentId, body, references);
+      if (existing.body !== body) await github.updateComment(commentId, body, references);
     } else {
-      commentId = (await postComment(repository, context.item.number, body, references)).data.id;
+      commentId = (await github.postComment(context.item.number, body, references)).data.id;
     }
     saveReceipt({ commentId });
   }
   if (contract.publication === "issue-assessment") {
-    await reconcileLabels(repository, context.item.number, {
+    await reconcileLabels(github, context.item.number, {
       current: current.item.labels ?? [], desired: result.ready ? ["scrat"] : [], managed: ["scrat"],
     }, references);
     saveReceipt({ scratLabel: result.ready });

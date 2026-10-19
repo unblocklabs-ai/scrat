@@ -4,7 +4,7 @@ import { config, getRepositoryPath } from "./config.ts";
 import { reviewChanges } from "./relevance.ts";
 import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts } from "./git.ts";
-import { fetchItemContext, getGitEnvironment, githubRevision } from "./github.ts";
+import { githubRevision, type GitHubRepository } from "./github.ts";
 import { items, runs, tasks } from "./schema.ts";
 import { cancelQueuedTasks, enqueueTask } from "./tasks.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
@@ -38,15 +38,19 @@ function applyDecisions(itemId: string, decisions: RoutingDecision[]) {
   return queued;
 }
 
-export async function routeGithubTasks(repository: string, current: Item[], previous: Map<string, Item>, log: Logger) {
+export async function routeGithubTasks(github: GitHubRepository, current: Item[], previous: Map<string, Item>, log: Logger) {
+  const { repository } = github;
   const repositoryPath = getRepositoryPath();
   const remote = `https://github.com/${repository}.git`;
-  const env = await getGitEnvironment(repository);
+  const env = await github.getGitEnvironment();
   const defaultBaseSha = await fetchRepository(repositoryPath, remote, config.github.baseBranch, env);
   const implemented = new Set(current.filter((item) => item.kind === "pr" && item.state === "open")
     .flatMap((item) => [...(item.payload.body ?? "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi)]
       .map((match) => Number(match[1]))));
   let queued = 0;
+  const reviewable = current.filter((item) => item.state === "open" && (item.kind === "pr" || !hasScratLabel(item)));
+  const contexts = await github.fetchItemContexts(reviewable.map((item) => ({ kind: item.kind, number: item.payload.number })));
+  const byId = new Map(reviewable.map((item, index) => [item.id, contexts[index]]));
   for (const item of current) {
     let mainSha = defaultBaseSha;
     if (item.state === "closed") {
@@ -77,7 +81,7 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
       queued += applyDecisions(item.id, plan.decisions);
       if (!plan.review) continue;
     }
-    const context = await fetchItemContext(repository, item.kind, item.payload.number, log);
+    const context = byId.get(item.id)!;
     if (context.item.state !== "open") continue;
     if ("head" in context.item && context.item.base.ref !== config.github.baseBranch) {
       mainSha = await fetchRepository(repositoryPath, remote, context.item.base.ref, env);
@@ -125,7 +129,7 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
       }
     } finally {
       if (item.kind === "pr") {
-        try { await reconcilePrReview(repository, item.id, item.payload.number, { itemId: item.id }); }
+        try { await reconcilePrReview(github, item.id, item.payload.number, { itemId: item.id }); }
         catch (error) { log.warn({ event: "github.review_reconciliation_pending", itemId: item.id, err: error }); }
       }
     }

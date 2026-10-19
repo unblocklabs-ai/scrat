@@ -105,3 +105,15 @@ export function finishRun(runId: string, outcome: { status: "completed" } | { st
     return run;
   }, { behavior: "immediate" });
 }
+
+export function cancelQueuedTasks(itemId: string, reason: string, action?: typeof tasks.$inferSelect.action) {
+  return db.transaction((transaction) => {
+    const cancelled = transaction.update(tasks).set({ status: "cancelled" }).where(and(
+      eq(tasks.itemId, itemId), eq(tasks.status, "queued"), action ? eq(tasks.action, action) : undefined,
+    )).returning().all();
+    for (const task of cancelled) {
+      recordEvent({ itemId, taskId: task.id, type: "task.cancelled", data: { action: task.action, reason } }, transaction);
+    }
+    return cancelled;
+  }, { behavior: "immediate" });
+}

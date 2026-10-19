@@ -11,7 +11,8 @@
     "fetch": "node --env-file=.env src/fetch.ts",
     "enqueue": "node --env-file=.env src/enqueue.ts",
     "run-next": "node --env-file=.env src/run-next.ts",
-    "work": "node --env-file=.env src/work.ts"
+    "work": "node --env-file=.env src/work.ts",
+    "sync": "node --env-file=.env src/sync.ts"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^1.3.0",

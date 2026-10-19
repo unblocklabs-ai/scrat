@@ -4,11 +4,11 @@ import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts } from "./git.ts";
-import { addLabels, createPullRequest, fetchItemContext, getGitEnvironment, postComment, removeLabels } from "./github.ts";
+import { addLabels, createPullRequest, fetchItemContext, getGitEnvironment, githubRevision, postComment, removeLabels } from "./github.ts";
 import { upsertItem } from "./items.ts";
 import { startOperation } from "./logging.ts";
 import { executePi } from "./pi.ts";
-import { items, runs } from "./schema.ts";
+import { items, runs, tasks } from "./schema.ts";
 import { claimTask, finishRun } from "./tasks.ts";
 import { commitWorkspace, createWorkspace, getWorkspace, pushWorkspace, removeWorkspace } from "./workspaces.ts";
 
@@ -30,10 +30,11 @@ export async function runNextTask() {
     const baseBranch = pullRequest?.base.ref ?? config.github.baseBranch;
     const gitEnvironment = await getGitEnvironment(repository);
     const mainSha = await fetchRepository(repositoryPath, remote, baseBranch, gitEnvironment);
-    const baseRef = `refs/remotes/origin/${baseBranch}`;
+    const baseRef = mainSha;
     const headRef = pullRequest
       ? await fetchPullRequestHead(repositoryPath, remote, pullRequest.number, gitEnvironment)
       : baseRef;
+    const preparedHead = await git(repositoryPath, ["rev-parse", headRef]);
     let workspace = !readOnly && item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
     if (workspace?.removedAt) throw new Error(`Workspace was removed: ${workspace.id}`);
     if (!workspace) {
@@ -41,27 +42,46 @@ export async function runNextTask() {
         throw new Error("Cannot update a PR branch in a different repository");
       }
       workspace = await createWorkspace({
-        repositoryPath, baseRef: headRef,
+        repositoryPath, baseRef: preparedHead,
         branch: !readOnly && pullRequest ? pullRequest.head.ref : undefined,
       }, references);
       if (readOnly) reviewWorkspace = workspace;
       else db.update(items).set({ workspaceId: workspace.id }).where(eq(items.id, item.id)).run();
     }
+    if (!readOnly && pullRequest) await git(workspace.path, ["merge", "--ff-only", preparedHead]);
     const headSha = await git(workspace.path, ["rev-parse", "HEAD"]);
     db.update(runs).set({ workspaceId: workspace.id, mainSha, headSha, stage: "agent" }).where(eq(runs.id, run.id)).run();
     const previous = !readOnly ? db.select().from(runs).where(and(
-      eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile),
+      eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile), isNotNull(runs.result),
     )).orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
-    const diff = pullRequest ? await git(repositoryPath, ["diff", `${baseRef}...${headRef}`]) : undefined;
+    const diff = pullRequest ? await git(repositoryPath, ["diff", `${mainSha}...${preparedHead}`]) : undefined;
+    const comments = context.comments.filter((comment) => comment.author !== config.github.botLogin && comment.body.trim());
+    const revision = githubRevision(context.item, comments);
+    const input = {
+      ...task.input, revision, mainSha,
+      ...(readOnly ? { triggerKey: JSON.stringify({ revision, mainSha }) } : {}),
+      ...(task.action === "address_pr_feedback" && !task.input.comments ? {
+        commentRevisions: comments.map((comment) => `${comment.id}@${comment.updatedAt}`),
+      } : {}),
+    };
+    db.update(tasks).set({ input }).where(eq(tasks.id, task.id)).run();
+    const previousMainSha = task.input.previousMainSha;
+    const previousHeadSha = task.input.previousHeadSha;
+    const mainChanges = typeof previousMainSha === "string" && previousMainSha !== mainSha
+      ? await git(repositoryPath, ["diff", previousMainSha, mainSha]) : undefined;
+    const prChanges = pullRequest && typeof previousHeadSha === "string" && previousHeadSha !== headSha
+      ? await git(repositoryPath, ["diff", previousHeadSha, headSha]) : undefined;
     const result = await executePi(run, workspace.path, JSON.stringify({
       action: task.action,
       reason: task.reason,
       item: { number: context.item.number, title: context.item.title, body: context.item.body, url: context.item.html_url },
       comments: task.action === "address_pr_feedback" && task.input.comments
-        ? task.input.comments : context.comments.filter((comment) => comment.author !== config.github.botLogin),
-      input: task.input,
-      workspace: { path: workspace.path, branch: workspace.branch, baseRef, mainSha, headSha },
+        ? task.input.comments : comments,
+      input,
+      workspace: { path: workspace.path, branch: workspace.branch, baseRef, baseBranch, mainSha, headSha },
       diff,
+      mainChanges,
+      prChanges,
     }, null, 2), readOnly, operation.log, previous?.piSessionFile ?? undefined);
     db.update(runs).set({ result, stage: "validating" }).where(eq(runs.id, run.id)).run();
     if (!readOnly) {

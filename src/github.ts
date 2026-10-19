@@ -67,16 +67,18 @@ export type GithubComment = {
   line?: number | null;
 };
 
-export async function fetchItemContext(repository: string, kind: "issue" | "pr", number: number, log: Logger = logger) {
+export async function fetchItemContext(repository: string, kind: "issue" | "pr", number: number, log: Logger = logger, includeComments = true) {
   const { github, owner, repo } = await githubForRepository(repository, "read", log);
   const item = kind === "issue"
     ? (await github.rest.issues.get({ owner, repo, issue_number: number })).data
     : (await github.rest.pulls.get({ owner, repo, pull_number: number })).data;
-  const comments: GithubComment[] = (await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 }))
+  const comments: GithubComment[] = [];
+  if (!includeComments) return { item, comments };
+  comments.push(...(await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 }))
     .map((comment) => ({
       id: `issue:${comment.id}`, body: comment.body ?? "", author: comment.user?.login,
       updatedAt: comment.updated_at, url: comment.html_url,
-    }));
+    })));
   if (kind === "pr") {
     const inline = await github.paginate(github.rest.pulls.listReviewComments, { owner, repo, pull_number: number, per_page: 100 });
     comments.push(...inline.map((comment) => ({
@@ -90,6 +92,13 @@ export async function fetchItemContext(repository: string, kind: "issue" | "pr",
     })));
   }
   return { item, comments };
+}
+
+export function githubRevision(item: { title: string; body?: string | null; head?: { sha: string } }, comments: GithubComment[]) {
+  return JSON.stringify({
+    title: item.title, body: item.body, head: item.head?.sha,
+    comments: comments.map((comment) => `${comment.id}@${comment.updatedAt}`).sort(),
+  });
 }
 
 export async function postComment(repository: string, issueNumber: number, body: string, references: EventReferences = {}) {

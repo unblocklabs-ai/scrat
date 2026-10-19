@@ -160,14 +160,14 @@ export async function runNextTask() {
         && revisionItem.head.sha !== evaluatedRun.publication.commitSha) throw new Error("GitHub PR head changed during execution");
       revisionItem = { ...revisionItem, head: { ...revisionItem.head, sha: evaluatedRun.context.headSha } };
     }
-    if (evaluatedRun.context?.revision !== githubRevision(revisionItem, currentComments)
-      || evaluatedRun.context.baseBranch !== currentBaseBranch) {
+    if (task.action !== "review_pr" && (evaluatedRun.context?.revision !== githubRevision(revisionItem, currentComments)
+      || evaluatedRun.context.baseBranch !== currentBaseBranch)) {
       throw new Error("GitHub task context changed; enqueue a fresh task instead of retrying publication");
     }
     if (readOnly) {
       const currentMainSha = run.stage === "publishing" ? mainSha
         : await fetchRepository(repositoryPath, remote, currentBaseBranch, await getGitEnvironment(repository));
-      if (evaluatedRun.mainSha && evaluatedRun.mainSha !== currentMainSha) {
+      if (task.action !== "review_pr" && evaluatedRun.mainSha && evaluatedRun.mainSha !== currentMainSha) {
         const changes = await reviewChanges(repositoryPath, evaluatedRun.mainSha, currentMainSha, evaluatedRun.result?.paths ?? []);
         if (changes.relevant) throw new Error("Reviewed code changed; enqueue a fresh review instead of retrying publication");
       }

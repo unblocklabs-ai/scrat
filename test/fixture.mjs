@@ -17,6 +17,11 @@ export async function fixture(scenario) {
   execFileSync("git", ["init", "--bare", "remote.git"], { stdio: "ignore" });
   execFileSync("git", ["init", "-b", "main", "seed"], { stdio: "ignore" });
   mkdirSync("seed/src"); writeFileSync("seed/src/app.ts", "export const value = 1;\n");
+  if (scenario === "scope_snapshots") {
+    writeFileSync("seed/src/deleted.ts", "export const deleted = 1;\n");
+    writeFileSync("seed/src/renamed.ts", "export const renamed = 1;\n");
+    writeFileSync("seed/ leading.ts", "export const leading = 1;\n");
+  }
   if (scenario === "unicode_scope") writeFileSync("seed/src/a b.ts", "export const special = 1;\n");
   if (scenario === "unicode_nfd") writeFileSync("seed/src/caf\u00e9.ts", "export const unicode = 1;\n");
   if (["panel", "relevance", "lockfile_scope", "importer_scope"].includes(scenario)) writeFileSync("seed/.gitignore", "node_modules/\n");
@@ -57,12 +62,14 @@ export async function fixture(scenario) {
     onModel?.(context, step);
     const review = context.action.startsWith("review");
     let tool;
-    if (review && step === 0) tool = mode === "grep" ? { name: "grep", args: { pattern: "value" } } : { name: "read", args: { path: scenario === "unicode_scope" ? "src/a\u00a0b.ts" : scenario === "panel" ? "node_modules/pinned-runtime/package.json" : mode === "helper" ? "src/helper.ts" : mode === "at" ? "@src/app.ts" : "src/app.ts" } };
+    if (review && step === 0) tool = mode === "grep" ? { name: "grep", args: { pattern: "value" } } : { name: "read", args: { path: scenario === "unicode_scope" ? "src/a\u00a0b.ts" : scenario === "panel" ? "node_modules/pinned-runtime/package.json" : mode.startsWith("helper") ? "src/helper.ts" : mode === "at" ? "@src/app.ts" : "src/app.ts" } };
     if (review && scenario === "unicode_nfd" && step === 0) tool = { name: "read", args: { path: existsSync("seed/src/cafe\u0301.ts") ? "src/cafe\u0301.ts" : "src/caf\u00e9.ts" } };
     if (review && mode === "grep" && step === 1) tool = { name: "read", args: { path: "src/app.ts" } };
     if (review && ["relevance", "lockfile_scope", "importer_scope"].includes(scenario) && step >= 2 && step <= 4) tool = { name: "read", args: { path: ["package.json", "pnpm-lock.yaml", "node_modules/wrangler/package.json"][step - 2] } };
     if (review && scenario === "lockfile_scope" && step === 5) tool = { name: "read", args: { path: "node_modules/string-width-cjs/package.json" } };
     if (review && scenario === "panel" && step === 1) tool = { name: "read_base", args: { path: "src/app.ts" } };
+    if (review && scenario === "scope_snapshots" && step === 0) tool = { name: "read_base", args: { path: "src/deleted.ts" } };
+    if (review && scenario === "scope_snapshots" && step === 1) tool = { name: "read", args: { path: " leading.ts" } };
     if (!review && step === 0) {
       tool = mode === "merge-failure" ? { name: "bash", args: { command: `git -c user.name=Fixture -c user.email=fixture@example.invalid merge --no-commit ${git(resolve("seed"), "rev-parse", "main")}` } }
         : context.database ? { name: "bash", args: { command: `${process.execPath} ${resolve("database-command.mjs")} query ${context.item.number}` } }
@@ -73,7 +80,7 @@ export async function fixture(scenario) {
     const output = (review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : "Implemented the change.")
       + (mode.startsWith("quoted-") ? "\n```\nSCRAT_GRADE: F\nSCRAT_READY\n```" : "")
       + (mode === "ready" ? "\nSCRAT_READY" : "")
-      + (context.action === "review_pr" && !["missing-grade", "quoted-only"].includes(mode) ? `\nSCRAT_GRADE: ${["grade-A", "quoted-grade"].includes(mode) ? "A" : "B"}` : "")
+      + (context.action === "review_pr" && !["missing-grade", "quoted-only"].includes(mode) ? `\nSCRAT_GRADE: ${["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : "B"}` : "")
       + (mode === "no-status" ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
     const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] } : { role: "assistant", content: output };
     res.writeHead(200, { "content-type": "text/event-stream" });

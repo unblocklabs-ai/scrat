@@ -1,9 +1,8 @@
-import { readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { access, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
 import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAgentSession, createBashToolDefinition, defineTool, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, createBashToolDefinition, createReadToolDefinition, detectSupportedImageMimeTypeFromFile, defineTool, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
 import { Type } from "typebox";
@@ -12,7 +11,7 @@ import { db } from "./db.ts";
 import { runs } from "./schema.ts";
 import { parseResult, type Reviewer } from "./results.ts";
 import { git } from "./git.ts";
-import { canonicalReviewPaths } from "./review-paths.ts";
+import { canonicalReviewPaths, observedReviewPaths } from "./review-paths.ts";
 
 export function saveReviewer(runId: string, index: number, patch: Partial<Reviewer>) {
   db.transaction((transaction) => {
@@ -57,6 +56,28 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
   const bash = createBashToolDefinition(cwd, {
     spawnHook: (context) => ({ ...context, env: { ...context.env, ...environment } }),
   });
+  const paths = new Set<string>();
+  const basePaths = new Set<string>();
+  const sdkRead = createReadToolDefinition(cwd);
+  const read: typeof sdkRead = {
+    ...sdkRead,
+    async execute(...args) {
+      // Per-invocation operations observe Pi's resolved path, preserving its
+      // Unicode/path expansion, images, truncation and cancellation behavior.
+      let absolute: string | undefined;
+      const tool = createReadToolDefinition(cwd, { operations: {
+        access: (path) => access(path, constants.R_OK),
+        detectImageMimeType: detectSupportedImageMimeTypeFromFile,
+        readFile: async (path) => { absolute = path; return readFile(path); },
+      } });
+      const result = await tool.execute(...args);
+      if (absolute) {
+        const local = relative(cwd, absolute);
+        if (local !== ".." && !local.startsWith("../")) paths.add(local || ".");
+      }
+      return result;
+    },
+  };
   const readBase = readOnly && baseSha ? defineTool({
     name: "read_base",
     label: "Read merge-base file",
@@ -64,16 +85,18 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     parameters: Type.Object({ path: Type.String() }),
     async execute(_id, { path }) {
       const text = await git(cwd, ["show", `${baseSha}:${path}`]);
+      basePaths.add(relative(cwd, resolve(cwd, path)));
       return { content: [{ type: "text", text }], details: { path, baseSha } };
     },
   }) : undefined;
   const { session } = await createAgentSession({
     cwd, modelRuntime, model, thinkingLevel, settingsManager, sessionManager, resourceLoader,
     tools: readOnly ? ["read", "grep", "find", "ls", ...(readBase ? ["read_base"] : [])] : ["read", "grep", "find", "ls", "bash", "edit", "write"],
-    customTools: readOnly ? (readBase ? [readBase] : []) : [{ ...bash, renderCall: undefined, renderResult: undefined }],
+    customTools: [
+      { ...read, renderCall: undefined, renderResult: undefined },
+      ...(readOnly ? (readBase ? [readBase] : []) : [{ ...bash, renderCall: undefined, renderResult: undefined }]),
+    ],
   });
-  const paths = new Set<string>();
-  const reads = new Map<string, string>();
   try {
     const sessionDetails = {
       piSessionId: session.sessionId, piSessionFile: session.sessionFile,
@@ -84,28 +107,6 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     session.subscribe((event) => {
       if (event.type === "tool_execution_start") {
         log.debug({ event: "pi.tool_started", tool: event.toolName, toolCallId: event.toolCallId });
-        if (event.toolName === "read" || event.toolName === "read_base") {
-          const args: unknown = event.args;
-          if (args && typeof args === "object") {
-            const path = "path" in args && typeof args.path === "string" ? args.path : undefined;
-            if (path !== undefined) {
-              const requested = event.toolName === "read" ? path.replace(/^@/, "") : path;
-              const absolute = event.toolName === "read_base" ? resolve(cwd, requested)
-                : requested.startsWith("file://") ? fileURLToPath(requested)
-                : requested === "~" ? homedir() : requested.startsWith("~/") ? resolve(homedir(), requested.slice(2)) : resolve(cwd, requested);
-              const local = relative(cwd, absolute);
-              if (local !== ".." && !local.startsWith("../")) {
-                // Pi can open Unicode filename variants without exposing the resolved path.
-                reads.set(event.toolCallId, event.toolName === "read" && !existsSync(absolute) ? "." : local || ".");
-              }
-            }
-          }
-        }
-      }
-      if (event.type === "tool_execution_end") {
-        const path = reads.get(event.toolCallId);
-        if (path && !event.isError) paths.add(path);
-        reads.delete(event.toolCallId);
       }
       if (event.type === "tool_execution_end" && event.isError) {
         log.warn({ event: "pi.tool_failed", tool: event.toolName, toolCallId: event.toolCallId });
@@ -120,7 +121,11 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     const output = session.getLastAssistantText()?.trim();
     if (!output) throw new Error("Pi returned an empty response");
     const tracked = (await git(cwd, ["ls-files", "-z"])).split("\0").filter(Boolean);
-    return parseResult(output, canonicalReviewPaths([...paths], tracked));
+    const baseTracked = baseSha && basePaths.size
+      ? (await git(cwd, ["ls-tree", "-r", "--name-only", "-z", baseSha])).split("\0").filter(Boolean) : [];
+    return parseResult(output, [...new Set([
+      ...observedReviewPaths([...paths], tracked), ...canonicalReviewPaths([...basePaths], baseTracked),
+    ])]);
   } finally {
     session.dispose();
   }

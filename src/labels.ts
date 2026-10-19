@@ -20,6 +20,6 @@ export async function reconcileLabels(repository: string, number: number, {
   const owned = new Set(managed.map((name) => name.toLowerCase()));
   const add = desired.filter((name) => !existing.has(name.toLowerCase()));
   const remove = present.filter((name) => owned.has(name.toLowerCase()) && !wanted.has(name.toLowerCase()));
-  if (add.length) await addLabels(repository, number, add, references);
   await removeLabels(repository, number, remove, references);
+  if (add.length) await addLabels(repository, number, add, references);
 }

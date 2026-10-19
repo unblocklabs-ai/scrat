@@ -89,7 +89,10 @@ try {
     assert.equal(f.requests.length, calls); assert.equal(recovered.publication.commentId, original.id);
     f.reset(201, "grade-A");
     tasks.enqueueTask({ itemId: f.row(s.tasks, lost.taskId).itemId, action: "review_pr", reason: "New assessment", input: {} });
-    const updated = await success(); assert.equal(updated.publication.commentId, original.id);
+    f.faults.comment.add(201); const lostUpdate = await run(); assert.ok(lostUpdate.error);
+    assert.deepEqual(f.prs[0].labels, [], "A lost report-write response must not leave the old report's grade");
+    const updateCalls = f.requests.length; tasks.retryTask(lostUpdate.taskId); const updated = await success();
+    assert.equal(f.requests.length, updateCalls); assert.equal(updated.publication.commentId, original.id);
     assert.equal(f.comments.get(201).length, 2); assert.equal(f.comments.get(201)[1].body, feedback.body);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
   } else if (scenario === "deleted_review" || scenario === "unreceipted_review") {
@@ -125,6 +128,64 @@ try {
       assert.equal(f.writes.filter((w) => w.type === "comment_update").length, updates);
       tasks.retryTask(newer.taskId); await success(); assert.equal(f.requests.length, calls);
     }
+  } else if (scenario === "stale_assessment") {
+    changeMain("src/helper.ts", "export const helper = 1;\n");
+    await implement(1); await route(); f.faults.label.add(201);
+    const older = await run(); assert.ok(older.error);
+    const itemId = f.row(s.tasks, older.taskId).itemId;
+    f.reset(201, "helper-grade-A");
+    // The newer assessment actually reads a broader scope than the older one.
+    tasks.enqueueTask({ itemId, action: "review_pr", reason: "Broader fresh review", input: {} });
+    const newer = await success();
+    assert.ok(newer.result.paths.includes("src/helper.ts"));
+    const report = f.comments.get(201)[0].body;
+    changeMain("src/helper.ts", "export const helper = 2;\n");
+    const calls = f.requests.length; await route();
+    assert.deepEqual(f.prs[0].labels, [], "No historical grade may replace a stale newer grade");
+    assert.equal(f.comments.get(201)[0].body, report);
+    assert.ok(all(s.tasks).some((t) => t.itemId === itemId && t.action === "review_pr" && t.status === "queued"));
+    tasks.cancelQueuedTasks(itemId, "Exercise an explicitly requested old publication retry", "review_pr");
+    tasks.retryTask(older.taskId); const stale = await run();
+    assert.match(stale.error.message, /fresh review/);
+    assert.equal(f.requests.length, calls); assert.deepEqual(f.prs[0].labels, []);
+    assert.equal(f.comments.get(201)[0].body, report);
+  } else if (scenario === "assessment_order") {
+    await implement(1); await route(); f.modes.set(201, "incomplete");
+    const failed = await run(); assert.ok(failed.error); assert.notEqual(failed.stage, "publishing");
+    const itemId = f.row(s.tasks, failed.taskId).itemId;
+    f.reset(201, "normal"); tasks.enqueueTask({ itemId, action: "review_pr", reason: "New task", input: {} });
+    const middle = await success();
+    // A misleading wall-clock timestamp must not decide inference precedence.
+    const { eq } = await import("drizzle-orm");
+    db.update(s.runs).set({ startedAt: "2099-01-01T00:00:00Z" }).where(eq(s.runs.id, middle.id)).run();
+    f.reset(201, "grade-A"); tasks.retryTask(failed.taskId); const newest = await success();
+    assert.equal(newest.result.grade, "A");
+    assert.deepEqual(f.prs[0].labels.map((l) => l.name), ["A · Strong"]);
+    assert.match(f.comments.get(201)[0].body, new RegExp(newest.taskId));
+    const calls = f.requests.length; await route();
+    assert.equal(f.requests.length, calls);
+    assert.deepEqual(f.prs[0].labels.map((l) => l.name), ["A · Strong"]);
+  } else if (scenario === "scope_snapshots") {
+    const implemented = await implement(1), workspace = f.row(s.workspaces, implemented.workspaceId);
+    unlinkSync(workspace.path + "/src/deleted.ts");
+    git(workspace.path, "mv", "src/renamed.ts", "src/moved.ts");
+    writeFileSync(workspace.path + "/src/added.ts", "export const added = 1;\n");
+    git(workspace.path, "add", "."); commit(workspace.path, "Prepare PR additions, deletions and rename");
+    git(workspace.path, "push", resolve("remote.git"), workspace.branch);
+    await route(); let changed = false;
+    f.onModel = () => { if (!changed) { changed = true; changeMain("notes.md", "Unrelated during review\n"); } };
+    const reviewed = await success(); f.onModel = undefined;
+    assert.ok(!reviewed.result.paths.includes("."));
+    for (const path of ["src/added.ts", "src/deleted.ts", "src/renamed.ts", "src/moved.ts", " leading.ts"]) assert.ok(reviewed.result.paths.includes(path), path);
+    assert.ok(f.requests.some((r) => r.request.messages.some((m) => m.role === "tool"
+      && JSON.stringify(m.content).includes("export const deleted = 1;\\n"))), "Base reads preserve the deleted source blob, including whitespace");
+    changeMain("notes.md", "Unrelated after review\n"); await route();
+    assert.ok(!all(s.tasks).some((t) => t.action === "review_pr" && t.status === "queued"));
+    changeMain(" leading.ts", "export const leading = 2;\n"); await route();
+    assert.ok(all(s.tasks).some((t) => t.action === "review_pr" && t.status === "queued"));
+    f.reset(201, "normal"); await success();
+    changeMain("src/deleted.ts", "export const deleted = 2;\n"); await route();
+    assert.ok(all(s.tasks).some((t) => t.action === "review_pr" && t.status === "queued"));
   } else if (scenario === "grade_race") {
     await implement(1); await route(); const reviewed = await success();
     tasks.enqueueTask({ itemId: f.row(s.tasks, reviewed.taskId).itemId, action: "review_pr", reason: "Fresh review", input: {} });
@@ -312,9 +373,9 @@ try {
   } else if (scenario === "legacy_scope") {
     f.addIssue(1); await route(); let reviewed = await success();
     const { eq } = await import("drizzle-orm");
-    for (const paths of [[".", "src/app.ts"], ["."]]) {
+    for (const paths of [[".", "src/app.ts"], ["."], ["src"]]) {
       db.update(s.runs).set({ result: { ...reviewed.result, paths } }).where(eq(s.runs.id, reviewed.id)).run();
-      changeMain("notes.md", JSON.stringify(paths)); await route();
+      changeMain(paths[0] === "src" ? "src/helper.ts" : "notes.md", JSON.stringify(paths)); await route();
       assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
       reviewed = await success();
     }

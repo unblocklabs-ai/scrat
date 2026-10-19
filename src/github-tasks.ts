@@ -9,6 +9,7 @@ import { items, runs, tasks } from "./schema.ts";
 import { cancelQueuedTasks, enqueueTask } from "./tasks.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { reconcilePrReview } from "./pr-review-state.ts";
+import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 
 type Item = typeof items.$inferSelect;
 type Action = typeof tasks.$inferSelect.action;
@@ -116,15 +117,23 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
       const revision = githubRevision(context.item, comments);
       const latest = latestTask(item.id, action);
       const triggerKey = JSON.stringify({ revision, mainSha });
+      const reviews = item.kind === "pr" ? prReviewHistory(item.id) : undefined;
+      const reviewState = reviews ? await resolvePrReview(reviews, context, mainSha) : undefined;
+      if (reviewState?.kind === "current") {
+        cancelQueuedTasks(item.id, "No observed relevant changes since the authoritative review", action);
+        continue;
+      }
       if (latest?.status !== "cancelled" && latest?.input.triggerKey === triggerKey) continue;
-      const attempt = latest ? db.select().from(runs).where(eq(runs.taskId, latest.id))
-        .orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
+      const attempt = reviews ? reviews.find(({ task }) => task.id === latest?.id)?.run
+        : latest ? db.select().from(runs).where(eq(runs.taskId, latest.id))
+          .orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
       if (latest?.status !== "cancelled" && attempt?.context?.revision === revision && attempt.mainSha === mainSha) continue;
-      const completed = db.select({ run: runs, task: tasks }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
+      const completed = reviewState ? (reviewState.kind === "stale" ? reviewState.assessment : undefined)
+        : db.select({ run: runs, task: tasks }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
         .where(and(eq(tasks.itemId, item.id), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
         .orderBy(desc(runs.startedAt)).limit(1).get();
-      let changedPaths: string[] = [];
-      if (completed?.run.context?.revision === revision && completed.run.mainSha) {
+      let changedPaths: string[] = reviewState?.kind === "stale" ? reviewState.changedPaths : [];
+      if (!reviewState && completed?.run.context?.revision === revision && completed.run.mainSha) {
         if (completed.run.mainSha === mainSha) {
           cancelQueuedTasks(item.id, "No changes since the last review", action);
           continue;

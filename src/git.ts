@@ -9,7 +9,9 @@ const repositoryFetches = new Map<string, Promise<string>>();
 
 export async function git(repositoryPath: string, args: string[], env = process.env) {
   const { stdout } = await executeFile("git", ["-C", repositoryPath, ...args], { env, maxBuffer: 16 * 1024 * 1024 });
-  return stdout.trim();
+  // Path inventories and source blobs are byte-sensitive; only command metadata
+  // (SHAs, refs, etc.) should have surrounding whitespace removed.
+  return args.includes("-z") || args[0] === "show" ? stdout : stdout.trim();
 }
 
 export async function fetchRepository(repositoryPath: string, remote: string, baseBranch: string, env = process.env) {

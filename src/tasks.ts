@@ -6,7 +6,8 @@ import { db } from "./db.ts";
 import { describeError } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { startOperation } from "./logging.ts";
-import { items, runs, tasks } from "./schema.ts";
+import { hasPublicationSnapshot } from "./results.ts";
+import { events, items, runs, tasks } from "./schema.ts";
 
 export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
   "itemId" | "action" | "priority" | "reason" | "input"
@@ -69,12 +70,15 @@ export function claimTask() {
       )))
       .orderBy(desc(tasks.priority), asc(tasks.createdAt), asc(tasks.id)).limit(1).get();
     if (!next) return;
-    const previousRun = transaction.select().from(runs).where(eq(runs.taskId, next.task.id))
-      .orderBy(desc(runs.startedAt), desc(runs.id)).limit(1).get();
+    const previous = transaction.select({ run: runs, sequence: events.id }).from(runs)
+      .leftJoin(events, and(eq(events.runId, runs.id), eq(events.type, "run.started")))
+      .where(eq(runs.taskId, next.task.id)).orderBy(desc(events.id)).limit(1).get();
+    if (previous && previous.sequence === null) throw new Error(`Missing run.started event: ${previous.run.id}`);
+    const previousRun = previous?.run;
     const retry = previousRun?.error && isDeepStrictEqual(previousRun.input, next.task.input) ? previousRun : undefined;
     const actionSettings = getActionConfig(next.task.action);
     const settings = retry ?? actionSettings;
-    const resume = retry?.stage === "publishing" && retry.result && retry.context ? retry : undefined;
+    const resume = hasPublicationSnapshot(retry) ? retry : undefined;
     const task = transaction.update(tasks).set({ status: "running" }).where(eq(tasks.id, next.task.id)).returning().get()!;
     const run = transaction.insert(runs).values({
       taskId: task.id,

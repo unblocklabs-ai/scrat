@@ -1,4 +1,12 @@
 import type { ErrorDetails } from "./errors.ts";
+import type { runs } from "./schema.ts";
+
+// Claiming and assessment provenance must agree on which retries copy inference.
+export function hasPublicationSnapshot(run: typeof runs.$inferSelect | undefined): run is typeof runs.$inferSelect & {
+  result: AgentResult; context: NonNullable<typeof runs.$inferSelect.context>;
+} {
+  return run?.stage === "publishing" && Boolean(run.result && run.context);
+}
 
 export const prGrades = ["S", "A", "B", "C", "D", "F"] as const;
 export type PrGrade = typeof prGrades[number];

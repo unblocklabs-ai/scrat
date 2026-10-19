@@ -22,6 +22,19 @@ export function saveReviewer(runId: string, index: number, patch: Partial<Review
   });
 }
 
+// One runtime serves every session in the process; a failed creation is not cached so the next session retries.
+let modelRuntimeCreation: Promise<ModelRuntime> | undefined;
+function sharedModelRuntime() {
+  modelRuntimeCreation ??= ModelRuntime.create({
+    modelsPath: fileURLToPath(new URL("../scrat.config.json", import.meta.url)),
+    modelsStorePath: resolve("data/pi-models-store.json"),
+  }).catch((error: unknown) => {
+    modelRuntimeCreation = undefined;
+    throw error;
+  });
+  return modelRuntimeCreation;
+}
+
 export async function executePi({ run, cwd, context, readOnly, log, sessionFile, environment = {}, reviewerIndex, baseSha }: {
   run: typeof runs.$inferSelect;
   cwd: string;
@@ -33,12 +46,13 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
   reviewerIndex?: number;
   baseSha?: string;
 }) {
-  const modelRuntime = await ModelRuntime.create({
-    modelsPath: fileURLToPath(new URL("../scrat.config.json", import.meta.url)),
-    modelsStorePath: resolve("data/pi-models-store.json"),
-  });
+  const modelRuntime = await sharedModelRuntime();
   const model = modelRuntime.getModel(run.provider, run.model);
-  if (!model) throw new Error(modelRuntime.getError() ?? `Configure a Pi model for ${run.provider}/${run.model}`);
+  if (!model) {
+    // Pi reports an unreadable or invalid models config without rejecting; rebuild on the next session.
+    modelRuntimeCreation = undefined;
+    throw new Error(modelRuntime.getError() ?? `Configure a Pi model for ${run.provider}/${run.model}`);
+  }
   const thinkingLevel = thinkingLevels.find((level) => level === run.thinkingLevel);
   if (!thinkingLevel) throw new Error(`Unknown thinking level: ${run.thinkingLevel}`);
   const settingsManager = SettingsManager.inMemory();

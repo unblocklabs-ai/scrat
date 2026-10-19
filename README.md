@@ -70,7 +70,7 @@ For project review, run `typecheck`, `knip`, and the integration/E2E tests after
 
 | Setting | Purpose |
 | --- | --- |
-| `harness.maxConcurrency` | Maximum simultaneous tasks, not model sessions or test subprocesses. Each PR review starts two reviewer sessions within one task. |
+| `harness.maxConcurrency` | Maximum simultaneous tasks, not model sessions or test subprocesses. Each PR review starts two reviewer sessions within one task. Change-mode tasks run the full validation suite and a database container, so size this to the host's memory. |
 | `harness.logLevel` | Pino log verbosity, such as `info` or `debug`. |
 | `github.repository` | Target GitHub repository as `owner/repo`. |
 | `github.repositoryPath` | Local repository clone; relative paths resolve from the config directory. `SCRAT_REPOSITORY_PATH` overrides it. |
@@ -125,7 +125,7 @@ Execution mode, acceptance rules, and publication behavior live in `src/actions.
 | `reviewers` | PR review panel: exactly two entries, each with its own `provider`, `model`, and `thinkingLevel`. |
 | `maxSelfRepairs` | `address_review` only: most self-repair tasks queued for one PR (non-negative integer, default 2; 0 disables self-repair; not enqueueable manually). A push makes the review stale and Scrat re-reviews; a reply-only repair is not retriggered for the same assessment. |
 
-The checked-in configuration currently uses six task slots, priorities **PR 100 > implementation/maintenance 60 > issue 10**, and a Sol-high/DeepSeek-high review panel with Sol-high consolidation. These are configurable values, not built-in limits or model choices.
+The checked-in configuration currently uses three task slots (sized for a 24 GB host running concurrent validation), priorities **PR 100 > implementation/maintenance 60 > issue 10**, and a Sol-high/DeepSeek-high review panel with Sol-high consolidation. These are configurable values, not built-in limits or model choices.
 
 ## Project layout
 

@@ -1,6 +1,6 @@
 {
   "harness": {
-    "maxConcurrency": 6,
+    "maxConcurrency": 3,
     "logLevel": "info"
   },
   "github": {

@@ -135,7 +135,7 @@ export async function fixture(scenario) {
   });
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   const config = JSON.parse(readFileSync("app/scrat.config.json", "utf8"));
-  config.workspace = {}; config.github.repository = "fixture/project"; config.github.repositoryPath = resolve("checkout");
+  config.workspace = {}; config.harness.maxConcurrency = 6; config.github.repository = "fixture/project"; config.github.repositoryPath = resolve("checkout");
   config.providers = { fixture: { api: "openai-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: "fixture", models: [
     { id: "gpt-6.1-sol", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
     { id: "deepseek/deepseek-v4.1-flash", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },

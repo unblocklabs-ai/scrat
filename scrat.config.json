@@ -1,6 +1,7 @@
 {
   "harness": {
-    "maxConcurrency": 2
+    "maxConcurrency": 2,
+    "logLevel": "info"
   },
   "github": {
     "repository": "unblocklabs-ai/agent-platform",

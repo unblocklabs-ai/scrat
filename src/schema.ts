@@ -74,6 +74,7 @@ export const events = sqliteTable("events", {
   id: integer("id").primaryKey(),
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
   type: text("type").$type<JournalEvent["type"]>().notNull(),
+  operationId: text("operation_id"),
   itemId: text("item_id").references(() => items.id),
   taskId: text("task_id").references(() => tasks.id),
   runId: text("run_id").references(() => runs.id),

@@ -31,15 +31,7 @@ export async function runNextTask() {
     const mainSha = await fetchRepository(repositoryPath, remote, baseBranch, gitEnvironment);
     const comments = context.comments.filter((comment) => comment.author !== config.github.botLogin && comment.body.trim());
     const revision = githubRevision(context.item, comments);
-    if (run.stage === "publishing" && run.result && run.context) {
-      if (readOnly) {
-        if (run.context.revision !== revision) throw new Error("GitHub review context changed; enqueue a fresh review instead of retrying publication");
-        if (run.mainSha && run.mainSha !== mainSha) {
-          const changed = (await git(repositoryPath, ["diff", "--name-only", "--no-renames", run.mainSha, mainSha])).split("\n").filter(Boolean);
-          if (affectsPaths(changed, run.result.paths)) throw new Error("Reviewed code changed; enqueue a fresh review instead of retrying publication");
-        }
-      }
-    } else {
+    if (run.stage !== "publishing") {
       const baseRef = mainSha;
       const headRef = pullRequest
         ? await fetchPullRequestHead(repositoryPath, remote, pullRequest.number, gitEnvironment)
@@ -110,7 +102,25 @@ export async function runNextTask() {
       }
       db.update(runs).set({ stage: "publishing" }).where(eq(runs.id, run.id)).run();
     }
-    await publishRun(task, db.select().from(runs).where(eq(runs.id, run.id)).get()!, context, references);
+    const evaluatedRun = db.select().from(runs).where(eq(runs.id, run.id)).get()!;
+    const publicationContext = readOnly && run.stage !== "publishing"
+      ? await fetchItemContext(repository, item.kind, item.payload.number, operation.log) : context;
+    if (readOnly) {
+      if (publicationContext.item.state !== "open") throw new Error("GitHub item is no longer open");
+      const currentBaseBranch = "head" in publicationContext.item ? publicationContext.item.base.ref : config.github.baseBranch;
+      const currentComments = publicationContext.comments.filter((comment) => comment.author !== config.github.botLogin && comment.body.trim());
+      if (evaluatedRun.context?.revision !== githubRevision(publicationContext.item, currentComments)
+        || evaluatedRun.context.baseBranch !== currentBaseBranch) {
+        throw new Error("GitHub review context changed; enqueue a fresh review instead of retrying publication");
+      }
+      const currentMainSha = run.stage === "publishing" ? mainSha
+        : await fetchRepository(repositoryPath, remote, currentBaseBranch, await getGitEnvironment(repository));
+      if (evaluatedRun.mainSha && evaluatedRun.mainSha !== currentMainSha) {
+        const changed = (await git(repositoryPath, ["diff", "--name-only", "--no-renames", evaluatedRun.mainSha, currentMainSha])).split("\n").filter(Boolean);
+        if (affectsPaths(changed, evaluatedRun.result?.paths ?? [])) throw new Error("Reviewed code changed; enqueue a fresh review instead of retrying publication");
+      }
+    }
+    await publishRun(task, evaluatedRun, publicationContext, references);
     finishRun(run.id, { status: "completed" });
     operation.complete();
     return db.select().from(runs).where(eq(runs.id, run.id)).get()!;

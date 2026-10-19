@@ -60,7 +60,9 @@ export async function fixture(scenario) {
     if (!review && context.database && step === 1) tool = { name: "write", args: { path: "migration.sql", content: "ALTER TABLE identities ADD COLUMN IF NOT EXISTS extra integer;\n" } };
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : "complete";
     const output = (review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : "Implemented the change.")
-      + (mode === "ready" ? "\nSCRAT_READY" : "") + (mode === "no-status" ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
+      + (mode === "ready" ? "\nSCRAT_READY" : "")
+      + (context.action === "review_pr" && mode !== "missing-grade" ? `\nSCRAT_GRADE: ${mode === "grade-A" ? "A" : "B"}` : "")
+      + (mode === "no-status" ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
     const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] } : { role: "assistant", content: output };
     res.writeHead(200, { "content-type": "text/event-stream" });
     res.end("data: " + JSON.stringify({ id: "local_" + requests.length, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: request.model,
@@ -136,8 +138,17 @@ export async function fixture(scenario) {
       comment.body = body.body; writes.push({ type: "comment_update", id: comment.id });
       return reply(comment);
     }
-    match = path.match(/\/issues\/(\d+)\/labels(?:\/scrat)?$/);
-    if (match) { const n = Number(match[1]); writes.push({ type: "label", number: n }); if (faults.label.delete(n)) return reply({ message: "Label failure" }, 503); issues.get(n).labels = method === "DELETE" ? [] : [{ name: "scrat" }]; return reply(issues.get(n).labels); }
+    match = path.match(/\/issues\/(\d+)\/labels(?:\/(.+))?$/);
+    if (match) {
+      const n = Number(match[1]), item = issues.get(n) ?? prs.find((pr) => pr.number === n);
+      writes.push({ type: "label", number: n }); if (faults.label.delete(n)) return reply({ message: "Label failure" }, 503);
+      if (method === "DELETE") {
+        const name = decodeURIComponent(match[2]);
+        if (!item.labels.some((label) => label.name === name)) return reply({ message: "Label does not exist" }, 404);
+        item.labels = item.labels.filter((label) => label.name !== name);
+      } else for (const name of body.labels) if (!item.labels.some((label) => label.name === name)) item.labels.push({ name });
+      return reply(item.labels);
+    }
     if (path.endsWith("/pulls") && method === "GET") return reply(prs.filter((pr) => (!url.searchParams.get("head") || pr.head.ref === url.searchParams.get("head").split(":").slice(1).join(":")) && (url.searchParams.get("state") !== "open" || pr.state === "open")));
     if (path.endsWith("/pulls") && method === "POST") {
       const token = new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");

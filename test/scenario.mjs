@@ -39,7 +39,7 @@ try {
     const claimed = []; let next; while ((next = tasks.claimTask())) claimed.push(next);
     assert.equal(claimed.filter((c) => ["issue-8", "issue-9"].includes(c.item.id)).length, 1);
   } else if (scenario === "panel") {
-    await implement(1); await route();
+    await implement(1); f.prs[0].labels.push({ name: "human-label" }); await route();
     const review = await success();
     assert.equal(review.reviewers.length, 2);
     assert.deepEqual(review.reviewers.map((r) => r.model), ["gpt-6.1-sol", "deepseek/deepseek-v4.1-flash"]);
@@ -56,20 +56,29 @@ try {
     }
     assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === 201).length, 1);
     assert.match(f.comments.get(201)[0].body, /Consolidated/);
+    assert.equal(review.result.grade, "B");
+    assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["B · Solid", "human-label"]);
     for (const req of f.requests.filter((r) => r.context.action === "review_pr" && !r.consolidating)) assert.ok(!req.text.includes("Independent review from"));
     // Adopt a pre-upgrade review comment too, without deleting its historical run.
     f.comments.get(201)[0].body = f.comments.get(201)[0].body.replace("<!-- scrat-review -->\n", "");
+    f.modes.set(201, "grade-A");
     changeMain("src/app.ts", "export const value = 99;\n"); await route();
-    const rereview = await success();
+    assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["human-label"]);
+    f.faults.label.add(201); const failed = await run(); assert.ok(failed.error); const calls = f.requests.length;
+    tasks.retryTask(failed.taskId); const rereview = await success(); assert.equal(f.requests.length, calls);
     assert.equal(rereview.publication.commentId, review.publication.commentId);
     assert.equal(f.comments.get(201).length, 1);
     assert.equal(f.writes.filter((w) => w.type === "comment_update").length, 1);
+    assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["A · Strong", "human-label"]);
   } else if (scenario === "reviewer_failure") {
     await implement(2); await route(); f.modes.set(202, "reviewer-failure");
     const r = await run(); assert.ok(r.error); assert.ok(r.reviewers.some((r) => r.error));
     assert.equal(f.requests.filter((r) => r.consolidating).length, 0);
     assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
     assert.ok(f.row(s.workspaces, r.workspaceId).removedAt);
+    f.reset(202, "missing-grade"); tasks.retryTask(r.taskId);
+    const invalid = await run(); assert.match(invalid.error.message, /grade/i);
+    assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
   } else if (scenario === "incomplete") {
     for (const [i, mode] of ["incomplete", "needs_decision", "no-status", "bare-status"].entries()) {
       f.addIssue(i + 1); f.enqueue(i + 1, "implement"); f.modes.set(i + 1, mode);
@@ -94,13 +103,15 @@ try {
     assert.match(r.error.message, /Validation changed/); assert.equal(f.prs.length, 0);
   } else if (scenario === "retry") {
     for (const [n, fault] of [[1, "label"], [2, "comment"]]) {
-      f.addIssue(n); f.modes.set(n, "ready"); f.enqueue(n); f.faults[fault].add(n);
+      f.addIssue(n, ["human-label"]); f.modes.set(n, "ready"); f.enqueue(n); f.faults[fault].add(n);
       const failed = await run(); assert.ok(failed.error); const calls = f.requests.length;
       tasks.retryTask(failed.taskId); const completed = await success();
       assert.equal(completed.retryOfRunId, failed.id); assert.equal(f.requests.length, calls);
       assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === n).length, 1);
-      assert.equal(f.issues.get(n).labels[0].name, "scrat");
+      assert.deepEqual(f.issues.get(n).labels.map((label) => label.name).sort(), ["human-label", "scrat"]);
     }
+    f.modes.set(1, "normal"); f.enqueue(1); await success();
+    assert.deepEqual(f.issues.get(1).labels.map((label) => label.name), ["human-label"]);
   } else if (scenario === "ambiguous_pr") {
     f.addIssue(1); f.enqueue(1, "implement"); f.faults.pr.add(1);
     const failed = await run(); assert.ok(failed.error); assert.equal(f.prs.length, 1); const calls = f.requests.length;

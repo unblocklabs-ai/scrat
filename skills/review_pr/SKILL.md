@@ -31,6 +31,8 @@ Order findings by severity: P1 breaks functionality or security; P2 is a correct
 
 Give a patch grade with one concise evidence-backed reason: S = exceptional and rare; A = strong; B = solid; C = needs work; D = weak; F = unsafe or broken. Judge correctness, simplicity, scope, compatibility and evidence together; grade the patch, not the author. S/A/B cannot coexist with introduced P0/P1/P2 findings or essential unverified behavior. Infrastructure failure alone is not a patch defect. Draft status, pending CI and human product choices do not alone lower the grade. Name required changes and material decisions explicitly rather than hiding them in the grade reason.
 
+For a complete review, include exactly one machine-readable `SCRAT_GRADE: <grade>` line immediately before the final `SCRAT_STATUS` line, where `<grade>` is S, A, B, C, D, or F. Keep the grade and its reason in the Markdown assessment too. This is a quality assessment, not merge authorization.
+
 ## Follow-ups and output
 
 Reconcile prior coverage with the current full diff and recheck affected conclusions against current source. Use supplied `mainChanges`, `prChanges` and discussion to focus new investigation; reuse applicable evidence without repeating unchanged work. Hints are not a complete dependency map.

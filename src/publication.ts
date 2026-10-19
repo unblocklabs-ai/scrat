@@ -3,7 +3,8 @@ import { config } from "./config.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
 import { branchContainsCommit } from "./git.ts";
-import { addLabels, createPullRequest, fetchItemContext, findPullRequest, getGitEnvironment, postComment, removeLabels, updateComment } from "./github.ts";
+import { createPullRequest, fetchItemContext, findPullRequest, getGitEnvironment, postComment, updateComment } from "./github.ts";
+import { gradeLabels, reconcileLabels } from "./labels.ts";
 import { upsertItem } from "./items.ts";
 import { items, runs, tasks } from "./schema.ts";
 import { getWorkspace, pushWorkspace } from "./workspaces.ts";
@@ -71,12 +72,13 @@ export async function publishRun(task: typeof tasks.$inferSelect, run: typeof ru
     saveReceipt({ commentId });
   }
   if (task.action === "review_issue") {
-    const labelled = current.item.labels?.some((label) => typeof label === "string" ? label === "scrat" : label.name === "scrat") ?? false;
-    if (labelled !== result.ready) {
-      if (result.ready) await addLabels(repository, context.item.number, ["scrat"], references);
-      else await removeLabels(repository, context.item.number, ["scrat"], references);
-    }
+    await reconcileLabels(repository, context.item.number, {
+      current: current.item.labels ?? [], desired: result.ready ? ["scrat"] : [], managed: ["scrat"],
+    }, references);
     saveReceipt({ scratLabel: result.ready });
   }
+  if (task.action === "review_pr" && result.grade) await reconcileLabels(repository, context.item.number, {
+    current: current.item.labels ?? [], desired: [gradeLabels[result.grade]], managed: Object.values(gradeLabels),
+  }, references);
   saveReceipt({ status: "published" });
 }

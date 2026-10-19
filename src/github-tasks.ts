@@ -8,6 +8,7 @@ import { fetchItemContext, getGitEnvironment, githubRevision } from "./github.ts
 import { items, runs, tasks } from "./schema.ts";
 import { cancelQueuedTasks, enqueueTask } from "./tasks.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
+import { gradeLabels, reconcileLabels } from "./labels.ts";
 
 type Item = typeof items.$inferSelect;
 type Action = typeof tasks.$inferSelect.action;
@@ -134,6 +135,9 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
         continue;
       }
     }
+    if (item.kind === "pr") await reconcileLabels(repository, item.payload.number, {
+      current: context.item.labels ?? [], desired: [], managed: Object.values(gradeLabels),
+    }, { itemId: item.id });
     queued += queue(item, action, completed ? "Relevant GitHub or base-branch changes" : "Initial GitHub review", {
       triggerKey, revision, mainSha, changedPaths,
       previousMainSha: completed?.run.mainSha ?? null,

@@ -25,8 +25,9 @@ export async function reviewPullRequest(run: typeof runs.$inferSelect, cwd: stri
   if (failed?.status === "rejected") throw new Error("An independent PR reviewer did not finish", { cause: failed.reason });
   const reviews = settled.flatMap((entry) => entry.status === "fulfilled" ? [entry.value] : []);
   const consolidated = await executePi({ run, cwd, context: [
-    "Consolidate the two independent reviews below into one source-verified PR review. Both reviewers assessed the same snapshot. Recheck disputed findings against source; agreement alone is not proof. Deduplicate findings, preserve every defensible issue and material uncertainty, and reject false positives with concrete reasons. Do not invent changes to reach consensus. Return one concise Markdown assessment, not two pasted reports, and follow the required SCRAT_STATUS output contract.",
+    "Consolidate the two independent reviews below into one source-verified PR review. Both reviewers assessed the same snapshot. Recheck disputed findings against source; agreement alone is not proof. Deduplicate findings, preserve every defensible issue and material uncertainty, and reject false positives with concrete reasons. Do not invent changes to reach consensus. Return one concise Markdown assessment, not two pasted reports. For a complete assessment, include SCRAT_GRADE: X (X is S, A, B, C, D, or F) immediately before the required final SCRAT_STATUS line.",
     reviewContext, JSON.stringify({ independentReviews: reviews }, null, 2),
   ].join("\n\n"), readOnly: true, log, baseSha });
+  if (consolidated.outcome === "complete" && !consolidated.grade) throw new Error("A complete consolidated PR review must include SCRAT_GRADE");
   return { ...consolidated, paths: [...new Set([...consolidated.paths, ...reviews.flatMap((review) => review.result.paths)])] };
 }

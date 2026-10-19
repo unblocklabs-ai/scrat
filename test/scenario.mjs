@@ -92,6 +92,39 @@ try {
     const updated = await success(); assert.equal(updated.publication.commentId, original.id);
     assert.equal(f.comments.get(201).length, 2); assert.equal(f.comments.get(201)[1].body, feedback.body);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
+  } else if (scenario === "deleted_review" || scenario === "unreceipted_review") {
+    await implement(1); await route(); f.faults.label.add(201);
+    const older = await run(); assert.ok(older.error); assert.ok(older.publication.commentId);
+    const itemId = f.row(s.tasks, older.taskId).itemId;
+    f.reset(201, "grade-A"); tasks.enqueueTask({ itemId, action: "review_pr", reason: "New assessment", input: {} });
+    if (scenario === "unreceipted_review") f.faults.comment.add(201);
+    const newer = await run();
+    if (scenario === "deleted_review") {
+      assert.equal(newer.error, null);
+      f.comments.set(201, []);
+    } else {
+      assert.ok(newer.error); assert.equal(newer.publication.commentId, undefined);
+      assert.match(f.comments.get(201)[0].body, new RegExp(newer.taskId));
+    }
+    const calls = f.requests.length, updates = f.writes.filter((w) => w.type === "comment_update").length;
+    tasks.retryTask(older.taskId); const superseded = await success();
+    assert.equal(superseded.publication.status, "not_needed");
+    assert.equal(f.requests.length, calls); assert.equal(f.comments.get(201).length, 1);
+    assert.match(f.comments.get(201)[0].body, new RegExp(newer.taskId));
+    assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
+    assert.equal(f.row(s.runs, newer.id).publication.commentId, f.comments.get(201)[0].id);
+    const delivered = all(s.events).findLast((event) => scenario === "deleted_review"
+      ? event.type === "github.comment_created" && event.data.commentId === f.comments.get(201)[0].id
+      : event.type === "github.labels_added" && event.data.labels.includes("A · Strong"));
+    assert.equal(delivered.runId, newer.id);
+    if (scenario === "deleted_review") {
+      f.comments.set(201, []); await route();
+      assert.equal(f.requests.length, calls); assert.equal(f.comments.get(201).length, 1);
+      assert.match(f.comments.get(201)[0].body, new RegExp(newer.taskId));
+    } else {
+      assert.equal(f.writes.filter((w) => w.type === "comment_update").length, updates);
+      tasks.retryTask(newer.taskId); await success(); assert.equal(f.requests.length, calls);
+    }
   } else if (scenario === "grade_race") {
     await implement(1); await route(); const reviewed = await success();
     tasks.enqueueTask({ itemId: f.row(s.tasks, reviewed.taskId).itemId, action: "review_pr", reason: "Fresh review", input: {} });

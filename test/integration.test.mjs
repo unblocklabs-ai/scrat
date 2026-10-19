@@ -9,6 +9,8 @@ const scenarios = {
   queue: "SQLite queue coalesces input, orders priorities, excludes busy workspaces and caps six tasks",
   panel: "Scrat-authored PR gets two independent Pi sessions and one consolidated comment",
   canonical: "publication recovery and re-review preserve the recorded comment when feedback quotes its markers",
+  deleted_review: "deleted canonical comments are restored from the newest applicable saved assessment",
+  unreceipted_review: "older retries preserve a newer remote review even when its write receipt was lost",
   grade_race: "sync invalidation and publication reconcile one current PR grade under concurrent execution",
   grade_failure: "grade delivery failures cannot prevent durable review tasks or block other PRs",
   absent_labels: "already absent labels reconcile without false removal events or hidden access failures",

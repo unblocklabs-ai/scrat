@@ -148,10 +148,11 @@ export async function fixture(scenario) {
     }
     match = path.match(/\/issues\/comments\/(\d+)$/);
     if (match && method === "PATCH") {
+      const number = [...comments].find(([, entries]) => entries.some((comment) => comment.id === Number(match[1])))?.[0];
       const comment = [...comments.values()].flat().find((comment) => comment.id === Number(match[1]));
       if (!comment) return reply({ message: "Not Found" }, 404);
       comment.body = body.body; writes.push({ type: "comment_update", id: comment.id });
-      return reply(comment);
+      return faults.comment.delete(number) ? reply({ message: "Lost update response" }, 502) : reply(comment);
     }
     match = path.match(/\/issues\/(\d+)\/labels(?:\/(.+))?$/);
     if (match) {

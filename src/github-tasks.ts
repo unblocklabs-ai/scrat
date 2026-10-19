@@ -10,6 +10,7 @@ import { cancelQueuedTasks, enqueueTask } from "./tasks.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { reconcilePrReview } from "./pr-review-state.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
+import { planIssueTasks, planPrMaintenance, planReview, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
 
 type Item = typeof items.$inferSelect;
 type Action = typeof tasks.$inferSelect.action;
@@ -28,11 +29,13 @@ function hasScratLabel(item: Item) {
   return item.payload.labels?.some((label) => typeof label === "string" ? label === "scrat" : label.name === "scrat");
 }
 
-function queue(item: Item, action: Action, reason: string, input: Record<string, unknown> & { triggerKey: string }) {
-  const latest = latestTask(item.id, action);
-  if (latest?.status !== "cancelled" && latest?.input.triggerKey === input.triggerKey) return 0;
-  enqueueTask({ itemId: item.id, action, reason, input });
-  return 1;
+function applyDecisions(itemId: string, decisions: RoutingDecision[]) {
+  let queued = 0;
+  for (const decision of decisions) {
+    if (decision.type === "cancel") cancelQueuedTasks(itemId, decision.reason, decision.action);
+    else { enqueueTask({ itemId, action: decision.action, reason: decision.reason, input: decision.input }); queued++; }
+  }
+  return queued;
 }
 
 export async function routeGithubTasks(repository: string, current: Item[], previous: Map<string, Item>, log: Logger) {
@@ -64,22 +67,16 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
       db.update(items).set({ workspaceId: null }).where(eq(items.id, item.id)).run();
       item.workspaceId = null;
     }
-    if (item.kind === "issue" && hasScratLabel(item)) {
-      cancelQueuedTasks(item.id, "Issue selected for implementation", "review_issue");
-      if (implemented.has(item.payload.number)) {
-        cancelQueuedTasks(item.id, "An open PR already implements this issue", "implement");
-        continue;
-      }
-      const latest = latestTask(item.id, "implement");
-      const wasLabelled = previous.get(item.externalId);
-      if (!item.workspaceId && (!latest || latest.status === "queued" || latest.status === "cancelled" || (wasLabelled && !hasScratLabel(wasLabelled)))) {
-        queued += queue(item, "implement", "Issue has the scrat label", {
-          triggerKey: JSON.stringify({ labelledAt: item.payload.updated_at, mainSha }), mainSha,
-        });
-      }
-      continue;
+    if (item.kind === "issue") {
+      const previousItem = previous.get(item.externalId);
+      const plan = planIssueTasks({
+        labelled: Boolean(hasScratLabel(item)), implemented: implemented.has(item.payload.number), workspaceId: item.workspaceId,
+        previouslyLabelled: previousItem ? Boolean(hasScratLabel(previousItem)) : undefined,
+        latest: latestTask(item.id, "implement"), updatedAt: item.payload.updated_at, mainSha,
+      });
+      queued += applyDecisions(item.id, plan.decisions);
+      if (!plan.review) continue;
     }
-    if (item.kind === "issue") cancelQueuedTasks(item.id, "Scrat label removed", "implement");
     const context = await fetchItemContext(repository, item.kind, item.payload.number, log);
     if (context.item.state !== "open") continue;
     if ("head" in context.item && context.item.base.ref !== config.github.baseBranch) {
@@ -92,11 +89,7 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
       if (pr.head.repo?.full_name !== repository) continue;
       const headRef = await fetchPullRequestHead(repositoryPath, remote, pr.number, env);
       const headSha = await git(repositoryPath, ["rev-parse", headRef]);
-      if (await hasConflicts(repositoryPath, mainSha, headSha)) {
-        queued += queue(item, "resolve_conflicts", "Scrat PR conflicts with its base branch", {
-          triggerKey: JSON.stringify({ mainSha, headSha }), mainSha, headSha,
-        });
-      } else cancelQueuedTasks(item.id, "PR no longer conflicts", "resolve_conflicts");
+      const conflicts = await hasConflicts(repositoryPath, mainSha, headSha);
       const acknowledged = new Set(context.comments.filter((comment) => comment.author === config.github.botLogin)
         .flatMap((comment) => [...comment.body.matchAll(/<!-- scrat-task:([a-f0-9-]+) -->/g)].map((match) => match[1])));
       const handled = db.select({ run: runs, task: tasks }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
@@ -105,51 +98,31 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
           || run.publication.commentId || acknowledged.has(task.id));
       const consumed = new Set(handled.flatMap(({ run }) => run.context?.commentRevisions ?? strings(run.input.commentRevisions)));
       const pending = comments.filter((comment) => !consumed.has(`${comment.id}@${comment.revision}`));
-      if (pending.length) {
-        const commentRevisions = pending.map((comment) => `${comment.id}@${comment.revision}`).sort();
-        queued += queue(item, "address_pr_feedback", "New feedback on a Scrat PR", {
-          triggerKey: JSON.stringify(commentRevisions), commentRevisions,
-        });
-      } else cancelQueuedTasks(item.id, "Feedback already handled", "address_pr_feedback");
+      queued += applyDecisions(item.id, planPrMaintenance({
+        conflicts, mainSha, headSha, pendingComments: pending.map((comment) => `${comment.id}@${comment.revision}`),
+        conflictTask: latestTask(item.id, "resolve_conflicts"), feedbackTask: latestTask(item.id, "address_pr_feedback"),
+      }));
     }
     try {
       const action = item.kind === "issue" ? "review_issue" : "review_pr";
       const revision = githubRevision(context.item, comments);
       const latest = latestTask(item.id, action);
-      const triggerKey = JSON.stringify({ revision, mainSha });
       const reviews = item.kind === "pr" ? prReviewHistory(item.id) : undefined;
-      const reviewState = reviews ? await resolvePrReview(reviews, context, mainSha) : undefined;
-      if (reviewState?.kind === "current") {
-        cancelQueuedTasks(item.id, "No observed relevant changes since the authoritative review", action);
-        continue;
-      }
-      if (latest?.status !== "cancelled" && latest?.input.triggerKey === triggerKey) continue;
       const attempt = reviews ? reviews.find(({ task }) => task.id === latest?.id)?.run
         : latest ? db.select().from(runs).where(eq(runs.taskId, latest.id))
           .orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
-      if (latest?.status !== "cancelled" && attempt?.context?.revision === revision && attempt.mainSha === mainSha) continue;
-      const completed = reviewState ? (reviewState.kind === "stale" ? reviewState.assessment : undefined)
-        : db.select({ run: runs, task: tasks }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-        .where(and(eq(tasks.itemId, item.id), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
-        .orderBy(desc(runs.startedAt)).limit(1).get();
-      let changedPaths: string[] = reviewState?.kind === "stale" ? reviewState.changedPaths : [];
-      if (!reviewState && completed?.run.context?.revision === revision && completed.run.mainSha) {
-        if (completed.run.mainSha === mainSha) {
-          cancelQueuedTasks(item.id, "No changes since the last review", action);
-          continue;
-        }
-        const changes = await reviewChanges(repositoryPath, completed.run.mainSha, mainSha, completed.run.result?.paths ?? []);
-        changedPaths = changes.paths;
-        if (!changes.relevant) {
-          cancelQueuedTasks(item.id, "Base changes do not affect the reviewed scope", action);
-          continue;
-        }
+      if (reviews) {
+        const state = await resolvePrReview(reviews, context, mainSha);
+        queued += applyDecisions(item.id, planReview({ kind: "pr", state, latest, attempt, revision, mainSha }));
+      } else {
+        if (reviewTrigger({ latest, attempt, revision, mainSha }).covered) continue;
+        const completed = db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
+          .where(and(eq(tasks.itemId, item.id), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
+          .orderBy(desc(runs.startedAt)).limit(1).get()?.run;
+        const baseChanges = completed?.context?.revision === revision && completed.mainSha && completed.mainSha !== mainSha
+          ? await reviewChanges(repositoryPath, completed.mainSha, mainSha, completed.result?.paths ?? []) : undefined;
+        queued += applyDecisions(item.id, planReview({ kind: "issue", completed, baseChanges, latest, attempt, revision, mainSha }));
       }
-      queued += queue(item, action, completed ? "Relevant GitHub or base-branch changes" : "Initial GitHub review", {
-        triggerKey, revision, mainSha, changedPaths,
-        previousMainSha: completed?.run.mainSha ?? null,
-        previousHeadSha: completed?.run.headSha ?? null,
-      });
     } finally {
       if (item.kind === "pr") {
         try { await reconcilePrReview(repository, item.id, item.payload.number, { itemId: item.id }); }

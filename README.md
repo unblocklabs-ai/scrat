@@ -95,6 +95,7 @@ Each `providers.<name>` entry registers an endpoint and models with Pi. Actions 
 ### Actions
 
 `actions` defines `review_issue`, `review_pr`, `implement`, `resolve_conflicts`, and `address_pr_feedback`.
+Execution mode, acceptance rules, and publication behavior live in `src/actions.ts`; configuration selects prompts, models, and priorities without changing those safety contracts.
 
 | Setting under `actions.<action>` | Purpose |
 | --- | --- |
@@ -108,7 +109,9 @@ The checked-in configuration currently uses six task slots, priorities **PR 100 
 
 ## Project layout
 
-- `src/github-tasks.ts` — GitHub routing policy.
+- `src/github-tasks.ts` — GitHub observations, queue effects, and closure cleanup.
+- `src/actions.ts` — typed execution, acceptance, and publication contracts; workspace lifetime follows action mode.
+- `src/github-routing.ts` — pure issue-selection, PR-maintenance, and review-routing decisions.
 - `src/tasks.ts`, `src/runner.ts` — atomic claims and task/run lifecycle.
 - `src/pi.ts`, `src/pr-review.ts` — Pi sessions and dual-model reviews.
 - `src/pr-assessment.ts`, `src/pr-review-state.ts` — assessment authority, freshness, and canonical delivery.

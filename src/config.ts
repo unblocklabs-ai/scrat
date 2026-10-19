@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import settings from "../scrat.config.json" with { type: "json" };
+import type { Action } from "./actions.ts";
 
 const configUrl = new URL("../scrat.config.json", import.meta.url);
 export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -18,7 +19,7 @@ export function getRepositoryPath() {
   return resolve(fileURLToPath(new URL(".", configUrl)), process.env.SCRAT_REPOSITORY_PATH ?? config.github.repositoryPath);
 }
 
-export function getActionConfig(action: keyof typeof config.actions) {
+export function getActionConfig(action: Action) {
   const actionConfig = config.actions[action];
   const thinkingLevel = thinkingLevels.find((level) => level === actionConfig.thinkingLevel);
   if (!thinkingLevel) throw new Error(`Invalid thinking level for ${action}: ${actionConfig.thinkingLevel}`);

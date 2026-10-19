@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 const execute = promisify(execFile);
 const scenarios = {
   queue: "SQLite queue coalesces input, orders priorities, excludes busy workspaces and caps six tasks",
+  routing: "GitHub routing reconciles all five actions and coalesces changing facts without invoking Pi",
+  routing_history: "covered triggers and attempts skip unavailable review history without blocking later items",
+  acceptance: "action postconditions reject empty implementations and unresolved conflicts but permit reply-only feedback",
   panel: "Scrat-authored PR gets two independent Pi sessions and one consolidated comment",
   canonical: "publication recovery and re-review preserve the recorded comment when feedback quotes its markers",
   deleted_review: "deleted canonical comments are restored from the authoritative saved assessment",

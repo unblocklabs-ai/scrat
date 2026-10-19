@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { type AnySQLiteColumn, integer, sqliteTable, text, unique, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { actionIds } from "./actions.ts";
 import type { ErrorDetails } from "./errors.ts";
 import type { AgentResult, Reviewer } from "./results.ts";
 import type { GithubComment, fetchItemContext, fetchOpenItems } from "./github.ts";
@@ -29,7 +30,7 @@ export const items = sqliteTable("items", {
 export const tasks = sqliteTable("tasks", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
   itemId: text("item_id").notNull().references(() => items.id),
-  action: text("action", { enum: ["review_issue", "review_pr", "implement", "resolve_conflicts", "address_pr_feedback"] }).notNull(),
+  action: text("action", { enum: actionIds }).notNull(),
   priority: integer("priority").notNull().default(0),
   reason: text("reason").notNull(),
   input: text("input", { mode: "json" }).$type<Record<string, unknown>>().notNull(),

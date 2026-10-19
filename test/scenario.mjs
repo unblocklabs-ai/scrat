@@ -38,6 +38,71 @@ try {
     db.update(s.items).set({ workspaceId: w.id }).where(eq(s.items.id, "issue-9")).run();
     const claimed = []; let next; while ((next = tasks.claimTask())) claimed.push(next);
     assert.equal(claimed.filter((c) => ["issue-8", "issue-9"].includes(c.item.id)).length, 1);
+  } else if (scenario === "routing") {
+    f.addIssue(1); f.addIssue(2, ["scrat"]); await route();
+    const queued = () => all(s.tasks).filter((t) => t.status === "queued");
+    assert.deepEqual(queued().map((t) => t.action).sort(), ["implement", "review_issue"]);
+    await route(); assert.equal(queued().length, 2);
+    f.issues.get(1).labels.push({ name: "scrat" }); f.issues.get(2).labels = []; await route();
+    assert.deepEqual(queued().map((t) => [t.itemId, t.action]).sort(), [["issue-1", "implement"], ["issue-2", "review_issue"]]);
+    git(resolve("seed"), "switch", "-c", "scrat/routing");
+    writeFileSync("seed/src/app.ts", "export const value = 2;\n"); git(resolve("seed"), "add", "."); commit(resolve("seed"), "PR branch");
+    git(resolve("seed"), "push", resolve("remote.git"), "scrat/routing"); git(resolve("seed"), "switch", "main");
+    changeMain("src/app.ts", "export const value = 3;\n");
+    f.prs.push({ ...f.issues.get(1), id: 201, node_id: "PR_routing", number: 201,
+      html_url: "https://github.com/fixture/project/pull/201", body: "Closes #1", labels: [], user: { login: f.config.github.botLogin },
+      head: { ref: "scrat/routing", sha: git(resolve("remote.git"), "rev-parse", "scrat/routing"), repo: { full_name: "fixture/project" } },
+      base: { ref: "main", repo: { full_name: "fixture/project" } },
+    });
+    const external = { id: 9001, body: "Please explain this change", user: { login: "human" }, updated_at: "2026-10-19T01:00:00Z", html_url: "https://github.com/fixture/project/pull/201#comment" };
+    f.comments.set(201, [external, { ...external, id: 9002, body: "My own review", user: { login: f.config.github.botLogin } }]);
+    await route();
+    assert.ok(!queued().some((t) => t.itemId === "issue-1"));
+    const prTasks = () => queued().filter((t) => f.row(s.items, t.itemId).kind === "pr");
+    assert.deepEqual(prTasks().map((t) => t.action).sort(), ["address_pr_feedback", "resolve_conflicts", "review_pr"]);
+    const conflict = prTasks().find((t) => t.action === "resolve_conflicts"), feedback = prTasks().find((t) => t.action === "address_pr_feedback");
+    assert.deepEqual(feedback.input.commentRevisions, ["issue:9001@2026-10-19T01:00:00Z"]);
+    changeMain("src/app.ts", "export const value = 4;\n");
+    external.updated_at = "2026-10-19T02:00:00Z"; await route();
+    assert.equal(prTasks().find((t) => t.action === "resolve_conflicts").id, conflict.id);
+    assert.notEqual(prTasks().find((t) => t.action === "resolve_conflicts").input.mainSha, conflict.input.mainSha);
+    assert.equal(prTasks().find((t) => t.action === "address_pr_feedback").id, feedback.id);
+    assert.deepEqual(prTasks().find((t) => t.action === "address_pr_feedback").input.commentRevisions, ["issue:9001@2026-10-19T02:00:00Z"]);
+    f.comments.set(201, [f.comments.get(201)[1]]); await route();
+    assert.ok(!prTasks().some((t) => t.action === "address_pr_feedback"));
+    f.prs[0].state = "closed"; await route(); assert.equal(prTasks().length, 0);
+    assert.equal(f.requests.length, 0, "Routing does not require agent inference");
+  } else if (scenario === "routing_history") {
+    f.addIssue(1); f.enqueue(1); const completed = await success();
+    changeMain("src/app.ts", "export const value = 2;\n"); await route();
+    const { eq } = await import("drizzle-orm");
+    // Persisted history can outlive the Git object it describes (e.g. after GC).
+    db.update(s.runs).set({ mainSha: "f".repeat(40) }).where(eq(s.runs.id, completed.id)).run();
+    const isQueued = (id) => all(s.tasks).some((t) => t.itemId === id && t.status === "queued");
+    f.addIssue(2); await route(); assert.ok(isQueued("issue-2"));
+    const claim = tasks.claimTask(); assert.equal(claim.task.itemId, "issue-1");
+    tasks.finishRun(claim.run.id, { status: "failed", error: new Error("Interrupted before inference") });
+    f.addIssue(3); await route(); assert.ok(isQueued("issue-3")); assert.ok(!isQueued("issue-1"));
+    for (const id of ["issue-2", "issue-3"]) tasks.cancelQueuedTasks(id, "Isolate manual review attempt");
+    f.enqueue(1); f.reset(1, "incomplete"); const failed = await run();
+    assert.equal(failed.error.code, "AGENT_INCOMPLETE");
+    assert.equal(f.row(s.tasks, failed.taskId).input.triggerKey, undefined);
+    const calls = f.requests.length; f.addIssue(4); await route();
+    assert.ok(isQueued("issue-4")); assert.ok(!isQueued("issue-1")); assert.equal(f.requests.length, calls);
+  } else if (scenario === "acceptance") {
+    f.addIssue(1, ["scrat"]); f.enqueue(1, "implement"); f.modes.set(1, "no-change");
+    const empty = await run(); assert.match(empty.error.message, /no changes/); assert.equal(f.prs.length, 0);
+    const implemented = await implement(2); const head = f.prs[0].head.sha;
+    changeMain("src/app.ts", "export const value = 99;\n"); await route();
+    const prItem = all(s.items).find((i) => i.kind === "pr");
+    tasks.cancelQueuedTasks(prItem.id, "Exercise conflict postcondition directly", "review_pr");
+    f.reset(202, "no-change"); const unresolved = await run();
+    assert.match(unresolved.error.message, /still conflicts/); assert.equal(f.prs[0].head.sha, head);
+    assert.ok(!f.row(s.workspaces, implemented.workspaceId).removedAt);
+    tasks.enqueueTask({ itemId: prItem.id, action: "address_pr_feedback", reason: "Reply without code changes", input: {} });
+    f.reset(202, "no-change"); const replied = await success();
+    assert.equal(replied.publication.publishedCommitSha, head); assert.equal(f.prs.length, 1);
+    assert.equal(f.comments.get(202).length, 1); assert.equal(replied.workspaceId, implemented.workspaceId);
   } else if (scenario === "panel") {
     await implement(1); f.prs[0].labels.push({ name: "human-label" }); await route();
     const review = await success();

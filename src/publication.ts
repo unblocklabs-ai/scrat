@@ -1,4 +1,5 @@
 import { eq } from "drizzle-orm";
+import { actionContracts } from "./actions.ts";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
@@ -22,8 +23,8 @@ export async function publishRun(task: typeof tasks.$inferSelect, run: typeof ru
     publication = { ...publication, ...patch };
     database.update(runs).set({ publication }).where(eq(runs.id, run.id)).run();
   }
-  const mutatesCode = task.action !== "review_issue" && task.action !== "review_pr";
-  if (mutatesCode) {
+  const contract = actionContracts[task.action];
+  if (contract.mode === "change") {
     const workspace = run.workspaceId ? getWorkspace(run.workspaceId) : undefined;
     if (!workspace || workspace.removedAt) throw new Error("Publication workspace is no longer active");
     const commitSha = publication.commitSha;
@@ -35,7 +36,7 @@ export async function publishRun(task: typeof tasks.$inferSelect, run: typeof ru
       }
       saveReceipt({ publishedCommitSha: commitSha });
     }
-    if (task.action === "implement") {
+    if (contract.publication === "pull-request") {
       if (!publication.pullRequestNumber) {
         let pr: Awaited<ReturnType<typeof findPullRequest>> | Awaited<ReturnType<typeof createPullRequest>>["data"] = await findPullRequest(repository, workspace.branch, context.baseBranch);
         if (pr?.state === "closed") throw new Error("The workspace PR was already closed");
@@ -54,7 +55,7 @@ export async function publishRun(task: typeof tasks.$inferSelect, run: typeof ru
       return;
     }
   }
-  if (task.action === "review_pr") {
+  if (contract.publication === "pr-assessment") {
     await reconcilePrReview(repository, task.itemId, context.item.number, references, { task, run });
     return;
   }
@@ -71,7 +72,7 @@ export async function publishRun(task: typeof tasks.$inferSelect, run: typeof ru
     }
     saveReceipt({ commentId });
   }
-  if (task.action === "review_issue") {
+  if (contract.publication === "issue-assessment") {
     await reconcileLabels(repository, context.item.number, {
       current: current.item.labels ?? [], desired: result.ready ? ["scrat"] : [], managed: ["scrat"],
     }, references);

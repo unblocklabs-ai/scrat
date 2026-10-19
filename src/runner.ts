@@ -1,4 +1,5 @@
 import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
+import { actionContracts } from "./actions.ts";
 import { config, getRepositoryPath } from "./config.ts";
 import { runCommands } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
@@ -20,7 +21,8 @@ export async function runNextTask() {
   const { task, run, item } = claimed;
   const references = { itemId: item.id, taskId: task.id, runId: run.id };
   const operation = startOperation("run.execute", { ...references, action: task.action });
-  const readOnly = task.action === "review_issue" || task.action === "review_pr";
+  const contract = actionContracts[task.action];
+  const readOnly = contract.mode === "review";
   let reviewWorkspace: Awaited<ReturnType<typeof createWorkspace>> | undefined;
   let databaseRequested = false;
   try {
@@ -68,7 +70,7 @@ export async function runNextTask() {
       const requested = run.input.commentRevisions;
       const ids = new Set(Array.isArray(requested)
         ? requested.filter((entry: unknown): entry is string => typeof entry === "string").map((entry) => entry.split("@")[0]) : []);
-      const evaluatedComments = task.action === "address_pr_feedback" && ids.size
+      const evaluatedComments = contract.context === "feedback" && ids.size
         ? comments.filter((comment) => ids.has(comment.id)) : comments;
       const evaluated = {
         revision, baseBranch, headSha: pullRequest?.head.sha,
@@ -118,7 +120,7 @@ export async function runNextTask() {
           prepare: config.workspace?.prepare, migrate: databaseConfig?.migrate,
         } : undefined,
       }, null, 2);
-      const agentResult = task.action === "review_pr"
+      const agentResult = contract.agent === "panel"
         ? await reviewPullRequest(run, workspace.path, prompt, operation.log, diffBaseSha)
         : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, log: operation.log, sessionFile: previous?.piSessionFile ?? undefined, environment });
       const result = { ...agentResult, paths: [...new Set([...diffPaths, ...agentResult.paths])] };
@@ -139,10 +141,10 @@ export async function runNextTask() {
         }, references);
         if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
         db.update(runs).set({ headSha: commitSha, publication: { status: "pending", commitSha }, verification: { headSha: commitSha, commands } }).where(eq(runs.id, run.id)).run();
-        if (task.action === "resolve_conflicts" && await hasConflicts(repositoryPath, mainSha, commitSha)) {
+        if (contract.acceptance === "conflict-free" && await hasConflicts(repositoryPath, mainSha, commitSha)) {
           throw new Error("PR still conflicts with its base branch after resolution");
         }
-        if (task.action === "implement" && !await git(workspace.path, ["diff", "--name-only", `${baseRef}...HEAD`])) {
+        if (contract.acceptance === "nonempty-diff" && !await git(workspace.path, ["diff", "--name-only", `${baseRef}...HEAD`])) {
           throw new Error("Implementation produced no changes against the base branch");
         }
       }
@@ -160,14 +162,14 @@ export async function runNextTask() {
         && revisionItem.head.sha !== evaluatedRun.publication.commitSha) throw new Error("GitHub PR head changed during execution");
       revisionItem = { ...revisionItem, head: { ...revisionItem.head, sha: evaluatedRun.context.headSha } };
     }
-    if (task.action !== "review_pr" && (evaluatedRun.context?.revision !== githubRevision(revisionItem, currentComments)
+    if (contract.publication !== "pr-assessment" && (evaluatedRun.context?.revision !== githubRevision(revisionItem, currentComments)
       || evaluatedRun.context.baseBranch !== currentBaseBranch)) {
       throw new Error("GitHub task context changed; enqueue a fresh task instead of retrying publication");
     }
     if (readOnly) {
       const currentMainSha = run.stage === "publishing" ? mainSha
         : await fetchRepository(repositoryPath, remote, currentBaseBranch, await getGitEnvironment(repository));
-      if (task.action !== "review_pr" && evaluatedRun.mainSha && evaluatedRun.mainSha !== currentMainSha) {
+      if (contract.publication !== "pr-assessment" && evaluatedRun.mainSha && evaluatedRun.mainSha !== currentMainSha) {
         const changes = await reviewChanges(repositoryPath, evaluatedRun.mainSha, currentMainSha, evaluatedRun.result?.paths ?? []);
         if (changes.relevant) throw new Error("Reviewed code changed; enqueue a fresh review instead of retrying publication");
       }

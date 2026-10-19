@@ -54,7 +54,7 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
       }
       continue;
     }
-    if (previous.get(item.externalId)?.state === "closed" && item.workspaceId && getWorkspace(item.workspaceId)?.removedAt) {
+    if (item.workspaceId && getWorkspace(item.workspaceId)?.removedAt) {
       db.update(items).set({ workspaceId: null }).where(eq(items.id, item.id)).run();
       item.workspaceId = null;
     }

@@ -1,0 +1,21 @@
+{
+  "name": "scrat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "db:push": "drizzle-kit push",
+    "fetch": "node --env-file=.env src/fetch.ts"
+  },
+  "dependencies": {
+    "@octokit/auth-app": "^8.3.1",
+    "drizzle-orm": "1.0.0-rc.4",
+    "octokit": "^5.0.5"
+  },
+  "devDependencies": {
+    "drizzle-kit": "1.0.0-rc.4"
+  }
+}

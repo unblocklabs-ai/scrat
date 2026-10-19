@@ -109,9 +109,8 @@ export async function commitWorkspace(workspace: typeof workspaces.$inferSelect,
   return git(workspace.path, ["rev-parse", "HEAD"]);
 }
 
-export async function pushWorkspace(workspace: typeof workspaces.$inferSelect, remote: string, env: NodeJS.ProcessEnv, references: EventReferences = {}) {
-  await git(workspace.path, ["push", "--", remote, `HEAD:refs/heads/${workspace.branch}`], env);
-  const commitSha = await git(workspace.path, ["rev-parse", "HEAD"]);
+export async function pushWorkspace(workspace: typeof workspaces.$inferSelect, remote: string, commitSha: string, env: NodeJS.ProcessEnv, references: EventReferences = {}) {
+  await git(workspace.repositoryPath, ["push", "--", remote, `${commitSha}:refs/heads/${workspace.branch}`], env);
   recordEvent({ ...references, type: "workspace.pushed", data: { workspaceId: workspace.id, commitSha } });
   return commitSha;
 }

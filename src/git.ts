@@ -47,3 +47,18 @@ export async function hasConflicts(repositoryPath: string, base: string, head: s
     throw error;
   }
 }
+
+export async function branchContainsCommit(repositoryPath: string, remote: string, branch: string, commitSha: string, env = process.env) {
+  const advertised = await git(repositoryPath, ["ls-remote", "--heads", "--", remote, `refs/heads/${branch}`], env);
+  const remoteSha = advertised.split(/\s+/)[0];
+  if (!remoteSha) return false;
+  if (remoteSha === commitSha) return true;
+  await git(repositoryPath, ["fetch", "--no-write-fetch-head", "--", remote, remoteSha], env);
+  try {
+    await git(repositoryPath, ["merge-base", "--is-ancestor", commitSha, remoteSha]);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === 1) return false;
+    throw error;
+  }
+}

@@ -1,6 +1,7 @@
 import { and, desc, eq, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
 import { config, getRepositoryPath } from "./config.ts";
+import { affectsPaths } from "./relevance.ts";
 import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts } from "./git.ts";
 import { fetchItemContext, getGitEnvironment, githubRevision } from "./github.ts";
@@ -86,9 +87,13 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
           triggerKey: JSON.stringify({ mainSha, headSha }), mainSha, headSha,
         });
       } else cancelQueuedTasks(item.id, "PR no longer conflicts", "resolve_conflicts");
-      const handled = db.select().from(tasks).where(and(eq(tasks.itemId, item.id), eq(tasks.action, "address_pr_feedback"))).all()
-        .filter((task) => task.status === "completed" || task.status === "running");
-      const consumed = new Set(handled.flatMap((task) => strings(task.input.commentRevisions)));
+      const acknowledged = new Set(context.comments.filter((comment) => comment.author === config.github.botLogin)
+        .flatMap((comment) => [...comment.body.matchAll(/<!-- scrat-task:([a-f0-9-]+) -->/g)].map((match) => match[1])));
+      const handled = db.select({ run: runs, task: tasks }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
+        .where(and(eq(tasks.itemId, item.id), eq(tasks.action, "address_pr_feedback"))).all()
+        .filter(({ run, task }) => (!run.finishedAt && task.status === "running") || (run.finishedAt && !run.error)
+          || run.publication.commentId || acknowledged.has(task.id));
+      const consumed = new Set(handled.flatMap(({ run }) => run.context?.commentRevisions ?? strings(run.input.commentRevisions)));
       const pending = comments.filter((comment) => !consumed.has(`${comment.id}@${comment.updatedAt}`));
       if (pending.length) {
         const commentRevisions = pending.map((comment) => `${comment.id}@${comment.updatedAt}`).sort();
@@ -103,19 +108,20 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
     const latest = latestTask(item.id, action);
     const triggerKey = JSON.stringify({ revision, mainSha });
     if (latest?.status !== "cancelled" && latest?.input.triggerKey === triggerKey) continue;
+    const attempt = latest ? db.select().from(runs).where(eq(runs.taskId, latest.id))
+      .orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
+    if (latest?.status !== "cancelled" && attempt?.context?.revision === revision && attempt.mainSha === mainSha) continue;
     const completed = db.select({ run: runs, task: tasks }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
       .where(and(eq(tasks.itemId, item.id), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
       .orderBy(desc(runs.startedAt)).limit(1).get();
     let changedPaths: string[] = [];
-    if (completed?.task.input.revision === revision && completed.run.mainSha) {
+    if (completed?.run.context?.revision === revision && completed.run.mainSha) {
       if (completed.run.mainSha === mainSha) {
         cancelQueuedTasks(item.id, "No changes since the last review", action);
         continue;
       }
       changedPaths = (await git(repositoryPath, ["diff", "--name-only", "--no-renames", completed.run.mainSha, mainSha])).split("\n").filter(Boolean);
-      const paths = strings(completed.run.result?.paths);
-      const relevant = !paths.length || changedPaths.some((changed) => paths.some((path) => path === "." || changed === path || changed.startsWith(path + "/")));
-      if (!changedPaths.length || !relevant) {
+      if (!affectsPaths(changedPaths, completed.run.result?.paths ?? [])) {
         cancelQueuedTasks(item.id, "Base changes do not affect the reviewed scope", action);
         continue;
       }

@@ -10,6 +10,7 @@ export type JournalEvent = (
   | { type: "run.completed"; data: { stage: string } }
   | { type: "run.failed"; data: { stage: string; error: ErrorDetails } }
   | { type: "task.cancelled"; data: { action: TaskDetails["action"]; reason: string } }
+  | { type: "task.retried"; data: { action: TaskDetails["action"] } }
   | { type: "workspace.committed" | "workspace.pushed"; data: { workspaceId: string; commitSha: string } }
   | { type: "task.enqueued"; data: TaskDetails }
   | { type: "task.coalesced"; data: {

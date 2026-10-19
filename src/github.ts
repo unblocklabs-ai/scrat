@@ -101,6 +101,14 @@ export function githubRevision(item: { title: string; body?: string | null; head
   });
 }
 
+export async function findPullRequest(repository: string, branch: string, base: string) {
+  const { github, owner, repo } = await githubForRepository(repository, "read", logger);
+  const matches = await github.paginate(github.rest.pulls.list, {
+    owner, repo, state: "all", head: `${owner}:${branch}`, base, per_page: 100,
+  });
+  return matches.find((pr) => pr.user?.login === config.github.botLogin && pr.head.repo?.full_name === repository && pr.head.ref === branch);
+}
+
 export async function postComment(repository: string, issueNumber: number, body: string, references: EventReferences = {}) {
   const operation = startOperation("github.post_comment", { ...references, repository, issueNumber });
   const eventReferences = { ...references, operationId: operation.operationId };

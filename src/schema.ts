@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
-import { integer, sqliteTable, text, unique, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { type AnySQLiteColumn, integer, sqliteTable, text, unique, uniqueIndex } from "drizzle-orm/sqlite-core";
 import type { ErrorDetails } from "./errors.ts";
-import type { fetchItemContext, fetchOpenItems } from "./github.ts";
+import type { GithubComment, fetchItemContext, fetchOpenItems } from "./github.ts";
 
 type OpenItems = Awaited<ReturnType<typeof fetchOpenItems>>;
 
@@ -58,6 +58,15 @@ export const workspaces = sqliteTable("workspaces", {
 export const runs = sqliteTable("runs", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
   taskId: text("task_id").notNull().references(() => tasks.id),
+  retryOfRunId: text("retry_of_run_id").references((): AnySQLiteColumn => runs.id),
+  input: text("input", { mode: "json" }).$type<Record<string, unknown>>().notNull().default({}),
+  context: text("context", { mode: "json" }).$type<{
+    revision: string;
+    baseBranch: string;
+    item: { number: number; title: string; body?: string | null; url: string };
+    comments: GithubComment[];
+    commentRevisions: string[];
+  }>(),
   skill: text("skill").notNull(),
   provider: text("provider").notNull(),
   model: text("model").notNull(),
@@ -70,12 +79,14 @@ export const runs = sqliteTable("runs", {
   stage: text("stage", { enum: runStages }).notNull().default("preparing"),
   startedAt: text("started_at"),
   finishedAt: text("finished_at"),
-  result: text("result", { mode: "json" }).$type<Record<string, unknown>>(),
+  result: text("result", { mode: "json" }).$type<{ text: string; ready: boolean; paths: string[] }>(),
   error: text("error", { mode: "json" }).$type<ErrorDetails>(),
   publication: text("publication", { mode: "json" }).$type<{
     status: "pending" | "published" | "not_needed";
     commentId?: number;
     commitSha?: string;
+    publishedCommitSha?: string;
+    scratLabel?: boolean;
     pullRequestNumber?: number;
   }>().notNull().$defaultFn(() => ({ status: "pending" })),
 });

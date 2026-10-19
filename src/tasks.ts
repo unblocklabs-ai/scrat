@@ -69,15 +69,26 @@ export function claimTask() {
       )))
       .orderBy(desc(tasks.priority), asc(tasks.createdAt), asc(tasks.id)).limit(1).get();
     if (!next) return;
-    const settings = getActionConfig(next.task.action);
+    const previousRun = transaction.select().from(runs).where(eq(runs.taskId, next.task.id))
+      .orderBy(desc(runs.startedAt), desc(runs.id)).limit(1).get();
+    const retry = previousRun?.error && isDeepStrictEqual(previousRun.input, next.task.input) ? previousRun : undefined;
+    const settings = retry ?? getActionConfig(next.task.action);
+    const resume = retry?.stage === "publishing" && retry.result && retry.context ? retry : undefined;
     const task = transaction.update(tasks).set({ status: "running" }).where(eq(tasks.id, next.task.id)).returning().get()!;
     const run = transaction.insert(runs).values({
       taskId: task.id,
+      retryOfRunId: retry?.id,
+      input: task.input,
       skill: settings.skill,
       provider: settings.provider,
       model: settings.model,
       thinkingLevel: settings.thinkingLevel,
-      workspaceId: next.item.workspaceId,
+      workspaceId: resume?.workspaceId ?? next.item.workspaceId,
+      ...(resume ? {
+        context: resume.context, result: resume.result, mainSha: resume.mainSha, headSha: resume.headSha,
+        piSessionId: resume.piSessionId, piSessionFile: resume.piSessionFile,
+        stage: "publishing", publication: { ...resume.publication, status: "pending" },
+      } : {}),
       startedAt: new Date().toISOString(),
     }).returning().get()!;
     recordEvent({ itemId: task.itemId, taskId: task.id, runId: run.id, type: "run.started", data: {
@@ -85,6 +96,28 @@ export function claimTask() {
     } }, transaction);
     return { task, item: next.item, run };
   }, { behavior: "immediate" });
+}
+
+export function retryTask(taskId: string) {
+  const operation = startOperation("task.retry", { taskId });
+  try {
+    const task = db.transaction((transaction) => {
+      const failed = transaction.select().from(tasks).where(and(eq(tasks.id, taskId), eq(tasks.status, "failed"))).get();
+      if (!failed) throw new Error(`Task is not failed: ${taskId}`);
+      const queued = transaction.select().from(tasks).where(and(
+        eq(tasks.itemId, failed.itemId), eq(tasks.action, failed.action), eq(tasks.status, "queued"),
+      )).get();
+      if (queued) throw new Error(`A queued task already exists for this item/action: ${queued.id}`);
+      const updated = transaction.update(tasks).set({ status: "queued" }).where(eq(tasks.id, taskId)).returning().get()!;
+      recordEvent({ itemId: updated.itemId, taskId, operationId: operation.operationId, type: "task.retried", data: { action: updated.action } }, transaction);
+      return updated;
+    }, { behavior: "immediate" });
+    operation.complete();
+    return task;
+  } catch (error) {
+    operation.fail(error);
+    throw error;
+  }
 }
 
 export function finishRun(runId: string, outcome: { status: "completed" } | { status: "failed"; error: unknown }) {

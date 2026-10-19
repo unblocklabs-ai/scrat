@@ -12,7 +12,9 @@
     "enqueue": "node --env-file=.env src/enqueue.ts",
     "run-next": "node --env-file=.env src/run-next.ts",
     "work": "node --env-file=.env src/work.ts",
-    "sync": "node --env-file=.env src/sync.ts"
+    "sync": "node --env-file=.env src/sync.ts",
+    "retry": "node --env-file=.env src/retry.ts",
+    "cleanup": "node --env-file=.env src/cleanup.ts"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^1.3.0",

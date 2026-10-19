@@ -16,7 +16,7 @@ export const logger = pino({
     },
   },
   redact: {
-    paths: ["authorization", "headers.authorization", "request.headers.authorization", "token", "privateKey", "*.token", "*.privateKey"],
+    paths: ["authorization", "headers.authorization", "request.headers.authorization", "token", "privateKey", "apiKey", "*.token", "*.privateKey", "*.apiKey"],
     censor: "[redacted]",
   },
 }, pino.destination({ dest: 2, sync: true }));

@@ -12,8 +12,9 @@ export type ErrorDetails = {
 };
 
 export function redactSecrets(value: string) {
-  const privateKey = process.env.GITHUB_APP_PRIVATE_KEY;
-  if (privateKey) value = value.replaceAll(privateKey, "[redacted]");
+  for (const secret of [process.env.GITHUB_APP_PRIVATE_KEY, process.env.CODEX_LB_API_KEY]) {
+    if (secret) value = value.replaceAll(secret, "[redacted]");
+  }
   return value
     .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, "[redacted]")
     .replace(/\b(?:gh[oprsu]_|github_pat_)[A-Za-z0-9_]+\b/g, "[redacted]")

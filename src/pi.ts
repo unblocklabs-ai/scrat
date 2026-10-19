@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
@@ -7,9 +8,9 @@ import { db } from "./db.ts";
 import { runs } from "./schema.ts";
 
 export async function executePi(run: typeof runs.$inferSelect, cwd: string, context: string, readOnly: boolean, log: Logger, sessionFile?: string) {
-  const modelRuntime = await ModelRuntime.create();
+  const modelRuntime = await ModelRuntime.create({ modelsPath: fileURLToPath(new URL("../scrat.config.json", import.meta.url)) });
   const model = modelRuntime.getModel(run.provider, run.model);
-  if (!model) throw new Error(`Configure a Pi model for ${run.provider}/${run.model}`);
+  if (!model) throw new Error(modelRuntime.getError() ?? `Configure a Pi model for ${run.provider}/${run.model}`);
   const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
   const thinkingLevel = levels.find((level) => level === run.thinkingLevel);
   if (!thinkingLevel) throw new Error(`Unknown thinking level: ${run.thinkingLevel}`);

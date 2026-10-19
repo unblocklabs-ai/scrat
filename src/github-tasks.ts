@@ -14,7 +14,7 @@ import { cancelQueuedTasks, enqueueTask } from "./tasks.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { reconcileObserved, serializePr } from "./pr-review-publication.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
-import { planIssueTasks, planPrMaintenance, planReview, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
+import { planIssueTasks, planPrMaintenance, planReview, planSelfRepair, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
 
 type Item = typeof items.$inferSelect;
 type Action = typeof tasks.$inferSelect.action;
@@ -43,6 +43,7 @@ function applyDecisions(itemId: string, decisions: RoutingDecision[]) {
 }
 
 let syncRound = 0;
+const limitLogged = new Set<string>();
 
 export async function routeGithubTasks(github: GitHubRepository, current: Item[], previous: Map<string, Item>, log: Logger) {
   const { repository } = github;
@@ -101,6 +102,16 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       if (reviews) {
         const state = await resolvePrReview(reviews, observation, mainSha);
         added += applyDecisions(item.id, planReview({ kind: "pr", state, latest, attempt, revision, mainSha }));
+        const { maxSelfRepairs = 2 } = config.actions.address_review;
+        const repair = planSelfRepair({
+          owned, state, feedbackTask: latestTask(item.id, "address_pr_feedback"), repairTask: latestTask(item.id, "address_review"),
+          count: db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count, limit: maxSelfRepairs,
+        });
+        if (repair.limited && state.kind === "current" && !limitLogged.has(state.assessment.originId)) {
+          limitLogged.add(state.assessment.originId);
+          log.info({ event: "self_repair.limit_reached", itemId: item.id, limit: maxSelfRepairs }, "Self-repair limit reached");
+        }
+        added += applyDecisions(item.id, repair.decisions);
       } else {
         if (reviewTrigger({ latest, attempt, revision, mainSha }).covered) return added;
         const completed = db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))

@@ -102,6 +102,14 @@
       "provider": "codex-lb",
       "model": "gpt-6.1-sol",
       "thinkingLevel": "high"
+    },
+    "address_review": {
+      "priority": 60,
+      "skill": "skills/address_review/SKILL.md",
+      "provider": "codex-lb",
+      "model": "gpt-6.1-sol",
+      "thinkingLevel": "high",
+      "maxSelfRepairs": 2
     }
   }
 }

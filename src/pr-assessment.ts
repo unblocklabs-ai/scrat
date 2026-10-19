@@ -16,7 +16,7 @@ type History = ReturnType<typeof prReviewHistory>;
 
 function selectAssessment(history: History) {
   const byId = new Map(history.map((entry) => [entry.run.id, entry]));
-  let selected: (History[number] & { result: NonNullable<typeof runs.$inferSelect.result>; originSequence: number }) | undefined;
+  let selected: (History[number] & { result: NonNullable<typeof runs.$inferSelect.result>; originSequence: number; originId: string }) | undefined;
   for (const entry of history) {
     const { run } = entry;
     if (!hasPublicationSnapshot(run) || run.result.outcome !== "complete" || run.publication.status === "not_needed") continue;
@@ -37,7 +37,7 @@ function selectAssessment(history: History) {
     if (sequence === null || run.sequence === null) throw new Error(`Missing run sequence for PR assessment: ${run.id}`);
     // History is claim-newest first. Copies retain their inference origin's order.
     if (!selected || sequence > selected.originSequence) {
-      selected = { ...entry, result: run.result, originSequence: sequence };
+      selected = { ...entry, result: run.result, originSequence: sequence, originId: origin.run.id };
     }
   }
   return selected;

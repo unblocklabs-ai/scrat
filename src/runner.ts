@@ -129,9 +129,12 @@ export async function runNextTask() {
           files[key] = resolve(contextDir, name);
           await writeFile(files[key], content);
         };
+        const report = task.action === "address_review" ? db.select().from(runs).where(eq(runs.id, String(task.input.assessmentRunId))).get()?.result?.text : undefined;
+        if (task.action === "address_review" && !report) throw new Error("Missing review report for self-repair");
         const failure = run.retryOfRunId ? db.select().from(runs).where(eq(runs.id, run.retryOfRunId)).get()?.error : undefined;
         await Promise.all([
           writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),
+          report && writeContext("review", "review.md", report),
           failure && writeContext("previousFailure", "previous-failure.json", JSON.stringify(failure, null, 2)),
           diffPaths.length > inlineDiffPaths && writeContext("diffPaths", "diff-paths.txt", diffPaths.join("\n") + "\n"),
           changedPaths.length > inlineDiffPaths && writeContext("changedPaths", "changed-paths.txt", changedPaths.join("\n") + "\n"),

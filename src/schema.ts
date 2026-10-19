@@ -21,6 +21,7 @@ export const items = sqliteTable("items", {
   kind: text("kind", { enum: ["issue", "pr"] }).notNull(),
   state: text("state", { enum: ["open", "closed"] }).notNull().default("open"),
   workspaceId: text("workspace_id").references(() => workspaces.id),
+  selfRepairCount: integer("self_repair_count").notNull().default(0),
   payload: text("payload", { mode: "json" })
     .$type<GithubItem>().notNull(),
 }, (table) => [unique().on(table.source, table.externalId)]);

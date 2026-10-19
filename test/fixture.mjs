@@ -125,7 +125,7 @@ export async function fixture(scenario) {
       + (mode === "leak-report" ? "\n" + process.env.GITHUB_APP_PRIVATE_KEY : "")
       + (mode.startsWith("quoted-") ? "\n```\nSCRAT_GRADE: F\nSCRAT_READY\n```" : "")
       + (mode === "ready" ? "\nSCRAT_READY" : "")
-      + (context.action === "review_pr" && !["missing-grade", "quoted-only"].includes(mode) ? `\nSCRAT_GRADE: ${["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : "B"}` : "")
+      + (context.action === "review_pr" && !["missing-grade", "quoted-only"].includes(mode) ? `\nSCRAT_GRADE: ${["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : mode === "grade-C" ? "C" : "B"}` : "")
       + (mode === "no-status" ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
     const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] } : { role: "assistant", content: output };
     res.writeHead(200, { "content-type": "text/event-stream" });

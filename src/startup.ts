@@ -11,7 +11,7 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 
 // Fails before any worker claims, so a bad static setting stops startup instead of failing tasks one by one.
 // @public: exported for the scenario tests, which validate alternative configurations directly.
-export async function validateStaticConfig(settings: { actions: Record<string, Entry & { skill: string; reviewers?: Entry[] }> } = config) {
+export async function validateStaticConfig(settings: { actions: Record<string, Entry & { skill: string; reviewers?: Entry[]; maxSelfRepairs?: number }> } = config) {
   const modelRuntime = await sharedModelRuntime();
   const problems: string[] = [];
   const checkEntry = (label: string, { provider, model, thinkingLevel }: Entry) => {
@@ -22,6 +22,9 @@ export async function validateStaticConfig(settings: { actions: Record<string, E
     const entry = settings.actions[action];
     if (!entry) { problems.push(`${action}: missing from configuration`); continue; }
     checkEntry(action, entry);
+    if (action === "address_review" && entry.maxSelfRepairs !== undefined && !(Number.isSafeInteger(entry.maxSelfRepairs) && entry.maxSelfRepairs >= 0)) {
+      problems.push(`${action}: maxSelfRepairs must be a non-negative integer`);
+    }
     entry.reviewers?.forEach((reviewer, index) => checkEntry(`${action} reviewer ${index + 1}`, reviewer));
     const skill = fileURLToPath(new URL(entry.skill, configUrl));
     if (!await access(skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${skill}`);

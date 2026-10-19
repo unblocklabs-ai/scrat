@@ -50,6 +50,22 @@ export function planPrMaintenance({ conflicts, mainSha, headSha, pendingComments
   return decisions;
 }
 
+const lowGrades: readonly (string | undefined)[] = ["C", "D", "F"];
+
+// A low grade on a current assessment of a Scrat PR queues one repair per assessment, up to the item's cap.
+// Anything else cancels a queued repair, so it never runs against a stale assessment or ahead of human feedback.
+export function planSelfRepair({ owned, state, feedbackTask, repairTask, count, limit }: {
+  owned: boolean; state: PrReviewState; feedbackTask?: TaskFacts; repairTask?: TaskFacts; count: number; limit: number;
+}): { decisions: RoutingDecision[]; limited: boolean } {
+  const cancel: RoutingDecision[] = [{ type: "cancel", action: "address_review", reason: "No current low-graded review to repair" }];
+  if (!owned || state.kind !== "current" || !lowGrades.includes(state.assessment.result.grade) || feedbackTask?.status === "queued") {
+    return { decisions: cancel, limited: false };
+  }
+  const { originId } = state.assessment, grade = state.assessment.result.grade;
+  const decisions = queue(repairTask, "address_review", `Current review graded ${grade}`, { triggerKey: originId, assessmentRunId: originId, grade });
+  return decisions.length && count >= limit ? { decisions: cancel, limited: true } : { decisions, limited: false };
+}
+
 type ReviewTriggerFacts = {
   revision: string; mainSha: string; latest?: TaskFacts; attempt?: ReviewAttempt;
 };

@@ -1,4 +1,4 @@
-export const actionIds = ["review_issue", "review_pr", "implement", "resolve_conflicts", "address_pr_feedback"] as const;
+export const actionIds = ["review_issue", "review_pr", "implement", "resolve_conflicts", "address_pr_feedback", "address_review"] as const;
 export type Action = typeof actionIds[number];
 
 // Safety policy belongs in code; prompts, models and priorities remain config.
@@ -16,6 +16,7 @@ export const actionContracts = {
   implement: { mode: "change", agent: "single", publication: "pull-request", context: "all", acceptance: "nonempty-diff" },
   resolve_conflicts: { mode: "change", agent: "single", publication: "comment", context: "all", acceptance: "conflict-free" },
   address_pr_feedback: { mode: "change", agent: "single", publication: "comment", context: "feedback", acceptance: "complete" },
+  address_review: { mode: "change", agent: "single", publication: "comment", context: "all", acceptance: "complete" },
 } as const satisfies Record<Action, ActionContract>;
 
 export const temporaryWorkspaceActions = actionIds.filter((action) => actionContracts[action].mode === "review");

@@ -953,6 +953,45 @@ try {
     f.prs[0].base.ref = "alternate"; await route();
     const after = all(s.tasks).find((t) => t.action === "review_pr" && t.status === "queued").input.triggerKey;
     assert.notEqual(after, before);
+  } else if (scenario === "self_repair") {
+    const prItem = (n) => all(s.items).find((i) => i.kind === "pr" && i.payload.number === n);
+    const repairs = (n) => all(s.tasks).filter((t) => t.itemId === prItem(n).id && t.action === "address_review");
+    const count = (n) => db.$client.prepare("select self_repair_count as c from items where id = ?").get(prItem(n).id).c;
+    const review = async (n, mode) => { f.reset(n, mode); await route(); return success(); };
+    await implement(1); const graded = await review(201, "grade-C");
+    assert.equal(graded.result.grade, "C"); await route();
+    assert.equal(repairs(201).length, 1); assert.equal(repairs(201)[0].status, "queued"); assert.equal(repairs(201)[0].input.assessmentRunId, graded.id);
+    assert.equal(count(201), 1); await route(); assert.equal(repairs(201).length, 1); assert.equal(count(201), 1);
+    f.reset(201, "no-change"); const repair = await success();
+    assert.equal(repair.taskId, repairs(201)[0].id);
+    const request = f.requests.findLast((r) => r.context.action === "address_review");
+    assert.match(readFileSync(request.context.files.review, "utf8"), /Consolidated source-verified review/);
+    assert.equal(f.comments.get(201).length, 2); assert.match(f.comments.get(201)[1].body, /Implemented the change/);
+    await route(); assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 0, "A reply-only repair leaves the assessment current and cannot retrigger");
+    assert.equal(repairs(201).length, 1); assert.equal(count(201), 1);
+    await implement(2); await review(202, "normal"); await route(); assert.equal(repairs(202).length, 0, "Grade B does not trigger");
+    await implement(3); f.prs.find((pr) => pr.number === 203).user.login = "human";
+    await review(203, "grade-C"); await route(); assert.equal(repairs(203).length, 0, "Human-authored PRs never trigger");
+    await implement(4); await review(204, "grade-C");
+    db.$client.prepare("update items set self_repair_count = 2 where id = ?").run(prItem(204).id);
+    await route(); assert.equal(repairs(204).length, 0, "The cap blocks further repairs");
+    db.$client.prepare("update items set self_repair_count = 1 where id = ?").run(prItem(204).id);
+    await route(); assert.equal(repairs(204).length, 1); assert.equal(count(204), 2);
+    const queuedRepair = repairs(204)[0], before = count(204);
+    tasks.enqueueTask({ itemId: queuedRepair.itemId, action: "address_review", reason: "Coalesce", input: queuedRepair.input });
+    assert.equal(count(204), before, "A coalesced repair does not spend a cap slot");
+    assert.throws(() => tasks.enqueueManualTasks("address_review", ["204"]), /queued automatically/);
+    f.prs.find((pr) => pr.number === 204).title = "Retitled after the review"; await route();
+    assert.equal(repairs(204)[0].status, "cancelled", "A repair for a stale assessment is cancelled");
+    await success(); await route(); assert.equal(repairs(204).length, 1, "A new low grade at the cap queues nothing");
+    await implement(5);
+    f.comments.set(205, [{ id: 9100, body: "Please rename it", user: { login: "human" }, updated_at: "2026-10-19T01:00:00Z", html_url: "https://github.com/fixture/project/pull/205#comment" }]);
+    assert.equal((await review(205, "grade-C")).result.grade, "C"); await route();
+    assert.ok(all(s.tasks).some((t) => t.itemId === prItem(205).id && t.action === "address_pr_feedback" && t.status === "queued"));
+    assert.equal(repairs(205).length, 0, "Pending human feedback goes first");
+    tasks.cancelQueuedTasks(prItem(205).id, "Drain"); await implement(6); await review(206, "grade-C"); await route(); assert.equal(repairs(206)[0].status, "queued");
+    f.comments.set(206, [{ id: 9200, body: "Please rename it", user: { login: "human" }, updated_at: "2026-10-19T01:00:00Z", html_url: "https://github.com/fixture/project/pull/206#comment" }]);
+    await route(); assert.equal(repairs(206)[0].status, "cancelled", "Human feedback arriving later cancels the queued repair");
   } else if (scenario === "commit_hook") {
     f.addIssue(1); f.enqueue(1, "implement");
     f.onModel = (_context, step) => {

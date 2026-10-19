@@ -56,6 +56,9 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
           retryMode: "repair",
         },
       }).returning().get()!;
+      if (!previous && typeof task.input.assessmentRunId === "string") {
+        transaction.update(items).set({ selfRepairCount: sql`${items.selfRepairCount} + 1` }).where(eq(items.id, task.itemId)).run();
+      }
       const references = { itemId: queuedTask.itemId, taskId: queuedTask.id, operationId: operation.operationId };
       recordEvent(previous ? {
         ...references,
@@ -85,6 +88,7 @@ export type ManualEnqueueResult = { target: string; number?: number; itemId?: st
 // `input.manual` so sync routing never cancels them; only item closure does.
 export function enqueueManualTasks(action: string, targets: string[], priority?: number): ManualEnqueueResult[] {
   if (!isKnownAction(action)) throw new Error(`Unknown action: ${action}; expected one of ${actionIds.join(", ")}`);
+  if (action === "address_review") throw new Error("address_review needs a review assessment and is queued automatically by sync");
   const candidates = db.select().from(items).all().filter((item) => {
     const repository = itemRepository(item);
     return repository && sameRepository(repository, config.github.repository);

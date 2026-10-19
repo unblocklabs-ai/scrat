@@ -10,7 +10,7 @@ GitHub sync turns repository state into a persistent task queue:
 - **Implementation and maintenance:** issues labelled `scrat` become implementation tasks. Conflicts and new external feedback on Scrat-authored PRs become separate repair tasks.
 - **Issue reviews:** Scrat assesses issues and applies the `scrat` label when it considers them ready for implementation.
 
-Concurrency, priorities, models, and reasoning levels come from configuration. Queued tasks coalesce by item and action; tasks sharing an item or workspace cannot execute together. Bot-authored comments do not trigger feedback tasks, and low grades do not automatically trigger self-repair.
+Concurrency, priorities, models, and reasoning levels come from configuration. Queued tasks coalesce by item and action; tasks sharing an item or workspace cannot execute together. Bot-authored comments do not trigger feedback tasks. A current review graded C, D or F on a Scrat PR queues one `address_review` repair per assessment (a queued repair is cancelled when its assessment goes stale or human feedback is pending), capped per PR by `maxSelfRepairs`.
 
 Scrat serves the single configured repository and clone: sync and fetch refuse any other repository, a clone whose `origin` is a different repository is never updated (a clone whose origin is not a github.com URL for the configured repository, such as an ssh host alias, is refused), and queued tasks for items of another repository are rejected at claim.
 
@@ -113,7 +113,7 @@ Each `providers.<name>` entry registers an endpoint and models with Pi. Actions 
 
 ### Actions
 
-`actions` defines `review_issue`, `review_pr`, `implement`, `resolve_conflicts`, and `address_pr_feedback`.
+`actions` defines `review_issue`, `review_pr`, `implement`, `resolve_conflicts`, `address_pr_feedback`, and `address_review`.
 Execution mode, acceptance rules, and publication behavior live in `src/actions.ts`; configuration selects prompts, models, and priorities without changing those safety contracts.
 
 | Setting under `actions.<action>` | Purpose |
@@ -123,6 +123,7 @@ Execution mode, acceptance rules, and publication behavior live in `src/actions.
 | `provider` / `model` | Provider name and model ID for the action. For PR reviews, these select the consolidator. |
 | `thinkingLevel` | Requested Pi reasoning level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; provider/model support determines its mapping. |
 | `reviewers` | PR review panel: exactly two entries, each with its own `provider`, `model`, and `thinkingLevel`. |
+| `maxSelfRepairs` | `address_review` only: most self-repair tasks queued for one PR (non-negative integer, default 2; 0 disables self-repair; not enqueueable manually). A push makes the review stale and Scrat re-reviews; a reply-only repair is not retriggered for the same assessment. |
 
 The checked-in configuration currently uses six task slots, priorities **PR 100 > implementation/maintenance 60 > issue 10**, and a Sol-high/DeepSeek-high review panel with Sol-high consolidation. These are configurable values, not built-in limits or model choices.
 

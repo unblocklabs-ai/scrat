@@ -9,8 +9,8 @@ import { thinkingLevels } from "./config.ts";
 import { db } from "./db.ts";
 import { runs } from "./schema.ts";
 import { parseResult, type Reviewer } from "./results.ts";
-import { git } from "./git.ts";
-import { createReviewGitTool } from "./review-git.ts";
+import { blobSize, git, gitPage } from "./git.ts";
+import { createReviewGitTool, defaultBytes, maxBytes, pageText } from "./review-git.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
 import { childEnvironment } from "./secrets.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
@@ -111,11 +111,16 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     name: "read_base",
     label: "Read merge-base file",
     description: `Read a repository-relative text file from the immutable PR merge-base ${baseSha}. Use read for the current PR head.`,
-    parameters: Type.Object({ path: Type.String() }),
-    async execute(_id, { path }) {
-      const text = await git(cwd, ["show", `${baseSha}:${path}`]);
+    parameters: Type.Object({
+      path: Type.String(),
+      offset: Type.Optional(Type.Integer({ minimum: 0, description: "Byte offset into the file, for paging" })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: maxBytes, description: `Maximum bytes to return (default ${defaultBytes})` })),
+    }),
+    async execute(_id, { path, offset = 0, limit = defaultBytes }) {
+      const object = `${baseSha}:${path}`, page = await gitPage(cwd, ["show", object], offset, limit);
+      const size = page.more ? await blobSize(cwd, object) : undefined;
       basePaths.add(relative(cwd, resolve(cwd, path)));
-      return { content: [{ type: "text", text }], details: { path, baseSha } };
+      return { content: [{ type: "text", text: pageText(page, offset, size) }], details: { path, baseSha } };
     },
   }) : undefined;
   const gitTool = readOnly ? createReviewGitTool(cwd, revisions, gitPaths) : undefined;

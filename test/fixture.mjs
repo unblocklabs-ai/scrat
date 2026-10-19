@@ -25,6 +25,11 @@ export async function fixture(scenario) {
     writeFileSync("seed/ leading.ts", "export const leading = 1;\n");
   }
   if (scenario === "isolation") { writeFileSync("outside-secret.txt", "outside-secret-content\n"); symlinkSync(resolve("outside-secret.txt"), "seed/src/link.txt"); }
+  if (scenario === "git_paging") {
+    writeFileSync("seed/src/mid.txt", Array.from({ length: 200_000 }, (_, n) => `line ${n}`).join("\n") + "\n");
+    writeFileSync("seed/src/utf.txt", "é".repeat(3000));
+    writeFileSync("seed/src/huge.txt", ("a".repeat(63) + "\n").repeat(17 * 16384 + 10));
+  }
   if (scenario === "unicode_scope") writeFileSync("seed/src/a b.ts", "export const special = 1;\n");
   if (scenario === "unicode_nfd") writeFileSync("seed/src/caf\u00e9.ts", "export const unicode = 1;\n");
   if (["panel", "relevance", "lockfile_scope", "importer_scope"].includes(scenario)) writeFileSync("seed/.gitignore", "node_modules/\n");
@@ -87,6 +92,19 @@ export async function fixture(scenario) {
         context.previous && { name: "git", args: { operation: "diff_stat", from: "previousMain", to: "main" } },
         consolidating && { name: "read", args: { path: dir + "/reviewer-1.md" } },
       ].filter(Boolean)[step - 2];
+    }
+    if (review && scenario === "git_paging" && step >= 1) {
+      const fileArgs = { operation: "show", revision: "base", path: "src/huge.txt", limit: 1024 }, diffArgs = { operation: "diff", from: "base", to: "head", path: "src/huge.txt", limit: 1024 };
+      tool = [{ name: "read_base", args: { path: "src/mid.txt" } },
+        { name: "read_base", args: { path: "src/mid.txt", offset: 32768, limit: 1024 } },
+        { name: "read_base", args: { path: "src/utf.txt", limit: 1001 } },
+        { name: "git", args: fileArgs },
+        { name: "git", args: diffArgs },
+        { name: "git", args: { ...diffArgs, offset: 1024 } },
+        { name: "git", args: { ...fileArgs, revision: "head", offset: 10_000_000 } },
+        { name: "git", args: { operation: "diff_stat", from: "base", to: "head" } },
+        { name: "git", args: { operation: "show", revision: "base", path: "src/missing.txt" } },
+      ][step - 1];
     }
     if (review && scenario === "scope_snapshots" && step === 0) tool = { name: "read_base", args: { path: "src/deleted.ts" } };
     if (review && scenario === "scope_snapshots" && step === 1) tool = { name: "read", args: { path: " leading.ts" } };

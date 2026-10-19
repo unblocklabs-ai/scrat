@@ -251,6 +251,32 @@ try {
     assert.equal(superseded.publication.status, "not_needed");
     assert.equal(f.writes.length, writes); assert.equal(f.requests.length, inferences);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["A · Strong", "human-label"]);
+  } else if (scenario === "git_paging") {
+    await implement(1);
+    // The PR rewrites a 17 MiB base file into 18 MiB, so its history and its diff both exceed the 16 MiB buffer the old reader used.
+    const branch = f.prs[0].head.ref;
+    git(".", "clone", "-b", branch, resolve("remote.git"), "pr-edit");
+    writeFileSync("pr-edit/src/huge.txt", ("b".repeat(63) + "\n").repeat(18 * 16384));
+    git(resolve("pr-edit"), "add", "."); commit(resolve("pr-edit"), "Rewrite huge file"); git(resolve("pr-edit"), "push", "origin", branch);
+    await route();
+    const review = await success();
+    const hugeSize = 64 * (17 * 16384 + 10), midSize = readFileSync("seed/src/mid.txt").length, mid = readFileSync("seed/src/mid.txt", "latin1");
+    const mine = f.requests.filter((r) => r.context.action === "review_pr" && !r.consolidating && r.request.model === "gpt-6.1-sol").at(-1);
+    const results = mine.request.messages.filter((m) => m.role === "tool").map((m) => typeof m.content === "string" ? m.content : m.content.map((part) => part.text ?? "").join(""));
+    assert.equal(results.length, 10, results.map((text) => text.slice(0, 80)).join("\n"));
+    const [, first, second, multibyte, show, diff, diffNext, deep, stat, missing] = results;
+    assert.ok(first.length < 33_000 && first.startsWith(mid.slice(0, 100)) && first.includes(`truncated: bytes 0-32768 of ${midSize}`) && first.includes("offset=32768"), first.slice(-200));
+    assert.ok(second.startsWith(mid.slice(32768, 33792)) && second.includes(`bytes 32768-33792 of ${midSize}`) && second.includes("offset=33792"), second.slice(-200));
+    assert.ok(multibyte.includes("bytes 0-1000 of 6000") && multibyte.includes("offset=1000"), multibyte.slice(-200));
+    assert.ok(show.length < 1300 && show.startsWith(("a".repeat(63) + "\n").repeat(2)) && show.includes(`bytes 0-1024 of ${hugeSize}`), show.slice(-200));
+    const expected = execFileSync("git", ["-C", resolve("remote.git"), "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", mine.context.diffBaseSha, f.prs[0].head.sha, "--", "src/huge.txt"], { maxBuffer: 1 << 28 });
+    assert.ok(expected.length > 32 * 1024 * 1024);
+    assert.ok(diff.startsWith(expected.subarray(0, 1024).toString()) && diff.includes("truncated: bytes 0-1024; more output exists") && diff.includes("offset=1024"), diff.slice(-200));
+    assert.ok(diffNext.startsWith(expected.subarray(1024, 2048).toString()) && diffNext.includes("bytes 1024-2048") && diffNext.includes("offset=2048"), diffNext.slice(-200));
+    assert.ok(deep.includes(`bytes 10000000-10001024 of ${18 * 16384 * 64}`), deep.slice(-200));
+    assert.ok(stat.includes("src/huge.txt"), stat.slice(0, 200));
+    assert.ok(/does not exist|exists on disk, but not in|fatal/.test(missing), missing);
+    assert.ok(review.result.paths.includes("src/huge.txt") && review.result.paths.includes("src/mid.txt"), "paged paths join review scope");
   } else if (scenario === "canonical") {
     await implement(1); await route(); f.faults.comment.add(201);
     const lost = await run(); assert.ok(lost.error); assert.equal(lost.stage, "publishing");

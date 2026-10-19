@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -14,6 +14,44 @@ export async function git(repositoryPath: string, args: string[], env = childEnv
   // Path inventories and source blobs are byte-sensitive; only command metadata
   // (SHAs, refs, etc.) should have surrounding whitespace removed.
   return args.includes("-z") || args[0] === "show" ? stdout : stdout.trim();
+}
+
+export type GitPage = { text: string; end: number; more: boolean; total?: number };
+
+// `show` prints a blob byte-for-byte but renders a tree as a listing, so only a blob has a known total.
+export async function blobSize(repositoryPath: string, object: string) {
+  try {
+    return await git(repositoryPath, ["cat-file", "-t", object]) === "blob" ? Number(await git(repositoryPath, ["cat-file", "-s", object])) || undefined : undefined;
+  } catch { return undefined; }
+}
+
+// Streams git output, keeping only bytes [offset, offset + limit] so memory stays bounded however large the
+// output is. The child is stopped as soon as one lookahead byte proves more exists; that kill is not an error.
+export function gitPage(repositoryPath: string, args: string[], offset: number, limit: number, env = childEnvironment()) {
+  return new Promise<GitPage>((done, fail) => {
+    const child = spawn("git", ["-C", repositoryPath, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    const chunks: Buffer[] = [];
+    let position = 0, kept = 0, stderr = "", stopped = false;
+    child.stderr.on("data", (data: Buffer) => { if (stderr.length < 8192) stderr += data.toString(); });
+    child.stdout.on("data", (data: Buffer) => {
+      if (stopped) return;
+      const start = Math.max(0, offset - position), take = data.subarray(start, start + limit + 1 - kept);
+      position += data.length;
+      if (take.length) { chunks.push(take); kept += take.length; }
+      if (kept > limit) { stopped = true; child.kill(); }
+    });
+    child.on("error", fail);
+    child.on("close", (code) => {
+      if (!stopped && code !== 0) {
+        return fail(Object.assign(new Error(`git ${args[0]} failed (exit ${code}): ${stderr.trim()}`), { code, stderr }));
+      }
+      const bytes = Buffer.concat(chunks), more = bytes.length > limit;
+      let size = more ? limit : bytes.length;
+      // Never end a page inside a multibyte character; the next offset starts on one.
+      if (more) while (size > 1 && (bytes[size]! & 0xc0) === 0x80) size--;
+      done({ text: bytes.subarray(0, size).toString(), end: offset + size, more, ...(stopped ? {} : { total: position }) });
+    });
+  });
 }
 
 const originPattern = /^(?:https:\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/]+\/[^/]+?)(?:\.git)?\/?$/i;

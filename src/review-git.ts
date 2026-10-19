@@ -1,12 +1,21 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { posix } from "node:path";
 import { Type } from "typebox";
-import { git } from "./git.ts";
+import { blobSize, git, gitPage, type GitPage } from "./git.ts";
 
-const defaultBytes = 32 * 1024;
-const maxBytes = 64 * 1024;
+export const defaultBytes = 32 * 1024;
+export const maxBytes = 64 * 1024;
 const maxCommits = 200;
+const maxScopeBytes = 1024 * 1024;
 const operations = ["diff_stat", "diff", "log", "show"];
+
+// Page text plus the note that tells the model how to continue; `size` is the full length when known.
+export function pageText(page: GitPage, offset: number, size = page.total) {
+  const note = !page.text && size && offset >= size ? `[no output at offset ${offset}; total ${size} bytes]`
+    : page.more ? `\n[truncated: bytes ${offset}-${page.end}${size === undefined ? "; more output exists" : ` of ${size}`}. Call again with offset=${page.end} for the rest, or narrow the request with path.]`
+      : offset ? `\n[end of output: bytes ${offset}-${page.end}${size === undefined ? "" : ` of ${size}`}]` : "";
+  return page.text + note;
+}
 
 // Read-only Git for sessions without Bash. Every path it touches is reported to
 // `touched` so freshness sees the same scope as the wrapped read tool.
@@ -54,39 +63,29 @@ export function createReviewGitTool(cwd: string, revisions: Record<string, strin
       if (!operations.includes(operation)) throw new Error(`operation must be one of: ${operations.join(", ")}`);
       const path = repositoryPath(requestedPath, operation === "diff" || operation === "show");
       const scope: string[] = path ? [path] : [];
-      let output: string;
-      try {
-        if (operation === "diff_stat" || operation === "diff") {
-          const range = [await resolveRevision(from, "from"), await resolveRevision(to, "to")];
-          const options = ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"];
-          const limited = path ? ["--", path] : [];
-          output = await git(cwd, [...options, ...(operation === "diff_stat" ? ["--stat=240,200"] : []), ...range, ...limited]);
-          if (operation === "diff_stat" && !path) {
-            scope.push(...(await git(cwd, [...options, "--name-only", "-z", ...range])).split("\0").filter(Boolean));
-          }
-        } else if (operation === "log") {
-          const end = await resolveRevision(revision ?? "head", "revision");
-          output = await git(cwd, ["--literal-pathspecs", "log", "--no-color", "--no-decorate", `--max-count=${maxCommits}`,
-            "--format=%H %cs %an: %s", end, ...(path ? ["--", path] : [])]);
-        } else {
-          output = await git(cwd, ["show", `${await resolveRevision(revision, "revision")}:${path}`]);
+      let page: GitPage, size: number | undefined;
+      if (operation === "diff_stat" || operation === "diff") {
+        const range = [await resolveRevision(from, "from"), await resolveRevision(to, "to")];
+        const options = ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"];
+        page = await gitPage(cwd, [...options, ...(operation === "diff_stat" ? ["--stat=240,200"] : []), ...range, ...(path ? ["--", path] : [])], offset, limit);
+        if (operation === "diff_stat" && !path) {
+          // An unlistable change set is recorded as unknown scope: over-recording is the safe direction.
+          const names = await gitPage(cwd, [...options, "--name-only", "-z", ...range], 0, maxScopeBytes);
+          scope.push(...(names.more ? ["."] : names.text.split("\0").filter(Boolean)));
         }
-      } catch (error) {
-        if (error instanceof Error && "code" in error && error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
-          throw new Error("Git output exceeds 16 MiB; narrow the request with path or use diff_stat first");
-        }
-        throw error;
+      } else if (operation === "log") {
+        const end = await resolveRevision(revision ?? "head", "revision");
+        page = await gitPage(cwd, ["--literal-pathspecs", "log", "--no-color", "--no-decorate", `--max-count=${maxCommits}`,
+          "--format=%H %cs %an: %s", end, ...(path ? ["--", path] : [])], offset, limit);
+      } else {
+        const object = `${await resolveRevision(revision, "revision")}:${path}`;
+        page = await gitPage(cwd, ["show", object], offset, limit);
+        if (page.more) size = await blobSize(cwd, object);
       }
       for (const entry of scope) touched.add(entry);
-      const bytes = Buffer.from(output);
-      let end = Math.min(bytes.length, offset + limit);
-      // Never end a page inside a multibyte character; the next offset starts on one.
-      if (end < bytes.length) while (end > offset + 1 && (bytes[end]! & 0xc0) === 0x80) end--;
-      const body = bytes.subarray(offset, end).toString();
-      const note = offset >= bytes.length && bytes.length ? `[no output at offset ${offset}; total ${bytes.length} bytes]`
-        : end < bytes.length ? `\n[truncated: bytes ${offset}-${end} of ${bytes.length}. Call again with offset=${end} for the rest, or narrow the request with path.]`
-          : offset ? `\n[end of output: bytes ${offset}-${end} of ${bytes.length}]` : "";
-      return { content: [{ type: "text", text: (body || (bytes.length ? "" : "(no output)")) + note }], details: { operation, offset, bytes: bytes.length } };
+      if (operation !== "show" && !page.more) page = { ...page, text: page.text.trimEnd() };
+      const text = pageText(page, offset, size);
+      return { content: [{ type: "text", text: text || "(no output)" }], details: { operation, offset, bytes: page.end } };
     },
   });
 }

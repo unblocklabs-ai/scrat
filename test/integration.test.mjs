@@ -53,6 +53,7 @@ const scenarios = {
   single_repository: "sync, fetch, claims and clone refs refuse any repository other than the configured one",
   identity: "retained workspaces reject branch replacement and retain unpublished commits",
   feedback: "edited review summaries and same-commit PR retargets produce fresh tasks",
+  git_paging: "git and read_base page bounded output from files and diffs larger than the 16 MiB buffer without loading them",
   commit_hook: "commit hooks cannot attach verification receipts to an unverified tree",
   isolation: "workspace commands, hooks and agent tools cannot reach Scrat credentials, and credential material is never published",
   wakeup: "idle workers wake on enqueue, keep signals sent while busy, fall back on timeout and release on abort",

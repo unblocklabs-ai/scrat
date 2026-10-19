@@ -92,8 +92,10 @@ export async function runNextTask() {
         const previous = !readOnly ? db.select().from(runs).where(and(
           eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile),
         )).orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
-        const diffBaseSha = pullRequest ? await git(repositoryPath, ["merge-base", mainSha, preparedHead]) : mainSha;
-        const diffPaths = pullRequest ? (await git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", `${mainSha}...${preparedHead}`])).split("\0").filter(Boolean) : [];
+        const [diffBaseSha, diffPaths] = await Promise.all([
+          pullRequest ? git(repositoryPath, ["merge-base", mainSha, preparedHead]) : mainSha,
+          pullRequest ? git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", `${mainSha}...${preparedHead}`]).then((output) => output.split("\0").filter(Boolean)) : [],
+        ]);
         const requested = run.input.commentRevisions;
         const ids = new Set(Array.isArray(requested)
           ? requested.filter((entry: unknown): entry is string => typeof entry === "string").map((entry) => entry.split("@")[0]) : []);
@@ -126,11 +128,13 @@ export async function runNextTask() {
           files[key] = resolve(contextDir, name);
           await writeFile(files[key], content);
         };
-        await writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2));
         const failure = run.retryOfRunId ? db.select().from(runs).where(eq(runs.id, run.retryOfRunId)).get()?.error : undefined;
-        if (failure) await writeContext("previousFailure", "previous-failure.json", JSON.stringify(failure, null, 2));
-        if (diffPaths.length > inlineDiffPaths) await writeContext("diffPaths", "diff-paths.txt", diffPaths.join("\n") + "\n");
-        if (changedPaths.length > inlineDiffPaths) await writeContext("changedPaths", "changed-paths.txt", changedPaths.join("\n") + "\n");
+        await Promise.all([
+          writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),
+          failure && writeContext("previousFailure", "previous-failure.json", JSON.stringify(failure, null, 2)),
+          diffPaths.length > inlineDiffPaths && writeContext("diffPaths", "diff-paths.txt", diffPaths.join("\n") + "\n"),
+          changedPaths.length > inlineDiffPaths && writeContext("changedPaths", "changed-paths.txt", changedPaths.join("\n") + "\n"),
+        ]);
         const revisions = { head: headSha, base: diffBaseSha, main: mainSha, ...(previousMainSha && { previousMain: previousMainSha }), ...(previousHeadSha && { previousHead: previousHeadSha }) };
         const prompt = JSON.stringify({
           action: task.action,

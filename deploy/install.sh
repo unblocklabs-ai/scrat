@@ -7,6 +7,7 @@ export PATH="/home/bek/.local/share/scrat/runtime/node-v22.23.1-linux-x64/bin:$i
 
 cd "$release_path"
 npm ci --no-audit --no-fund
+node --env-file="$install_root/.env" deploy/prepare-tools.mjs
 mkdir -p "$install_root/data" "$install_root/bin" "$install_root/backups"
 corepack enable --install-directory "$install_root/bin" pnpm
 corepack prepare pnpm@11.7.0 --activate

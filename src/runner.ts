@@ -10,7 +10,7 @@ import { fetchPullRequestHead, fetchRepository, git, hasConflicts, hasPendingMer
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { startOperation } from "./logging.ts";
-import { observe } from "./observation.ts";
+import { assertConfiguredRepository, itemRepository, observe } from "./observation.ts";
 import { executePi } from "./pi.ts";
 import { reviewPullRequest } from "./pr-review.ts";
 import { publishRun } from "./publication.ts";
@@ -33,7 +33,8 @@ export async function runNextTask() {
   let reviewWorkspace: Awaited<ReturnType<typeof createWorkspace>> | undefined;
   let databaseRequested = false;
   try {
-    const repository = new URL(item.payload.html_url).pathname.split("/").slice(1, 3).join("/");
+    const repository = itemRepository(item) ?? item.payload.html_url;
+    assertConfiguredRepository(repository);
     const repositoryPath = getRepositoryPath();
     const github = new GitHubRepository(repository);
     const context = await github.fetchItemContext(item.kind, item.payload.number);

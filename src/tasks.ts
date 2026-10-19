@@ -3,6 +3,7 @@ import { and, asc, count, desc, eq, isNotNull, isNull, notExists, or, sql } from
 import { alias } from "drizzle-orm/sqlite-core";
 import { type Action, actionContracts, actionIds } from "./actions.ts";
 import { config, getActionConfig, thinkingLevels } from "./config.ts";
+import { itemRepository, sameRepository } from "./observation.ts";
 import { db } from "./db.ts";
 import { describeError } from "./errors.ts";
 import { recordEvent } from "./events.ts";
@@ -27,12 +28,15 @@ function latestRun(taskId: string, database: Pick<typeof db, "select">) {
 // Infrastructure errors from the reads below still propagate and never reject a task.
 const isKnownAction = (action: string): action is Action => (actionIds as readonly string[]).includes(action);
 
-function checkClaimable({ task }: { task: typeof tasks.$inferSelect; item: typeof items.$inferSelect }, database: Pick<typeof db, "select">) {
+function checkClaimable({ task, item }: { task: typeof tasks.$inferSelect; item: typeof items.$inferSelect }, database: Pick<typeof db, "select">) {
   if (!isKnownAction(task.action) || !(task.action in config.actions)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   const actionConfig = config.actions[task.action];
   const invalid = [actionConfig, ...("reviewers" in actionConfig ? actionConfig.reviewers : [])]
     .find(({ thinkingLevel }) => !(thinkingLevels as readonly string[]).includes(thinkingLevel));
   if (invalid) return { ok: false as const, reason: `Invalid thinking level for ${task.action}: ${invalid.thinkingLevel}` };
+  const repository = itemRepository(item);
+  if (!repository) return { ok: false as const, reason: `Unparseable item URL: ${item.payload.html_url}` };
+  if (!sameRepository(repository, config.github.repository)) return { ok: false as const, reason: `Item belongs to ${repository}, not ${config.github.repository}` };
   const history = runHistory(task.id, database);
   if (history && history.sequence === null) return { ok: false as const, reason: `Missing run.started event: ${history.run.id}` };
   return { ok: true as const, previousRun: history?.run };

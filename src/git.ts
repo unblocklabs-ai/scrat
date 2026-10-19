@@ -16,6 +16,16 @@ export async function git(repositoryPath: string, args: string[], env = childEnv
   return args.includes("-z") || args[0] === "show" ? stdout : stdout.trim();
 }
 
+const originPattern = /^(?:https:\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/]+\/[^/]+?)(?:\.git)?\/?$/i;
+const repositoryOfUrl = (url: string) => originPattern.exec(url.trim())?.[1]?.toLowerCase();
+
+// `config --get` reports the stored URL, not an insteadOf rewrite of it.
+async function assertOrigin(repositoryPath: string, remote: string) {
+  const origin = await git(repositoryPath, ["config", "--get", "remote.origin.url"]).catch(() => "");
+  const expected = repositoryOfUrl(remote);
+  if (!expected || repositoryOfUrl(origin) !== expected) throw new Error(`Clone at ${repositoryPath} has origin ${origin || "(none)"}, not ${remote}`);
+}
+
 export async function fetchRepository(repositoryPath: string, remote: string, baseBranch: string, env = childEnvironment()) {
   repositoryPath = resolve(repositoryPath);
   const previous = repositoryFetches.get(repositoryPath);
@@ -25,6 +35,7 @@ export async function fetchRepository(repositoryPath: string, remote: string, ba
       await mkdir(dirname(repositoryPath), { recursive: true });
       await executeFile("git", ["clone", "--single-branch", "--branch", baseBranch, "--", remote, repositoryPath], { env });
     }
+    await assertOrigin(repositoryPath, remote);
     await git(repositoryPath, ["fetch", "--", remote, `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`], env);
     return git(repositoryPath, ["rev-parse", `refs/remotes/origin/${baseBranch}`]);
   })();

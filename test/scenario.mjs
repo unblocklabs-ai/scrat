@@ -742,6 +742,50 @@ try {
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_issue.model = "missing-model"; })), /review_issue: no Pi model fixture\/missing-model/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.reviewers[0].provider = "nowhere"; })), /review_pr reviewer 1: no Pi model nowhere/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.resolve_conflicts.skill = "skills/missing/SKILL.md"; })), /resolve_conflicts: skill file not found/);
+  } else if (scenario === "single_repository") {
+    const { eq } = await import("drizzle-orm");
+    const { syncGitHub } = await f.app("github-sync.ts");
+    const calls = []; const realFetch = globalThis.fetch; globalThis.fetch = (...args) => { calls.push(args[0]); return realFetch(...args); };
+    for (const other of ["other/repo", "Fixture/Project2"]) {
+      await assert.rejects(syncGitHub(other), /serves only fixture\/project/);
+      await assert.rejects(syncGitHub(other, false), /serves only fixture\/project/);
+    }
+    assert.equal(calls.length, 0); assert.equal(all(s.githubSnapshots).length, 0); assert.equal(all(s.items).length, 0);
+    await syncGitHub(undefined, false); assert.ok(calls.length > 0);
+
+    f.addIssue(1); f.addIssue(2);
+    db.update(s.items).set({ payload: { ...f.issues.get(1), html_url: "https://github.com/other/repo/issues/1" } }).where(eq(s.items.id, "issue-1")).run();
+    f.enqueue(1, "review_issue"); f.enqueue(2, "review_issue");
+    db.update(s.tasks).set({ priority: 1000 }).where(eq(s.tasks.itemId, "issue-1")).run();
+    assert.equal(tasks.claimTask().task.itemId, "issue-2");
+    const rejected = all(s.events).filter((e) => e.type === "task.rejected");
+    assert.equal(rejected.length, 1);
+    assert.match(rejected[0].data.reason, /Item belongs to other\/repo, not fixture\/project/);
+    assert.equal(f.row(s.tasks, rejected[0].taskId).status, "failed");
+    f.addIssue(3); f.addIssue(4); f.enqueue(3); f.enqueue(4);
+    db.update(s.items).set({ payload: { ...f.issues.get(3), html_url: "not a url" } }).where(eq(s.items.id, "issue-3")).run();
+    db.update(s.items).set({ payload: { ...f.issues.get(4), html_url: "https://example.com/fixture/project/issues/4" } }).where(eq(s.items.id, "issue-4")).run();
+    assert.equal(tasks.claimTask(), undefined);
+    const bad = all(s.events).filter((e) => e.type === "task.rejected").slice(1);
+    assert.equal(bad.length, 2);
+    for (const e of bad) assert.match(e.data.reason, /Unparseable item URL/);
+
+    const { fetchRepository } = await f.app("git.ts");
+    const checkout = f.config.github.repositoryPath, remote = "https://github.com/fixture/project.git";
+    const base = await fetchRepository(checkout, remote, "main");
+    assert.equal(git(checkout, "config", "--get", "remote.origin.url"), remote);
+    for (const url of ["git@github.com:Fixture/Project.git", "ssh://git@github.com/fixture/project", "https://github.com/FIXTURE/project"]) {
+      git(checkout, "remote", "set-url", "origin", url);
+      assert.equal(await fetchRepository(checkout, remote, "main"), base);
+    }
+    for (const [index, url] of ["https://github.com/other/repo.git", "git@github.com:fixture/project-fork.git", "https://example.com/fixture/project.git"].entries()) {
+      git(checkout, "remote", "set-url", "origin", url);
+      writeFileSync("seed/src/app.ts", `export const value = ${index + 2};\n`); git(resolve("seed"), "add", "."); commit(resolve("seed"), "Advance " + index);
+      git(resolve("seed"), "push", resolve("remote.git"), "main");
+      const before = git(checkout, "rev-parse", "refs/remotes/origin/main");
+      await assert.rejects(fetchRepository(checkout, remote, "main"), /has origin .* not https:\/\/github\.com\/fixture\/project\.git/);
+      assert.equal(git(checkout, "rev-parse", "refs/remotes/origin/main"), before);
+    }
   } else if (scenario === "recovery") {
     f.addIssue(1); f.enqueue(1); const claim = tasks.claimTask();
     const { eq } = await import("drizzle-orm");

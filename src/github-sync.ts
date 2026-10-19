@@ -5,15 +5,19 @@ import { db } from "./db.ts";
 import { GitHubRepository } from "./github.ts";
 import { routeGithubTasks } from "./github-tasks.ts";
 import { upsertItem } from "./items.ts";
+import { assertConfiguredRepository, itemRepository, sameRepository } from "./observation.ts";
 import { startOperation } from "./logging.ts";
 import { githubSnapshots, items } from "./schema.ts";
 
 export async function syncGitHub(repository = config.github.repository, queueTasks = true) {
   const operation = startOperation(queueTasks ? "github.sync" : "github.fetch", { repository });
-  let stage = "fetch";
+  let stage = "repository";
   try {
+    // Before any read or write; inside the operation so the CLI's silent catch still leaves a log.
+    assertConfiguredRepository(repository);
+    stage = "fetch";
     const previousItems = db.select().from(items).where(eq(items.source, "github")).all()
-      .filter((item) => item.payload.html_url.startsWith(`https://github.com/${repository}/`));
+      .filter((item) => sameRepository(itemRepository(item) ?? "", repository));
     const previous = new Map(previousItems.map((item) => [item.externalId, item]));
     const github = new GitHubRepository(repository);
     const { issues, pullRequests, snapshot } = await github.fetchOpenItems();
@@ -39,7 +43,7 @@ export async function syncGitHub(repository = config.github.repository, queueTas
       }
       stage = "route_tasks";
       const current = db.select().from(items).where(eq(items.source, "github")).all()
-        .filter((item) => item.payload.html_url.startsWith(`https://github.com/${repository}/`));
+        .filter((item) => sameRepository(itemRepository(item) ?? "", repository));
       queued = await routeGithubTasks(github, current, previous, operation.log);
     }
     operation.complete({ issues: issues.length, pullRequests: pullRequests.length, ...(queueTasks ? { queued } : {}) });

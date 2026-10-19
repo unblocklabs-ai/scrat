@@ -12,6 +12,8 @@ GitHub sync turns repository state into a persistent task queue:
 
 Concurrency, priorities, models, and reasoning levels come from configuration. Queued tasks coalesce by item and action; tasks sharing an item or workspace cannot execute together. Bot-authored comments do not trigger feedback tasks, and low grades do not automatically trigger self-repair.
 
+Scrat serves the single configured repository and clone: sync and fetch refuse any other repository, a clone whose `origin` is a different repository is never updated (a clone whose origin is not a github.com URL for the configured repository, such as an ssh host alias, is refused), and queued tasks for items of another repository are rejected at claim.
+
 GitHub access uses a repository-scoped client with shared, permission-specific authentication. Sync reads up to four item contexts concurrently and applies routing effects in order; startup sync still finishes before workers claim tasks. Credentials are cached, responses are not: publication and serialized PR reconciliation fetch fresh state. A rejected credential is refreshed on the next operation, without automatically replaying a failed write.
 
 Implementations use isolated worktrees and branches; follow-ups reuse their workspace and Pi session. Checks must pass against the exact tree being committed before publication. Optional Docker PostgreSQL databases isolate mutating runs. PR closure triggers workspace cleanup; failed work is retained for recovery.

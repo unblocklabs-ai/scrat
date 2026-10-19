@@ -4,6 +4,7 @@ import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
 import { git } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
+import type { GithubContext } from "./github-types.ts";
 import { gradeLabels, reconcileLabels } from "./labels.ts";
 import { isIssueComment, issueCommentId, parseIssueCommentId, reviewMarker, taskMarker } from "./markers.ts";
 import { observe, type ItemObservation } from "./observation.ts";
@@ -13,7 +14,7 @@ import { runs, tasks } from "./schema.ts";
 type Run = typeof runs.$inferSelect;
 type Task = typeof tasks.$inferSelect;
 // One serve process owns delivery; serialize its poller and worker calls per PR.
-const pendingReviews = new Map<string, Promise<void>>();
+const pendingReviews = new Map<string, Promise<unknown>>();
 
 function reviewBody(text: string, taskId: string) {
   return `${text}\n\n${reviewMarker}\n${taskMarker(taskId)}`;
@@ -30,8 +31,8 @@ function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeo
   }
 }
 
-async function reconcile(github: GitHubRepository, itemId: string, number: number, references: EventReferences, publication?: { task: Task; run: Run }) {
-  const current = await github.fetchItemContext("pr", number);
+async function reconcile(github: GitHubRepository, itemId: string, number: number, references: EventReferences, publication?: { task: Task; run: Run }, observed?: GithubContext) {
+  const current = observed ?? await github.fetchItemContext("pr", number);
   const reviews = prReviewHistory(itemId);
   const observation = observe(github.repository, current);
   const existing = canonicalComment(observation.own, reviews);
@@ -72,14 +73,23 @@ async function reconcile(github: GitHubRepository, itemId: string, number: numbe
     .where(eq(runs.id, publication.run.id)).run();
 }
 
-export async function reconcilePrReview(github: GitHubRepository, itemId: string, number: number, references: EventReferences = {}, publication?: { task: Task; run: Run }) {
+// Runs `work` as the only operation on this PR's review state. Work already inside the lock must call
+// reconcileObserved, never reconcilePrReview, or it would wait on itself.
+export async function serializePr<T>(github: GitHubRepository, number: number, work: () => Promise<T>) {
   const key = `${github.repository}#${number}`;
   const previous = pendingReviews.get(key);
   const pending = (async () => {
     if (previous) await previous.catch(() => {});
-    await reconcile(github, itemId, number, references, publication);
+    return work();
   })();
   pendingReviews.set(key, pending);
-  try { await pending; }
+  try { return await pending; }
   finally { if (pendingReviews.get(key) === pending) pendingReviews.delete(key); }
 }
+
+export const reconcilePrReview = (github: GitHubRepository, itemId: string, number: number, references: EventReferences = {}, publication?: { task: Task; run: Run }) =>
+  serializePr(github, number, () => reconcile(github, itemId, number, references, publication));
+
+// Reconcile from an observation taken inside the already-held lock, saving a second read of the PR.
+export const reconcileObserved = (github: GitHubRepository, itemId: string, number: number, references: EventReferences, current: GithubContext) =>
+  reconcile(github, itemId, number, references, undefined, current);

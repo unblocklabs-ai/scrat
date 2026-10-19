@@ -64,7 +64,7 @@ try {
       active++; peak = Math.max(peak, active);
       try {
         await new Promise((done) => setTimeout(done, 15));
-        if (fail && url.pathname.endsWith("/issues/3")) return new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } });
+        if (fail && url.pathname.endsWith("/issues/3/comments")) return new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } });
         return await fetch(input, options);
       } finally { active--; }
     };
@@ -239,7 +239,7 @@ try {
       assert.ok(!("changedPaths" in r.context.input) && r.context.input.changedPathCount >= 250);
       assert.ok(readFileSync(r.context.files.changedPaths, "utf8").split("\n").includes("src/many-249.txt"));
     }
-    assert.equal(f.comments.get(201).length, 1);
+    assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
     assert.equal(f.writes.filter((w) => w.type === "comment_update").length, 1);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["A · Strong", "human-label"]);
     const itemId = f.row(s.tasks, review.taskId).itemId;
@@ -284,7 +284,7 @@ try {
     const calls = f.requests.length, updates = f.writes.filter((w) => w.type === "comment_update").length;
     tasks.retryTask(older.taskId); const superseded = await success();
     assert.equal(superseded.publication.status, "not_needed");
-    assert.equal(f.requests.length, calls); assert.equal(f.comments.get(201).length, 1);
+    assert.equal(f.requests.length, calls); assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
     assert.match(f.comments.get(201)[0].body, new RegExp(newer.taskId));
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
     assert.equal(f.row(s.runs, newer.id).publication.commentId, f.comments.get(201)[0].id);
@@ -294,7 +294,7 @@ try {
     assert.equal(delivered.runId, newer.id);
     if (scenario === "deleted_review") {
       f.comments.set(201, []); await route();
-      assert.equal(f.requests.length, calls); assert.equal(f.comments.get(201).length, 1);
+      assert.equal(f.requests.length, calls); assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
       assert.match(f.comments.get(201)[0].body, new RegExp(newer.taskId));
     } else {
       assert.equal(f.writes.filter((w) => w.type === "comment_update").length, updates);
@@ -881,6 +881,96 @@ try {
     assert.ok(aborted < 1000, `Abort should release the waiter, took ${aborted}ms`);
     const notified = await timed(((since) => { const waiting = waitForWork(since, 5_000); signalWork(); return waiting; })(workGeneration()));
     assert.ok(notified < 1000, `Explicit signal should wake the waiter, took ${notified}ms`);
+  } else if (scenario === "sync_cost") {
+    await implement(1); await implement(2); f.addIssue(10); f.addIssue(11);
+    const { GitHubRepository } = await f.app("github.ts");
+    const reads = (since) => f.calls.slice(since).filter((call) => call.method === "GET" && !call.path.endsWith("/access_tokens"));
+    const count = (since, pattern) => reads(since).filter((call) => pattern.test(call.path)).length;
+    let since = f.calls.length;
+    await route();
+    // One observation per PR (four concurrent reads, none repeated by reconciliation); issues reuse list metadata.
+    for (const number of [201, 202]) {
+      assert.equal(count(since, new RegExp(`/pulls/${number}$`)), 1);
+      assert.equal(count(since, new RegExp(`/issues/${number}/comments`)), 1);
+      assert.equal(count(since, new RegExp(`/pulls/${number}/(comments|reviews)`)), 2);
+    }
+    for (const number of [10, 11]) {
+      assert.equal(count(since, new RegExp(`/issues/${number}$`)), 0);
+      assert.equal(count(since, new RegExp(`/issues/${number}/comments`)), 1);
+    }
+    // Nothing changed: every read is a conditional request answered 304.
+    since = f.calls.length; await route();
+    assert.ok(reads(since).length >= 12);
+    assert.deepEqual(reads(since).filter((call) => call.status !== 304), []);
+    const remaining = f.rate.remaining; await route(); assert.equal(f.rate.remaining, remaining, "304s do not consume the rate limit");
+    // A comment added between syncs is seen; unchanged resources stay cached.
+    f.comments.set(202, [{ id: 900, body: "Please rename this", user: { login: "human" }, updated_at: "2026-10-19T02:00:00Z", html_url: "https://github.com/fixture/project/pull/202#c900" }]);
+    since = f.calls.length; await route();
+    assert.equal(reads(since).find((call) => call.path.includes("/issues/202/comments")).status, 200);
+    assert.equal(reads(since).find((call) => call.path.includes("/issues/201/comments")).status, 304);
+    assert.ok(all(s.tasks).some((task) => task.action === "address_pr_feedback" && f.row(s.items, task.itemId).payload.number === 202));
+    // A full page is never served from cache: the 101st comment must appear even though page one is byte-identical.
+    const comment = (id) => ({ id, body: "c" + id, user: { login: "human" }, updated_at: "2026-10-19T02:00:00Z", html_url: "https://github.com/fixture/project/issues/10#c" + id });
+    f.comments.set(10, Array.from({ length: 100 }, (_, i) => comment(1000 + i)));
+    const github = new GitHubRepository("fixture/project");
+    assert.equal((await github.fetchItemContext("issue", 10, { item: f.issues.get(10) })).comments.length, 100);
+    f.comments.get(10).push(comment(1100));
+    since = f.calls.length;
+    assert.equal((await github.fetchItemContext("issue", 10, { item: f.issues.get(10) })).comments.length, 101);
+    assert.deepEqual(reads(since).map((call) => call.status), [200, 200]);
+    since = f.calls.length;
+    assert.equal((await github.fetchItemContext("issue", 10, { item: f.issues.get(10) })).comments.length, 101);
+    assert.deepEqual(reads(since).map((call) => call.status), [200, 304]);
+    // Low rate-limit headroom defers item reads but still lists, and recovers when the window has room.
+    f.rate.remaining = 100; since = f.calls.length; await route();
+    assert.equal(count(since, /\/comments|\/reviews|\/pulls\/\d+$/), 0);
+    assert.ok(count(since, /\/issues\?/) > 0);
+    f.rate.remaining = 5000; since = f.calls.length; await route();
+    assert.ok(count(since, /\/issues\/10\/comments/) > 0);
+    // One failing read of a PR's four concurrent reads fails the sync, leaves no read running, and the next sync recovers.
+    {
+      const original = globalThis.fetch;
+      let active = 0, failing = true;
+      globalThis.fetch = async (input, options = {}) => {
+        const { pathname } = new URL(input);
+        if (!/\/(pulls|issues)\/201/.test(pathname)) return original(input, options);
+        active++;
+        try {
+          await new Promise((done) => setTimeout(done, 15));
+          if (failing && pathname.endsWith("/pulls/201/reviews")) return new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } });
+          return await original(input, options);
+        } finally { active--; }
+      };
+      try {
+        f.comments.set(201, [{ id: 901, body: "Changed so reads are not 304", user: { login: "human" }, updated_at: "2026-10-19T03:00:00Z", html_url: "https://github.com/fixture/project/pull/201#c901" }]);
+        await assert.rejects(route(), (error) => error.status === 404);
+        assert.equal(active, 0, "A failed PR read must wait for its sibling reads");
+        failing = false; await route();
+      } finally { globalThis.fetch = original; }
+    }
+    // A worker publishing while sync holds a PR's observation cannot be missed or duplicated.
+    const fetch = globalThis.fetch;
+    let blocked, release;
+    const held = new Promise((done) => { blocked = done; }), released = new Promise((done) => { release = done; });
+    let once = false;
+    globalThis.fetch = async (input, options = {}) => {
+      const response = await fetch(input, options);
+      if (!once && (options.method ?? "GET") === "GET" && new URL(input).pathname.endsWith("/issues/201/comments")) { once = true; blocked(); await released; }
+      return response;
+    };
+    try {
+      const syncing = route(); await held;
+      const working = run();
+      // Wait until the worker has its result and is heading for publication, which must queue behind sync's lock.
+      while (!all(s.runs).some((r) => r.result && !r.finishedAt)) await new Promise((done) => setTimeout(done, 10));
+      for (let turn = 0; turn < 50; turn++) await new Promise((done) => setImmediate(done));
+      release();
+      const [, published] = await Promise.all([syncing, working]);
+      assert.equal(published.error, null, JSON.stringify(published.error));
+      assert.equal(f.writes.filter((write) => write.type === "comment" && write.number === 201).length, 1);
+      assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
+      await route(); assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
+    } finally { release(); globalThis.fetch = fetch; }
   } else if (scenario === "database") {
     const original = process.env.DATABASE_URL; f.addIssue(1); f.addIssue(2); f.enqueue(1, "implement"); f.enqueue(2, "implement");
     const runs = await Promise.all([f.runNextTask(), f.runNextTask()]);

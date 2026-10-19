@@ -36,9 +36,9 @@ export async function syncGitHub(repository = config.github.repository, queueTas
       stage = "reconcile_closed";
       const openIds = new Set([...issues, ...pullRequests].map((payload) => payload.node_id));
       const missing = previousItems.filter((item) => item.state === "open" && !openIds.has(item.externalId));
-      const contexts = await github.fetchItemContexts(missing.map((item) => ({ kind: item.kind, number: item.payload.number })), false);
+      const contexts = await github.fetchItemContexts(missing.map((item) => ({ kind: item.kind, number: item.payload.number })), { comments: false });
       for (const [index, previousItem] of missing.entries()) {
-        const context = contexts[index];
+        const context = contexts[index]!;
         upsertItem({ source: "github", externalId: previousItem.externalId, kind: previousItem.kind, payload: context.item, state: context.item.state === "open" ? "open" : "closed" });
       }
       stage = "route_tasks";

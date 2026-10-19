@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -46,7 +46,7 @@ export async function fixture(scenario) {
   process.env.GIT_CONFIG_GLOBAL = resolve("gitconfig");
   process.env.GITHUB_APP_PRIVATE_KEY = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
-  const modes = new Map(), steps = new Map(), requests = [], issues = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
+  const modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set() };
   const tokens = new Map();
   let onModel, nextCommentId = 1000;
@@ -172,7 +172,19 @@ export async function fixture(scenario) {
       pr.head.sha = git(resolve("remote.git"), "rev-parse", pr.head.ref);
       git(resolve("remote.git"), "update-ref", `refs/pull/${pr.number}/head`, pr.head.sha);
     }
-    const reply = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
+    const call = { method, path: path + url.search }; calls.push(call);
+    const reply = (data, status = 200, extra = {}) => {
+      const text = JSON.stringify(data), headers = { "content-type": "application/json", "x-ratelimit-limit": String(rate.limit), "x-ratelimit-reset": String(rate.reset), "x-ratelimit-resource": "core", ...extra };
+      if (method === "GET" && status === 200) {
+        headers.etag = `"${createHash("sha1").update(url.pathname + url.search + text).digest("hex")}"`;
+        // Like GitHub, a matching conditional request is answered 304 and is not counted against the limit.
+        if (new Headers(options.headers).get("if-none-match") === headers.etag) {
+          call.status = 304; return new Response(null, { status: 304, headers: { ...headers, "x-ratelimit-remaining": String(rate.remaining) } });
+        }
+      }
+      call.status = status; if (!path.endsWith("/access_tokens")) rate.remaining--;
+      return new Response(text, { status, headers: { ...headers, "x-ratelimit-remaining": String(rate.remaining) } });
+    };
     if (path.endsWith("/access_tokens")) {
       const token = "ghs_fixture_" + tokens.size; tokens.set(token, body.permissions);
       return reply({ token, expires_at: new Date(Date.now() + 3600000).toISOString() }, 201);
@@ -188,7 +200,11 @@ export async function fixture(scenario) {
     if (/\/pulls\/\d+\/comments$/.test(path)) return reply([]);
     match = path.match(/\/issues\/(\d+)\/comments$/);
     if (match) {
-      const n = Number(match[1]); if (method === "GET") return reply(comments.get(n) ?? []);
+      const n = Number(match[1]); if (method === "GET") {
+        const all = comments.get(n) ?? [], size = Number(url.searchParams.get("per_page") ?? 30), page = Number(url.searchParams.get("page") ?? 1);
+        const next = page * size < all.length ? { link: `<https://api.github.com${path}?per_page=${size}&page=${page + 1}>; rel="next"` } : {};
+        return reply(all.slice((page - 1) * size, page * size), 200, next);
+      }
       const token = new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");
       const permission = prs.some((pr) => pr.number === n) ? "pull_requests" : "issues";
       if (tokens.get(token)?.[permission] !== "write") return reply({ message: "Resource not accessible by integration" }, 403);
@@ -239,7 +255,7 @@ export async function fixture(scenario) {
   };
   const enqueue = (number, action = "review_issue", input = {}) => tasks.enqueueTask({ itemId: "issue-" + number, action, reason: "Integration", input });
   const row = (table, id) => db.select().from(table).all().find((entry) => entry.id === id);
-  return { root, app, db, schema, tasks, runNextTask, git, commit, config, modes, requests, issues, prs, comments, reviews, writes, faults, addIssue, enqueue, row,
+  return { root, app, db, schema, tasks, runNextTask, git, commit, config, modes, requests, calls, rate, issues, prs, comments, reviews, writes, faults, addIssue, enqueue, row,
     set onModel(value) { onModel = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },
     async close() { globalThis.fetch = originalFetch; db.$client.close(); server.closeAllConnections(); await new Promise((done) => server.close(done)); },

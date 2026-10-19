@@ -4,7 +4,7 @@ import { Octokit } from "octokit";
 import { config } from "./config.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
 import { logger, startOperation } from "./logging.ts";
-import type { GithubComment, GithubContext, GithubIssue, GithubPullRequest } from "./github-types.ts";
+import type { GithubComment, GithubContext, GithubIssue, GithubItem, GithubPullRequest } from "./github-types.ts";
 import { assertPublishable, childEnvironment } from "./secrets.ts";
 
 const permissions = {
@@ -14,7 +14,70 @@ const permissions = {
   contents_read: { contents: "read", metadata: "read" },
   contents_write: { contents: "write", metadata: "read" },
 } as const;
+// Read responses keyed by full request URL (query included). The cache lives outside the clients so it
+// survives hourly token rotation; if GitHub rejects the old ETag for a new token it simply answers 200.
+const etags = new Map<string, { etag: string; body: string; headers: [string, string][] }>();
+const maxCachedResponses = 2000, maxCachedChars = 64 * 1024 * 1024; // UTF-16 characters of body text, not exact bytes
+let cachedChars = 0;
+const rateLimit = { remaining: Infinity, limit: 5000, reset: 0 };
 let authenticate: ReturnType<typeof createAppAuth> | undefined;
+
+// Below a tenth of the installation allowance, sync defers non-essential reads until the window resets.
+export function rateLimitLow() {
+  return Date.now() < rateLimit.reset * 1000 && rateLimit.remaining < rateLimit.limit * 0.1;
+}
+export const rateLimitState = () => ({ remaining: rateLimit.remaining, limit: rateLimit.limit, resetsAt: new Date(rateLimit.reset * 1000).toISOString() });
+
+function forget(key: string) {
+  const old = etags.get(key);
+  if (old) { cachedChars -= old.body.length; etags.delete(key); }
+}
+
+// A 304 is answered from the cached 200 of the identical URL, so Octokit (and its retry plugin) never sees an error.
+// Page-sized arrays are never cached: a full page's body can stay unchanged while its Link header gains a next page.
+async function conditionalFetch(input: string | URL | Request, init: RequestInit = {}) {
+  const key = typeof input === "string" && (init.method ?? "GET") === "GET" ? input : undefined;
+  const hit = key ? etags.get(key) : undefined;
+  if (key && hit) { etags.delete(key); etags.set(key, hit); }
+  const response = await globalThis.fetch(input, hit
+    ? { ...init, headers: { ...(init.headers as Record<string, string>), "if-none-match": hit.etag } } : init);
+  const resource = response.headers.get("x-ratelimit-resource");
+  if ((!resource || resource === "core") && response.headers.has("x-ratelimit-remaining")) {
+    Object.assign(rateLimit, {
+      remaining: Number(response.headers.get("x-ratelimit-remaining")), reset: Number(response.headers.get("x-ratelimit-reset")),
+      limit: Number(response.headers.get("x-ratelimit-limit")) || rateLimit.limit,
+    });
+  }
+  if (!key) return response;
+  if (response.status === 304 && hit) {
+    const merged = new Headers(hit.headers); // stored without content-length/-encoding: the replayed body is decoded text
+    for (const name of ["x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-used", "x-ratelimit-resource"]) {
+      const value = response.headers.get(name);
+      if (value) merged.set(name, value);
+    }
+    return new Response(hit.body, { status: 200, headers: merged });
+  }
+  forget(key);
+  const etag = response.headers.get("etag");
+  if (response.status === 200 && etag) {
+    const body = await response.clone().text();
+    let full = false;
+    try {
+      const data: unknown = JSON.parse(body);
+      full = Array.isArray(data) && data.length >= Number(new URL(key).searchParams.get("per_page") ?? 30);
+    } catch { /* not JSON */ }
+    if (!full && body.length <= maxCachedChars) {
+      forget(key); // a concurrent request for this URL may have stored an entry while we awaited
+      etags.set(key, { etag, body, headers: [...response.headers].filter(([name]) => name !== "content-length" && name !== "content-encoding") });
+      cachedChars += body.length;
+      for (const [oldest] of etags) {
+        if (etags.size <= maxCachedResponses && cachedChars <= maxCachedChars) break;
+        forget(oldest);
+      }
+    }
+  }
+  return response;
+}
 const clients = new Map<string, { token: string; github: Octokit; invalid: boolean }>();
 
 async function githubForRepository(repository: string, access: keyof typeof permissions) {
@@ -41,7 +104,7 @@ async function githubForRepository(repository: string, access: keyof typeof perm
     auth: token,
     // Cached clients must not retain the first caller's operation/run identity.
     log: logger.child({ component: "octokit", repository, access }),
-    ...(access !== "read" ? { retry: { enabled: false }, throttle: { enabled: false } } : {}),
+    ...(access !== "read" ? { retry: { enabled: false }, throttle: { enabled: false } } : { request: { fetch: conditionalFetch } }),
   });
   const entry = { token, github, invalid: false };
   github.hook.error("request", (error) => {
@@ -106,40 +169,47 @@ export class GitHubRepository {
     };
   }
 
-  async fetchItemContext(kind: "issue" | "pr", number: number, includeComments = true): Promise<GithubContext> {
+  // `item` reuses metadata that is already fresh (the sync's list response), leaving only the discussion to read.
+  async fetchItemContext(kind: "issue" | "pr", number: number, { comments: withComments = true, item: known }: { comments?: boolean; item?: GithubItem } = {}): Promise<GithubContext> {
     const { github, owner, repo } = await githubForRepository(this.repository, "read");
-    const item = kind === "issue"
-      ? issueView((await github.rest.issues.get({ owner, repo, issue_number: number })).data)
-      : pullRequestView((await github.rest.pulls.get({ owner, repo, pull_number: number })).data);
-    const comments: GithubComment[] = [];
-    if (!includeComments) return { item, comments };
-    comments.push(...(await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 }))
-      .map((comment) => ({
+    const when = <T>(enabled: boolean, read: () => Promise<T[]>) => enabled ? read() : Promise.resolve([] as T[]);
+    const reads = [
+      known ? Promise.resolve(known) : kind === "issue"
+        ? github.rest.issues.get({ owner, repo, issue_number: number }).then(({ data }) => issueView(data))
+        : github.rest.pulls.get({ owner, repo, pull_number: number }).then(({ data }) => pullRequestView(data)),
+      when(withComments, () => github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 })),
+      when(withComments && kind === "pr", () => github.paginate(github.rest.pulls.listReviewComments, { owner, repo, pull_number: number, per_page: 100 })),
+      when(withComments && kind === "pr", () => github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: number, per_page: 100 })),
+    ] as const;
+    // Settle every read even on error, so a failure leaves no background requests.
+    for (const read of await Promise.allSettled(reads)) if (read.status === "rejected") throw read.reason;
+    const [item, discussion, inline, reviews] = await Promise.all(reads);
+    const comments: GithubComment[] = [
+      ...discussion.map((comment) => ({
         id: `issue:${comment.id}`, body: comment.body ?? "", author: comment.user?.login,
         revision: comment.updated_at, url: comment.html_url,
-      })));
-    if (kind === "pr") {
-      const inline = await github.paginate(github.rest.pulls.listReviewComments, { owner, repo, pull_number: number, per_page: 100 });
-      comments.push(...inline.map((comment) => ({
+      })),
+      ...inline.map((comment) => ({
         id: `inline:${comment.id}`, body: comment.body, author: comment.user?.login,
         revision: comment.updated_at, url: comment.html_url, path: comment.path, line: comment.line,
-      })));
-      const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: number, per_page: 100 });
-      comments.push(...reviews.filter((review) => review.body).map((review) => ({
+      })),
+      ...reviews.filter((review) => review.body).map((review) => ({
         id: `review:${review.id}`, body: review.body, author: review.user?.login,
         revision: createHash("sha256").update(review.body).digest("hex"), url: review.html_url,
-      })));
-    }
+      })),
+    ];
     return { item, comments };
   }
 
-  async fetchItemContexts(items: readonly { kind: "issue" | "pr"; number: number }[], includeComments = true) {
-    const contexts = new Array<GithubContext>(items.length);
+  // With `defer`, readers stop starting reads once the rate limit runs low; skipped entries stay undefined.
+  async fetchItemContexts(items: readonly { kind: "issue" | "pr"; number: number; item?: GithubItem }[], options: { comments?: boolean; defer?: boolean } = {}) {
+    const contexts = new Array<GithubContext | undefined>(items.length);
     let next = 0;
     const workers = await Promise.allSettled(Array.from({ length: Math.min(4, items.length) }, async () => {
-      while (next < items.length) {
+      while (next < items.length && !(options.defer && rateLimitLow())) {
         const index = next++;
-        contexts[index] = await this.fetchItemContext(items[index].kind, items[index].number, includeComments);
+        const { kind, number, item } = items[index];
+        contexts[index] = await this.fetchItemContext(kind, number, { comments: options.comments, item });
       }
     }));
     // Await all readers even on error, so a failed sync leaves no background reads.

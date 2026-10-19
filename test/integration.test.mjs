@@ -9,6 +9,7 @@ const scenarios = {
   queue: "SQLite queue coalesces input, orders priorities, excludes busy workspaces and caps six tasks",
   routing: "GitHub routing reconciles all five actions and coalesces changing facts without invoking Pi",
   repository_sync: "repository sync bounds reads, shares scoped authentication, refreshes expired tokens and keeps raw diagnostics",
+  sync_cost: "one fresh observation per PR, list-reused issue metadata, ETag 304s, rate-limit deferral and no duplicate review under routing/publication races",
   routing_history: "covered triggers and attempts skip unavailable review history without blocking later items",
   acceptance: "action postconditions reject empty implementations and unresolved conflicts but permit reply-only feedback",
   panel: "Scrat-authored PR gets two independent Pi sessions and one consolidated comment",

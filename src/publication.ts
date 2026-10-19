@@ -55,13 +55,19 @@ export async function publishRun(task: typeof tasks.$inferSelect, run: typeof ru
   }
   const reviewMarker = "<!-- scrat-review -->";
   const body = `${result.text}\n\n${task.action === "review_pr" ? reviewMarker + "\n" : ""}${marker}`;
+  const reviews = task.action === "review_pr" ? db.select({ publication: runs.publication, taskId: tasks.id, createdAt: tasks.createdAt }).from(runs)
+    .innerJoin(tasks, eq(runs.taskId, tasks.id)).where(and(eq(tasks.itemId, task.itemId), eq(tasks.action, "review_pr"))).all() : [];
+  const reviewIds = new Set(reviews.flatMap(({ publication }) => publication.commentId ? [publication.commentId] : []));
+  const existing = current.comments.findLast((comment) => comment.id.startsWith("issue:") && comment.author === config.github.botLogin
+    && (comment.body.includes(marker) || (task.action === "review_pr"
+      && (comment.body.includes(reviewMarker) || reviewIds.has(Number(comment.id.slice("issue:".length)))))));
+  // A publication-only retry retains its original task order, not its new run's timestamp.
+  if (existing && reviews.some((review) => review.publication.commentId === Number(existing.id.slice("issue:".length))
+    && (review.createdAt > task.createdAt || (review.createdAt === task.createdAt && review.taskId > task.id)))) {
+    saveReceipt({ status: "not_needed" });
+    return;
+  }
   if (!publication.commentId) {
-    const reviewIds = task.action === "review_pr" ? new Set(db.select({ publication: runs.publication }).from(runs)
-      .innerJoin(tasks, eq(runs.taskId, tasks.id)).where(and(eq(tasks.itemId, task.itemId), eq(tasks.action, "review_pr")))
-      .all().flatMap(({ publication }) => publication.commentId ? [publication.commentId] : [])) : new Set<number>();
-    const existing = current.comments.findLast((comment) => comment.id.startsWith("issue:") && comment.author === config.github.botLogin
-      && (comment.body.includes(marker) || (task.action === "review_pr"
-        && (comment.body.includes(reviewMarker) || reviewIds.has(Number(comment.id.slice("issue:".length)))))));
     let commentId: number;
     if (existing) {
       commentId = Number(existing.id.slice("issue:".length));

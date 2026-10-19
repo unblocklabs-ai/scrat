@@ -70,6 +70,15 @@ try {
     assert.equal(f.comments.get(201).length, 1);
     assert.equal(f.writes.filter((w) => w.type === "comment_update").length, 1);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["A · Strong", "human-label"]);
+    const itemId = f.row(s.tasks, review.taskId).itemId;
+    f.reset(201, "normal"); tasks.enqueueTask({ itemId, action: "review_pr", reason: "Manual review", input: {} });
+    f.faults.label.add(201); const older = await run(); assert.ok(older.error);
+    f.reset(201, "grade-A"); tasks.enqueueTask({ itemId, action: "review_pr", reason: "Newer manual review", input: {} });
+    await success(); const writes = f.writes.length, inferences = f.requests.length;
+    tasks.retryTask(older.taskId); const superseded = await success();
+    assert.equal(superseded.publication.status, "not_needed");
+    assert.equal(f.writes.length, writes); assert.equal(f.requests.length, inferences);
+    assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["A · Strong", "human-label"]);
   } else if (scenario === "reviewer_failure") {
     await implement(2); await route(); f.modes.set(202, "reviewer-failure");
     const r = await run(); assert.ok(r.error); assert.ok(r.reviewers.some((r) => r.error));

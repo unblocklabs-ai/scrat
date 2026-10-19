@@ -1,11 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import { mkdir, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { eq } from "drizzle-orm";
 import { db } from "./db.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
-import { git } from "./git.ts";
+import { git, hasPendingMerge } from "./git.ts";
 import { startOperation } from "./logging.ts";
 import { workspaces } from "./schema.ts";
 
@@ -99,8 +98,7 @@ export async function commitWorkspace(workspace: typeof workspaces.$inferSelect,
   await git(workspace.path, ["diff", "--check"]);
   await git(workspace.path, ["add", "--all"]);
   const staged = await git(workspace.path, ["diff", "--cached", "--name-only"]);
-  const mergeHead = await git(workspace.path, ["rev-parse", "--git-path", "MERGE_HEAD"]);
-  if (staged || existsSync(resolve(workspace.path, mergeHead))) {
+  if (staged || await hasPendingMerge(workspace.path)) {
     await git(workspace.path, ["-c", `user.name=${author.name}`, "-c", `user.email=${author.email}`, "commit", "-m", message]);
     const commitSha = await git(workspace.path, ["rev-parse", "HEAD"]);
     recordEvent({ ...references, type: "workspace.committed", data: { workspaceId: workspace.id, commitSha } });

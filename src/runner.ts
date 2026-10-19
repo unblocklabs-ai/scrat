@@ -1,7 +1,7 @@
 import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { config, getRepositoryPath } from "./config.ts";
 import { db } from "./db.ts";
-import { fetchPullRequestHead, fetchRepository, git, hasConflicts } from "./git.ts";
+import { fetchPullRequestHead, fetchRepository, git, hasConflicts, hasPendingMerge } from "./git.ts";
 import { fetchItemContext, getGitEnvironment, githubRevision } from "./github.ts";
 import { startOperation } from "./logging.ts";
 import { executePi } from "./pi.ts";
@@ -58,11 +58,12 @@ export async function runNextTask() {
         if (readOnly) reviewWorkspace = workspace;
         else db.update(items).set({ workspaceId: workspace.id }).where(eq(items.id, item.id)).run();
       }
-      if (!readOnly && pullRequest) await git(workspace.path, ["merge", "--ff-only", preparedHead]);
+      const mergeInProgress = !readOnly && await hasPendingMerge(workspace.path);
+      if (!readOnly && pullRequest && !mergeInProgress) await git(workspace.path, ["merge", "--ff-only", preparedHead]);
       const headSha = await git(workspace.path, ["rev-parse", "HEAD"]);
       db.update(runs).set({ workspaceId: workspace.id, mainSha, headSha, stage: "agent" }).where(eq(runs.id, run.id)).run();
       const previous = !readOnly ? db.select().from(runs).where(and(
-        eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile), isNotNull(runs.result),
+        eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile),
       )).orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
       const diff = pullRequest ? await git(repositoryPath, ["diff", `${mainSha}...${preparedHead}`]) : undefined;
       const requested = run.input.commentRevisions;
@@ -89,7 +90,7 @@ export async function runNextTask() {
         ...evaluated,
         input: run.input,
         previousFailure: run.retryOfRunId ? db.select().from(runs).where(eq(runs.id, run.retryOfRunId)).get()?.error : undefined,
-        workspace: { path: workspace.path, branch: workspace.branch, baseRef, baseBranch, mainSha, headSha },
+        workspace: { path: workspace.path, branch: workspace.branch, baseRef, baseBranch, mainSha, headSha, mergeInProgress },
         diff,
         mainChanges,
         prChanges,

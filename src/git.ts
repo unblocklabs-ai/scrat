@@ -38,6 +38,11 @@ export async function fetchPullRequestHead(repositoryPath: string, remote: strin
   return ref;
 }
 
+export async function hasPendingMerge(repositoryPath: string) {
+  const mergeHead = await git(repositoryPath, ["rev-parse", "--git-path", "MERGE_HEAD"]);
+  return existsSync(resolve(repositoryPath, mergeHead));
+}
+
 export async function hasConflicts(repositoryPath: string, base: string, head: string) {
   try {
     await git(repositoryPath, ["merge-tree", "--write-tree", base, head]);

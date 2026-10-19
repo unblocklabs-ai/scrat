@@ -3,6 +3,7 @@ import { events, type tasks } from "./schema.ts";
 
 type TaskDetails = Pick<typeof tasks.$inferSelect, "action" | "priority" | "reason">;
 type FetchDetails = { repository: string; durationMs: number };
+export type EventReferences = { itemId?: string; taskId?: string; runId?: string };
 
 export type JournalEvent = (
   | { type: "task.enqueued"; data: TaskDetails }
@@ -16,7 +17,19 @@ export type JournalEvent = (
   | { type: "github.fetch_failed"; data: FetchDetails & {
       error: { name: string; message: string; status?: number; code?: string };
     } }
-) & { itemId?: string; taskId?: string; runId?: string };
+  | { type: "github.comment_created"; data: { repository: string; issueNumber: number; commentId: number; url: string } }
+  | { type: "github.comment_updated"; data: { repository: string; commentId: number; url: string } }
+  | { type: "github.labels_added"; data: { repository: string; issueNumber: number; labels: string[] } }
+  | { type: "github.label_removed"; data: { repository: string; issueNumber: number; label: string } }
+  | { type: "github.write_failed"; data: {
+      repository: string;
+      operation: "postComment" | "updateComment" | "addLabels" | "removeLabels";
+      issueNumber?: number;
+      commentId?: number;
+      labels?: string[];
+      error: { name: string; message: string; status?: number; code?: string };
+    } }
+) & EventReferences;
 
 export function recordEvent(event: JournalEvent, database: Pick<typeof db, "insert"> = db) {
   return database.insert(events).values(event).returning().get()!;

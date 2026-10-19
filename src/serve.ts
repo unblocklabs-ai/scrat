@@ -4,7 +4,7 @@ import { db } from "./db.ts";
 import { syncGitHub } from "./github-sync.ts";
 import { logger } from "./logging.ts";
 import { runNextTask } from "./runner.ts";
-import { ensureRunSequences, validateStaticConfig } from "./startup.ts";
+import { prepareService } from "./startup.ts";
 import { signalWork, waitForWork, workGeneration } from "./work-signal.ts";
 
 // Other processes (enqueue, retry) cannot signal this one, so idle workers also re-check periodically.
@@ -36,8 +36,7 @@ async function worker() {
   }
 }
 try {
-  await validateStaticConfig();
-  ensureRunSequences();
+  await prepareService();
   logger.info({ event: "worker.started", concurrency: config.harness.maxConcurrency });
   // Discover all priorities before the first claims, rather than starting with a partial queue.
   try { await syncGitHub(); }

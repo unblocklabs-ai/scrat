@@ -1,8 +1,7 @@
 import { access, readFile, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 import { relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { createAgentSession, createBashToolDefinition, createFindToolDefinition, createGrepToolDefinition, createLsToolDefinition, createReadToolDefinition, detectSupportedImageMimeTypeFromFile, defineTool, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, createBashToolDefinition, createFindToolDefinition, createGrepToolDefinition, createLsToolDefinition, createReadToolDefinition, detectSupportedImageMimeTypeFromFile, defineTool, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
 import { Type } from "typebox";
@@ -14,6 +13,7 @@ import { git } from "./git.ts";
 import { createReviewGitTool } from "./review-git.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
 import { childEnvironment } from "./secrets.ts";
+import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 
 export function saveReviewer(runId: string, index: number, patch: Partial<Reviewer>) {
   db.transaction((transaction) => {
@@ -21,19 +21,6 @@ export function saveReviewer(runId: string, index: number, patch: Partial<Review
     transaction.update(runs).set({ reviewers: current.reviewers.map((reviewer, i) => i === index ? { ...reviewer, ...patch } : reviewer) })
       .where(eq(runs.id, runId)).run();
   });
-}
-
-// One runtime serves every session in the process; a failed creation is not cached so the next session retries.
-let modelRuntimeCreation: Promise<ModelRuntime> | undefined;
-function sharedModelRuntime() {
-  modelRuntimeCreation ??= ModelRuntime.create({
-    modelsPath: fileURLToPath(new URL("../scrat.config.json", import.meta.url)),
-    modelsStorePath: resolve("data/pi-models-store.json"),
-  }).catch((error: unknown) => {
-    modelRuntimeCreation = undefined;
-    throw error;
-  });
-  return modelRuntimeCreation;
 }
 
 export async function executePi({ run, cwd, context, readOnly, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {} }: {
@@ -52,8 +39,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
   const modelRuntime = await sharedModelRuntime();
   const model = modelRuntime.getModel(run.provider, run.model);
   if (!model) {
-    // Pi reports an unreadable or invalid models config without rejecting; rebuild on the next session.
-    modelRuntimeCreation = undefined;
+    dropModelRuntime();
     throw new Error(modelRuntime.getError() ?? `Configure a Pi model for ${run.provider}/${run.model}`);
   }
   const thinkingLevel = thinkingLevels.find((level) => level === run.thinkingLevel);

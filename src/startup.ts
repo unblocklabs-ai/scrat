@@ -1,21 +1,18 @@
 import { access } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { eq, sql } from "drizzle-orm";
 import { actionIds } from "./actions.ts";
 import { config, configUrl, thinkingLevels } from "./config.ts";
 import { db } from "./db.ts";
+import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 import { runs } from "./schema.ts";
 
 type Entry = { provider: string; model: string; thinkingLevel: string };
 
 // Fails before any worker claims, so a bad static setting stops startup instead of failing tasks one by one.
+// @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: { actions: Record<string, Entry & { skill: string; reviewers?: Entry[] }> } = config) {
-  const modelRuntime = await ModelRuntime.create({
-    modelsPath: fileURLToPath(configUrl),
-    modelsStorePath: resolve("data/pi-models-store.json"),
-  });
+  const modelRuntime = await sharedModelRuntime();
   const problems: string[] = [];
   const checkEntry = (label: string, { provider, model, thinkingLevel }: Entry) => {
     if (!(thinkingLevels as readonly string[]).includes(thinkingLevel)) problems.push(`${label}: invalid thinking level ${thinkingLevel}`);
@@ -29,7 +26,16 @@ export async function validateStaticConfig(settings: { actions: Record<string, E
     const skill = fileURLToPath(new URL(entry.skill, configUrl));
     if (!await access(skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${skill}`);
   }
-  if (problems.length) throw new Error(`Invalid Scrat configuration:\n${problems.map((problem) => `- ${problem}`).join("\n")}`);
+  if (problems.length) {
+    if (modelRuntime.getError()) dropModelRuntime();
+    throw new Error(`Invalid Scrat configuration:\n${problems.map((problem) => `- ${problem}`).join("\n")}`);
+  }
+}
+
+// Everything a claiming entrypoint (serve, work, run-next) does before its first claim.
+export async function prepareService() {
+  await validateStaticConfig();
+  ensureRunSequences();
 }
 
 // Idempotent backfill for runs created before runs.sequence. Existing sequences are kept and unsequenced runs continue after the maximum:

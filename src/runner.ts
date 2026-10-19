@@ -63,6 +63,7 @@ export async function runNextTask() {
         eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile),
       )).orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
       const diff = pullRequest ? await git(repositoryPath, ["diff", `${mainSha}...${preparedHead}`]) : undefined;
+      const diffBaseSha = pullRequest ? await git(repositoryPath, ["merge-base", mainSha, preparedHead]) : mainSha;
       const diffPaths = pullRequest ? (await git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", `${mainSha}...${preparedHead}`])).split("\0").filter(Boolean) : [];
       const requested = run.input.commentRevisions;
       const ids = new Set(Array.isArray(requested)
@@ -108,6 +109,8 @@ export async function runNextTask() {
         previousFailure: run.retryOfRunId ? db.select().from(runs).where(eq(runs.id, run.retryOfRunId)).get()?.error : undefined,
         workspace: { path: workspace.path, branch: workspace.branch, baseRef, baseBranch, mainSha, headSha, mergeInProgress },
         diff,
+        diffBaseSha,
+        diffPaths,
         mainChanges,
         prChanges,
         database: database ? {
@@ -116,8 +119,8 @@ export async function runNextTask() {
         } : undefined,
       }, null, 2);
       const agentResult = task.action === "review_pr"
-        ? await reviewPullRequest(run, workspace.path, prompt, operation.log)
-        : await executePi(run, workspace.path, prompt, readOnly, operation.log, previous?.piSessionFile ?? undefined, environment);
+        ? await reviewPullRequest(run, workspace.path, prompt, operation.log, diffBaseSha)
+        : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, log: operation.log, sessionFile: previous?.piSessionFile ?? undefined, environment });
       const result = { ...agentResult, paths: [...new Set([...diffPaths, ...agentResult.paths])] };
       db.update(runs).set({ result, stage: "validating" }).where(eq(runs.id, run.id)).run();
       if (result.outcome !== "complete") {

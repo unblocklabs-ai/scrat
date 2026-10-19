@@ -3,13 +3,15 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAgentSession, createBashToolDefinition, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, createBashToolDefinition, defineTool, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
+import { Type } from "typebox";
 import { thinkingLevels } from "./config.ts";
 import { db } from "./db.ts";
 import { runs } from "./schema.ts";
 import { parseResult, type Reviewer } from "./results.ts";
+import { git } from "./git.ts";
 
 export function saveReviewer(runId: string, index: number, patch: Partial<Reviewer>) {
   db.transaction((transaction) => {
@@ -19,7 +21,17 @@ export function saveReviewer(runId: string, index: number, patch: Partial<Review
   });
 }
 
-export async function executePi(run: typeof runs.$inferSelect, cwd: string, context: string, readOnly: boolean, log: Logger, sessionFile?: string, environment: NodeJS.ProcessEnv = {}, reviewerIndex?: number) {
+export async function executePi({ run, cwd, context, readOnly, log, sessionFile, environment = {}, reviewerIndex, baseSha }: {
+  run: typeof runs.$inferSelect;
+  cwd: string;
+  context: string;
+  readOnly: boolean;
+  log: Logger;
+  sessionFile?: string;
+  environment?: NodeJS.ProcessEnv;
+  reviewerIndex?: number;
+  baseSha?: string;
+}) {
   const modelRuntime = await ModelRuntime.create({
     modelsPath: fileURLToPath(new URL("../scrat.config.json", import.meta.url)),
     modelsStorePath: resolve("data/pi-models-store.json"),
@@ -44,10 +56,20 @@ export async function executePi(run: typeof runs.$inferSelect, cwd: string, cont
   const bash = createBashToolDefinition(cwd, {
     spawnHook: (context) => ({ ...context, env: { ...context.env, ...environment } }),
   });
+  const readBase = readOnly && baseSha ? defineTool({
+    name: "read_base",
+    label: "Read merge-base file",
+    description: `Read a repository-relative text file from the immutable PR merge-base ${baseSha}. Use read for the current PR head.`,
+    parameters: Type.Object({ path: Type.String() }),
+    async execute(_id, { path }) {
+      const text = await git(cwd, ["show", `${baseSha}:${path}`]);
+      return { content: [{ type: "text", text }], details: { path, baseSha } };
+    },
+  }) : undefined;
   const { session } = await createAgentSession({
     cwd, modelRuntime, model, thinkingLevel, settingsManager, sessionManager, resourceLoader,
-    tools: readOnly ? ["read", "grep", "find", "ls"] : ["read", "grep", "find", "ls", "bash", "edit", "write"],
-    customTools: readOnly ? [] : [{ ...bash, renderCall: undefined, renderResult: undefined }],
+    tools: readOnly ? ["read", "grep", "find", "ls", ...(readBase ? ["read_base"] : [])] : ["read", "grep", "find", "ls", "bash", "edit", "write"],
+    customTools: readOnly ? (readBase ? [readBase] : []) : [{ ...bash, renderCall: undefined, renderResult: undefined }],
   });
   const paths = new Set<string>();
   try {
@@ -60,7 +82,7 @@ export async function executePi(run: typeof runs.$inferSelect, cwd: string, cont
     session.subscribe((event) => {
       if (event.type === "tool_execution_start") {
         log.debug({ event: "pi.tool_started", tool: event.toolName, toolCallId: event.toolCallId });
-        if (event.toolName === "read" || event.toolName === "grep") {
+        if (event.toolName === "read" || event.toolName === "grep" || event.toolName === "read_base") {
           const args: unknown = event.args;
           if (args && typeof args === "object") {
             const path = "path" in args && typeof args.path === "string" ? args.path : event.toolName === "grep" ? "." : undefined;

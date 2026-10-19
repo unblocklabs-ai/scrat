@@ -48,6 +48,11 @@ try {
     for (const model of ["gpt-6.1-sol", "deepseek/deepseek-v4.1-flash"]) {
       assert.ok(f.requests.some((r) => r.context.action === "review_pr" && !r.consolidating && r.request.model === model
         && r.request.messages.some((m) => m.role === "tool" && JSON.stringify(m.content).includes("9.8.7"))), "Reviewer must read the prepared dependency in its own workspace");
+      assert.ok(f.requests.some((r) => r.context.action === "review_pr" && !r.consolidating && r.request.model === model
+        && r.request.messages.some((m) => m.role === "tool" && JSON.stringify(m.content).includes("export const value = 1;"))), "Reviewer must read the immutable base file, not the modified head");
+    }
+    for (const request of f.requests.filter((r) => r.context.action === "review_pr")) {
+      assert.deepEqual(request.context.diffPaths, ["src/app.ts"]); assert.match(request.context.diffBaseSha, /^[a-f0-9]{40}$/);
     }
     assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === 201).length, 1);
     assert.match(f.comments.get(201)[0].body, /Consolidated/);

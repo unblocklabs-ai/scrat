@@ -1,6 +1,4 @@
-import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
-import { db } from "./db.ts";
 import { describeError } from "./errors.ts";
 import { executePi, saveReviewer } from "./pi.ts";
 import { runs } from "./schema.ts";

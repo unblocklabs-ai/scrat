@@ -43,6 +43,8 @@ npm run work                     # Drain runnable queued work, then exit
 npm run retry -- <task-id>        # Repair a failed task, or resume publication
 npm run retry -- <task-id> --validation-only  # Recheck saved code without Pi
 npm run cleanup                  # Retry finished-run resource cleanup
+npm run typecheck                # Strict TypeScript and Node type-erasure compatibility
+npm run knip                     # Unused files, exports, and dependencies
 npm test                         # Integration/E2E tests; PostgreSQL case needs Docker
 ```
 
@@ -51,6 +53,8 @@ Normal retries rerun Pi for pre-publication failures, reusing the workspace/sess
 Use `--validation-only` for a transient validation failure after a mutating agent returned complete. It requires a saved checkpoint with unchanged task input, workspace identity, HEAD, source tree, merge state, GitHub context, and base SHA. Scrat skips Pi, creates a fresh disposable database when configured, reruns preparation/migrations and all checks, and still enforces action postconditions before publication. Ignored files are outside the source checkpoint; configured preparation must restore any required dependency/generated state. Changed or incomplete work requires a normal repair retry.
 
 When upgrading an existing installation, run `npm run db:push` before starting the new code (the installer does this). Old run history is preserved, but runs without checkpoints cannot use validation-only retry. No validation is bypassed or automatically retried.
+
+For project review, run `typecheck`, `knip`, and the integration/E2E tests after `npm ci` (including dev dependencies). TypeScript checks `src/` and the Drizzle config without emitting JavaScript. Knip includes the CLI, deployment-only recovery, and subprocess-driven test entrypoints; ordinary source modules remain eligible for unused-code detection. Review findings before removing code or adding exceptions.
 
 ## Configuration
 

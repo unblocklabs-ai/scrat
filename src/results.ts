@@ -16,7 +16,7 @@ export function hasValidationCheckpoint(run: typeof runs.$inferSelect | undefine
     && Boolean(run.context && run.agentCheckpoint && run.workspaceId && run.mainSha);
 }
 
-export const prGrades = ["S", "A", "B", "C", "D", "F"] as const;
+const prGrades = ["S", "A", "B", "C", "D", "F"] as const;
 export type PrGrade = typeof prGrades[number];
 
 export type AgentResult = {

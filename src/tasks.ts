@@ -1,8 +1,8 @@
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, count, desc, eq, isNotNull, isNull, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
-import { actionContracts } from "./actions.ts";
-import { config, getActionConfig } from "./config.ts";
+import { type Action, actionContracts, actionIds } from "./actions.ts";
+import { config, getActionConfig, thinkingLevels } from "./config.ts";
 import { db } from "./db.ts";
 import { describeError } from "./errors.ts";
 import { recordEvent } from "./events.ts";
@@ -10,12 +10,31 @@ import { startOperation } from "./logging.ts";
 import { hasPublicationSnapshot, hasValidationCheckpoint } from "./results.ts";
 import { events, items, runs, tasks } from "./schema.ts";
 
-function latestRun(taskId: string, database: Pick<typeof db, "select">) {
-  const previous = database.select({ run: runs, sequence: events.id }).from(runs)
+function runHistory(taskId: string, database: Pick<typeof db, "select">) {
+  return database.select({ run: runs, sequence: events.id }).from(runs)
     .leftJoin(events, and(eq(events.runId, runs.id), eq(events.type, "run.started")))
     .where(eq(runs.taskId, taskId)).orderBy(desc(events.id)).limit(1).get();
+}
+
+function latestRun(taskId: string, database: Pick<typeof db, "select">) {
+  const previous = runHistory(taskId, database);
   if (previous && previous.sequence === null) throw new Error(`Missing run.started event: ${previous.run.id}`);
   return previous?.run;
+}
+
+// Pure and non-throwing for task-specific faults, so one damaged task cannot stall the queue; add new reasons here.
+// Infrastructure errors from the reads below still propagate and never reject a task.
+const isKnownAction = (action: string): action is Action => (actionIds as readonly string[]).includes(action);
+
+function checkClaimable({ task }: { task: typeof tasks.$inferSelect; item: typeof items.$inferSelect }, database: Pick<typeof db, "select">) {
+  if (!isKnownAction(task.action) || !(task.action in config.actions)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
+  const actionConfig = config.actions[task.action];
+  const invalid = [actionConfig, ...("reviewers" in actionConfig ? actionConfig.reviewers : [])]
+    .find(({ thinkingLevel }) => !(thinkingLevels as readonly string[]).includes(thinkingLevel));
+  if (invalid) return { ok: false as const, reason: `Invalid thinking level for ${task.action}: ${invalid.thinkingLevel}` };
+  const history = runHistory(task.id, database);
+  if (history && history.sequence === null) return { ok: false as const, reason: `Missing run.started event: ${history.run.id}` };
+  return { ok: true as const, previousRun: history?.run };
 }
 
 export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
@@ -68,7 +87,7 @@ export function claimTask() {
     if (active.count >= config.harness.maxConcurrency) return;
     const busyTasks = alias(tasks, "busy_tasks");
     const busyItems = alias(items, "busy_items");
-    const next = transaction.select({ task: tasks, item: items }).from(tasks)
+    const select = () => transaction.select({ task: tasks, item: items }).from(tasks)
       .innerJoin(items, eq(tasks.itemId, items.id))
       .where(and(eq(tasks.status, "queued"), eq(items.state, "open"), notExists(
         transaction.select({ id: busyTasks.id }).from(busyTasks)
@@ -79,8 +98,15 @@ export function claimTask() {
           ))),
       )))
       .orderBy(desc(tasks.priority), asc(tasks.createdAt), asc(tasks.id)).limit(1).get();
-    if (!next) return;
-    const previousRun = latestRun(next.task.id, transaction);
+    let next, claimable;
+    while ((next = select())) {
+      claimable = checkClaimable(next, transaction);
+      if (claimable.ok) break;
+      transaction.update(tasks).set({ status: "failed" }).where(eq(tasks.id, next.task.id)).run();
+      recordEvent({ itemId: next.task.itemId, taskId: next.task.id, type: "task.rejected", data: { action: next.task.action, reason: claimable.reason } }, transaction);
+    }
+    if (!next || !claimable?.ok) return;
+    const previousRun = claimable.previousRun;
     const retry = previousRun?.error && isDeepStrictEqual(previousRun.input, next.task.input) ? previousRun : undefined;
     const actionSettings = getActionConfig(next.task.action);
     const settings = retry ?? actionSettings;
@@ -129,7 +155,7 @@ export function retryTask(taskId: string, mode: typeof tasks.$inferSelect.retryM
       if (queued) throw new Error(`A queued task already exists for this item/action: ${queued.id}`);
       if (mode === "validation") {
         const previous = latestRun(taskId, transaction);
-        if (actionContracts[failed.action].mode !== "change" || !hasValidationCheckpoint(previous)
+        if (!isKnownAction(failed.action) || actionContracts[failed.action].mode !== "change" || !hasValidationCheckpoint(previous)
           || !isDeepStrictEqual(previous.input, failed.input)) {
           throw new Error("Validation-only retry requires an unchanged task input and a complete agent checkpoint from a failed validation; use normal retry to repair");
         }

@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import settings from "../scrat.config.json" with { type: "json" };
 import type { Action } from "./actions.ts";
 
-const configUrl = new URL("../scrat.config.json", import.meta.url);
+export const configUrl = new URL("../scrat.config.json", import.meta.url);
 export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 type WorkspaceConfig = {

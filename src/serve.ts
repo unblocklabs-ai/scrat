@@ -4,6 +4,7 @@ import { db } from "./db.ts";
 import { syncGitHub } from "./github-sync.ts";
 import { logger } from "./logging.ts";
 import { runNextTask } from "./runner.ts";
+import { validateStaticConfig } from "./startup.ts";
 
 const shutdown = new AbortController();
 const wait = (ms: number) => setTimeout(ms, undefined, { signal: shutdown.signal }).catch((error: unknown) => {
@@ -31,6 +32,7 @@ async function worker() {
   }
 }
 try {
+  await validateStaticConfig();
   logger.info({ event: "worker.started", concurrency: config.harness.maxConcurrency });
   // Discover all priorities before the first claims, rather than starting with a partial queue.
   try { await syncGitHub(); }

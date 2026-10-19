@@ -658,6 +658,49 @@ try {
     f.enqueue(2, "implement"); await route();
     assert.ok(!all(s.tasks).some((t) => t.itemId === "issue-2" && t.status === "queued"));
     assert.ok(all(s.tasks).some((t) => t.action === "review_pr" && t.status === "queued"));
+  } else if (scenario === "rejection") {
+    const { eq } = await import("drizzle-orm");
+    const rejections = () => all(s.events).filter((e) => e.type === "task.rejected");
+    for (let n = 1; n <= 4; n++) f.addIssue(n);
+    db.$client.prepare("INSERT INTO tasks (id, item_id, action, priority, reason, input, created_at) VALUES ('bogus', 'issue-1', 'ship_it', 1000, 'Integration', '{}', '2026-01-01')").run();
+    f.enqueue(2);
+    const claim = tasks.claimTask();
+    assert.equal(claim.task.itemId, "issue-2");
+    assert.equal(f.row(s.tasks, "bogus").status, "failed");
+    assert.equal(rejections().length, 1);
+    assert.deepEqual({ ...rejections()[0].data, taskId: rejections()[0].taskId }, { action: "ship_it", reason: "Unknown action: ship_it", taskId: "bogus" });
+    assert.equal(tasks.claimTask(), undefined);
+    tasks.retryTask("bogus"); assert.equal(tasks.claimTask(), undefined);
+    assert.equal(rejections().length, 2); assert.equal(f.row(s.tasks, "bogus").status, "failed");
+    tasks.finishRun(claim.run.id, { status: "completed" });
+
+    f.enqueue(3); const damaged = tasks.claimTask();
+    tasks.finishRun(damaged.run.id, { status: "failed", error: new Error("Interrupted") });
+    db.delete(s.events).where(eq(s.events.runId, damaged.run.id)).run();
+    assert.throws(() => tasks.retryTask(damaged.task.id, "validation"), /Missing run\.started event/);
+    assert.throws(() => tasks.retryTask("bogus", "validation"), /Validation-only retry requires/);
+    tasks.retryTask(damaged.task.id); f.enqueue(4);
+    assert.equal(tasks.claimTask().task.itemId, "issue-4");
+    assert.equal(f.row(s.tasks, damaged.task.id).status, "failed");
+    assert.match(rejections().at(-1).data.reason, /Missing run\.started event/);
+    assert.equal(rejections().at(-1).taskId, damaged.task.id);
+    assert.equal(rejections().length, 3);
+
+    const { config: live } = await f.app("config.ts"); live.actions.review_pr.thinkingLevel = "turbo";
+    f.addIssue(5); f.addIssue(6); f.enqueue(5, "review_pr"); f.enqueue(6);
+    assert.equal(tasks.claimTask().task.itemId, "issue-6");
+    assert.equal(f.row(s.tasks, all(s.tasks).find((t) => t.itemId === "issue-5").id).status, "failed");
+    assert.match(rejections().at(-1).data.reason, /Invalid thinking level for review_pr: turbo/);
+    live.actions.review_pr.thinkingLevel = "high";
+
+    const { validateStaticConfig } = await f.app("startup.ts");
+    await validateStaticConfig(f.config);
+    const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
+    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.implement.thinkingLevel = "turbo"; })), /implement: invalid thinking level turbo/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.reviewers[1].thinkingLevel = "turbo"; })), /review_pr reviewer 2: invalid thinking level/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_issue.model = "missing-model"; })), /review_issue: no Pi model fixture\/missing-model/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.reviewers[0].provider = "nowhere"; })), /review_pr reviewer 1: no Pi model nowhere/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.resolve_conflicts.skill = "skills/missing/SKILL.md"; })), /resolve_conflicts: skill file not found/);
   } else if (scenario === "recovery") {
     f.addIssue(1); f.enqueue(1); const claim = tasks.claimTask();
     const { eq } = await import("drizzle-orm");

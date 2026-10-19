@@ -43,6 +43,7 @@ const scenarios = {
   merge: "retry resumes an unfinished merge and preserves partial work",
   reopen: "fetch-only reopening cannot keep a deleted workspace attached",
   existing_pr: "existing implementation PRs suppress duplicate implementation tasks",
+  rejection: "invalid queued tasks are rejected with a journal reason while later work still runs, and bad static config blocks startup",
   recovery: "recover releases an abandoned claim without rewriting the saved result",
   cleanup: "cleanup failure cannot turn a published review into a failed task",
   identity: "retained workspaces reject branch replacement and retain unpublished commits",

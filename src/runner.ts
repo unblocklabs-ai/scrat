@@ -6,12 +6,12 @@ import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts, hasPendingMerge } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
-import { evaluateGithubContext } from "./github-context.ts";
+import { freshness, savedEvaluation } from "./freshness.ts";
 import { startOperation } from "./logging.ts";
+import { observe } from "./observation.ts";
 import { executePi } from "./pi.ts";
 import { reviewPullRequest } from "./pr-review.ts";
 import { publishRun } from "./publication.ts";
-import { reviewChanges } from "./relevance.ts";
 import { hasValidationCheckpoint } from "./results.ts";
 import { items, runs } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
@@ -30,16 +30,15 @@ export async function runNextTask() {
   let databaseRequested = false;
   try {
     const repository = new URL(item.payload.html_url).pathname.split("/").slice(1, 3).join("/");
-    const remote = `https://github.com/${repository}.git`;
     const repositoryPath = getRepositoryPath();
     const github = new GitHubRepository(repository);
     const context = await github.fetchItemContext(item.kind, item.payload.number);
     if (context.item.state !== "open") throw new Error("GitHub item is no longer open");
     const pullRequest = "head" in context.item ? context.item : undefined;
-    const baseBranch = pullRequest?.base.ref ?? config.github.baseBranch;
+    const observation = observe(repository, context);
+    const { remote, baseBranch, revision, external: comments } = observation;
     const gitEnvironment = await github.getGitEnvironment();
     const mainSha = await fetchRepository(repositoryPath, remote, baseBranch, gitEnvironment);
-    const { comments, revision } = evaluateGithubContext(context, config.github.botLogin);
     if (run.stage !== "publishing") {
       const validationOnly = run.stage === "validating";
       const baseRef = mainSha;
@@ -53,7 +52,7 @@ export async function runNextTask() {
       if (validationOnly) {
         if (readOnly || !hasValidationCheckpoint(run)) throw new Error("No complete agent checkpoint to resume; use normal retry to repair");
         if (!workspace || workspace.id !== run.workspaceId) throw new Error("Validation checkpoint workspace is no longer attached to this item");
-        if (run.context.revision !== revision || run.context.baseBranch !== baseBranch || run.mainSha !== mainSha) {
+        if ((await freshness(savedEvaluation(run), { ...observation, mainSha }, "exact")).kind === "stale") {
           throw new Error("Validation checkpoint context or base changed; use normal retry to repair against current requirements");
         }
         await validateCheckpoint(workspace, run.agentCheckpoint);
@@ -170,25 +169,23 @@ export async function runNextTask() {
     const publicationContext = run.stage !== "publishing"
       ? await github.fetchItemContext(item.kind, item.payload.number) : context;
     if (publicationContext.item.state !== "open") throw new Error("GitHub item is no longer open");
-    const currentBaseBranch = "head" in publicationContext.item ? publicationContext.item.base.ref : config.github.baseBranch;
-    let revisionItem = publicationContext.item;
-    if (!readOnly && "head" in revisionItem && evaluatedRun.context?.headSha) {
-      if (revisionItem.head.sha !== evaluatedRun.context.headSha && revisionItem.head.sha !== evaluatedRun.publication.publishedCommitSha
-        && revisionItem.head.sha !== evaluatedRun.publication.commitSha) throw new Error("GitHub PR head changed during execution");
-      revisionItem = { ...revisionItem, head: { ...revisionItem.head, sha: evaluatedRun.context.headSha } };
+    let headOverride: string | undefined;
+    if (!readOnly && "head" in publicationContext.item && evaluatedRun.context?.headSha) {
+      const { sha } = publicationContext.item.head;
+      if (sha !== evaluatedRun.context.headSha && sha !== evaluatedRun.publication.publishedCommitSha
+        && sha !== evaluatedRun.publication.commitSha) throw new Error("GitHub PR head changed during execution");
+      headOverride = evaluatedRun.context.headSha;
     }
-    const { revision: currentRevision } = evaluateGithubContext({ ...publicationContext, item: revisionItem }, config.github.botLogin);
-    if (contract.publication !== "pr-assessment" && (evaluatedRun.context?.revision !== currentRevision
-      || evaluatedRun.context.baseBranch !== currentBaseBranch)) {
-      throw new Error("GitHub task context changed; enqueue a fresh task instead of retrying publication");
-    }
-    if (readOnly) {
-      const currentMainSha = run.stage === "publishing" ? mainSha
-        : await fetchRepository(repositoryPath, remote, currentBaseBranch, await github.getGitEnvironment());
-      if (contract.publication !== "pr-assessment" && evaluatedRun.mainSha && evaluatedRun.mainSha !== currentMainSha) {
-        const changes = await reviewChanges(repositoryPath, evaluatedRun.mainSha, currentMainSha, evaluatedRun.result?.paths ?? []);
-        if (changes.relevant) throw new Error("Reviewed code changed; enqueue a fresh review instead of retrying publication");
-      }
+    const current = observe(repository, publicationContext, headOverride);
+    const currentMainSha = readOnly ? async () => run.stage === "publishing" ? mainSha
+      : await fetchRepository(repositoryPath, remote, current.baseBranch, await github.getGitEnvironment()) : undefined;
+    // PR assessments are checked by the serialized reconciliation, not here.
+    if (contract.publication === "pr-assessment") await currentMainSha?.();
+    else {
+      const state = await freshness(savedEvaluation(evaluatedRun), { ...current, mainSha: currentMainSha }, "relevant-paths", { unknownBase: "current" });
+      if (state.kind === "stale") throw new Error(state.reason === "context"
+        ? "GitHub task context changed; enqueue a fresh task instead of retrying publication"
+        : "Reviewed code changed; enqueue a fresh review instead of retrying publication");
     }
     await publishRun(github, task, evaluatedRun, publicationContext, references);
     finishRun(run.id, { status: "completed" });

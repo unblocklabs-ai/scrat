@@ -1,9 +1,7 @@
 import { and, desc, eq } from "drizzle-orm";
-import { config, getRepositoryPath } from "./config.ts";
 import { db } from "./db.ts";
-import { evaluateGithubContext } from "./github-context.ts";
-import type { GithubContext } from "./github-types.ts";
-import { reviewChanges } from "./relevance.ts";
+import { freshness, savedEvaluation } from "./freshness.ts";
+import type { ItemObservation } from "./observation.ts";
 import { hasPublicationSnapshot } from "./results.ts";
 import { events, runs, tasks } from "./schema.ts";
 
@@ -52,19 +50,10 @@ export type PrReviewState =
   | { kind: "current"; assessment: Assessment };
 
 // Authority first, freshness second. A stale opinion never revives an older one.
-export async function resolvePrReview(history: History, current: GithubContext, mainSha: string): Promise<PrReviewState> {
+export async function resolvePrReview(history: History, now: ItemObservation, mainSha: string): Promise<PrReviewState> {
   const assessment = selectAssessment(history);
   if (!assessment) return { kind: "missing" };
-  const { run, result } = assessment;
-  const baseBranch = "base" in current.item ? current.item.base.ref : config.github.baseBranch;
-  const { revision } = evaluateGithubContext(current, config.github.botLogin);
-  if (current.item.state !== "open" || run.context?.revision !== revision
-    || run.context.baseBranch !== baseBranch || !run.mainSha) {
-    return { kind: "stale", assessment, changedPaths: [] };
-  }
-  if (run.mainSha !== mainSha) {
-    const changes = await reviewChanges(getRepositoryPath(), run.mainSha, mainSha, result.paths);
-    if (changes.relevant) return { kind: "stale", assessment, changedPaths: changes.paths };
-  }
-  return { kind: "current", assessment };
+  if (now.item.state !== "open") return { kind: "stale", assessment, changedPaths: [] };
+  const state = await freshness(savedEvaluation(assessment.run), { ...now, mainSha }, "relevant-paths");
+  return state.kind === "current" ? { kind: "current", assessment } : { kind: "stale", assessment, changedPaths: state.changedPaths };
 }

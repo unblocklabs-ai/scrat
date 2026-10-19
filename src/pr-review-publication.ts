@@ -1,11 +1,12 @@
 import { eq } from "drizzle-orm";
-import { config, getRepositoryPath } from "./config.ts";
+import { getRepositoryPath } from "./config.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
 import { git } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
-import type { GithubComment } from "./github-types.ts";
 import { gradeLabels, reconcileLabels } from "./labels.ts";
+import { isIssueComment, issueCommentId, parseIssueCommentId, reviewMarker, taskMarker } from "./markers.ts";
+import { observe, type ItemObservation } from "./observation.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { runs, tasks } from "./schema.ts";
 
@@ -13,18 +14,17 @@ type Run = typeof runs.$inferSelect;
 type Task = typeof tasks.$inferSelect;
 // One serve process owns delivery; serialize its poller and worker calls per PR.
 const pendingReviews = new Map<string, Promise<void>>();
-const reviewMarker = "<!-- scrat-review -->";
 
 function reviewBody(text: string, taskId: string) {
-  return `${text}\n\n${reviewMarker}\n<!-- scrat-task:${taskId} -->`;
+  return `${text}\n\n${reviewMarker}\n${taskMarker(taskId)}`;
 }
 
-function canonicalComment(comments: GithubComment[], reviews: ReturnType<typeof prReviewHistory>) {
-  const own = comments.filter((comment) => comment.id.startsWith("issue:") && comment.author === config.github.botLogin);
+function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeof prReviewHistory>) {
+  const issueComments = own.filter(isIssueComment);
   for (const { run, task } of reviews) {
     // Receipts identify physical comments, not assessment authority. Recover lost
     // responses only from a complete rendered report, never a quoted marker.
-    const existing = own.findLast((comment) => comment.id === `issue:${run.publication.commentId}`
+    const existing = issueComments.findLast((comment) => comment.id === issueCommentId(run.publication.commentId)
       || (run.result && comment.body === reviewBody(run.result.text, task.id)));
     if (existing) return existing;
   }
@@ -33,13 +33,13 @@ function canonicalComment(comments: GithubComment[], reviews: ReturnType<typeof 
 async function reconcile(github: GitHubRepository, itemId: string, number: number, references: EventReferences, publication?: { task: Task; run: Run }) {
   const current = await github.fetchItemContext("pr", number);
   const reviews = prReviewHistory(itemId);
-  const existing = canonicalComment(current.comments, reviews);
-  const baseBranch = "base" in current.item ? current.item.base.ref : config.github.baseBranch;
-  const mainSha = await git(getRepositoryPath(), ["rev-parse", `refs/remotes/origin/${baseBranch}`]);
-  const state = await resolvePrReview(reviews, current, mainSha);
+  const observation = observe(github.repository, current);
+  const existing = canonicalComment(observation.own, reviews);
+  const mainSha = await git(getRepositoryPath(), ["rev-parse", `refs/remotes/origin/${observation.baseBranch}`]);
+  const state = await resolvePrReview(reviews, observation, mainSha);
   const desired = state.kind === "current" ? state.assessment : undefined;
   const deliveryReferences = desired ? { ...references, itemId, taskId: desired.task.id, runId: desired.run.id } : references;
-  let labels = current.item.labels ?? [];
+  let labels = observation.labels;
   const body = desired ? reviewBody(desired.result.text, desired.task.id) : undefined;
   const replacing = desired && existing?.body !== body;
   if (!desired || replacing) {
@@ -47,7 +47,7 @@ async function reconcile(github: GitHubRepository, itemId: string, number: numbe
     // over a grade attached to the wrong report if either write fails.
     await reconcileLabels(github, number, { current: labels, desired: [], managed: Object.values(gradeLabels) }, deliveryReferences);
     const managed = new Set<string>(Object.values(gradeLabels).map((name) => name.toLowerCase()));
-    labels = labels.filter((label) => !managed.has((typeof label === "string" ? label : label.name ?? "").toLowerCase()));
+    labels = labels.filter((label) => !managed.has(label.toLowerCase()));
   }
   if (publication && !desired) throw new Error("Reviewed code changed or PR context changed; enqueue a fresh review");
 
@@ -55,7 +55,7 @@ async function reconcile(github: GitHubRepository, itemId: string, number: numbe
     const { run } = desired;
     let commentId: number;
     if (existing) {
-      commentId = Number(existing.id.slice("issue:".length));
+      commentId = parseIssueCommentId(existing.id);
       if (existing.body !== body) await github.updateComment(commentId, body, deliveryReferences);
     } else commentId = await github.postComment(number, body, deliveryReferences);
     run.publication = { ...run.publication, commentId };

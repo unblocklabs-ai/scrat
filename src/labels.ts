@@ -7,6 +7,8 @@ export const gradeLabels = {
   C: "C · Needs work", D: "D · Weak", F: "F · Unsafe or broken",
 } satisfies Record<PrGrade, string>;
 
+export const labelName = (label: string | { name?: string }) => typeof label === "string" ? label : label.name ?? "";
+
 export async function reconcileLabels(github: GitHubRepository, number: number, {
   current, desired, managed,
 }: {
@@ -14,7 +16,7 @@ export async function reconcileLabels(github: GitHubRepository, number: number, 
   desired: readonly string[];
   managed: readonly string[];
 }, references: EventReferences = {}) {
-  const present = current.map((label) => typeof label === "string" ? label : label.name ?? "");
+  const present = current.map(labelName);
   const existing = new Set(present.map((name) => name.toLowerCase()));
   const wanted = new Set(desired.map((name) => name.toLowerCase()));
   const owned = new Set(managed.map((name) => name.toLowerCase()));

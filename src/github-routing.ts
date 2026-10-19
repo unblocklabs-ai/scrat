@@ -1,4 +1,5 @@
 import type { Action } from "./actions.ts";
+import type { Freshness } from "./freshness.ts";
 import type { PrReviewState } from "./pr-assessment.ts";
 import type { runs, tasks } from "./schema.ts";
 
@@ -64,7 +65,7 @@ export function reviewTrigger({ latest, attempt, revision, mainSha }: ReviewTrig
 
 type ReviewFacts = ReviewTriggerFacts & (
   | { kind: "pr"; state: PrReviewState }
-  | { kind: "issue"; completed?: PreviousReview; baseChanges?: { paths: string[]; relevant: boolean } }
+  | { kind: "issue"; completed?: PreviousReview; freshness?: Freshness }
 );
 
 // Observations in, intents out. Queue transactions and external effects belong
@@ -80,11 +81,11 @@ export function planReview(facts: ReviewFacts): RoutingDecision[] {
   const completed = facts.kind === "pr"
     ? facts.state.kind === "stale" ? facts.state.assessment.run : undefined : facts.completed;
   let changedPaths: string[] = facts.kind === "pr" && facts.state.kind === "stale" ? facts.state.changedPaths : [];
-  if (facts.kind === "issue" && completed?.context?.revision === revision && completed.mainSha) {
-    if (completed.mainSha === mainSha) return [{ type: "cancel", action, reason: "No changes since the last review" }];
-    if (!facts.baseChanges) throw new Error("Missing base-change observation for issue review");
-    changedPaths = facts.baseChanges.paths;
-    if (!facts.baseChanges.relevant) return [{ type: "cancel", action, reason: "Base changes do not affect the reviewed scope" }];
+  if (facts.kind === "issue" && completed) {
+    if (!facts.freshness) throw new Error("Missing freshness observation for issue review");
+    if (facts.freshness.kind === "current") return [{ type: "cancel", action, reason: facts.freshness.baseMoved
+      ? "Base changes do not affect the reviewed scope" : "No changes since the last review" }];
+    changedPaths = facts.freshness.changedPaths;
   }
   return queue(latest, action, completed ? "Relevant GitHub or base-branch changes" : "Initial GitHub review", {
     triggerKey, revision, mainSha, changedPaths,

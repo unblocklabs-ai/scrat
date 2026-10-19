@@ -1,11 +1,13 @@
 import { and, desc, eq, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
 import { config, getRepositoryPath } from "./config.ts";
-import { reviewChanges } from "./relevance.ts";
+import { freshness, savedEvaluation } from "./freshness.ts";
+import { acknowledgedTaskIds } from "./markers.ts";
+import { observe, remoteUrl } from "./observation.ts";
+import { labelName } from "./labels.ts";
 import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
-import { evaluateGithubContext } from "./github-context.ts";
 import { items, runs, tasks } from "./schema.ts";
 import { cancelQueuedTasks, enqueueTask } from "./tasks.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
@@ -27,7 +29,7 @@ function strings(value: unknown): string[] {
 }
 
 function hasScratLabel(item: Item) {
-  return item.payload.labels?.some((label) => typeof label === "string" ? label === "scrat" : label.name === "scrat");
+  return item.payload.labels?.some((label) => labelName(label) === "scrat");
 }
 
 function applyDecisions(itemId: string, decisions: RoutingDecision[]) {
@@ -42,7 +44,7 @@ function applyDecisions(itemId: string, decisions: RoutingDecision[]) {
 export async function routeGithubTasks(github: GitHubRepository, current: Item[], previous: Map<string, Item>, log: Logger) {
   const { repository } = github;
   const repositoryPath = getRepositoryPath();
-  const remote = `https://github.com/${repository}.git`;
+  const remote = remoteUrl(repository);
   const env = await github.getGitEnvironment();
   const defaultBaseSha = await fetchRepository(repositoryPath, remote, config.github.baseBranch, env);
   const implemented = new Set(current.filter((item) => item.kind === "pr" && item.state === "open")
@@ -84,10 +86,11 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
     }
     const context = byId.get(item.id)!;
     if (context.item.state !== "open") continue;
-    if ("head" in context.item && context.item.base.ref !== config.github.baseBranch) {
-      mainSha = await fetchRepository(repositoryPath, remote, context.item.base.ref, env);
+    const observation = observe(repository, context);
+    if (observation.kind === "pr" && observation.baseBranch !== config.github.baseBranch) {
+      mainSha = await fetchRepository(repositoryPath, remote, observation.baseBranch, env);
     }
-    const { comments, revision } = evaluateGithubContext(context, config.github.botLogin);
+    const { external: comments, revision } = observation;
     const owned = item.kind === "pr" && context.item.user?.login === config.github.botLogin;
     if (owned && "head" in context.item) {
       const pr = context.item;
@@ -95,8 +98,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       const headRef = await fetchPullRequestHead(repositoryPath, remote, pr.number, env);
       const headSha = await git(repositoryPath, ["rev-parse", headRef]);
       const conflicts = await hasConflicts(repositoryPath, mainSha, headSha);
-      const acknowledged = new Set(context.comments.filter((comment) => comment.author === config.github.botLogin)
-        .flatMap((comment) => [...comment.body.matchAll(/<!-- scrat-task:([a-f0-9-]+) -->/g)].map((match) => match[1])));
+      const acknowledged = new Set(observation.own.flatMap((comment) => acknowledgedTaskIds(comment.body)));
       const handled = db.select({ run: runs, task: tasks }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
         .where(and(eq(tasks.itemId, item.id), eq(tasks.action, "address_pr_feedback"))).all()
         .filter(({ run, task }) => (!run.finishedAt && task.status === "running") || (run.finishedAt && !run.error)
@@ -116,16 +118,15 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
         : latest ? db.select().from(runs).where(eq(runs.taskId, latest.id))
           .orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
       if (reviews) {
-        const state = await resolvePrReview(reviews, context, mainSha);
+        const state = await resolvePrReview(reviews, observation, mainSha);
         queued += applyDecisions(item.id, planReview({ kind: "pr", state, latest, attempt, revision, mainSha }));
       } else {
         if (reviewTrigger({ latest, attempt, revision, mainSha }).covered) continue;
         const completed = db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
           .where(and(eq(tasks.itemId, item.id), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
           .orderBy(desc(runs.startedAt)).limit(1).get()?.run;
-        const baseChanges = completed?.context?.revision === revision && completed.mainSha && completed.mainSha !== mainSha
-          ? await reviewChanges(repositoryPath, completed.mainSha, mainSha, completed.result?.paths ?? []) : undefined;
-        queued += applyDecisions(item.id, planReview({ kind: "issue", completed, baseChanges, latest, attempt, revision, mainSha }));
+        const state = completed ? await freshness(savedEvaluation(completed), { ...observation, mainSha }, "relevant-paths") : undefined;
+        queued += applyDecisions(item.id, planReview({ kind: "issue", completed, freshness: state, latest, attempt, revision, mainSha }));
       }
     } finally {
       if (item.kind === "pr") {

@@ -32,6 +32,7 @@ const scenarios = {
   retry: "publication retries reconcile remote comments and labels without rerunning Pi",
   ambiguous_pr: "a lost PR response is reconciled without another PR or inference",
   freshness: "requirements changed during inference cannot receive an approval label",
+  freshness_policy: "one freshness policy distinguishes exact, context, irrelevant and relevant base changes",
   relevance: "root searches and unrelated development dependencies do not trigger re-review",
   lockfile_scope: "mixed lockfile changes cannot hide inspected packages, aliases or importer changes",
   importer_scope: "real importer bumps skip unrelated packages while aliases and unknown workspace shapes remain relevant",

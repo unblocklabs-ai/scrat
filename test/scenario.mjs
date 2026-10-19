@@ -523,6 +523,32 @@ try {
     await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "Unrelated dev dependencies must not trigger review");
     changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "2.0.0", unrelated: "2.0.0" } }));
     await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"), "Inspected dependency changes must trigger review");
+  } else if (scenario === "freshness_policy") {
+    const { freshness, savedEvaluation } = await f.app("freshness.ts");
+    const { fetchRepository } = await f.app("git.ts");
+    const fetchMain = () => fetchRepository(f.config.github.repositoryPath, "https://github.com/fixture/project.git", "main");
+    f.addIssue(1); f.modes.set(1, "grep"); await route(); const saved = savedEvaluation(await success());
+    assert.ok(saved.mainSha && saved.paths.includes("src/app.ts"));
+    const now = { revision: saved.revision, baseBranch: saved.baseBranch, mainSha: saved.mainSha };
+    for (const mode of ["exact", "relevant-paths"]) assert.deepEqual(await freshness(saved, now, mode), { kind: "current", baseMoved: false });
+    for (const mode of ["exact", "relevant-paths"]) {
+      assert.deepEqual(await freshness(saved, { ...now, revision: "changed" }, mode), { kind: "stale", reason: "context", changedPaths: [] });
+      assert.deepEqual(await freshness(saved, { ...now, baseBranch: "release" }, mode), { kind: "stale", reason: "context", changedPaths: [] });
+    }
+    let fetched = false;
+    const lazy = async () => { fetched = true; return saved.mainSha; };
+    assert.equal((await freshness(saved, { ...now, revision: "changed", mainSha: lazy }, "relevant-paths")).kind, "stale"); assert.ok(!fetched);
+    assert.equal((await freshness(saved, { ...now, mainSha: lazy }, "relevant-paths")).kind, "current"); assert.ok(fetched);
+    assert.equal((await freshness(saved, { revision: saved.revision, baseBranch: saved.baseBranch }, "relevant-paths")).kind, "current");
+    const unknown = { ...saved, mainSha: null };
+    assert.equal((await freshness(unknown, now, "relevant-paths")).kind, "stale");
+    assert.equal((await freshness(unknown, now, "relevant-paths", { unknownBase: "current" })).kind, "current");
+    changeMain("notes.md", "new docs\n"); const docsSha = await fetchMain(); assert.notEqual(docsSha, saved.mainSha);
+    assert.deepEqual(await freshness(saved, { ...now, mainSha: docsSha }, "relevant-paths"), { kind: "current", baseMoved: true });
+    assert.deepEqual(await freshness(saved, { ...now, mainSha: docsSha }, "exact"), { kind: "stale", reason: "base", changedPaths: [] });
+    changeMain("src/app.ts", "export const changed = true;\n"); const codeSha = await fetchMain();
+    const relevant = await freshness(saved, { ...now, mainSha: codeSha }, "relevant-paths");
+    assert.equal(relevant.kind, "stale"); assert.equal(relevant.reason, "base"); assert.ok(relevant.changedPaths.includes("src/app.ts"));
   } else if (scenario === "lockfile_scope") {
     f.addIssue(1); f.modes.set(1, "grep"); await route(); await success();
     let lock = readFileSync("seed/pnpm-lock.yaml", "utf8");

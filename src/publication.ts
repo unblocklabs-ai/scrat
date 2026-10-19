@@ -1,12 +1,13 @@
 import { eq } from "drizzle-orm";
 import { actionContracts } from "./actions.ts";
-import { config } from "./config.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
 import { branchContainsCommit } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { reconcileLabels } from "./labels.ts";
+import { isIssueComment, parseIssueCommentId, taskMarker } from "./markers.ts";
+import { observe, remoteUrl } from "./observation.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
 import { upsertItem } from "./items.ts";
 import { items, runs, tasks } from "./schema.ts";
@@ -17,8 +18,8 @@ export async function publishRun(github: GitHubRepository, task: typeof tasks.$i
   if (!result || !context) throw new Error("Run has no evaluated result to publish");
   if (result.outcome !== "complete") throw new Error("Incomplete agent work cannot be published");
   const { repository } = github;
-  const remote = `https://github.com/${repository}.git`;
-  const marker = `<!-- scrat-task:${task.id} -->`;
+  const remote = remoteUrl(repository);
+  const marker = taskMarker(task.id);
   let publication = run.publication;
   function saveReceipt(patch: Partial<typeof publication>, database: Pick<typeof db, "update"> = db) {
     publication = { ...publication, ...patch };
@@ -61,12 +62,12 @@ export async function publishRun(github: GitHubRepository, task: typeof tasks.$i
     return;
   }
   const body = `${result.text}\n\n${marker}`;
-  const existing = current.comments.findLast((comment) => comment.id.startsWith("issue:") && comment.author === config.github.botLogin
-    && comment.body.trimEnd().endsWith(marker));
+  const observation = observe(repository, current);
+  const existing = observation.own.findLast((comment) => isIssueComment(comment) && comment.body.trimEnd().endsWith(marker));
   if (!publication.commentId) {
     let commentId: number;
     if (existing) {
-      commentId = Number(existing.id.slice("issue:".length));
+      commentId = parseIssueCommentId(existing.id);
       if (existing.body !== body) await github.updateComment(commentId, body, references);
     } else {
       commentId = await github.postComment(context.item.number, body, references);
@@ -75,7 +76,7 @@ export async function publishRun(github: GitHubRepository, task: typeof tasks.$i
   }
   if (contract.publication === "issue-assessment") {
     await reconcileLabels(github, context.item.number, {
-      current: current.item.labels ?? [], desired: result.ready ? ["scrat"] : [], managed: ["scrat"],
+      current: observation.labels, desired: result.ready ? ["scrat"] : [], managed: ["scrat"],
     }, references);
     saveReceipt({ scratLabel: result.ready });
   }

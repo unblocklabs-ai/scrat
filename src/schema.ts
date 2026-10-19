@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { integer, sqliteTable, text, unique, uniqueIndex } from "drizzle-orm/sqlite-core";
 import type { fetchOpenItems } from "./github.ts";
+import type { JournalEvent } from "./events.ts";
 
 type OpenItems = Awaited<ReturnType<typeof fetchOpenItems>>;
 
@@ -67,4 +68,14 @@ export const runs = sqliteTable("runs", {
     commitSha?: string;
     pullRequestNumber?: number;
   }>().notNull().$defaultFn(() => ({ status: "pending" })),
+});
+
+export const events = sqliteTable("events", {
+  id: integer("id").primaryKey(),
+  createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
+  type: text("type").$type<JournalEvent["type"]>().notNull(),
+  itemId: text("item_id").references(() => items.id),
+  taskId: text("task_id").references(() => tasks.id),
+  runId: text("run_id").references(() => runs.id),
+  data: text("data", { mode: "json" }).$type<JournalEvent["data"]>().notNull(),
 });

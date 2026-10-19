@@ -239,6 +239,17 @@ try {
     let changed = false;
     f.onModel = (_context, step) => { if (step === 1 && !changed) { changed = true; changeMain("src/a b.ts", "export const special = 3;\n"); } };
     const stale = await run(); assert.match(stale.error.message, /Reviewed code changed/);
+  } else if (scenario === "unicode_nfd") {
+    f.addIssue(1); await route(); const reviewed = await success();
+    assert.ok(f.requests.some((r) => r.request.messages.some((m) => m.role === "tool" && JSON.stringify(m.content).includes("export const unicode = 1;"))));
+    assert.ok(reviewed.result.paths.includes("src/caf\u00e9.ts"));
+    const { eq } = await import("drizzle-orm");
+    db.update(s.runs).set({ result: { ...reviewed.result, paths: ["src/cafe\u0301.ts"] } }).where(eq(s.runs.id, reviewed.id)).run();
+    changeMain("src/caf\u00e9.ts", "export const unicode = 2;\n"); await route();
+    assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
+    f.reset(1, "normal"); let changed = false;
+    f.onModel = (_context, step) => { if (step === 1 && !changed) { changed = true; changeMain("src/caf\u00e9.ts", "export const unicode = 3;\n"); } };
+    const stale = await run(); assert.match(stale.error.message, /Reviewed code changed/);
   } else if (scenario === "legacy_scope") {
     f.addIssue(1); await route(); let reviewed = await success();
     const { eq } = await import("drizzle-orm");

@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { parse } from "yaml";
 import { git } from "./git.ts";
+import { canonicalReviewPaths } from "./review-paths.ts";
 
 function affectsPaths(changed: string[], scope: string[]) {
   return changed.length > 0 && (!scope.length || changed.some((file) => scope.includes(file)));
@@ -35,6 +36,9 @@ function lockfileChanged(before: string, after: string, dependencies: Set<string
 export async function reviewChanges(repository: string, before: string, after: string, scope: string[]) {
   const paths = (await git(repository, ["diff", "--name-only", "--no-renames", "-z", before, after])).split("\0").filter(Boolean);
   if (!scope.length || scope.includes(".")) return { paths, relevant: paths.length > 0 };
+  const tracked = await Promise.all([before, after].map((sha) => git(repository, ["ls-tree", "-r", "--name-only", "-z", sha])));
+  scope = canonicalReviewPaths(scope, tracked.flatMap((files) => files.split("\0").filter(Boolean)));
+  if (scope.includes(".")) return { paths, relevant: paths.length > 0 };
   const metadata = new Set(["package.json", "pnpm-lock.yaml"]);
   if (affectsPaths(paths.filter((path) => !metadata.has(path)), scope)) return { paths, relevant: true };
   const dependencies = new Set(scope.flatMap((path) => [...path.matchAll(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)/g)]

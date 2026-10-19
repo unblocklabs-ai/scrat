@@ -12,6 +12,7 @@ import { db } from "./db.ts";
 import { runs } from "./schema.ts";
 import { parseResult, type Reviewer } from "./results.ts";
 import { git } from "./git.ts";
+import { canonicalReviewPaths } from "./review-paths.ts";
 
 export function saveReviewer(runId: string, index: number, patch: Partial<Reviewer>) {
   db.transaction((transaction) => {
@@ -118,7 +119,8 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     }
     const output = session.getLastAssistantText()?.trim();
     if (!output) throw new Error("Pi returned an empty response");
-    return parseResult(output, [...paths]);
+    const tracked = (await git(cwd, ["ls-files", "-z"])).split("\0").filter(Boolean);
+    return parseResult(output, canonicalReviewPaths([...paths], tracked));
   } finally {
     session.dispose();
   }

@@ -24,6 +24,7 @@ const scenarios = {
   lockfile_scope: "mixed lockfile changes cannot hide inspected packages, aliases or importer changes",
   review_scope: "Pi path aliases and supplied PR diff files participate in freshness and re-review",
   unicode_scope: "Pi filename normalization cannot hide relevant base changes",
+  unicode_nfd: "current and persisted Unicode read scopes map to Git filenames across filesystem spellings",
   legacy_scope: "historical unknown scope remains conservative even alongside known paths",
   merge: "retry resumes an unfinished merge and preserves partial work",
   reopen: "fetch-only reopening cannot keep a deleted workspace attached",

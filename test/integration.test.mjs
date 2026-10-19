@@ -18,6 +18,8 @@ const scenarios = {
   unreceipted_review: "older retries preserve a newer remote review even when its write receipt was lost",
   stale_assessment: "a stale newest assessment clears its grade without resurrecting an older narrower review",
   assessment_order: "new inference on an old task outranks newer-created tasks regardless of timestamps",
+  run_sequence: "claims assign increasing run sequences and the backfill preserves journal order, is idempotent and survives schema push",
+  run_latest: "latest-run decisions follow claim sequence, not startedAt, for issue baselines and Pi session continuation",
   scope_snapshots: "PR-only, renamed and deleted paths keep their identities across unrelated base changes",
   grade_race: "sync invalidation and publication reconcile one current PR grade under concurrent execution",
   grade_failure: "grade delivery failures cannot prevent durable review tasks or block other PRs",

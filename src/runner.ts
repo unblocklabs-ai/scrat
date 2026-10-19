@@ -91,7 +91,7 @@ export async function runNextTask() {
       if (!validationOnly) {
         const previous = !readOnly ? db.select().from(runs).where(and(
           eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile),
-        )).orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
+        )).orderBy(desc(runs.sequence)).limit(1).get() : undefined;
         const [diffBaseSha, diffPaths] = await Promise.all([
           pullRequest ? git(repositoryPath, ["merge-base", mainSha, preparedHead]) : mainSha,
           pullRequest ? git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", `${mainSha}...${preparedHead}`]).then((output) => output.split("\0").filter(Boolean)) : [],

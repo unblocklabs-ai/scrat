@@ -1,10 +1,11 @@
 import { db } from "./db.ts";
 import { logger } from "./logging.ts";
 import { runNextTask } from "./runner.ts";
-import { validateStaticConfig } from "./startup.ts";
+import { ensureRunSequences, validateStaticConfig } from "./startup.ts";
 
 try {
   await validateStaticConfig();
+  ensureRunSequences();
   const run = await runNextTask();
   if (run?.error) process.exitCode = 1;
 } catch (error) {

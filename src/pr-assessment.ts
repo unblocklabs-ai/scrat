@@ -3,14 +3,13 @@ import { db } from "./db.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import type { ItemObservation } from "./observation.ts";
 import { hasPublicationSnapshot } from "./results.ts";
-import { events, runs, tasks } from "./schema.ts";
+import { runs, tasks } from "./schema.ts";
 
 export function prReviewHistory(itemId: string) {
-  return db.select({ run: runs, task: tasks, sequence: events.id }).from(runs)
+  return db.select({ run: runs, task: tasks }).from(runs)
     .innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .leftJoin(events, and(eq(events.runId, runs.id), eq(events.type, "run.started")))
     .where(and(eq(tasks.itemId, itemId), eq(tasks.action, "review_pr")))
-    .orderBy(desc(events.id)).all();
+    .orderBy(desc(runs.sequence)).all();
 }
 
 type History = ReturnType<typeof prReviewHistory>;
@@ -34,10 +33,11 @@ function selectAssessment(history: History) {
       if (!origin.run.inferenceFromRunId && !hasPublicationSnapshot(parent.run)) break;
       origin = parent;
     }
-    if (origin.sequence === null || entry.sequence === null) throw new Error(`Missing run.started event for PR assessment: ${run.id}`);
-    // History is delivery-newest first. Copies retain their inference origin's order.
-    if (!selected || origin.sequence > selected.originSequence) {
-      selected = { ...entry, result: run.result, originSequence: origin.sequence };
+    const { sequence } = origin.run;
+    if (sequence === null || run.sequence === null) throw new Error(`Missing run sequence for PR assessment: ${run.id}`);
+    // History is claim-newest first. Copies retain their inference origin's order.
+    if (!selected || sequence > selected.originSequence) {
+      selected = { ...entry, result: run.result, originSequence: sequence };
     }
   }
   return selected;

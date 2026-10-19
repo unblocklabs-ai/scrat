@@ -33,6 +33,7 @@ Requires Node.js **22.19+**, Git, and the tools used by the target repository's 
 
    ```sh
    npm run db:push
+   npm run db:backfill   # numbers runs created before runs.sequence; also done at startup
    npm run serve
    ```
 

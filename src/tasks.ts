@@ -9,19 +9,13 @@ import { describeError } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { startOperation } from "./logging.ts";
 import { hasPublicationSnapshot, hasValidationCheckpoint } from "./results.ts";
-import { events, items, runs, tasks } from "./schema.ts";
+import { items, runs, tasks } from "./schema.ts";
 import { signalWork } from "./work-signal.ts";
 
-function runHistory(taskId: string, database: Pick<typeof db, "select">) {
-  return database.select({ run: runs, sequence: events.id }).from(runs)
-    .leftJoin(events, and(eq(events.runId, runs.id), eq(events.type, "run.started")))
-    .where(eq(runs.taskId, taskId)).orderBy(desc(events.id)).limit(1).get();
-}
-
+// An unsequenced run sorts first so damage is seen instead of silently skipped.
 function latestRun(taskId: string, database: Pick<typeof db, "select">) {
-  const previous = runHistory(taskId, database);
-  if (previous && previous.sequence === null) throw new Error(`Missing run.started event: ${previous.run.id}`);
-  return previous?.run;
+  return database.select().from(runs).where(eq(runs.taskId, taskId))
+    .orderBy(sql`${runs.sequence} is null desc`, desc(runs.sequence)).limit(1).get();
 }
 
 // Pure and non-throwing for task-specific faults, so one damaged task cannot stall the queue; add new reasons here.
@@ -37,9 +31,9 @@ function checkClaimable({ task, item }: { task: typeof tasks.$inferSelect; item:
   const repository = itemRepository(item);
   if (!repository) return { ok: false as const, reason: `Unparseable item URL: ${item.payload.html_url}` };
   if (!sameRepository(repository, config.github.repository)) return { ok: false as const, reason: `Item belongs to ${repository}, not ${config.github.repository}` };
-  const history = runHistory(task.id, database);
-  if (history && history.sequence === null) return { ok: false as const, reason: `Missing run.started event: ${history.run.id}` };
-  return { ok: true as const, previousRun: history?.run };
+  const previousRun = latestRun(task.id, database);
+  if (previousRun && previousRun.sequence === null) return { ok: false as const, reason: `Missing run sequence: ${previousRun.id}` };
+  return { ok: true as const, previousRun };
 }
 
 export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
@@ -122,6 +116,7 @@ export function claimTask() {
     const task = transaction.update(tasks).set({ status: "running" }).where(eq(tasks.id, next.task.id)).returning().get()!;
     const run = transaction.insert(runs).values({
       taskId: task.id,
+      sequence: sql`(select coalesce(max(${runs.sequence}), 0) + 1 from ${runs})`,
       retryOfRunId: retry?.id,
       inferenceFromRunId: resume?.id,
       input: task.input,

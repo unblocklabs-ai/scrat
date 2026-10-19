@@ -337,6 +337,74 @@ try {
     const calls = f.requests.length; await route();
     assert.equal(f.requests.length, calls);
     assert.deepEqual(f.prs[0].labels.map((l) => l.name), ["A · Strong"]);
+  } else if (scenario === "run_sequence") {
+    const { eq } = await import("drizzle-orm");
+    for (let n = 1; n <= 5; n++) f.addIssue(n);
+    f.enqueue(1); f.enqueue(2, "implement"); // created first, claimed second
+    const claims = [tasks.claimTask(), tasks.claimTask()];
+    assert.deepEqual(claims.map((c) => c.task.action), ["implement", "review_issue"]);
+    assert.deepEqual(claims.map((c) => c.run.sequence), [1, 2]);
+    for (const c of claims) tasks.finishRun(c.run.id, { status: "completed" });
+    for (let n = 3; n <= 5; n++) f.enqueue(n);
+    const more = [tasks.claimTask(), tasks.claimTask(), tasks.claimTask()].map((c) => c.run);
+    assert.deepEqual(more.map((r) => r.sequence), [3, 4, 5]);
+    for (const r of more) tasks.finishRun(r.id, { status: "completed" });
+    const [r1, r2, r3, r4, r5] = all(s.runs).sort((a, b) => a.sequence - b.sequence);
+    assert.throws(() => db.$client.exec("UPDATE runs SET sequence = 1 WHERE sequence = 2"), /UNIQUE/);
+    // Pre-upgrade shape: no sequence column, event ids that disagree with creation order, and runs without a run.started event.
+    const swap = db.$client.prepare("UPDATE events SET id = ? WHERE id = ?");
+    const eventId = (r) => db.$client.prepare("SELECT id FROM events WHERE run_id = ? AND type = 'run.started'").get(r.id).id;
+    const [e1, e2] = [eventId(r1), eventId(r2)];
+    swap.run(100000, e1); swap.run(e1, e2); swap.run(e2, 100000);
+    db.$client.exec(`DELETE FROM events WHERE run_id IN ('${r4.id}', '${r5.id}') AND type = 'run.started'`);
+    db.update(s.runs).set({ startedAt: "2021-01-01T00:00:00Z" }).where(eq(s.runs.id, r5.id)).run();
+    db.update(s.runs).set({ startedAt: "2020-01-01T00:00:00Z" }).where(eq(s.runs.id, r4.id)).run();
+    const create = db.$client.prepare("SELECT sql FROM sqlite_master WHERE name = 'runs'").get().sql;
+    const legacySql = create.split("\n").filter((line) => !line.includes("`sequence`")).join("\n").replace("CREATE TABLE `runs`", "CREATE TABLE `legacy_runs`");
+    const columns = db.$client.prepare("PRAGMA table_info(runs)").all().map((column) => column.name).filter((name) => name !== "sequence")
+      .map((name) => '"' + name + '"').join(", ");
+    db.$client.exec("PRAGMA foreign_keys = OFF");
+    db.$client.exec(`BEGIN; ${legacySql}; INSERT INTO legacy_runs (${columns}) SELECT ${columns} FROM runs; DROP TABLE runs; ALTER TABLE legacy_runs RENAME TO runs; COMMIT;`);
+    db.$client.exec("PRAGMA foreign_keys = ON");
+    execFileSync(process.execPath, [resolve("app/node_modules/drizzle-kit/bin.cjs"), "push", "--dialect=sqlite", "--schema=./app/src/schema.ts", "--url=./data/scrat.sqlite"], { stdio: "pipe" });
+    assert.deepEqual(db.$client.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.equal(all(s.runs).length, 5); assert.ok(all(s.runs).every((r) => r.sequence === null));
+    assert.ok(db.$client.prepare("SELECT 1 FROM sqlite_master WHERE name = 'runs_sequence_unique'").get());
+    const { ensureRunSequences } = await f.app("startup.ts");
+    assert.equal(ensureRunSequences(), 5);
+    const order = () => all(s.runs).sort((a, b) => a.sequence - b.sequence).map((r) => r.id);
+    // Eventless runs first (by startedAt), then event order (r2's event now precedes r1's).
+    assert.deepEqual(order(), [r4.id, r5.id, r2.id, r1.id, r3.id]);
+    assert.deepEqual(all(s.runs).map((r) => r.sequence).sort(), [1, 2, 3, 4, 5]);
+    const before = all(s.runs);
+    assert.equal(ensureRunSequences(), 0); assert.deepEqual(all(s.runs), before);
+    db.update(s.runs).set({ sequence: null }).where(eq(s.runs.id, r4.id)).run();
+    assert.equal(ensureRunSequences(), 1); assert.equal(f.row(s.runs, r4.id).sequence, 6);
+    // Claims continue after the backfill.
+    f.enqueue(1); assert.equal(tasks.claimTask().run.sequence, 7);
+  } else if (scenario === "run_latest") {
+    const { eq } = await import("drizzle-orm");
+    // Issue-review baseline: the later claim is latest even when its startedAt is earlier.
+    changeMain("src/helper.ts", "export const helper = 1;\n");
+    f.addIssue(1); await route(); const first = await success(); assert.ok(first.result.paths.includes("src/app.ts"));
+    f.enqueue(1); f.reset(1, "helper");
+    const second = await success(); assert.ok(second.result.paths.includes("src/helper.ts")); assert.ok(second.sequence > first.sequence);
+    db.update(s.runs).set({ startedAt: "2099-01-01T00:00:00Z" }).where(eq(s.runs.id, first.id)).run();
+    db.update(s.runs).set({ startedAt: "1970-01-01T00:00:00Z" }).where(eq(s.runs.id, second.id)).run();
+    await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
+    changeMain("src/helper.ts", "export const helper = 2;\n"); await route();
+    assert.ok(all(s.tasks).some((t) => t.action === "review_issue" && t.status === "queued"), "The latest claimed review is the baseline");
+    // Pi session continuation follows claim order in a workspace, not timestamps.
+    f.addIssue(2, ["scrat"]); f.enqueue(2, "implement"); const implemented = await success();
+    const prItem = all(s.items).find((i) => i.kind === "pr");
+    const feedback = async () => { tasks.enqueueTask({ itemId: prItem.id, action: "address_pr_feedback", reason: "Reply", input: {} }); f.reset(202, "no-change"); return success(); };
+    const older = await feedback(); assert.equal(older.workspaceId, implemented.workspaceId);
+    assert.equal(older.piSessionFile, implemented.piSessionFile);
+    const copy = implemented.piSessionFile.replace(/\.jsonl$/, "-copy.jsonl");
+    copyFileSync(implemented.piSessionFile, copy);
+    db.update(s.runs).set({ piSessionFile: copy, startedAt: "1970-01-01T00:00:00Z" }).where(eq(s.runs.id, older.id)).run();
+    db.update(s.runs).set({ startedAt: "2099-01-01T00:00:00Z" }).where(eq(s.runs.id, implemented.id)).run();
+    const next = await feedback(); assert.equal(next.piSessionFile, copy);
   } else if (scenario === "scope_snapshots") {
     const implemented = await implement(1), workspace = f.row(s.workspaces, implemented.workspaceId);
     unlinkSync(workspace.path + "/src/deleted.ts");
@@ -717,13 +785,13 @@ try {
 
     f.enqueue(3); const damaged = tasks.claimTask();
     tasks.finishRun(damaged.run.id, { status: "failed", error: new Error("Interrupted") });
-    db.delete(s.events).where(eq(s.events.runId, damaged.run.id)).run();
-    assert.throws(() => tasks.retryTask(damaged.task.id, "validation"), /Missing run\.started event/);
+    db.update(s.runs).set({ sequence: null }).where(eq(s.runs.id, damaged.run.id)).run();
+    assert.throws(() => tasks.retryTask(damaged.task.id, "validation"), /Validation-only retry requires/);
     assert.throws(() => tasks.retryTask("bogus", "validation"), /Validation-only retry requires/);
     tasks.retryTask(damaged.task.id); f.enqueue(4);
     assert.equal(tasks.claimTask().task.itemId, "issue-4");
     assert.equal(f.row(s.tasks, damaged.task.id).status, "failed");
-    assert.match(rejections().at(-1).data.reason, /Missing run\.started event/);
+    assert.match(rejections().at(-1).data.reason, /Missing run sequence/);
     assert.equal(rejections().at(-1).taskId, damaged.task.id);
     assert.equal(rejections().length, 3);
 

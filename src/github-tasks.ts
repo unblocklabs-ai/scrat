@@ -97,7 +97,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       const reviews = item.kind === "pr" ? prReviewHistory(item.id) : undefined;
       const attempt = reviews ? reviews.find(({ task }) => task.id === latest?.id)?.run
         : latest ? db.select().from(runs).where(eq(runs.taskId, latest.id))
-          .orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
+          .orderBy(desc(runs.sequence)).limit(1).get() : undefined;
       if (reviews) {
         const state = await resolvePrReview(reviews, observation, mainSha);
         added += applyDecisions(item.id, planReview({ kind: "pr", state, latest, attempt, revision, mainSha }));
@@ -105,7 +105,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
         if (reviewTrigger({ latest, attempt, revision, mainSha }).covered) return added;
         const completed = db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
           .where(and(eq(tasks.itemId, item.id), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
-          .orderBy(desc(runs.startedAt)).limit(1).get()?.run;
+          .orderBy(desc(runs.sequence)).limit(1).get()?.run;
         const state = completed ? await freshness(savedEvaluation(completed), { ...observation, mainSha }, "relevant-paths") : undefined;
         added += applyDecisions(item.id, planReview({ kind: "issue", completed, freshness: state, latest, attempt, revision, mainSha }));
       }

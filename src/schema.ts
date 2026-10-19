@@ -59,6 +59,8 @@ export const workspaces = sqliteTable("workspaces", {
 export const runs = sqliteTable("runs", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
   taskId: text("task_id").notNull().references(() => tasks.id),
+  // Claim order, assigned by claimTask. Nullable only so db:push can add it to existing rows before ensureRunSequences fills it.
+  sequence: integer("sequence"),
   retryOfRunId: text("retry_of_run_id").references((): AnySQLiteColumn => runs.id),
   inferenceFromRunId: text("inference_from_run_id").references((): AnySQLiteColumn => runs.id),
   input: text("input", { mode: "json" }).$type<Record<string, unknown>>().notNull().default({}),
@@ -100,7 +102,7 @@ export const runs = sqliteTable("runs", {
     scratLabel?: boolean;
     pullRequestNumber?: number;
   }>().notNull().$defaultFn(() => ({ status: "pending" })),
-});
+}, (table) => [uniqueIndex("runs_sequence_unique").on(table.sequence)]);
 
 export const events = sqliteTable("events", {
   id: integer("id").primaryKey(),

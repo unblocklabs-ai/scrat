@@ -42,6 +42,17 @@ export const tasks = sqliteTable("tasks", {
 
 const runStages = ["preparing", "agent", "validating", "publishing"] as const;
 
+export const workspaces = sqliteTable("workspaces", {
+  id: text("id").primaryKey(),
+  repositoryPath: text("repository_path").notNull(),
+  branch: text("branch").notNull(),
+  path: text("path").notNull().unique(),
+  baseRef: text("base_ref").notNull(),
+  baseSha: text("base_sha").notNull(),
+  createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
+  removedAt: text("removed_at"),
+});
+
 export const runs = sqliteTable("runs", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
   taskId: text("task_id").notNull().references(() => tasks.id),

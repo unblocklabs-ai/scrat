@@ -16,6 +16,12 @@ export type JournalEvent = (
   | { type: "github.comment_updated"; data: { repository: string; commentId: number; url: string } }
   | { type: "github.labels_added"; data: { repository: string; issueNumber: number; labels: string[] } }
   | { type: "github.label_removed"; data: { repository: string; issueNumber: number; label: string } }
+  | { type: "workspace.created" | "workspace.removed"; data: {
+      workspaceId: string;
+      repositoryPath: string;
+      path: string;
+      branch: string;
+    } }
 ) & EventReferences & { operationId?: string };
 
 export function recordEvent(event: JournalEvent, database: Pick<typeof db, "insert"> = db) {

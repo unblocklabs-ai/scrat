@@ -1,0 +1,119 @@
+# Scrat
+
+Scrat is a GitHub coding agent built with TypeScript, [Pi](https://github.com/earendil-works/pi), and SQLite. It reviews issues and pull requests, implements selected issues, and maintains its own PRs. Scrat handles scheduling, workspaces, validation, and publication; Pi investigates and writes code.
+
+## How it works
+
+GitHub sync turns repository state into a persistent task queue:
+
+- **PR reviews:** two model sessions review independently. A fresh consolidation session combines their findings into one updatable comment and a grade label. This includes Scrat's own PRs.
+- **Implementation and maintenance:** issues labelled `scrat` become implementation tasks. Conflicts and new external feedback on Scrat-authored PRs become separate repair tasks.
+- **Issue reviews:** Scrat assesses issues and applies the `scrat` label when it considers them ready for implementation.
+
+Concurrency, priorities, models, and reasoning levels come from configuration. Queued tasks coalesce by item and action; tasks sharing an item or workspace cannot execute together. Bot-authored comments do not trigger feedback tasks, and low grades do not automatically trigger self-repair.
+
+Implementations use isolated worktrees and branches; follow-ups reuse their workspace and Pi session. Checks must pass against the exact tree being committed before publication. Optional Docker PostgreSQL databases isolate mutating runs. PR closure triggers workspace cleanup; failed work is retained for recovery.
+
+The newest complete PR assessment is authoritative. Context and observed source/dependency changes determine freshness—a relevance heuristic, not a full dependency graph. Stale assessments lose their grade and require a fresh review; older opinions never regain authority. Publication-only retries reuse saved results. Scrat does not automatically merge PRs.
+
+## Configure and run
+
+Requires Node.js **22.19+**, Git, and the tools used by the target repository's workspace commands. Docker is required when per-run databases are configured.
+
+1. Run `npm ci`.
+2. Edit `scrat.config.json`: GitHub repository/App installation, model provider, action skills, concurrency, and workspace preparation/validation commands.
+3. Create an untracked `.env` containing `GITHUB_APP_PRIVATE_KEY` and `CODEX_LB_API_KEY`. Install the GitHub App on the target repository with the necessary contents, issues, and pull-request permissions.
+4. Initialize the local schema and start the service:
+
+   ```sh
+   npm run db:push
+   npm run serve
+   ```
+
+**Starting the service enables real GitHub writes and code execution.** Use one service process; do not overlap it with standalone `sync` or `work` processes. Shutdown drains active tasks before exiting.
+
+Useful commands:
+
+```sh
+npm run fetch                    # Save GitHub state without routing tasks
+npm run sync                     # Sync, queue tasks, and reconcile reviews/labels
+npm run work                     # Drain runnable queued work, then exit
+npm run retry -- <task-id>        # Explicitly retry a failed task
+npm run cleanup                  # Retry finished-run resource cleanup
+npm test                         # Integration/E2E tests; PostgreSQL case needs Docker
+```
+
+## Configuration
+
+`scrat.config.json` controls runtime behavior. Restart the service after changing it; action settings are captured when a run is claimed, and retries retain their saved settings.
+
+### Harness and GitHub
+
+| Setting | Purpose |
+| --- | --- |
+| `harness.maxConcurrency` | Maximum simultaneous tasks, not model sessions or test subprocesses. Each PR review starts two reviewer sessions within one task. |
+| `harness.logLevel` | Pino log verbosity, such as `info` or `debug`. |
+| `github.repository` | Target GitHub repository as `owner/repo`. |
+| `github.repositoryPath` | Local repository clone; relative paths resolve from the config directory. `SCRAT_REPOSITORY_PATH` overrides it. |
+| `github.baseBranch` | Default base branch for issues and implementations. Existing PRs use their own base branch. |
+| `github.botLogin` | Scrat's GitHub identity, used to recognize its PRs/comments and exclude its own feedback. |
+| `github.appId` | GitHub App ID used for authentication. |
+| `github.installationId` | App installation granting access to the target repository. |
+| `github.fetchIntervalSeconds` | Delay between service syncs, in seconds. The service also syncs on startup. |
+
+### Workspace
+
+Workspace commands are argument arrays, not shell strings: `["pnpm", "verify"]`. Command lists execute sequentially inside the worktree; a failing command stops the run.
+
+| Setting | Purpose |
+| --- | --- |
+| `workspace.environment` | Environment variables added to Pi's Bash commands and harness preparation/validation commands. Test-process limits belong here; task concurrency does not serialize tests. |
+| `workspace.prepare` | Setup commands, including dependency installation and code generation. Also used for read-only reviews, and rerun before mutating-work validation. |
+| `workspace.validate` | Required checks for mutating tasks before committing or publishing. Not run as a harness gate for read-only reviews. |
+| `workspace.database` | Optional per-run PostgreSQL container configuration for mutating tasks; omit or set to `null` to disable. |
+| `workspace.database.image` | PostgreSQL-compatible Docker image to start. |
+| `workspace.database.environment` | Variable names populated with the temporary database URL, overriding corresponding workspace environment values. |
+| `workspace.database.migrate` | Migration command run against the temporary database before validation. |
+
+### Model providers
+
+Each `providers.<name>` entry registers an endpoint and models with Pi. Actions refer to the provider by that name.
+
+| Setting | Purpose |
+| --- | --- |
+| `baseUrl` | Provider or proxy API endpoint. |
+| `api` | Pi API adapter, such as `openai-responses`. |
+| `apiKey` | Credential; use environment interpolation such as `${CODEX_LB_API_KEY}` rather than committing a secret. |
+| `authHeader` | Whether Pi supplies the API key in the Authorization header. |
+| `models` | Models available through this provider. |
+| `models[].id` / `name` | API model identifier / optional display name. Actions select the identifier. |
+| `models[].reasoning` | Whether the model supports reasoning. |
+| `models[].thinkingLevelMap` | Optional mapping from Pi thinking levels to provider-specific reasoning values. |
+| `models[].contextWindow` | Declared context capacity in tokens. |
+| `models[].maxTokens` | Model output-token limit used by Pi. |
+
+### Actions
+
+`actions` defines `review_issue`, `review_pr`, `implement`, `resolve_conflicts`, and `address_pr_feedback`.
+
+| Setting under `actions.<action>` | Purpose |
+| --- | --- |
+| `priority` | Default queue priority; higher values are claimed first. Manual enqueue can override it. Running tasks are not preempted. |
+| `skill` | Prompt file, resolved relative to the config directory. |
+| `provider` / `model` | Provider name and model ID for the action. For PR reviews, these select the consolidator. |
+| `thinkingLevel` | Requested Pi reasoning level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; provider/model support determines its mapping. |
+| `reviewers` | PR review panel: exactly two entries, each with its own `provider`, `model`, and `thinkingLevel`. |
+
+The checked-in configuration currently uses six task slots, priorities **PR 100 > implementation/maintenance 60 > issue 10**, and a Sol-high/DeepSeek-high review panel with Sol-high consolidation. These are configurable values, not built-in limits or model choices.
+
+## Project layout
+
+- `src/github-tasks.ts` — GitHub routing policy.
+- `src/tasks.ts`, `src/runner.ts` — atomic claims and task/run lifecycle.
+- `src/pi.ts`, `src/pr-review.ts` — Pi sessions and dual-model reviews.
+- `src/pr-assessment.ts`, `src/pr-review-state.ts` — assessment authority, freshness, and canonical delivery.
+- `src/workspaces.ts`, `src/databases.ts` — Git and database resource lifecycles.
+- `skills/` — action prompts; `scrat.config.json` selects their models and settings.
+- `data/` — SQLite queue, run history, event journal, workspaces, and Pi sessions. Back it up alongside credentials before deployment.
+
+`deploy/install.sh` installs a staged release on the existing worker: it drains the service, backs up SQLite, applies schema updates, and switches to the selected release. It contains host-specific paths, so review it before reuse.

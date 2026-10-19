@@ -1,7 +1,6 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { actionContracts } from "./actions.ts";
+import { buildAgentInput, evaluateContext, readDiffScope } from "./agent-input.ts";
 import { config, getRepositoryPath } from "./config.ts";
 import { runCommands } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
@@ -20,7 +19,43 @@ import { childEnvironment } from "./secrets.ts";
 import { claimTask, finishRun } from "./tasks.ts";
 import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
 
-const inlineDiffPaths = 200;
+type Workspace = Awaited<ReturnType<typeof createWorkspace>>;
+type DatabaseConfig = NonNullable<NonNullable<typeof config.workspace>["database"]>;
+type Environment = Record<string, string | undefined>;
+type References = { itemId: string; taskId: string; runId: string };
+
+async function prepareWorkspace(workspace: Workspace, environment: Environment, databaseConfig: DatabaseConfig | null | undefined, references: References) {
+  await runCommands(config.workspace?.prepare ?? [], workspace.path, environment, references);
+  if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, environment, references);
+}
+
+async function validateAndCommit(options: {
+  run: typeof runs.$inferSelect; workspace: Workspace; validationOnly: boolean; title: string;
+  commandEnvironment: Environment; databaseConfig: DatabaseConfig | null | undefined; references: References; secretBaseSha: string;
+  acceptance: { kind: "conflict-free" | "nonempty-diff" | "complete"; repositoryPath: string; mainSha: string; baseRef: string };
+}) {
+  const { run, workspace, commandEnvironment, references, acceptance } = options;
+  if (!options.validationOnly) db.update(runs).set({ agentCheckpoint: await checkpointWorkspace(workspace) }).where(eq(runs.id, run.id)).run();
+  await prepareWorkspace(workspace, commandEnvironment, options.databaseConfig, references);
+  const checkpoint = await checkpointWorkspace(workspace);
+  db.update(runs).set({ agentCheckpoint: checkpoint }).where(eq(runs.id, run.id)).run();
+  const validationTree = checkpoint.treeSha;
+  const commands = await runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references);
+  await git(workspace.path, ["add", "--all"]);
+  if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
+  await assertNoCommittedSecrets(workspace, options.secretBaseSha, validationTree);
+  const commitSha = await commitWorkspace(workspace, `fix: ${options.title}`, {
+    name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com`,
+  }, references);
+  if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
+  db.update(runs).set({ headSha: commitSha, publication: { status: "pending", commitSha }, verification: { headSha: commitSha, commands } }).where(eq(runs.id, run.id)).run();
+  if (acceptance.kind === "conflict-free" && await hasConflicts(acceptance.repositoryPath, acceptance.mainSha, commitSha)) {
+    throw new Error("PR still conflicts with its base branch after resolution");
+  }
+  if (acceptance.kind === "nonempty-diff" && !await git(workspace.path, ["diff", "--name-only", `${acceptance.baseRef}...HEAD`])) {
+    throw new Error("Implementation produced no changes against the base branch");
+  }
+}
 
 export async function runNextTask() {
   const claimed = claimTask();
@@ -41,7 +76,7 @@ export async function runNextTask() {
     if (context.item.state !== "open") throw new Error("GitHub item is no longer open");
     const pullRequest = "head" in context.item ? context.item : undefined;
     const observation = observe(repository, context);
-    const { remote, baseBranch, revision, external: comments } = observation;
+    const { remote, baseBranch } = observation;
     const gitEnvironment = await github.getGitEnvironment();
     const mainSha = await fetchRepository(repositoryPath, remote, baseBranch, gitEnvironment);
     if (run.stage !== "publishing") {
@@ -92,68 +127,19 @@ export async function runNextTask() {
         const previous = !readOnly ? db.select().from(runs).where(and(
           eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile),
         )).orderBy(desc(runs.sequence)).limit(1).get() : undefined;
-        const [diffBaseSha, diffPaths] = await Promise.all([
-          pullRequest ? git(repositoryPath, ["merge-base", mainSha, preparedHead]) : mainSha,
-          pullRequest ? git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", `${mainSha}...${preparedHead}`]).then((output) => output.split("\0").filter(Boolean)) : [],
-        ]);
-        const requested = run.input.commentRevisions;
-        const ids = new Set(Array.isArray(requested)
-          ? requested.filter((entry: unknown): entry is string => typeof entry === "string").map((entry) => entry.split("@")[0]) : []);
-        const evaluatedComments = contract.context === "feedback" && ids.size
-          ? comments.filter((comment) => ids.has(comment.id)) : comments;
-        const evaluated = {
-          revision, baseBranch, headSha: pullRequest?.head.sha,
-          item: { number: context.item.number, title: context.item.title, body: context.item.body, url: context.item.html_url },
-          comments: evaluatedComments,
-          commentRevisions: evaluatedComments.map((comment) => `${comment.id}@${comment.revision}`),
-        };
+        const { diffBaseSha, diffPaths } = await readDiffScope(repositoryPath, mainSha, preparedHead, Boolean(pullRequest));
+        const evaluated = evaluateContext(run, task, observation, context.item, pullRequest?.head.sha);
         db.update(runs).set({ context: evaluated }).where(eq(runs.id, run.id)).run();
-        const previousMainSha = typeof task.input.previousMainSha === "string" ? task.input.previousMainSha : undefined;
-        const previousHeadSha = pullRequest && typeof task.input.previousHeadSha === "string" ? task.input.previousHeadSha : undefined;
         const preparationDeferred = mergeInProgress || Boolean(run.retryOfRunId);
-        if (readOnly || !preparationDeferred) {
-          await runCommands(config.workspace?.prepare ?? [], workspace.path, commandEnvironment, references);
-          if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, commandEnvironment, references);
-        }
+        if (readOnly || !preparationDeferred) await prepareWorkspace(workspace, commandEnvironment, databaseConfig, references);
         db.update(runs).set({ stage: "agent" }).where(eq(runs.id, run.id)).run();
-        const input = { ...run.input };
-        delete input.comments;
-        delete input.manual;
-        const changedPaths = Array.isArray(input.changedPaths) ? input.changedPaths.filter((path: unknown) => typeof path === "string") : [];
-        if (changedPaths.length > inlineDiffPaths) { delete input.changedPaths; input.changedPathCount = changedPaths.length; }
-        // Larger context lives beside, not inside, the worktree: `git add --all` would commit it.
-        const contextDir = resolve("data/runs", run.id);
-        await mkdir(contextDir, { recursive: true });
-        const files: Record<string, string> = { directory: contextDir };
-        const writeContext = async (key: string, name: string, content: string) => {
-          files[key] = resolve(contextDir, name);
-          await writeFile(files[key], content);
-        };
-        const report = task.action === "address_review" ? db.select().from(runs).where(eq(runs.id, String(task.input.assessmentRunId))).get()?.result?.text : undefined;
-        if (task.action === "address_review" && !report) throw new Error("Missing review report for self-repair");
-        const failure = run.retryOfRunId ? db.select().from(runs).where(eq(runs.id, run.retryOfRunId)).get()?.error : undefined;
-        await Promise.all([
-          writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),
-          report && writeContext("review", "review.md", report),
-          failure && writeContext("previousFailure", "previous-failure.json", JSON.stringify(failure, null, 2)),
-          diffPaths.length > inlineDiffPaths && writeContext("diffPaths", "diff-paths.txt", diffPaths.join("\n") + "\n"),
-          changedPaths.length > inlineDiffPaths && writeContext("changedPaths", "changed-paths.txt", changedPaths.join("\n") + "\n"),
-        ]);
-        const revisions = { head: headSha, base: diffBaseSha, main: mainSha, ...(previousMainSha && { previousMain: previousMainSha }), ...(previousHeadSha && { previousHead: previousHeadSha }) };
-        const prompt = JSON.stringify({
-          action: task.action,
-          reason: task.reason,
-          revision, baseBranch, headSha: pullRequest?.head.sha, item: evaluated.item, commentRevisions: evaluated.commentRevisions,
-          input,
-          workspace: { path: workspace.path, branch: workspace.branch, baseRef, baseBranch, mainSha, headSha, mergeInProgress },
-          diffBaseSha, previous: previousMainSha || previousHeadSha ? { mainSha: previousMainSha, headSha: previousHeadSha } : undefined,
-          ...(diffPaths.length > inlineDiffPaths ? { diffPathCount: diffPaths.length } : { diffPaths }),
-          files,
+        const { prompt, contextDir, revisions } = await buildAgentInput({
+          run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha, baseRef, mergeInProgress, workspace,
           database: database ? {
             ...database, environment, schemaPrepared: !preparationDeferred,
             prepare: config.workspace?.prepare, migrate: databaseConfig?.migrate,
           } : undefined,
-        }, null, 2);
+        });
         const agentResult = contract.agent === "panel"
           ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { baseSha: diffBaseSha, contextDir, revisions })
           : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, log: operation.log, sessionFile: previous?.piSessionFile ?? undefined, environment, contextDir, revisions });
@@ -165,28 +151,12 @@ export async function runNextTask() {
         throw Object.assign(new Error(`Agent returned ${result.outcome}: ${result.text}`), { code: "AGENT_INCOMPLETE" });
       }
       if (!readOnly) {
-        if (!validationOnly) db.update(runs).set({ agentCheckpoint: await checkpointWorkspace(workspace) }).where(eq(runs.id, run.id)).run();
-        await runCommands(config.workspace?.prepare ?? [], workspace.path, commandEnvironment, references);
-        if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, commandEnvironment, references);
-        const checkpoint = await checkpointWorkspace(workspace);
-        db.update(runs).set({ agentCheckpoint: checkpoint }).where(eq(runs.id, run.id)).run();
-        const validationTree = checkpoint.treeSha;
-        const commands = await runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references);
-        await git(workspace.path, ["add", "--all"]);
-        if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
-        // A validation-only retry keeps the original run's pre-agent head.
-        await assertNoCommittedSecrets(workspace, validationOnly ? run.headSha ?? baseRef : headSha, validationTree);
-        const commitSha = await commitWorkspace(workspace, `fix: ${context.item.title}`, {
-          name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com`,
-        }, references);
-        if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
-        db.update(runs).set({ headSha: commitSha, publication: { status: "pending", commitSha }, verification: { headSha: commitSha, commands } }).where(eq(runs.id, run.id)).run();
-        if (contract.acceptance === "conflict-free" && await hasConflicts(repositoryPath, mainSha, commitSha)) {
-          throw new Error("PR still conflicts with its base branch after resolution");
-        }
-        if (contract.acceptance === "nonempty-diff" && !await git(workspace.path, ["diff", "--name-only", `${baseRef}...HEAD`])) {
-          throw new Error("Implementation produced no changes against the base branch");
-        }
+        await validateAndCommit({
+          run, workspace, validationOnly, title: context.item.title, commandEnvironment, databaseConfig, references,
+          // A validation-only retry keeps the original run's pre-agent head.
+          secretBaseSha: validationOnly ? run.headSha ?? baseRef : headSha,
+          acceptance: { kind: contract.acceptance, repositoryPath, mainSha, baseRef },
+        });
       }
       db.update(runs).set({ stage: "publishing" }).where(eq(runs.id, run.id)).run();
     }

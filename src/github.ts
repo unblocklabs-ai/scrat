@@ -1,13 +1,14 @@
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "octokit";
+import { config } from "./config.ts";
 
 export async function fetchOpenItems(repository: string) {
   const [owner, repo] = repository.split("/");
   const github = new Octokit({
     authStrategy: createAppAuth,
     auth: {
-      appId: process.env.GITHUB_APP_ID,
-      installationId: Number(process.env.GITHUB_APP_INSTALLATION_ID),
+      appId: config.github.appId,
+      installationId: config.github.installationId,
       privateKey: process.env.GITHUB_APP_PRIVATE_KEY,
       repositoryNames: [repo],
       permissions: { issues: "read", pull_requests: "read", metadata: "read" },

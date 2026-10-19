@@ -1,0 +1,25 @@
+{
+  "harness": {
+    "maxConcurrency": 2
+  },
+  "github": {
+    "repository": "unblocklabs-ai/agent-platform",
+    "appId": 5017746,
+    "installationId": 163420479,
+    "fetchIntervalSeconds": 300
+  },
+  "actions": {
+    "review": {
+      "skill": "skills/review/SKILL.md",
+      "provider": "provider-name",
+      "model": "review-model",
+      "thinkingLevel": "medium"
+    },
+    "implement": {
+      "skill": "skills/implement/SKILL.md",
+      "provider": "provider-name",
+      "model": "implementation-model",
+      "thinkingLevel": "high"
+    }
+  }
+}

@@ -1,7 +1,5 @@
-import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
 import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
-import { config } from "./config.ts";
+import { config, getRepositoryPath } from "./config.ts";
 import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts } from "./git.ts";
 import { addLabels, createPullRequest, fetchItemContext, getGitEnvironment, githubRevision, postComment, removeLabels } from "./github.ts";
@@ -23,7 +21,7 @@ export async function runNextTask() {
   try {
     const repository = new URL(item.payload.html_url).pathname.split("/").slice(1, 3).join("/");
     const remote = `https://github.com/${repository}.git`;
-    const repositoryPath = resolve(fileURLToPath(new URL("..", import.meta.url)), config.github.repositoryPath);
+    const repositoryPath = getRepositoryPath();
     const context = await fetchItemContext(repository, item.kind, item.payload.number, operation.log);
     if (context.item.state !== "open") throw new Error("GitHub item is no longer open");
     const pullRequest = "head" in context.item ? context.item : undefined;
@@ -124,20 +122,17 @@ export async function runNextTask() {
         if (!result.ready && labelled) await removeLabels(repository, context.item.number, ["scrat"], references);
       }
     }
-    if (reviewWorkspace) {
-      await removeWorkspace(reviewWorkspace.id, references);
-      reviewWorkspace = undefined;
-    }
     finishRun(run.id, { status: "completed" });
     operation.complete();
     return db.select().from(runs).where(eq(runs.id, run.id)).get()!;
   } catch (error) {
-    if (reviewWorkspace) {
-      try { await removeWorkspace(reviewWorkspace.id, references); }
-      catch (cleanupError) { operation.log.error({ err: cleanupError, event: "run.cleanup_failed", workspaceId: reviewWorkspace.id }, "Review workspace cleanup failed"); }
-    }
     const failed = finishRun(run.id, { status: "failed", error });
     operation.fail(error);
     return failed;
+  } finally {
+    if (reviewWorkspace) {
+      try { await removeWorkspace(reviewWorkspace.id, references); }
+      catch { operation.log.warn({ event: "run.cleanup_pending", workspaceId: reviewWorkspace.id }); }
+    }
   }
 }

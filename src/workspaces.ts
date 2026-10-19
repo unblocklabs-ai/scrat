@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { eq } from "drizzle-orm";
 import { db } from "./db.ts";
@@ -19,7 +19,7 @@ export async function createWorkspace(
 ) {
   const workspaceId = randomUUID();
   branch ??= `scrat/${workspaceId}`;
-  const path = resolve("data/workspaces", workspaceId);
+  let path = resolve("data/workspaces", workspaceId);
   const operation = startOperation("workspace.create", {
     ...references, workspaceId, repositoryPath, path, branch, baseRef,
   });
@@ -29,6 +29,7 @@ export async function createWorkspace(
     const baseSha = await git(repositoryPath, ["rev-parse", "--verify", "--end-of-options", `${baseRef}^{commit}`]);
     stage = "create_worktree";
     await mkdir(dirname(path), { recursive: true });
+    path = resolve(await realpath(dirname(path)), workspaceId);
     await git(repositoryPath, ["worktree", "add", "-b", branch, "--", path, baseSha]);
     stage = "persistence";
     const workspace = db.transaction((transaction) => {
@@ -43,7 +44,7 @@ export async function createWorkspace(
       }, transaction);
       return created;
     });
-    operation.complete({ baseSha });
+    operation.complete({ baseSha, path });
     return workspace;
   } catch (error) {
     operation.fail(error, { stage });
@@ -61,7 +62,11 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
       operation.complete({ alreadyRemoved: true });
       return workspace;
     }
-    const { repositoryPath, path, branch } = workspace;
+    const { repositoryPath, branch } = workspace;
+    const path = await realpath(workspace.path).catch((error: unknown) => {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return workspace.path;
+      throw error;
+    });
     stage = "remove_worktree";
     const registered = await git(repositoryPath, ["worktree", "list", "--porcelain", "-z"]);
     if (registered.split("\0").includes(`worktree ${path}`)) {
@@ -72,7 +77,7 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
     if (existingBranch) await git(repositoryPath, ["branch", "-D", "--", branch]);
     stage = "persistence";
     const removed = db.transaction((transaction) => {
-      const updated = transaction.update(workspaces).set({ removedAt: new Date().toISOString() })
+      const updated = transaction.update(workspaces).set({ path, removedAt: new Date().toISOString() })
         .where(eq(workspaces.id, workspaceId)).returning().get()!;
       recordEvent({
         ...references,

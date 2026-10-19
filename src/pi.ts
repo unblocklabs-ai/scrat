@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
+import { thinkingLevels } from "./config.ts";
 import { db } from "./db.ts";
 import { runs } from "./schema.ts";
 
@@ -11,8 +12,7 @@ export async function executePi(run: typeof runs.$inferSelect, cwd: string, cont
   const modelRuntime = await ModelRuntime.create({ modelsPath: fileURLToPath(new URL("../scrat.config.json", import.meta.url)) });
   const model = modelRuntime.getModel(run.provider, run.model);
   if (!model) throw new Error(modelRuntime.getError() ?? `Configure a Pi model for ${run.provider}/${run.model}`);
-  const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-  const thinkingLevel = levels.find((level) => level === run.thinkingLevel);
+  const thinkingLevel = thinkingLevels.find((level) => level === run.thinkingLevel);
   if (!thinkingLevel) throw new Error(`Unknown thinking level: ${run.thinkingLevel}`);
   const settingsManager = SettingsManager.inMemory();
   const resourceLoader = new DefaultResourceLoader({
@@ -36,11 +36,12 @@ export async function executePi(run: typeof runs.$inferSelect, cwd: string, cont
     session.subscribe((event) => {
       if (event.type === "tool_execution_start") {
         log.debug({ event: "pi.tool_started", tool: event.toolName, toolCallId: event.toolCallId });
-        if (["read", "grep", "find", "ls"].includes(event.toolName)) {
+        if (event.toolName === "read" || event.toolName === "grep") {
           const args: unknown = event.args;
-          const path = args && typeof args === "object" && "path" in args && typeof args.path === "string" ? args.path : ".";
-          const local = relative(cwd, resolve(cwd, path));
-          if (local !== ".." && !local.startsWith("../")) paths.add(local || ".");
+          if (args && typeof args === "object" && "path" in args && typeof args.path === "string") {
+            const local = relative(cwd, resolve(cwd, args.path));
+            if (local !== ".." && !local.startsWith("../")) paths.add(local || ".");
+          }
         }
       }
       if (event.type === "tool_execution_end" && event.isError) {

@@ -1,8 +1,6 @@
-import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
-import { config } from "./config.ts";
+import { config, getRepositoryPath } from "./config.ts";
 import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts } from "./git.ts";
 import { fetchItemContext, getGitEnvironment, githubRevision } from "./github.ts";
@@ -35,7 +33,7 @@ function queue(item: Item, action: Action, priority: number, reason: string, inp
 }
 
 export async function routeGithubTasks(repository: string, current: Item[], previous: Map<string, Item>, log: Logger) {
-  const repositoryPath = resolve(fileURLToPath(new URL("..", import.meta.url)), config.github.repositoryPath);
+  const repositoryPath = getRepositoryPath();
   const remote = `https://github.com/${repository}.git`;
   const env = await getGitEnvironment(repository);
   const defaultBaseSha = await fetchRepository(repositoryPath, remote, config.github.baseBranch, env);

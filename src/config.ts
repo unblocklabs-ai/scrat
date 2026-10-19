@@ -1,10 +1,15 @@
 import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import settings from "../scrat.config.json" with { type: "json" };
 
 const configUrl = new URL("../scrat.config.json", import.meta.url);
-const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export const config = settings;
+
+export function getRepositoryPath() {
+  return resolve(fileURLToPath(new URL(".", configUrl)), config.github.repositoryPath);
+}
 
 export function getActionConfig(action: keyof typeof config.actions) {
   const actionConfig = config.actions[action];

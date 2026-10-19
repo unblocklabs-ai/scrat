@@ -62,7 +62,7 @@ export type GithubComment = {
   id: string;
   body: string;
   author?: string;
-  updatedAt: string;
+  revision: string;
   url: string;
   path?: string;
   line?: number | null;
@@ -78,27 +78,27 @@ export async function fetchItemContext(repository: string, kind: "issue" | "pr",
   comments.push(...(await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 }))
     .map((comment) => ({
       id: `issue:${comment.id}`, body: comment.body ?? "", author: comment.user?.login,
-      updatedAt: comment.updated_at, url: comment.html_url,
+      revision: comment.updated_at, url: comment.html_url,
     })));
   if (kind === "pr") {
     const inline = await github.paginate(github.rest.pulls.listReviewComments, { owner, repo, pull_number: number, per_page: 100 });
     comments.push(...inline.map((comment) => ({
       id: `inline:${comment.id}`, body: comment.body, author: comment.user?.login,
-      updatedAt: comment.updated_at, url: comment.html_url, path: comment.path, line: comment.line,
+      revision: comment.updated_at, url: comment.html_url, path: comment.path, line: comment.line,
     })));
     const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: number, per_page: 100 });
     comments.push(...reviews.filter((review) => review.body).map((review) => ({
       id: `review:${review.id}`, body: review.body, author: review.user?.login,
-      updatedAt: review.submitted_at ?? "", url: review.html_url,
+      revision: createHash("sha256").update(review.body).digest("hex"), url: review.html_url,
     })));
   }
   return { item, comments };
 }
 
-export function githubRevision(item: { title: string; body?: string | null; head?: { sha: string } }, comments: GithubComment[]) {
+export function githubRevision(item: { title: string; body?: string | null; head?: { sha: string }; base?: { ref: string } }, comments: GithubComment[]) {
   return createHash("sha256").update(JSON.stringify({
-    title: item.title, body: item.body, head: item.head?.sha,
-    comments: comments.map((comment) => `${comment.id}@${comment.updatedAt}`).sort(),
+    title: item.title, body: item.body, head: item.head?.sha, base: item.base?.ref,
+    comments: comments.map((comment) => `${comment.id}@${comment.revision}`).sort(),
   })).digest("hex");
 }
 

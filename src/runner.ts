@@ -63,16 +63,17 @@ export async function runNextTask() {
         eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile),
       )).orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
       const diff = pullRequest ? await git(repositoryPath, ["diff", `${mainSha}...${preparedHead}`]) : undefined;
+      const diffPaths = pullRequest ? (await git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", `${mainSha}...${preparedHead}`])).split("\0").filter(Boolean) : [];
       const requested = run.input.commentRevisions;
       const ids = new Set(Array.isArray(requested)
         ? requested.filter((entry: unknown): entry is string => typeof entry === "string").map((entry) => entry.split("@")[0]) : []);
       const evaluatedComments = task.action === "address_pr_feedback" && ids.size
         ? comments.filter((comment) => ids.has(comment.id)) : comments;
       const evaluated = {
-        revision, baseBranch,
+        revision, baseBranch, headSha: pullRequest?.head.sha,
         item: { number: context.item.number, title: context.item.title, body: context.item.body, url: context.item.html_url },
         comments: evaluatedComments,
-        commentRevisions: evaluatedComments.map((comment) => `${comment.id}@${comment.updatedAt}`),
+        commentRevisions: evaluatedComments.map((comment) => `${comment.id}@${comment.revision}`),
       };
       db.update(runs).set({ context: evaluated }).where(eq(runs.id, run.id)).run();
       const previousMainSha = task.input.previousMainSha;
@@ -112,9 +113,10 @@ export async function runNextTask() {
           prepare: config.workspace?.prepare, migrate: databaseConfig?.migrate,
         } : undefined,
       }, null, 2);
-      const result = task.action === "review_pr"
+      const agentResult = task.action === "review_pr"
         ? await reviewPullRequest(run, workspace.path, prompt, operation.log)
         : await executePi(run, workspace.path, prompt, readOnly, operation.log, previous?.piSessionFile ?? undefined, environment);
+      const result = { ...agentResult, paths: [...new Set([...diffPaths, ...agentResult.paths])] };
       db.update(runs).set({ result, stage: "validating" }).where(eq(runs.id, run.id)).run();
       if (result.outcome !== "complete") {
         throw Object.assign(new Error(`Agent returned ${result.outcome}: ${result.text}`), { code: "AGENT_INCOMPLETE" });
@@ -130,6 +132,7 @@ export async function runNextTask() {
         const commitSha = await commitWorkspace(workspace, `fix: ${context.item.title}`, {
           name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com`,
         }, references);
+        if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
         db.update(runs).set({ headSha: commitSha, publication: { status: "pending", commitSha }, verification: { headSha: commitSha, commands } }).where(eq(runs.id, run.id)).run();
         if (task.action === "resolve_conflicts" && await hasConflicts(repositoryPath, mainSha, commitSha)) {
           throw new Error("PR still conflicts with its base branch after resolution");
@@ -141,20 +144,26 @@ export async function runNextTask() {
       db.update(runs).set({ stage: "publishing" }).where(eq(runs.id, run.id)).run();
     }
     const evaluatedRun = db.select().from(runs).where(eq(runs.id, run.id)).get()!;
-    const publicationContext = readOnly && run.stage !== "publishing"
+    const publicationContext = run.stage !== "publishing"
       ? await fetchItemContext(repository, item.kind, item.payload.number, operation.log) : context;
+    if (publicationContext.item.state !== "open") throw new Error("GitHub item is no longer open");
+    const currentBaseBranch = "head" in publicationContext.item ? publicationContext.item.base.ref : config.github.baseBranch;
+    const currentComments = publicationContext.comments.filter((comment) => comment.author !== config.github.botLogin && comment.body.trim());
+    let revisionItem = publicationContext.item;
+    if (!readOnly && "head" in revisionItem && evaluatedRun.context?.headSha) {
+      if (revisionItem.head.sha !== evaluatedRun.context.headSha && revisionItem.head.sha !== evaluatedRun.publication.publishedCommitSha
+        && revisionItem.head.sha !== evaluatedRun.publication.commitSha) throw new Error("GitHub PR head changed during execution");
+      revisionItem = { ...revisionItem, head: { ...revisionItem.head, sha: evaluatedRun.context.headSha } };
+    }
+    if (evaluatedRun.context?.revision !== githubRevision(revisionItem, currentComments)
+      || evaluatedRun.context.baseBranch !== currentBaseBranch) {
+      throw new Error("GitHub task context changed; enqueue a fresh task instead of retrying publication");
+    }
     if (readOnly) {
-      if (publicationContext.item.state !== "open") throw new Error("GitHub item is no longer open");
-      const currentBaseBranch = "head" in publicationContext.item ? publicationContext.item.base.ref : config.github.baseBranch;
-      const currentComments = publicationContext.comments.filter((comment) => comment.author !== config.github.botLogin && comment.body.trim());
-      if (evaluatedRun.context?.revision !== githubRevision(publicationContext.item, currentComments)
-        || evaluatedRun.context.baseBranch !== currentBaseBranch) {
-        throw new Error("GitHub review context changed; enqueue a fresh review instead of retrying publication");
-      }
       const currentMainSha = run.stage === "publishing" ? mainSha
         : await fetchRepository(repositoryPath, remote, currentBaseBranch, await getGitEnvironment(repository));
       if (evaluatedRun.mainSha && evaluatedRun.mainSha !== currentMainSha) {
-        const changed = (await git(repositoryPath, ["diff", "--name-only", "--no-renames", evaluatedRun.mainSha, currentMainSha])).split("\n").filter(Boolean);
+        const changed = (await git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", evaluatedRun.mainSha, currentMainSha])).split("\0").filter(Boolean);
         if (affectsPaths(changed, evaluatedRun.result?.paths ?? [])) throw new Error("Reviewed code changed; enqueue a fresh review instead of retrying publication");
       }
     }

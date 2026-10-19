@@ -22,6 +22,8 @@ const scenarios = {
   recovery: "recover releases an abandoned claim without rewriting the saved result",
   cleanup: "cleanup failure cannot turn a published review into a failed task",
   identity: "retained workspaces reject branch replacement and retain unpublished commits",
+  feedback: "edited review summaries and same-commit PR retargets produce fresh tasks",
+  commit_hook: "commit hooks cannot attach verification receipts to an unverified tree",
   database: "real PostgreSQL runs isolate databases, apply new migrations and remove resources",
 };
 

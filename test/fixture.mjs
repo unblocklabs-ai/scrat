@@ -24,7 +24,7 @@ export async function fixture(scenario) {
   process.env.GIT_CONFIG_GLOBAL = resolve("gitconfig");
   process.env.GITHUB_APP_PRIVATE_KEY = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
-  const modes = new Map(), steps = new Map(), requests = [], issues = new Map(), prs = [], comments = new Map(), writes = [];
+  const modes = new Map(), steps = new Map(), requests = [], issues = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set() };
   let onModel;
   const server = createServer(async (req, res) => {
@@ -42,7 +42,7 @@ export async function fixture(scenario) {
     onModel?.(context, step);
     const review = context.action.startsWith("review");
     let tool;
-    if (review && step === 0) tool = mode === "grep" ? { name: "grep", args: { pattern: "value" } } : { name: "read", args: { path: "src/app.ts" } };
+    if (review && step === 0) tool = mode === "grep" ? { name: "grep", args: { pattern: "value" } } : { name: "read", args: { path: mode === "helper" ? "src/helper.ts" : "src/app.ts" } };
     if (review && mode === "grep" && step === 1) tool = { name: "read", args: { path: "src/app.ts" } };
     if (!review && step === 0) {
       tool = mode === "merge-failure" ? { name: "bash", args: { command: `git -c user.name=Fixture -c user.email=fixture@example.invalid merge --no-commit ${git(resolve("seed"), "rev-parse", "main")}` } }
@@ -52,7 +52,7 @@ export async function fixture(scenario) {
     if (!review && context.database && step === 1) tool = { name: "write", args: { path: "migration.sql", content: "ALTER TABLE identities ADD COLUMN IF NOT EXISTS extra integer;\n" } };
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : "complete";
     const output = (review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : "Implemented the change.")
-      + (mode === "ready" ? "\nSCRAT_READY" : "") + (mode === "no-status" ? "" : `\nSCRAT_STATUS: ${outcome}`);
+      + (mode === "ready" ? "\nSCRAT_READY" : "") + (mode === "no-status" ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
     const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] } : { role: "assistant", content: output };
     res.writeHead(200, { "content-type": "text/event-stream" });
     res.end("data: " + JSON.stringify({ id: "local_" + requests.length, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: request.model,
@@ -91,7 +91,9 @@ export async function fixture(scenario) {
     if (path.endsWith("/issues") && method === "GET") return reply([...issues.values(), ...prs.map((pr) => ({ ...pr, pull_request: {} }))].filter((item) => item.state === "open"));
     let match = path.match(/\/(issues|pulls)\/(\d+)$/);
     if (match && method === "GET") return reply(match[1] === "issues" ? issues.get(Number(match[2])) : prs.find((pr) => pr.number === Number(match[2])));
-    if (/\/pulls\/\d+\/(comments|reviews)$/.test(path)) return reply([]);
+    match = path.match(/\/pulls\/(\d+)\/reviews$/);
+    if (match) return reply(reviews.get(Number(match[1])) ?? []);
+    if (/\/pulls\/\d+\/comments$/.test(path)) return reply([]);
     match = path.match(/\/issues\/(\d+)\/comments$/);
     if (match) {
       const n = Number(match[1]); if (method === "GET") return reply(comments.get(n) ?? []);
@@ -118,7 +120,7 @@ export async function fixture(scenario) {
   };
   const enqueue = (number, action = "review_issue", input = {}) => tasks.enqueueTask({ itemId: "issue-" + number, action, reason: "Integration", input });
   const row = (table, id) => db.select().from(table).all().find((entry) => entry.id === id);
-  return { root, app, db, schema, tasks, runNextTask, git, commit, config, modes, requests, issues, prs, comments, writes, faults, addIssue, enqueue, row,
+  return { root, app, db, schema, tasks, runNextTask, git, commit, config, modes, requests, issues, prs, comments, reviews, writes, faults, addIssue, enqueue, row,
     set onModel(value) { onModel = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },
     async close() { globalThis.fetch = originalFetch; db.$client.close(); server.closeAllConnections(); await new Promise((done) => server.close(done)); },

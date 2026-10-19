@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fixture } from "./fixture.mjs";
 
@@ -55,7 +55,7 @@ try {
     assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
     assert.ok(f.row(s.workspaces, r.workspaceId).removedAt);
   } else if (scenario === "incomplete") {
-    for (const [i, mode] of ["incomplete", "needs_decision", "no-status"].entries()) {
+    for (const [i, mode] of ["incomplete", "needs_decision", "no-status", "bare-status"].entries()) {
       f.addIssue(i + 1); f.enqueue(i + 1, "implement"); f.modes.set(i + 1, mode);
       const r = await run(); assert.ok(r.error); assert.equal(f.row(s.tasks, r.taskId).status, "failed");
       assert.ok(existsSync(f.row(s.workspaces, r.workspaceId).path + "/src/app.ts"));
@@ -91,6 +91,8 @@ try {
     f.onModel = () => { f.issues.get(1).body = "New requirements"; };
     const r = await run(); assert.match(r.error.message, /context changed/); assert.equal(f.writes.length, 0);
     f.onModel = undefined; await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"));
+    f.addIssue(2); f.enqueue(2, "implement"); f.onModel = () => { f.issues.get(2).body = "Changed implementation requirements"; };
+    const stale = await run(); assert.match(stale.error.message, /context changed/); assert.equal(f.prs.length, 0);
   } else if (scenario === "relevance") {
     f.addIssue(1); f.modes.set(1, "grep"); await route(); const r = await success(); assert.ok(r.result.paths.includes("."));
     changeMain("notes.md", "new docs\n"); await route(); assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
@@ -144,6 +146,29 @@ try {
     git(w.path, "add", "."); commit(w.path, "Unpublished work");
     await assert.rejects(removeWorkspace(w.id), /unpublished commits/);
     assert.equal(readFileSync(w.path + "/unpublished.txt", "utf8"), "retain\n");
+    f.prs[0].state = "closed"; f.addIssue(2); await route();
+    assert.ok(all(s.tasks).some((t) => t.itemId === "issue-2" && t.status === "queued"));
+  } else if (scenario === "feedback") {
+    await implement(1); await route(); await success();
+    const summary = { id: 55, body: "Please change the implementation", user: { login: "human" }, submitted_at: "2026-10-19T00:00:00Z", html_url: "https://github.com/fixture/project/pull/201#review" };
+    f.reviews.set(201, [summary]); await route(); await success(); await success();
+    summary.body = "Edited request with different requirements"; await route();
+    assert.ok(all(s.tasks).some((t) => t.action === "address_pr_feedback" && t.status === "queued"));
+    const before = all(s.tasks).find((t) => t.action === "review_pr" && t.status === "queued").input.triggerKey;
+    git(resolve("remote.git"), "update-ref", "refs/heads/alternate", git(resolve("remote.git"), "rev-parse", "main"));
+    f.prs[0].base.ref = "alternate"; await route();
+    const after = all(s.tasks).find((t) => t.action === "review_pr" && t.status === "queued").input.triggerKey;
+    assert.notEqual(after, before);
+  } else if (scenario === "commit_hook") {
+    f.addIssue(1); f.enqueue(1, "implement");
+    f.onModel = (_context, step) => {
+      if (step) return;
+      const hook = resolve(f.config.github.repositoryPath, ".git/hooks/pre-commit");
+      copyFileSync(hook + ".sample", hook);
+      writeFileSync(hook, '#!/bin/sh\nprintf "export const value = 909;\\n" > src/app.ts\ngit add src/app.ts\n');
+    };
+    const r = await run(); assert.match(r.error.message, /Committed tree differs/);
+    assert.equal(r.verification, null); assert.equal(f.prs.length, 0);
   } else if (scenario === "database") {
     const original = process.env.DATABASE_URL; f.addIssue(1); f.addIssue(2); f.enqueue(1, "implement"); f.enqueue(2, "implement");
     const runs = await Promise.all([f.runNextTask(), f.runNextTask()]);

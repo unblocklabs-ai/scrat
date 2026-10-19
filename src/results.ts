@@ -20,7 +20,7 @@ export type Reviewer = {
 export function parseResult(output: string, paths: string[]): AgentResult {
   const lines = output.trim().split("\n");
   const marker = lines.pop()?.trim();
-  const outcome = marker?.replace(/^SCRAT_STATUS: /, "");
+  const outcome = marker?.startsWith("SCRAT_STATUS: ") ? marker.slice("SCRAT_STATUS: ".length) : undefined;
   if (outcome !== "complete" && outcome !== "incomplete" && outcome !== "needs_decision") {
     throw new Error("Pi must end its response with SCRAT_STATUS: complete, incomplete, or needs_decision");
   }

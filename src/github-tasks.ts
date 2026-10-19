@@ -52,7 +52,8 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
         if (!active && workspace && !workspace.removedAt) {
           const related = db.select().from(items).where(eq(items.workspaceId, workspace.id)).all();
           for (const linked of related) cancelQueuedTasks(linked.id, "PR merged or closed");
-          await removeWorkspace(workspace.id, { itemId: item.id });
+          try { await removeWorkspace(workspace.id, { itemId: item.id }); }
+          catch { /* Cleanup logs the failure and retains the work; keep routing unrelated items. */ }
         }
       }
       continue;
@@ -101,9 +102,9 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
         .filter(({ run, task }) => (!run.finishedAt && task.status === "running") || (run.finishedAt && !run.error)
           || run.publication.commentId || acknowledged.has(task.id));
       const consumed = new Set(handled.flatMap(({ run }) => run.context?.commentRevisions ?? strings(run.input.commentRevisions)));
-      const pending = comments.filter((comment) => !consumed.has(`${comment.id}@${comment.updatedAt}`));
+      const pending = comments.filter((comment) => !consumed.has(`${comment.id}@${comment.revision}`));
       if (pending.length) {
-        const commentRevisions = pending.map((comment) => `${comment.id}@${comment.updatedAt}`).sort();
+        const commentRevisions = pending.map((comment) => `${comment.id}@${comment.revision}`).sort();
         queued += queue(item, "address_pr_feedback", "New feedback on a Scrat PR", {
           triggerKey: JSON.stringify(commentRevisions), commentRevisions,
         });
@@ -126,7 +127,7 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
         cancelQueuedTasks(item.id, "No changes since the last review", action);
         continue;
       }
-      changedPaths = (await git(repositoryPath, ["diff", "--name-only", "--no-renames", completed.run.mainSha, mainSha])).split("\n").filter(Boolean);
+      changedPaths = (await git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", completed.run.mainSha, mainSha])).split("\0").filter(Boolean);
       if (!affectsPaths(changedPaths, completed.run.result?.paths ?? [])) {
         cancelQueuedTasks(item.id, "Base changes do not affect the reviewed scope", action);
         continue;

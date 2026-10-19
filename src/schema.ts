@@ -64,6 +64,7 @@ export const runs = sqliteTable("runs", {
   context: text("context", { mode: "json" }).$type<{
     revision: string;
     baseBranch: string;
+    headSha?: string;
     item: { number: number; title: string; body?: string | null; url: string };
     comments: GithubComment[];
     commentRevisions: string[];

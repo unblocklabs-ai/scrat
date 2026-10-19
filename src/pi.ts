@@ -1,4 +1,6 @@
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentSession, createBashToolDefinition, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -62,7 +64,11 @@ export async function executePi(run: typeof runs.$inferSelect, cwd: string, cont
           if (args && typeof args === "object") {
             const path = "path" in args && typeof args.path === "string" ? args.path : event.toolName === "grep" ? "." : undefined;
             if (path !== undefined) {
-              const local = relative(cwd, resolve(cwd, path));
+              const requested = path.replace(/^@/, "");
+              const absolute = requested.startsWith("file://") ? fileURLToPath(requested)
+                : requested === "~" ? homedir() : requested.startsWith("~/") ? resolve(homedir(), requested.slice(2)) : resolve(cwd, requested);
+              // Pi also resolves Unicode filename variants; retain broad scope if that spelling differs.
+              const local = existsSync(absolute) ? relative(cwd, absolute) : ".";
               if (local !== ".." && !local.startsWith("../")) paths.add(local || ".");
             }
           }

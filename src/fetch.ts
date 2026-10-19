@@ -21,9 +21,9 @@ try {
   const issues = items.filter((item) => !item.pull_request).length;
 
   stage = "responses";
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(`${directory}/issues-and-pull-requests.json`, JSON.stringify(items, null, 2) + "\n", { mode: 0o600 });
-  await writeFile(`${directory}/pull-requests.json`, JSON.stringify(pullRequests, null, 2) + "\n", { mode: 0o600 });
+  await mkdir(directory, { recursive: true });
+  await writeFile(`${directory}/issues-and-pull-requests.json`, JSON.stringify(items, null, 2) + "\n");
+  await writeFile(`${directory}/pull-requests.json`, JSON.stringify(pullRequests, null, 2) + "\n");
 
   stage = "persistence";
   db.transaction((transaction) => {
@@ -43,10 +43,6 @@ try {
   });
 
   operation.complete({ issues, pullRequests: pullRequests.length });
-  console.log(JSON.stringify({
-    repository, fetchedAt, issues, pullRequests: pullRequests.length,
-    responses: directory, database: "data/scrat.sqlite",
-  }, null, 2));
 } catch (error) {
   operation.fail(error, { stage });
   const failure = {

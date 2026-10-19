@@ -26,6 +26,7 @@ export async function fixture(scenario) {
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
   const modes = new Map(), steps = new Map(), requests = [], issues = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set() };
+  const tokens = new Map();
   let onModel;
   const server = createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
@@ -91,7 +92,10 @@ export async function fixture(scenario) {
       git(resolve("remote.git"), "update-ref", `refs/pull/${pr.number}/head`, pr.head.sha);
     }
     const reply = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
-    if (path.endsWith("/access_tokens")) return reply({ token: "ghs_fixture", expires_at: new Date(Date.now() + 3600000).toISOString() }, 201);
+    if (path.endsWith("/access_tokens")) {
+      const token = "ghs_fixture_" + tokens.size; tokens.set(token, body.permissions);
+      return reply({ token, expires_at: new Date(Date.now() + 3600000).toISOString() }, 201);
+    }
     if (path.endsWith("/issues") && method === "GET") return reply([...issues.values(), ...prs.map((pr) => ({ ...pr, pull_request: {} }))].filter((item) => item.state === "open"));
     let match = path.match(/\/(issues|pulls)\/(\d+)$/);
     if (match && method === "GET") return reply(match[1] === "issues" ? issues.get(Number(match[2])) : prs.find((pr) => pr.number === Number(match[2])));
@@ -101,6 +105,9 @@ export async function fixture(scenario) {
     match = path.match(/\/issues\/(\d+)\/comments$/);
     if (match) {
       const n = Number(match[1]); if (method === "GET") return reply(comments.get(n) ?? []);
+      const token = new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");
+      const permission = prs.some((pr) => pr.number === n) ? "pull_requests" : "issues";
+      if (tokens.get(token)?.[permission] !== "write") return reply({ message: "Resource not accessible by integration" }, 403);
       writes.push({ type: "comment", number: n, body: body.body });
       const comment = { id: 1000 + n, body: body.body, user: { login: config.github.botLogin }, updated_at: "2026-10-19T01:00:00Z", html_url: `https://github.com/fixture/project/issues/${n}#comment` };
       comments.set(n, [...(comments.get(n) ?? []), comment]);

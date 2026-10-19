@@ -10,7 +10,7 @@ async function githubForRepository(repository: string, access: "read" | "write" 
   const [owner, repo] = repository.split("/");
   const permissions = {
     read: { issues: "read", pull_requests: "read", metadata: "read" },
-    write: { issues: "write", metadata: "read" },
+    write: { issues: "write", pull_requests: "write", metadata: "read" },
     pull_request: { pull_requests: "write", metadata: "read" },
     contents_read: { contents: "read", metadata: "read" },
     contents_write: { contents: "write", metadata: "read" },

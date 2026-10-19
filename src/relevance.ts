@@ -66,10 +66,54 @@ function lockfileChanged(before: string, after: string, dependencies: Set<string
   return false;
 }
 
+type Review = { paths: string[]; relevant: boolean; degraded?: true };
+
+const reviewCacheLimit = 256;
+const treeCacheLimit = 8;
+const reviewCache = new Map<string, Promise<Review>>();
+const treeCache = new Map<string, Promise<string>>();
+const commitSha = /^[0-9a-f]{40}$/;
+
+// Promises are stored so concurrent callers share one run. Rejections are evicted so they are retried.
+function memoize<T>(cache: Map<string, Promise<T>>, limit: number, key: string, load: () => Promise<T>) {
+  const cached = cache.get(key);
+  if (cached !== undefined) {
+    cache.delete(key);
+    cache.set(key, cached);
+    return cached;
+  }
+  const pending = load();
+  cache.set(key, pending);
+  if (cache.size > limit) cache.delete(cache.keys().next().value as string);
+  pending.catch(() => {
+    if (cache.get(key) === pending) cache.delete(key);
+  });
+  return pending;
+}
+
+// Ref names can move, so only immutable commit SHAs are cached.
+function listTree(repository: string, sha: string) {
+  const command = ["ls-tree", "-r", "--name-only", "-z", sha];
+  return commitSha.test(sha) ? memoize(treeCache, treeCacheLimit, JSON.stringify([repository, sha]), () => git(repository, command)) : git(repository, command);
+}
+
 export async function reviewChanges(repository: string, before: string, after: string, scope: string[]) {
+  if (!commitSha.test(before) || !commitSha.test(after)) {
+    const { paths, relevant } = await computeReview(repository, before, after, scope);
+    return { paths, relevant };
+  }
+  const key = JSON.stringify([repository, before, after, [...new Set(scope)].sort()]);
+  const pending = memoize(reviewCache, reviewCacheLimit, key, () => computeReview(repository, before, after, scope));
+  const review = await pending;
+  // A degraded verdict is conservative but transient, so it must not outlive this call.
+  if (review.degraded && reviewCache.get(key) === pending) reviewCache.delete(key);
+  return { paths: [...review.paths], relevant: review.relevant };
+}
+
+async function computeReview(repository: string, before: string, after: string, scope: string[]): Promise<Review> {
   const paths = (await git(repository, ["diff", "--name-only", "--no-renames", "-z", before, after])).split("\0").filter(Boolean);
   if (!scope.length || scope.includes(".")) return { paths, relevant: paths.length > 0 };
-  const tracked = await Promise.all([before, after].map((sha) => git(repository, ["ls-tree", "-r", "--name-only", "-z", sha])));
+  const tracked = await Promise.all([before, after].map((sha) => listTree(repository, sha)));
   const observed = reviewScope(scope, tracked.flatMap((files) => files.split("\0").filter(Boolean)));
   if (observed.kind === "unknown") return { paths, relevant: paths.length > 0 };
   scope = observed.paths;
@@ -93,7 +137,7 @@ export async function reviewChanges(repository: string, before: string, after: s
     }
   } catch {
     // Missing or malformed metadata is itself worth reviewing, not evidence of no impact.
-    return { paths, relevant: true };
+    return { paths, relevant: true, degraded: true };
   }
   return { paths, relevant: false };
 }

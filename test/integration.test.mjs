@@ -25,6 +25,9 @@ const scenarios = {
   incomplete: "partial or undecided implementations never become PRs",
   verification: "verification receipts bind to the published commit and failing checks block publication",
   validation_mutation: "checks that change source cannot certify the resulting commit",
+  validation_resume: "validation-only retry recreates PostgreSQL and validates saved code without Pi, then recovers publication",
+  validation_guards: "validation checkpoints reject changed source, context and incomplete work while normal retry still repairs",
+  resume_migration: "checkpoint schema updates preserve existing task and run history without inventing legacy checkpoints",
   retry: "publication retries reconcile remote comments and labels without rerunning Pi",
   ambiguous_pr: "a lost PR response is reconciled without another PR or inference",
   freshness: "requirements changed during inference cannot receive an approval label",
@@ -48,7 +51,7 @@ const scenarios = {
 
 for (const [scenario, name] of Object.entries(scenarios)) {
   test(name, { timeout: 180_000 }, async (t) => {
-    if (scenario === "database") {
+    if (["database", "validation_resume"].includes(scenario)) {
       try { await execute("docker", ["info"], { timeout: 10_000 }); }
       catch { t.skip("Docker daemon is required for the PostgreSQL integration"); return; }
     }

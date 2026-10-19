@@ -34,6 +34,7 @@ export const tasks = sqliteTable("tasks", {
   priority: integer("priority").notNull().default(0),
   reason: text("reason").notNull(),
   input: text("input", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  retryMode: text("retry_mode", { enum: ["repair", "validation"] }).notNull().default("repair"),
   status: text("status", {
     enum: ["queued", "running", "completed", "failed", "cancelled"],
   }).notNull().default("queued"),
@@ -61,6 +62,7 @@ export const runs = sqliteTable("runs", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
   taskId: text("task_id").notNull().references(() => tasks.id),
   retryOfRunId: text("retry_of_run_id").references((): AnySQLiteColumn => runs.id),
+  inferenceFromRunId: text("inference_from_run_id").references((): AnySQLiteColumn => runs.id),
   input: text("input", { mode: "json" }).$type<Record<string, unknown>>().notNull().default({}),
   context: text("context", { mode: "json" }).$type<{
     revision: string;
@@ -83,6 +85,9 @@ export const runs = sqliteTable("runs", {
   startedAt: text("started_at"),
   finishedAt: text("finished_at"),
   reviewers: text("reviewers", { mode: "json" }).$type<Reviewer[]>().notNull().default([]),
+  agentCheckpoint: text("agent_checkpoint", { mode: "json" }).$type<{
+    headSha: string; treeSha: string; mergeHead: string | null;
+  }>(),
   verification: text("verification", { mode: "json" }).$type<{
     headSha: string;
     commands: { command: string[]; durationMs: number; stdout: string; stderr: string }[];

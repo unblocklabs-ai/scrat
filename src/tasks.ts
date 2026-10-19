@@ -1,13 +1,22 @@
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, count, desc, eq, isNotNull, isNull, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
+import { actionContracts } from "./actions.ts";
 import { config, getActionConfig } from "./config.ts";
 import { db } from "./db.ts";
 import { describeError } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { startOperation } from "./logging.ts";
-import { hasPublicationSnapshot } from "./results.ts";
+import { hasPublicationSnapshot, hasValidationCheckpoint } from "./results.ts";
 import { events, items, runs, tasks } from "./schema.ts";
+
+function latestRun(taskId: string, database: Pick<typeof db, "select">) {
+  const previous = database.select({ run: runs, sequence: events.id }).from(runs)
+    .leftJoin(events, and(eq(events.runId, runs.id), eq(events.type, "run.started")))
+    .where(eq(runs.taskId, taskId)).orderBy(desc(events.id)).limit(1).get();
+  if (previous && previous.sequence === null) throw new Error(`Missing run.started event: ${previous.run.id}`);
+  return previous?.run;
+}
 
 export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
   "itemId" | "action" | "priority" | "reason" | "input"
@@ -25,6 +34,7 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
           priority: task.priority ?? tasks.priority,
           reason: task.reason,
           input: task.input,
+          retryMode: "repair",
         },
       }).returning().get()!;
       const references = { itemId: queuedTask.itemId, taskId: queuedTask.id, operationId: operation.operationId };
@@ -70,19 +80,18 @@ export function claimTask() {
       )))
       .orderBy(desc(tasks.priority), asc(tasks.createdAt), asc(tasks.id)).limit(1).get();
     if (!next) return;
-    const previous = transaction.select({ run: runs, sequence: events.id }).from(runs)
-      .leftJoin(events, and(eq(events.runId, runs.id), eq(events.type, "run.started")))
-      .where(eq(runs.taskId, next.task.id)).orderBy(desc(events.id)).limit(1).get();
-    if (previous && previous.sequence === null) throw new Error(`Missing run.started event: ${previous.run.id}`);
-    const previousRun = previous?.run;
+    const previousRun = latestRun(next.task.id, transaction);
     const retry = previousRun?.error && isDeepStrictEqual(previousRun.input, next.task.input) ? previousRun : undefined;
     const actionSettings = getActionConfig(next.task.action);
     const settings = retry ?? actionSettings;
-    const resume = hasPublicationSnapshot(retry) ? retry : undefined;
+    const validationOnly = next.task.retryMode === "validation";
+    const publicationResume = !validationOnly && hasPublicationSnapshot(retry) ? retry : undefined;
+    const resume = validationOnly ? (hasValidationCheckpoint(retry) ? retry : undefined) : publicationResume;
     const task = transaction.update(tasks).set({ status: "running" }).where(eq(tasks.id, next.task.id)).returning().get()!;
     const run = transaction.insert(runs).values({
       taskId: task.id,
       retryOfRunId: retry?.id,
+      inferenceFromRunId: resume?.id,
       input: task.input,
       skill: settings.skill,
       provider: settings.provider,
@@ -91,11 +100,13 @@ export function claimTask() {
       reviewers: resume ? resume.reviewers : (retry?.reviewers ?? actionSettings.reviewers)
         .map(({ provider, model, thinkingLevel }) => ({ provider, model, thinkingLevel })),
       workspaceId: resume?.workspaceId ?? next.item.workspaceId,
+      stage: validationOnly ? "validating" : publicationResume ? "publishing" : "preparing",
       ...(resume ? {
         context: resume.context, result: resume.result, mainSha: resume.mainSha, headSha: resume.headSha,
         piSessionId: resume.piSessionId, piSessionFile: resume.piSessionFile,
-        stage: "publishing", publication: { ...resume.publication, status: "pending" },
-        verification: resume.verification,
+        agentCheckpoint: resume.agentCheckpoint,
+        publication: publicationResume ? { ...resume.publication, status: "pending" } : { status: "pending" },
+        verification: publicationResume?.verification,
       } : {}),
       startedAt: new Date().toISOString(),
     }).returning().get()!;
@@ -106,7 +117,7 @@ export function claimTask() {
   }, { behavior: "immediate" });
 }
 
-export function retryTask(taskId: string) {
+export function retryTask(taskId: string, mode: typeof tasks.$inferSelect.retryMode = "repair") {
   const operation = startOperation("task.retry", { taskId });
   try {
     const task = db.transaction((transaction) => {
@@ -116,8 +127,15 @@ export function retryTask(taskId: string) {
         eq(tasks.itemId, failed.itemId), eq(tasks.action, failed.action), eq(tasks.status, "queued"),
       )).get();
       if (queued) throw new Error(`A queued task already exists for this item/action: ${queued.id}`);
-      const updated = transaction.update(tasks).set({ status: "queued" }).where(eq(tasks.id, taskId)).returning().get()!;
-      recordEvent({ itemId: updated.itemId, taskId, operationId: operation.operationId, type: "task.retried", data: { action: updated.action } }, transaction);
+      if (mode === "validation") {
+        const previous = latestRun(taskId, transaction);
+        if (actionContracts[failed.action].mode !== "change" || !hasValidationCheckpoint(previous)
+          || !isDeepStrictEqual(previous.input, failed.input)) {
+          throw new Error("Validation-only retry requires an unchanged task input and a complete agent checkpoint from a failed validation; use normal retry to repair");
+        }
+      }
+      const updated = transaction.update(tasks).set({ status: "queued", retryMode: mode }).where(eq(tasks.id, taskId)).returning().get()!;
+      recordEvent({ itemId: updated.itemId, taskId, operationId: operation.operationId, type: "task.retried", data: { action: updated.action, mode } }, transaction);
       return updated;
     }, { behavior: "immediate" });
     operation.complete();

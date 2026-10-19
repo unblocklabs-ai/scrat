@@ -24,12 +24,15 @@ function selectAssessment(history: History) {
     if (!hasPublicationSnapshot(run) || run.result.outcome !== "complete" || run.publication.status === "not_needed") continue;
     let origin = entry;
     const visited = new Set<string>();
-    while (origin.run.retryOfRunId) {
+    while (origin.run.inferenceFromRunId || origin.run.retryOfRunId) {
       if (visited.has(origin.run.id)) throw new Error(`Cyclic PR assessment ancestry: ${origin.run.id}`);
       visited.add(origin.run.id);
-      const parent = byId.get(origin.run.retryOfRunId);
-      if (!parent) throw new Error(`Missing PR assessment ancestor: ${origin.run.retryOfRunId}`);
-      if (!hasPublicationSnapshot(parent.run)) break;
+      const parentId = origin.run.inferenceFromRunId ?? origin.run.retryOfRunId!;
+      const parent = byId.get(parentId);
+      if (!parent) throw new Error(`Missing PR assessment ancestor: ${parentId}`);
+      // New copies carry explicit provenance; legacy publication retries can
+      // still be reconstructed using their original publication-only rule.
+      if (!origin.run.inferenceFromRunId && !hasPublicationSnapshot(parent.run)) break;
       origin = parent;
     }
     if (origin.sequence === null || entry.sequence === null) throw new Error(`Missing run.started event for PR assessment: ${run.id}`);

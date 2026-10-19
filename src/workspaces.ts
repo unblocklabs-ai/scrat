@@ -24,6 +24,25 @@ export async function validateWorkspace(workspace: typeof workspaces.$inferSelec
     || !registered.split("\0").includes(`worktree ${path}`)) throw new Error("Workspace Git identity changed");
 }
 
+export async function checkpointWorkspace(workspace: typeof workspaces.$inferSelect) {
+  await git(workspace.path, ["add", "--all"]);
+  return {
+    headSha: await git(workspace.path, ["rev-parse", "HEAD"]),
+    treeSha: await git(workspace.path, ["write-tree"]),
+    mergeHead: await hasPendingMerge(workspace.path) ? await git(workspace.path, ["rev-parse", "MERGE_HEAD"]) : null,
+  };
+}
+
+export async function validateCheckpoint(workspace: typeof workspaces.$inferSelect, checkpoint: NonNullable<typeof runs.$inferSelect.agentCheckpoint>) {
+  const headSha = await git(workspace.path, ["rev-parse", "HEAD"]);
+  const mergeHead = await hasPendingMerge(workspace.path) ? await git(workspace.path, ["rev-parse", "MERGE_HEAD"]) : null;
+  const changed = await git(workspace.path, ["diff", "--name-only", "-z", checkpoint.treeSha, "--"]);
+  const untracked = await git(workspace.path, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  if (headSha !== checkpoint.headSha || mergeHead !== checkpoint.mergeHead || changed || untracked) {
+    throw new Error("Validation checkpoint source changed; use normal retry to repair the current workspace");
+  }
+}
+
 export async function createWorkspace(
   { repositoryPath, baseRef = "origin/main", branch }: { repositoryPath: string; baseRef?: string; branch?: string },
   references: EventReferences = {},

@@ -11,9 +11,10 @@ import { executePi } from "./pi.ts";
 import { reviewPullRequest } from "./pr-review.ts";
 import { publishRun } from "./publication.ts";
 import { reviewChanges } from "./relevance.ts";
+import { hasValidationCheckpoint } from "./results.ts";
 import { items, runs } from "./schema.ts";
 import { claimTask, finishRun } from "./tasks.ts";
-import { commitWorkspace, createWorkspace, getWorkspace, removeWorkspace, validateWorkspace } from "./workspaces.ts";
+import { checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
 
 export async function runNextTask() {
   const claimed = claimTask();
@@ -38,6 +39,7 @@ export async function runNextTask() {
     const comments = context.comments.filter((comment) => comment.author !== config.github.botLogin && comment.body.trim());
     const revision = githubRevision(context.item, comments);
     if (run.stage !== "publishing") {
+      const validationOnly = run.stage === "validating";
       const baseRef = mainSha;
       const headRef = pullRequest
         ? await fetchPullRequestHead(repositoryPath, remote, pullRequest.number, gitEnvironment)
@@ -46,6 +48,14 @@ export async function runNextTask() {
       let workspace = !readOnly && item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
       if (workspace?.removedAt) throw new Error(`Workspace was removed: ${workspace.id}`);
       if (workspace) await validateWorkspace(workspace);
+      if (validationOnly) {
+        if (readOnly || !hasValidationCheckpoint(run)) throw new Error("No complete agent checkpoint to resume; use normal retry to repair");
+        if (!workspace || workspace.id !== run.workspaceId) throw new Error("Validation checkpoint workspace is no longer attached to this item");
+        if (run.context.revision !== revision || run.context.baseBranch !== baseBranch || run.mainSha !== mainSha) {
+          throw new Error("Validation checkpoint context or base changed; use normal retry to repair against current requirements");
+        }
+        await validateCheckpoint(workspace, run.agentCheckpoint);
+      }
       if (!workspace) {
         if (!readOnly && pullRequest && pullRequest.head.repo?.full_name !== repository) {
           throw new Error("Cannot update a PR branch in a different repository");
@@ -58,33 +68,9 @@ export async function runNextTask() {
         else db.update(items).set({ workspaceId: workspace.id }).where(eq(items.id, item.id)).run();
       }
       const mergeInProgress = !readOnly && await hasPendingMerge(workspace.path);
-      if (!readOnly && pullRequest && !mergeInProgress) await git(workspace.path, ["merge", "--ff-only", preparedHead]);
+      if (!readOnly && pullRequest && !mergeInProgress && !validationOnly) await git(workspace.path, ["merge", "--ff-only", preparedHead]);
       const headSha = await git(workspace.path, ["rev-parse", "HEAD"]);
-      db.update(runs).set({ workspaceId: workspace.id, mainSha, headSha }).where(eq(runs.id, run.id)).run();
-      const previous = !readOnly ? db.select().from(runs).where(and(
-        eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile),
-      )).orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
-      const diff = pullRequest ? await git(repositoryPath, ["diff", `${mainSha}...${preparedHead}`]) : undefined;
-      const diffBaseSha = pullRequest ? await git(repositoryPath, ["merge-base", mainSha, preparedHead]) : mainSha;
-      const diffPaths = pullRequest ? (await git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", `${mainSha}...${preparedHead}`])).split("\0").filter(Boolean) : [];
-      const requested = run.input.commentRevisions;
-      const ids = new Set(Array.isArray(requested)
-        ? requested.filter((entry: unknown): entry is string => typeof entry === "string").map((entry) => entry.split("@")[0]) : []);
-      const evaluatedComments = contract.context === "feedback" && ids.size
-        ? comments.filter((comment) => ids.has(comment.id)) : comments;
-      const evaluated = {
-        revision, baseBranch, headSha: pullRequest?.head.sha,
-        item: { number: context.item.number, title: context.item.title, body: context.item.body, url: context.item.html_url },
-        comments: evaluatedComments,
-        commentRevisions: evaluatedComments.map((comment) => `${comment.id}@${comment.revision}`),
-      };
-      db.update(runs).set({ context: evaluated }).where(eq(runs.id, run.id)).run();
-      const previousMainSha = task.input.previousMainSha;
-      const previousHeadSha = task.input.previousHeadSha;
-      const mainChanges = typeof previousMainSha === "string" && previousMainSha !== mainSha
-        ? await git(repositoryPath, ["diff", previousMainSha, mainSha]) : undefined;
-      const prChanges = pullRequest && typeof previousHeadSha === "string" && previousHeadSha !== headSha
-        ? await git(repositoryPath, ["diff", previousHeadSha, headSha]) : undefined;
+      if (!validationOnly) db.update(runs).set({ workspaceId: workspace.id, mainSha, headSha }).where(eq(runs.id, run.id)).run();
       const databaseConfig = !readOnly ? config.workspace?.database : undefined;
       let database: Awaited<ReturnType<typeof createRunDatabase>> | undefined;
       if (databaseConfig) {
@@ -95,44 +81,70 @@ export async function runNextTask() {
         ...Object.fromEntries((databaseConfig?.environment ?? []).map((name) => [name, database!.url])),
       };
       const commandEnvironment = { ...process.env, ...environment };
-      const preparationDeferred = mergeInProgress || Boolean(run.retryOfRunId);
-      if (readOnly || !preparationDeferred) {
-        await runCommands(config.workspace?.prepare ?? [], workspace.path, commandEnvironment, references);
-        if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, commandEnvironment, references);
+      let result = run.result;
+      if (!validationOnly) {
+        const previous = !readOnly ? db.select().from(runs).where(and(
+          eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile),
+        )).orderBy(desc(runs.startedAt)).limit(1).get() : undefined;
+        const diff = pullRequest ? await git(repositoryPath, ["diff", `${mainSha}...${preparedHead}`]) : undefined;
+        const diffBaseSha = pullRequest ? await git(repositoryPath, ["merge-base", mainSha, preparedHead]) : mainSha;
+        const diffPaths = pullRequest ? (await git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", `${mainSha}...${preparedHead}`])).split("\0").filter(Boolean) : [];
+        const requested = run.input.commentRevisions;
+        const ids = new Set(Array.isArray(requested)
+          ? requested.filter((entry: unknown): entry is string => typeof entry === "string").map((entry) => entry.split("@")[0]) : []);
+        const evaluatedComments = contract.context === "feedback" && ids.size
+          ? comments.filter((comment) => ids.has(comment.id)) : comments;
+        const evaluated = {
+          revision, baseBranch, headSha: pullRequest?.head.sha,
+          item: { number: context.item.number, title: context.item.title, body: context.item.body, url: context.item.html_url },
+          comments: evaluatedComments,
+          commentRevisions: evaluatedComments.map((comment) => `${comment.id}@${comment.revision}`),
+        };
+        db.update(runs).set({ context: evaluated }).where(eq(runs.id, run.id)).run();
+        const previousMainSha = task.input.previousMainSha;
+        const previousHeadSha = task.input.previousHeadSha;
+        const mainChanges = typeof previousMainSha === "string" && previousMainSha !== mainSha
+          ? await git(repositoryPath, ["diff", previousMainSha, mainSha]) : undefined;
+        const prChanges = pullRequest && typeof previousHeadSha === "string" && previousHeadSha !== headSha
+          ? await git(repositoryPath, ["diff", previousHeadSha, headSha]) : undefined;
+        const preparationDeferred = mergeInProgress || Boolean(run.retryOfRunId);
+        if (readOnly || !preparationDeferred) {
+          await runCommands(config.workspace?.prepare ?? [], workspace.path, commandEnvironment, references);
+          if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, commandEnvironment, references);
+        }
+        db.update(runs).set({ stage: "agent" }).where(eq(runs.id, run.id)).run();
+        const input = { ...run.input };
+        delete input.comments;
+        const prompt = JSON.stringify({
+          action: task.action,
+          reason: task.reason,
+          ...evaluated,
+          input,
+          previousFailure: run.retryOfRunId ? db.select().from(runs).where(eq(runs.id, run.retryOfRunId)).get()?.error : undefined,
+          workspace: { path: workspace.path, branch: workspace.branch, baseRef, baseBranch, mainSha, headSha, mergeInProgress },
+          diff, diffBaseSha, diffPaths, mainChanges, prChanges,
+          database: database ? {
+            ...database, environment, schemaPrepared: !preparationDeferred,
+            prepare: config.workspace?.prepare, migrate: databaseConfig?.migrate,
+          } : undefined,
+        }, null, 2);
+        const agentResult = contract.agent === "panel"
+          ? await reviewPullRequest(run, workspace.path, prompt, operation.log, diffBaseSha)
+          : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, log: operation.log, sessionFile: previous?.piSessionFile ?? undefined, environment });
+        result = { ...agentResult, paths: [...new Set([...diffPaths, ...agentResult.paths])] };
+        db.update(runs).set({ result, stage: "validating" }).where(eq(runs.id, run.id)).run();
       }
-      db.update(runs).set({ stage: "agent" }).where(eq(runs.id, run.id)).run();
-      const input = { ...run.input };
-      delete input.comments;
-      const prompt = JSON.stringify({
-        action: task.action,
-        reason: task.reason,
-        ...evaluated,
-        input,
-        previousFailure: run.retryOfRunId ? db.select().from(runs).where(eq(runs.id, run.retryOfRunId)).get()?.error : undefined,
-        workspace: { path: workspace.path, branch: workspace.branch, baseRef, baseBranch, mainSha, headSha, mergeInProgress },
-        diff,
-        diffBaseSha,
-        diffPaths,
-        mainChanges,
-        prChanges,
-        database: database ? {
-          ...database, environment, schemaPrepared: !preparationDeferred,
-          prepare: config.workspace?.prepare, migrate: databaseConfig?.migrate,
-        } : undefined,
-      }, null, 2);
-      const agentResult = contract.agent === "panel"
-        ? await reviewPullRequest(run, workspace.path, prompt, operation.log, diffBaseSha)
-        : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, log: operation.log, sessionFile: previous?.piSessionFile ?? undefined, environment });
-      const result = { ...agentResult, paths: [...new Set([...diffPaths, ...agentResult.paths])] };
-      db.update(runs).set({ result, stage: "validating" }).where(eq(runs.id, run.id)).run();
+      if (!result) throw new Error("No saved agent result to validate");
       if (result.outcome !== "complete") {
         throw Object.assign(new Error(`Agent returned ${result.outcome}: ${result.text}`), { code: "AGENT_INCOMPLETE" });
       }
       if (!readOnly) {
+        if (!validationOnly) db.update(runs).set({ agentCheckpoint: await checkpointWorkspace(workspace) }).where(eq(runs.id, run.id)).run();
         await runCommands(config.workspace?.prepare ?? [], workspace.path, commandEnvironment, references);
         if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, commandEnvironment, references);
-        await git(workspace.path, ["add", "--all"]);
-        const validationTree = await git(workspace.path, ["write-tree"]);
+        const checkpoint = await checkpointWorkspace(workspace);
+        db.update(runs).set({ agentCheckpoint: checkpoint }).where(eq(runs.id, run.id)).run();
+        const validationTree = checkpoint.treeSha;
         const commands = await runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references);
         await git(workspace.path, ["add", "--all"]);
         if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");

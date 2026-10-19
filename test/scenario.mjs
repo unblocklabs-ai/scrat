@@ -92,12 +92,16 @@ try {
   } else if (scenario === "acceptance") {
     f.addIssue(1, ["scrat"]); f.enqueue(1, "implement"); f.modes.set(1, "no-change");
     const empty = await run(); assert.match(empty.error.message, /no changes/); assert.equal(f.prs.length, 0);
+    let calls = f.requests.length; tasks.retryTask(empty.taskId, "validation");
+    const stillEmpty = await run(); assert.match(stillEmpty.error.message, /no changes/); assert.equal(f.requests.length, calls);
     const implemented = await implement(2); const head = f.prs[0].head.sha;
     changeMain("src/app.ts", "export const value = 99;\n"); await route();
     const prItem = all(s.items).find((i) => i.kind === "pr");
     tasks.cancelQueuedTasks(prItem.id, "Exercise conflict postcondition directly", "review_pr");
     f.reset(202, "no-change"); const unresolved = await run();
     assert.match(unresolved.error.message, /still conflicts/); assert.equal(f.prs[0].head.sha, head);
+    calls = f.requests.length; tasks.retryTask(unresolved.taskId, "validation");
+    const stillConflicted = await run(); assert.match(stillConflicted.error.message, /still conflicts/); assert.equal(f.requests.length, calls);
     assert.ok(!f.row(s.workspaces, implemented.workspaceId).removedAt);
     tasks.enqueueTask({ itemId: prItem.id, action: "address_pr_feedback", reason: "Reply without code changes", input: {} });
     f.reset(202, "no-change"); const replied = await success();
@@ -341,6 +345,89 @@ try {
   } else if (scenario === "validation_mutation") {
     f.addIssue(1); f.enqueue(1, "implement"); const r = await run();
     assert.match(r.error.message, /Validation changed/); assert.equal(f.prs.length, 0);
+  } else if (scenario === "validation_resume") {
+    f.addIssue(1); f.enqueue(1, "implement"); const failed = await run();
+    assert.ok(failed.error); assert.equal(failed.stage, "validating");
+    const calls = f.requests.length;
+    assert.equal(readFileSync("prepare.log", "utf8").trim().split("\n").length, 2);
+    // Exercise the public CLI, including its persisted queue mode across processes.
+    execFileSync(process.execPath, [resolve("app/src/retry.ts"), failed.taskId, "--validation-only"], { stdio: "pipe" });
+    f.faults.pr.add(1); const publishing = await run();
+    assert.equal(f.requests.length, calls, "Validation resume must not invoke Pi");
+    assert.equal(publishing.stage, "publishing"); assert.ok(publishing.error);
+    assert.equal(publishing.inferenceFromRunId, failed.id); assert.equal(publishing.piSessionId, failed.piSessionId);
+    assert.equal(publishing.verification.headSha, publishing.publication.commitSha);
+    const receipts = readFileSync("database-receipts.jsonl", "utf8").trim().split("\n").map(JSON.parse);
+    assert.deepEqual(receipts.map((receipt) => receipt.rows), [1, 0]); assert.notEqual(receipts[0].id, receipts[1].id);
+    assert.equal(readFileSync("prepare.log", "utf8").trim().split("\n").length, 3, "Resume retains post-agent preparation exactly once");
+    tasks.retryTask(publishing.taskId); const published = await success();
+    assert.equal(f.requests.length, calls); assert.equal(f.prs.length, 1);
+    assert.equal(published.inferenceFromRunId, publishing.id); assert.deepEqual(published.verification, publishing.verification);
+    assert.equal(readFileSync("database-receipts.jsonl", "utf8").trim().split("\n").length, 2);
+    for (const attempt of [failed, publishing, published]) assert.equal(execFileSync("docker", ["ps", "-a", "--filter", `name=^/scrat-v2-db-${attempt.id}$`, "--format", "{{.ID}}"], { encoding: "utf8" }).trim(), "");
+  } else if (scenario === "validation_guards") {
+    const { eq } = await import("drizzle-orm");
+    const changes = [
+      (w) => writeFileSync(w.path + "/src/app.ts", "export const changed = true;\n"),
+      (w) => writeFileSync(w.path + "/unexpected.ts", "untracked source\n"),
+      (w) => git(w.path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "Changed HEAD"),
+      (_w, n) => { f.issues.get(n).body = "Different requirements"; },
+      () => changeMain("notes.md", "Base changed\n"),
+      (_w, n) => db.update(s.items).set({ workspaceId: null }).where(eq(s.items.id, "issue-" + n)).run(),
+    ];
+    for (const [index, change] of changes.entries()) {
+      const n = index + 1; f.addIssue(n); f.enqueue(n, "implement"); const failed = await run();
+      assert.equal(failed.error.exitCode, 7); const calls = f.requests.length, prepares = readFileSync("prepare.log", "utf8");
+      const workspace = f.row(s.workspaces, failed.workspaceId); change(workspace, n);
+      tasks.retryTask(failed.taskId, "validation"); const rejected = await run();
+      assert.match(rejected.error.message, /checkpoint/i); assert.equal(f.requests.length, calls);
+      assert.equal(readFileSync("prepare.log", "utf8"), prepares, "Reject before preparation can alter source");
+      assert.equal(f.prs.length, 0);
+    }
+    f.addIssue(99); f.enqueue(99, "implement"); f.modes.set(99, "incomplete"); const partial = await run();
+    assert.equal(partial.result.outcome, "incomplete");
+    assert.throws(() => tasks.retryTask(partial.taskId, "validation"), /complete agent checkpoint/);
+    f.addIssue(100); f.enqueue(100, "implement"); const changedInput = await run();
+    db.update(s.tasks).set({ input: { requirements: "new" } }).where(eq(s.tasks.id, changedInput.taskId)).run();
+    assert.throws(() => tasks.retryTask(changedInput.taskId, "validation"), /unchanged task input/);
+    f.addIssue(101); f.enqueue(101, "implement"); const replaced = await run();
+    tasks.retryTask(replaced.taskId, "validation");
+    f.enqueue(101, "implement", { requirements: "replacement" });
+    assert.equal(f.row(s.tasks, replaced.taskId).retryMode, "repair");
+    f.reset(99, "normal"); unlinkSync("block-validation"); const calls = f.requests.length;
+    tasks.retryTask(partial.taskId); const repaired = await success();
+    assert.equal(repaired.taskId, partial.taskId);
+    assert.ok(f.requests.length > calls); assert.equal(repaired.inferenceFromRunId, null);
+    assert.equal(repaired.piSessionId, partial.piSessionId, "Normal retry repairs in the existing session");
+    const replacementCalls = f.requests.length; f.reset(101, "normal"); const replacement = await success();
+    assert.equal(replacement.taskId, replaced.taskId); assert.ok(f.requests.length > replacementCalls);
+    assert.equal(replacement.inferenceFromRunId, null);
+  } else if (scenario === "resume_migration") {
+    f.addIssue(1); f.enqueue(1, "implement"); const first = await run(); assert.equal(first.error.exitCode, 7);
+    f.reset(1, "normal"); tasks.retryTask(first.taskId); const failed = await run();
+    assert.equal(failed.retryOfRunId, first.id);
+    const history = all(s.events);
+    // Rebuild only this disposable fixture's table: SQLite cannot DROP a
+    // column while its table-level foreign-key constraint still references it.
+    const removed = ["agent_checkpoint", "inference_from_run_id"];
+    const create = db.$client.prepare("SELECT sql FROM sqlite_master WHERE name = 'runs'").get().sql;
+    const legacySql = create.split("\n").filter((line) => !removed.some((name) => line.includes("`" + name + "`"))).join("\n")
+      .replace("CREATE TABLE `runs`", "CREATE TABLE `legacy_runs`");
+    const columns = db.$client.prepare("PRAGMA table_info(runs)").all().map((column) => column.name).filter((name) => !removed.includes(name))
+      .map((name) => '"' + name + '"').join(", ");
+    db.$client.exec("PRAGMA foreign_keys = OFF");
+    db.$client.exec(`BEGIN; ALTER TABLE tasks DROP COLUMN retry_mode; ${legacySql}; INSERT INTO legacy_runs (${columns}) SELECT ${columns} FROM runs; DROP TABLE runs; ALTER TABLE legacy_runs RENAME TO runs; COMMIT;`);
+    db.$client.exec("PRAGMA foreign_keys = ON");
+    execFileSync(process.execPath, [resolve("app/node_modules/drizzle-kit/bin.cjs"), "push", "--dialect=sqlite", "--schema=./app/src/schema.ts", "--url=./data/scrat.sqlite"], { stdio: "pipe" });
+    assert.deepEqual(db.$client.prepare("PRAGMA foreign_key_check").all(), []);
+    const legacy = f.row(s.runs, failed.id);
+    assert.deepEqual(legacy.result, failed.result); assert.deepEqual(legacy.error, failed.error); assert.equal(legacy.piSessionId, failed.piSessionId);
+    assert.equal(legacy.agentCheckpoint, null); assert.equal(legacy.inferenceFromRunId, null);
+    assert.equal(legacy.retryOfRunId, first.id); assert.deepEqual(f.row(s.runs, first.id).result, first.result);
+    assert.equal(f.row(s.tasks, failed.taskId).retryMode, "repair"); assert.deepEqual(all(s.events), history);
+    assert.throws(() => tasks.retryTask(failed.taskId, "validation"), /complete agent checkpoint/);
+    unlinkSync("block-validation"); f.reset(1, "normal"); const calls = f.requests.length;
+    tasks.retryTask(failed.taskId); await success(); assert.ok(f.requests.length > calls);
   } else if (scenario === "retry") {
     for (const [n, fault] of [[1, "label"], [2, "comment"]]) {
       f.addIssue(n, ["human-label"]); f.modes.set(n, "ready"); f.enqueue(n); f.faults[fault].add(n);

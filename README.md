@@ -38,10 +38,17 @@ Useful commands:
 npm run fetch                    # Save GitHub state without routing tasks
 npm run sync                     # Sync, queue tasks, and reconcile reviews/labels
 npm run work                     # Drain runnable queued work, then exit
-npm run retry -- <task-id>        # Explicitly retry a failed task
+npm run retry -- <task-id>        # Repair a failed task, or resume publication
+npm run retry -- <task-id> --validation-only  # Recheck saved code without Pi
 npm run cleanup                  # Retry finished-run resource cleanup
 npm test                         # Integration/E2E tests; PostgreSQL case needs Docker
 ```
+
+Normal retries rerun Pi for pre-publication failures, reusing the workspace/session so it can repair the problem. Publication-only retries reuse the saved validated result.
+
+Use `--validation-only` for a transient validation failure after a mutating agent returned complete. It requires a saved checkpoint with unchanged task input, workspace identity, HEAD, source tree, merge state, GitHub context, and base SHA. Scrat skips Pi, creates a fresh disposable database when configured, reruns preparation/migrations and all checks, and still enforces action postconditions before publication. Ignored files are outside the source checkpoint; configured preparation must restore any required dependency/generated state. Changed or incomplete work requires a normal repair retry.
+
+When upgrading an existing installation, run `npm run db:push` before starting the new code (the installer does this). Old run history is preserved, but runs without checkpoints cannot use validation-only retry. No validation is bypassed or automatically retried.
 
 ## Configuration
 

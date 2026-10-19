@@ -8,6 +8,14 @@ export function hasPublicationSnapshot(run: typeof runs.$inferSelect | undefined
   return run?.stage === "publishing" && Boolean(run.result && run.context);
 }
 
+export function hasValidationCheckpoint(run: typeof runs.$inferSelect | undefined): run is typeof runs.$inferSelect & {
+  result: AgentResult; context: NonNullable<typeof runs.$inferSelect.context>;
+  agentCheckpoint: NonNullable<typeof runs.$inferSelect.agentCheckpoint>; workspaceId: string; mainSha: string;
+} {
+  return run?.stage === "validating" && run.result?.outcome === "complete"
+    && Boolean(run.context && run.agentCheckpoint && run.workspaceId && run.mainSha);
+}
+
 export const prGrades = ["S", "A", "B", "C", "D", "F"] as const;
 export type PrGrade = typeof prGrades[number];
 

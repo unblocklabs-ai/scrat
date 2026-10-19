@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 const [phase, owner] = process.argv.slice(2);
 assert.equal(process.env.SCRAT_WORKSPACE_VALUE, "isolated");
 assert.equal(process.env.DATABASE_URL, process.env.TEST_DATABASE_URL);
@@ -19,4 +19,11 @@ if (phase === "migrate") {
 } else if (phase === "validate") {
   assert.equal(sql("SELECT count(extra) FROM identities"), "0");
   assert.equal(sql("SELECT count(*) FROM identities"), "1");
+} else if (phase === "validate-resume") {
+  assert.equal(sql("SELECT count(extra) FROM identities"), "0", "Saved migration must be applied to every new database");
+  const rows = Number(sql("SELECT count(*) FROM identities"));
+  const first = !existsSync(owner);
+  appendFileSync(owner, JSON.stringify({ id, rows, url: process.env.DATABASE_URL }) + "\n");
+  if (first) { assert.equal(rows, 1); throw new Error("Transient validation failure after agent work"); }
+  assert.equal(rows, 0, "Validation-only resume must use a fresh migrated database without rerunning agent inserts");
 }

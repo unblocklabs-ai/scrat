@@ -17,6 +17,7 @@ export async function fixture(scenario) {
   execFileSync("git", ["init", "--bare", "remote.git"], { stdio: "ignore" });
   execFileSync("git", ["init", "-b", "main", "seed"], { stdio: "ignore" });
   mkdirSync("seed/src"); writeFileSync("seed/src/app.ts", "export const value = 1;\n");
+  if (["validation_resume", "validation_guards", "resume_migration"].includes(scenario)) writeFileSync("seed/.gitignore", "node_modules/\n");
   if (scenario === "scope_snapshots") {
     writeFileSync("seed/.gitignore", "/src/generated.ts\n");
     writeFileSync("seed/src/deleted.ts", "export const deleted = 1;\n");
@@ -114,9 +115,18 @@ export async function fixture(scenario) {
     writeFileSync("check.mjs", scenario === "validation_mutation" ? 'import{writeFileSync}from"node:fs";writeFileSync("src/app.ts","unexpected verification change\\n");' : 'import{existsSync}from"node:fs";if(existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed");process.exit(7);}console.log("checked actual source");');
     config.workspace.validate = [[process.execPath, resolve("check.mjs")]];
   }
-  if (scenario === "database") {
+  if (["validation_resume", "validation_guards", "resume_migration"].includes(scenario)) {
+    writeFileSync("prepare.mjs", 'import{appendFileSync,mkdirSync,writeFileSync}from"node:fs";appendFileSync(' + JSON.stringify(resolve("prepare.log")) + ',"prepare\\n");mkdirSync("node_modules",{recursive:true});writeFileSync("node_modules/prepared","ready");');
+    config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
+  }
+  if (["validation_guards", "resume_migration"].includes(scenario)) {
+    writeFileSync("block-validation", "transient failure\n");
+    writeFileSync("validate.mjs", 'import{existsSync}from"node:fs";if(existsSync(' + JSON.stringify(resolve("block-validation")) + ')){console.error("transient validation failure");process.exit(7);}console.log("validated saved source");');
+    config.workspace.validate = [[process.execPath, resolve("validate.mjs")]];
+  }
+  if (["database", "validation_resume"].includes(scenario)) {
     const helper = fileURLToPath(new URL("database-command.mjs", import.meta.url)); cpSync(helper, "database-command.mjs");
-    config.workspace = { environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), "validate"]] };
+    config.workspace = { ...config.workspace, environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), scenario === "validation_resume" ? "validate-resume" : "validate", resolve("database-receipts.jsonl")]] };
   }
   writeFileSync("app/scrat.config.json", JSON.stringify(config));
   mkdirSync("data");

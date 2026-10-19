@@ -1,5 +1,4 @@
 import { readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -72,6 +71,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     customTools: readOnly ? (readBase ? [readBase] : []) : [{ ...bash, renderCall: undefined, renderResult: undefined }],
   });
   const paths = new Set<string>();
+  const reads = new Map<string, string>();
   try {
     const sessionDetails = {
       piSessionId: session.sessionId, piSessionFile: session.sessionFile,
@@ -82,20 +82,24 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     session.subscribe((event) => {
       if (event.type === "tool_execution_start") {
         log.debug({ event: "pi.tool_started", tool: event.toolName, toolCallId: event.toolCallId });
-        if (event.toolName === "read" || event.toolName === "grep" || event.toolName === "read_base") {
+        if (event.toolName === "read" || event.toolName === "read_base") {
           const args: unknown = event.args;
           if (args && typeof args === "object") {
-            const path = "path" in args && typeof args.path === "string" ? args.path : event.toolName === "grep" ? "." : undefined;
+            const path = "path" in args && typeof args.path === "string" ? args.path : undefined;
             if (path !== undefined) {
               const requested = path.replace(/^@/, "");
               const absolute = requested.startsWith("file://") ? fileURLToPath(requested)
                 : requested === "~" ? homedir() : requested.startsWith("~/") ? resolve(homedir(), requested.slice(2)) : resolve(cwd, requested);
-              // Pi also resolves Unicode filename variants; retain broad scope if that spelling differs.
-              const local = existsSync(absolute) ? relative(cwd, absolute) : ".";
-              if (local !== ".." && !local.startsWith("../")) paths.add(local || ".");
+              const local = relative(cwd, absolute);
+              if (local && local !== ".." && !local.startsWith("../")) reads.set(event.toolCallId, local);
             }
           }
         }
+      }
+      if (event.type === "tool_execution_end") {
+        const path = reads.get(event.toolCallId);
+        if (path && !event.isError) paths.add(path);
+        reads.delete(event.toolCallId);
       }
       if (event.type === "tool_execution_end" && event.isError) {
         log.warn({ event: "pi.tool_failed", tool: event.toolName, toolCallId: event.toolCallId });

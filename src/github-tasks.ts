@@ -1,7 +1,7 @@
 import { and, desc, eq, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
 import { config, getRepositoryPath } from "./config.ts";
-import { affectsPaths } from "./relevance.ts";
+import { reviewChanges } from "./relevance.ts";
 import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts } from "./git.ts";
 import { fetchItemContext, getGitEnvironment, githubRevision } from "./github.ts";
@@ -127,8 +127,9 @@ export async function routeGithubTasks(repository: string, current: Item[], prev
         cancelQueuedTasks(item.id, "No changes since the last review", action);
         continue;
       }
-      changedPaths = (await git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", completed.run.mainSha, mainSha])).split("\0").filter(Boolean);
-      if (!affectsPaths(changedPaths, completed.run.result?.paths ?? [])) {
+      const changes = await reviewChanges(repositoryPath, completed.run.mainSha, mainSha, completed.run.result?.paths ?? []);
+      changedPaths = changes.paths;
+      if (!changes.relevant) {
         cancelQueuedTasks(item.id, "Base changes do not affect the reviewed scope", action);
         continue;
       }

@@ -107,10 +107,14 @@ try {
     f.addIssue(2); f.enqueue(2, "implement"); f.onModel = () => { f.issues.get(2).body = "Changed implementation requirements"; };
     const stale = await run(); assert.match(stale.error.message, /context changed/); assert.equal(f.prs.length, 0);
   } else if (scenario === "relevance") {
-    f.addIssue(1); f.modes.set(1, "grep"); await route(); const r = await success(); assert.ok(r.result.paths.includes("."));
-    changeMain("notes.md", "new docs\n"); await route(); assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
-    f.reset(1, "normal"); await success();
-    changeMain("notes.md", "other docs\n"); await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
+    f.addIssue(1); f.modes.set(1, "grep"); await route(); const r = await success();
+    assert.ok(r.result.paths.includes("src/app.ts")); assert.ok(!r.result.paths.includes("."));
+    changeMain("notes.md", "new docs\n"); await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
+    changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "2.0.0" } }));
+    changeMain("pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: old}\n  unrelated@2.0.0:\n    resolution: {integrity: new}\n");
+    await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "Unrelated dev dependencies must not trigger review");
+    changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "2.0.0", unrelated: "2.0.0" } }));
+    await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"), "Inspected dependency changes must trigger review");
   } else if (scenario === "review_scope") {
     f.addIssue(1); f.modes.set(1, "at"); await route();
     const reviewed = await success(); assert.ok(reviewed.result.paths.includes("src/app.ts"));

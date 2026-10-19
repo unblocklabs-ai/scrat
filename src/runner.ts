@@ -9,7 +9,7 @@ import { startOperation } from "./logging.ts";
 import { executePi } from "./pi.ts";
 import { reviewPullRequest } from "./pr-review.ts";
 import { publishRun } from "./publication.ts";
-import { affectsPaths } from "./relevance.ts";
+import { reviewChanges } from "./relevance.ts";
 import { items, runs } from "./schema.ts";
 import { claimTask, finishRun } from "./tasks.ts";
 import { commitWorkspace, createWorkspace, getWorkspace, removeWorkspace, validateWorkspace } from "./workspaces.ts";
@@ -168,8 +168,8 @@ export async function runNextTask() {
       const currentMainSha = run.stage === "publishing" ? mainSha
         : await fetchRepository(repositoryPath, remote, currentBaseBranch, await getGitEnvironment(repository));
       if (evaluatedRun.mainSha && evaluatedRun.mainSha !== currentMainSha) {
-        const changed = (await git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", evaluatedRun.mainSha, currentMainSha])).split("\0").filter(Boolean);
-        if (affectsPaths(changed, evaluatedRun.result?.paths ?? [])) throw new Error("Reviewed code changed; enqueue a fresh review instead of retrying publication");
+        const changes = await reviewChanges(repositoryPath, evaluatedRun.mainSha, currentMainSha, evaluatedRun.result?.paths ?? []);
+        if (changes.relevant) throw new Error("Reviewed code changed; enqueue a fresh review instead of retrying publication");
       }
     }
     await publishRun(task, evaluatedRun, publicationContext, references);

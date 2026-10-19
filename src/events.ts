@@ -2,7 +2,7 @@ import { db } from "./db.ts";
 import { events, type tasks } from "./schema.ts";
 
 type TaskDetails = Pick<typeof tasks.$inferSelect, "action" | "priority" | "reason">;
-export type EventReferences = { itemId?: string; taskId?: string; runId?: string; operationId?: string };
+export type EventReferences = { itemId?: string; taskId?: string; runId?: string };
 
 export type JournalEvent = (
   | { type: "task.enqueued"; data: TaskDetails }
@@ -16,7 +16,7 @@ export type JournalEvent = (
   | { type: "github.comment_updated"; data: { repository: string; commentId: number; url: string } }
   | { type: "github.labels_added"; data: { repository: string; issueNumber: number; labels: string[] } }
   | { type: "github.label_removed"; data: { repository: string; issueNumber: number; label: string } }
-) & EventReferences;
+) & EventReferences & { operationId?: string };
 
 export function recordEvent(event: JournalEvent, database: Pick<typeof db, "insert"> = db) {
   return database.insert(events).values(event).returning().get()!;

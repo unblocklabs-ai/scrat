@@ -38,9 +38,12 @@ export async function executePi(run: typeof runs.$inferSelect, cwd: string, cont
         log.debug({ event: "pi.tool_started", tool: event.toolName, toolCallId: event.toolCallId });
         if (event.toolName === "read" || event.toolName === "grep") {
           const args: unknown = event.args;
-          if (args && typeof args === "object" && "path" in args && typeof args.path === "string") {
-            const local = relative(cwd, resolve(cwd, args.path));
-            if (local !== ".." && !local.startsWith("../")) paths.add(local || ".");
+          if (args && typeof args === "object") {
+            const path = "path" in args && typeof args.path === "string" ? args.path : event.toolName === "grep" ? "." : undefined;
+            if (path !== undefined) {
+              const local = relative(cwd, resolve(cwd, path));
+              if (local !== ".." && !local.startsWith("../")) paths.add(local || ".");
+            }
           }
         }
       }

@@ -98,6 +98,20 @@ try {
     changeMain("notes.md", "new docs\n"); await route(); assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
     f.reset(1, "normal"); await success();
     changeMain("notes.md", "other docs\n"); await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
+  } else if (scenario === "review_scope") {
+    f.addIssue(1); f.modes.set(1, "at"); await route();
+    const reviewed = await success(); assert.ok(reviewed.result.paths.includes("src/app.ts"));
+    changeMain("src/app.ts", "export const value = 9;\n"); await route();
+    assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
+    changeMain("src/helper.ts", "export const helper = 1;\n");
+    await implement(2); await route(); f.modes.set(202, "helper");
+    let changed = false;
+    f.onModel = (context) => {
+      if (!changed && context.item.number === 202) { changed = true; changeMain("src/app.ts", "export const value = 99;\n"); }
+    };
+    const stale = await run(); assert.match(stale.error.message, /Reviewed code changed/);
+    assert.ok(stale.result.paths.includes("src/app.ts")); assert.ok(stale.result.paths.includes("src/helper.ts"));
+    assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === 202).length, 0);
   } else if (scenario === "merge") {
     const original = await implement(1); changeMain("src/app.ts", "export const value = 200;\n");
     await route(); f.modes.set(201, "merge-failure");

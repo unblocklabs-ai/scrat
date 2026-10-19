@@ -42,7 +42,7 @@ export async function fixture(scenario) {
     onModel?.(context, step);
     const review = context.action.startsWith("review");
     let tool;
-    if (review && step === 0) tool = mode === "grep" ? { name: "grep", args: { pattern: "value" } } : { name: "read", args: { path: mode === "helper" ? "src/helper.ts" : "src/app.ts" } };
+    if (review && step === 0) tool = mode === "grep" ? { name: "grep", args: { pattern: "value" } } : { name: "read", args: { path: mode === "helper" ? "src/helper.ts" : mode === "at" ? "@src/app.ts" : "src/app.ts" } };
     if (review && mode === "grep" && step === 1) tool = { name: "read", args: { path: "src/app.ts" } };
     if (!review && step === 0) {
       tool = mode === "merge-failure" ? { name: "bash", args: { command: `git -c user.name=Fixture -c user.email=fixture@example.invalid merge --no-commit ${git(resolve("seed"), "rev-parse", "main")}` } }
@@ -86,6 +86,10 @@ export async function fixture(scenario) {
     if (url.hostname === "127.0.0.1") return originalFetch(input, options);
     if (url.hostname !== "api.github.com") throw new Error("External network disabled");
     const path = url.pathname, method = options.method ?? "GET", body = options.body ? JSON.parse(options.body) : {};
+    for (const pr of prs) {
+      pr.head.sha = git(resolve("remote.git"), "rev-parse", pr.head.ref);
+      git(resolve("remote.git"), "update-ref", `refs/pull/${pr.number}/head`, pr.head.sha);
+    }
     const reply = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
     if (path.endsWith("/access_tokens")) return reply({ token: "ghs_fixture", expires_at: new Date(Date.now() + 3600000).toISOString() }, 201);
     if (path.endsWith("/issues") && method === "GET") return reply([...issues.values(), ...prs.map((pr) => ({ ...pr, pull_request: {} }))].filter((item) => item.state === "open"));

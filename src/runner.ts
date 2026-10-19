@@ -91,7 +91,7 @@ export async function runNextTask() {
       const environment = Object.fromEntries((databaseConfig?.environment ?? []).map((name) => [name, database!.url]));
       const commandEnvironment = { ...process.env, ...environment };
       const preparationDeferred = mergeInProgress || Boolean(run.retryOfRunId);
-      if (!readOnly && !preparationDeferred) {
+      if (readOnly || !preparationDeferred) {
         await runCommands(config.workspace?.prepare ?? [], workspace.path, commandEnvironment, references);
         if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, commandEnvironment, references);
       }

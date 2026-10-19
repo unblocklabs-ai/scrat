@@ -36,7 +36,7 @@ function hasScratLabel(item: Item) {
 function applyDecisions(itemId: string, decisions: RoutingDecision[]) {
   let queued = 0;
   for (const decision of decisions) {
-    if (decision.type === "cancel") cancelQueuedTasks(itemId, decision.reason, decision.action);
+    if (decision.type === "cancel") cancelQueuedTasks(itemId, decision.reason, decision.action, true);
     else { enqueueTask({ itemId, action: decision.action, reason: decision.reason, input: decision.input }); queued++; }
   }
   return queued;

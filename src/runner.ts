@@ -118,6 +118,7 @@ export async function runNextTask() {
         db.update(runs).set({ stage: "agent" }).where(eq(runs.id, run.id)).run();
         const input = { ...run.input };
         delete input.comments;
+        delete input.manual;
         const changedPaths = Array.isArray(input.changedPaths) ? input.changedPaths.filter((path: unknown) => typeof path === "string") : [];
         if (changedPaths.length > inlineDiffPaths) { delete input.changedPaths; input.changedPathCount = changedPaths.length; }
         // Larger context lives beside, not inside, the worktree: `git add --all` would commit it.

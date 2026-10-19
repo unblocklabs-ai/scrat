@@ -44,13 +44,15 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
       const previous = transaction.select().from(tasks).where(and(
         eq(tasks.itemId, task.itemId), eq(tasks.action, task.action), eq(tasks.status, "queued"),
       )).get();
-      const queuedTask = transaction.insert(tasks).values({ ...task, priority: task.priority ?? config.actions[task.action].priority }).onConflictDoUpdate({
+      // Coalescing replaces input; a queued manual task keeps its mark so routing cannot later cancel it.
+      const input = previous?.input.manual === true ? { ...task.input, manual: true } : task.input;
+      const queuedTask = transaction.insert(tasks).values({ ...task, input, priority: task.priority ?? config.actions[task.action].priority }).onConflictDoUpdate({
         target: [tasks.itemId, tasks.action],
         targetWhere: sql`${tasks.status} = 'queued'`,
         set: {
           priority: task.priority ?? tasks.priority,
           reason: task.reason,
-          input: task.input,
+          input,
           retryMode: "repair",
         },
       }).returning().get()!;
@@ -74,6 +76,27 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
     operation.complete({ taskId: queued.id, priority: queued.priority });
     signalWork();
     return queued;
+  });
+}
+
+export type ManualEnqueueResult = { target: string; number?: number; itemId?: string; taskId?: string; error?: string };
+
+// Targets are PR/issue numbers in the configured repository or internal item ids. Tasks are marked
+// `input.manual` so sync routing never cancels them; only item closure does.
+export function enqueueManualTasks(action: string, targets: string[], priority?: number): ManualEnqueueResult[] {
+  if (!isKnownAction(action)) throw new Error(`Unknown action: ${action}; expected one of ${actionIds.join(", ")}`);
+  const candidates = db.select().from(items).all().filter((item) => {
+    const repository = itemRepository(item);
+    return repository && sameRepository(repository, config.github.repository);
+  });
+  return targets.map((target): ManualEnqueueResult => {
+    const item = /^\d+$/.test(target) ? candidates.find((candidate) => candidate.payload.number === Number(target))
+      : candidates.find((candidate) => candidate.id === target);
+    if (!item) return { target, error: `No item ${target} in ${config.github.repository}` };
+    const base = { target, number: item.payload.number, itemId: item.id };
+    if (item.state !== "open") return { ...base, error: "Item is closed" };
+    try { return { ...base, taskId: enqueueTask({ itemId: item.id, action, priority, reason: "Manually enqueued", input: { manual: true } }).id }; }
+    catch (error) { return { ...base, error: error instanceof Error ? error.message : String(error) }; }
   });
 }
 
@@ -187,10 +210,12 @@ export function finishRun(runId: string, outcome: { status: "completed" } | { st
   return finished;
 }
 
-export function cancelQueuedTasks(itemId: string, reason: string, action?: typeof tasks.$inferSelect.action) {
+// Routing passes `keepManual`; item closure cancels everything.
+export function cancelQueuedTasks(itemId: string, reason: string, action?: typeof tasks.$inferSelect.action, keepManual = false) {
   return db.transaction((transaction) => {
     const cancelled = transaction.update(tasks).set({ status: "cancelled" }).where(and(
       eq(tasks.itemId, itemId), eq(tasks.status, "queued"), action ? eq(tasks.action, action) : undefined,
+      keepManual ? sql`coalesce(json_extract(${tasks.input}, '$.manual'), 0) != 1` : undefined,
     )).returning().all();
     for (const task of cancelled) {
       recordEvent({ itemId, taskId: task.id, type: "task.cancelled", data: { action: task.action, reason } }, transaction);

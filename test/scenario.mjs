@@ -337,6 +337,38 @@ try {
     const calls = f.requests.length; await route();
     assert.equal(f.requests.length, calls);
     assert.deepEqual(f.prs[0].labels.map((l) => l.name), ["A · Strong"]);
+  } else if (scenario === "manual_queue") {
+    await implement(1); await route(); await success(); // reviews the new PR
+    const prItem = all(s.items).find((i) => i.kind === "pr"), itemId = prItem.id;
+    const reviewTasks = () => all(s.tasks).filter((t) => t.itemId === itemId && t.action === "review_pr");
+    await route(); assert.equal(reviewTasks().filter((t) => t.status === "queued").length, 0, "review is current");
+    const [ok, missing] = [tasks.enqueueManualTasks("review_pr", ["201", String(prItem.payload.number)], 77), tasks.enqueueManualTasks("review_pr", ["999", "Nope"])];
+    assert.equal(ok[0].error, undefined); assert.equal(ok[0].itemId, itemId); assert.equal(ok[0].number, 201);
+    assert.equal(ok[1].taskId, ok[0].taskId, "same item coalesces");
+    assert.equal(missing.length, 2); assert.ok(missing.every((r) => /No item/.test(r.error)));
+    assert.throws(() => tasks.enqueueManualTasks("bogus", ["201"]), /Unknown action/);
+    const manual = f.row(s.tasks, ok[0].taskId);
+    assert.equal(manual.input.manual, true); assert.equal(manual.priority, 77);
+    await route();
+    assert.equal(f.row(s.tasks, manual.id).status, "queued", "routing must not cancel a manual task");
+    // Routing enqueue coalescing keeps the mark and takes the routing fields.
+    tasks.enqueueTask({ itemId, action: "review_pr", reason: "Routing", input: { triggerKey: "k", changedPaths: [] } });
+    const merged = f.row(s.tasks, manual.id);
+    assert.equal(merged.status, "queued"); assert.deepEqual(merged.input, { triggerKey: "k", changedPaths: [], manual: true });
+    await route(); assert.equal(f.row(s.tasks, manual.id).status, "queued");
+    const result = await success();
+    assert.equal(result.taskId, manual.id);
+    assert.match(f.comments.get(201).find((c) => c.user.login !== "human").body, new RegExp(manual.id));
+    await route(); assert.equal(reviewTasks().filter((t) => t.status === "queued").length, 0, "the manual run is the current authoritative review");
+    // Closure cancels manual tasks too.
+    const again = tasks.enqueueManualTasks("review_pr", ["201"])[0];
+    f.prs[0].state = "closed"; await route();
+    assert.equal(f.row(s.tasks, again.taskId).status, "cancelled");
+    assert.equal(tasks.enqueueManualTasks("review_pr", ["201"])[0].error, "Item is closed");
+    // Issues resolve by number too; mixed batches report each result.
+    f.addIssue(5); const mixed = tasks.enqueueManualTasks("review_issue", ["5", "404", "issue-5"]);
+    assert.deepEqual(mixed.map((r) => Boolean(r.taskId)), [true, false, true]);
+    assert.equal(mixed[0].taskId, mixed[2].taskId);
   } else if (scenario === "run_sequence") {
     const { eq } = await import("drizzle-orm");
     for (let n = 1; n <= 5; n++) f.addIssue(n);

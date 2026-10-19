@@ -47,6 +47,7 @@ npm run sync                     # Sync, queue tasks, and reconcile reviews/labe
 npm run work                     # Drain runnable queued work, then exit
 npm run retry -- <task-id>        # Repair a failed task, or resume publication
 npm run retry -- <task-id> --validation-only  # Recheck saved code without Pi
+npm run enqueue -- <action> <number|item-id>... [--priority N]  # Queue work for PR/issue numbers; sync never cancels it, even past routing guards (closing the item does)
 npm run cleanup                  # Retry finished-run resource cleanup
 npm run typecheck                # Strict TypeScript and Node type-erasure compatibility
 npm run knip                     # Unused files, exports, and dependencies

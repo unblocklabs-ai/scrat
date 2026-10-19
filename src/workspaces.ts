@@ -113,7 +113,6 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
 
 export async function commitWorkspace(workspace: typeof workspaces.$inferSelect, message: string, author: { name: string; email: string }, references: EventReferences = {}) {
   await git(workspace.path, ["add", "--all"]);
-  await git(workspace.path, ["diff", "--cached", "--check"]);
   const staged = await git(workspace.path, ["diff", "--cached", "--name-only"]);
   if (staged || await hasPendingMerge(workspace.path)) {
     await git(workspace.path, ["-c", `user.name=${author.name}`, "-c", `user.email=${author.email}`, "commit", "-m", message]);

@@ -50,7 +50,7 @@ export async function fixture(scenario) {
     if (!review && step === 0) {
       tool = mode === "merge-failure" ? { name: "bash", args: { command: `git -c user.name=Fixture -c user.email=fixture@example.invalid merge --no-commit ${git(resolve("seed"), "rev-parse", "main")}` } }
         : context.database ? { name: "bash", args: { command: `${process.execPath} ${resolve("database-command.mjs")} query ${context.item.number}` } }
-          : { name: "write", args: { path: "src/app.ts", content: `export const value = ${context.item.number + 10};\n` } };
+          : { name: "write", args: { path: "src/app.ts", content: `export const value = ${context.item.number + 10};\n${scenario === "verification" ? "\n" : ""}` } };
     }
     if (!review && context.database && step === 1) tool = { name: "write", args: { path: "migration.sql", content: "ALTER TABLE identities ADD COLUMN IF NOT EXISTS extra integer;\n" } };
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : "complete";

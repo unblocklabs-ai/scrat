@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { integer, sqliteTable, text, unique, uniqueIndex } from "drizzle-orm/sqlite-core";
+import type { ErrorDetails } from "./errors.ts";
 import type { fetchOpenItems } from "./github.ts";
 
 type OpenItems = Awaited<ReturnType<typeof fetchOpenItems>>;
@@ -55,12 +56,7 @@ export const runs = sqliteTable("runs", {
   startedAt: text("started_at"),
   finishedAt: text("finished_at"),
   result: text("result", { mode: "json" }).$type<Record<string, unknown>>(),
-  error: text("error", { mode: "json" }).$type<{
-    stage: typeof runStages[number];
-    message: string;
-    code?: string;
-    cause?: unknown;
-  }>(),
+  error: text("error", { mode: "json" }).$type<ErrorDetails>(),
   publication: text("publication", { mode: "json" }).$type<{
     status: "pending" | "published" | "not_needed";
     commentId?: number;

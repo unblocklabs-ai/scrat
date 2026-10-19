@@ -14,7 +14,8 @@
     "work": "node --env-file=.env src/work.ts",
     "sync": "node --env-file=.env src/sync.ts",
     "retry": "node --env-file=.env src/retry.ts",
-    "cleanup": "node --env-file=.env src/cleanup.ts"
+    "cleanup": "node --env-file=.env src/cleanup.ts",
+    "recover": "node --env-file=.env src/recover.ts"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^1.3.0",

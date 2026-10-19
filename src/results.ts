@@ -28,11 +28,15 @@ export function parseResult(output: string, paths: string[]): AgentResult {
   if (outcome !== "complete" && outcome !== "incomplete" && outcome !== "needs_decision") {
     throw new Error("Pi must end its response with SCRAT_STATUS: complete, incomplete, or needs_decision");
   }
-  const ready = lines.some((line) => line.trim() === "SCRAT_READY");
-  const grades = lines.filter((line) => line.trim().startsWith("SCRAT_GRADE:"));
-  const grade = grades.length ? prGrades.find((value) => grades[0].trim() === `SCRAT_GRADE: ${value}`) : undefined;
-  if (grades.length > 1 || (grades.length && !grade)) throw new Error("Pi must return one valid SCRAT_GRADE: S, A, B, C, D, or F");
-  const text = lines.filter((line) => line.trim() !== "SCRAT_READY" && !line.trim().startsWith("SCRAT_GRADE:")).join("\n").trim();
+  const gradeLine = lines.at(-1)?.trim();
+  const grade = prGrades.find((value) => gradeLine === `SCRAT_GRADE: ${value}`);
+  if (gradeLine?.startsWith("SCRAT_GRADE:")) {
+    if (!grade) throw new Error("Pi must return a valid SCRAT_GRADE: S, A, B, C, D, or F");
+    lines.pop();
+  }
+  const ready = lines.at(-1)?.trim() === "SCRAT_READY";
+  if (ready) lines.pop();
+  const text = lines.join("\n").trim();
   if (!text) throw new Error("Pi returned no report");
   return { text, ready, paths, outcome, grade };
 }

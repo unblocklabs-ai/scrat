@@ -79,6 +79,19 @@ try {
     assert.equal(superseded.publication.status, "not_needed");
     assert.equal(f.writes.length, writes); assert.equal(f.requests.length, inferences);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["A · Strong", "human-label"]);
+  } else if (scenario === "footer") {
+    await implement(1); f.modes.set(201, "quoted-grade"); await route();
+    const reviewed = await success();
+    assert.equal(reviewed.result.grade, "A");
+    assert.match(f.comments.get(201)[0].body, /```\nSCRAT_GRADE: F\nSCRAT_READY\n```/);
+    assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
+    f.reset(201, "quoted-only");
+    tasks.enqueueTask({ itemId: f.row(s.tasks, reviewed.taskId).itemId, action: "review_pr", reason: "Review again", input: {} });
+    const invalid = await run(); assert.match(invalid.error.message, /grade/i);
+    assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
+    f.addIssue(2); f.modes.set(2, "quoted-only"); f.enqueue(2);
+    const issue = await success(); assert.equal(issue.result.ready, false);
+    assert.deepEqual(f.issues.get(2).labels, []);
   } else if (scenario === "reviewer_failure") {
     await implement(2); await route(); f.modes.set(202, "reviewer-failure");
     const r = await run(); assert.ok(r.error); assert.ok(r.reviewers.some((r) => r.error));

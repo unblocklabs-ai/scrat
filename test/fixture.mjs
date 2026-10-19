@@ -60,8 +60,9 @@ export async function fixture(scenario) {
     if (!review && context.database && step === 1) tool = { name: "write", args: { path: "migration.sql", content: "ALTER TABLE identities ADD COLUMN IF NOT EXISTS extra integer;\n" } };
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : "complete";
     const output = (review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : "Implemented the change.")
+      + (mode.startsWith("quoted-") ? "\n```\nSCRAT_GRADE: F\nSCRAT_READY\n```" : "")
       + (mode === "ready" ? "\nSCRAT_READY" : "")
-      + (context.action === "review_pr" && mode !== "missing-grade" ? `\nSCRAT_GRADE: ${mode === "grade-A" ? "A" : "B"}` : "")
+      + (context.action === "review_pr" && !["missing-grade", "quoted-only"].includes(mode) ? `\nSCRAT_GRADE: ${["grade-A", "quoted-grade"].includes(mode) ? "A" : "B"}` : "")
       + (mode === "no-status" ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
     const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] } : { role: "assistant", content: output };
     res.writeHead(200, { "content-type": "text/event-stream" });

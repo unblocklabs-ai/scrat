@@ -9,6 +9,7 @@ const scenarios = {
   queue: "SQLite queue coalesces input, orders priorities, excludes busy workspaces and caps six tasks",
   panel: "Scrat-authored PR gets two independent Pi sessions and one consolidated comment",
   reviewer_failure: "a failed reviewer prevents consolidation and publication",
+  footer: "quoted control markers stay report text and cannot supply a PR grade or issue approval",
   incomplete: "partial or undecided implementations never become PRs",
   verification: "verification receipts bind to the published commit and failing checks block publication",
   validation_mutation: "checks that change source cannot certify the resulting commit",

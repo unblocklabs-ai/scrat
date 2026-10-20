@@ -13,7 +13,7 @@ type WorkspaceConfig = {
   prepare?: string[][];
   database?: { image: string; environment: string[]; migrate: string[] } | null;
   validate?: string[][];
-  blockedCommands?: string[];
+  heavyCommands?: string[];
 };
 
 type Json = Record<string, unknown>;

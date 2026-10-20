@@ -30,7 +30,7 @@
       ["env", "TEST_DATABASE_URL=", "pnpm", "verify"],
       ["pnpm", "test:db:ci"]
     ],
-    "blockedCommands": [
+    "heavyCommands": [
       "^pnpm( -\\S+)*( run)? (verify|lint|knip|type-check|build|test:coverage|test:e2e\\S*)( |$)",
       "^(pnpm (exec )?|npx )?tsc( |$)",
       "^(pnpm (exec )?|npx )?knip( |$)",
@@ -117,7 +117,8 @@
       "provider": "codex-lb",
       "model": "gpt-6.1-sol",
       "thinkingLevel": "high",
-      "maxSelfRepairs": 2
+      "maxSelfRepairs": 2,
+      "exhaustedLabel": "Scrat repair exhausted"
     }
   }
 }

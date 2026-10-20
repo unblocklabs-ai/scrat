@@ -12,8 +12,8 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 // Fails before any worker claims, so a bad static setting stops startup instead of failing tasks one by one.
 // @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: {
-  harness?: { maxConcurrentValidations?: number }; workspace?: { blockedCommands?: string[] };
-  actions: Record<string, Entry & { skill: string; reviewers?: Entry[]; maxSelfRepairs?: number }>;
+  harness?: { maxConcurrentValidations?: number }; workspace?: { heavyCommands?: string[] };
+  actions: Record<string, Entry & { skill: string; reviewers?: Entry[]; maxSelfRepairs?: number; exhaustedLabel?: string | null }>;
 } = config) {
   const modelRuntime = await sharedModelRuntime();
   const problems: string[] = [];
@@ -23,8 +23,8 @@ export async function validateStaticConfig(settings: {
   };
   const slots = settings.harness?.maxConcurrentValidations;
   if (slots !== undefined && !(Number.isSafeInteger(slots) && slots > 0)) problems.push("harness.maxConcurrentValidations must be a positive integer");
-  settings.workspace?.blockedCommands?.forEach((pattern, index) => {
-    try { new RegExp(pattern); } catch { problems.push(`workspace.blockedCommands[${index}] is not a valid regular expression`); }
+  settings.workspace?.heavyCommands?.forEach((pattern, index) => {
+    try { new RegExp(pattern); } catch { problems.push(`workspace.heavyCommands[${index}] is not a valid regular expression`); }
   });
   for (const action of actionIds) {
     const entry = settings.actions[action];
@@ -32,6 +32,9 @@ export async function validateStaticConfig(settings: {
     checkEntry(action, entry);
     if (action === "address_review" && entry.maxSelfRepairs !== undefined && !(Number.isSafeInteger(entry.maxSelfRepairs) && entry.maxSelfRepairs >= 0)) {
       problems.push(`${action}: maxSelfRepairs must be a non-negative integer`);
+    }
+    if (action === "address_review" && entry.exhaustedLabel != null && typeof entry.exhaustedLabel !== "string") {
+      problems.push(`${action}: exhaustedLabel must be a string, or null or "" to disable it`);
     }
     entry.reviewers?.forEach((reviewer, index) => checkEntry(`${action} reviewer ${index + 1}`, reviewer));
     const skill = fileURLToPath(new URL(entry.skill, configUrl));

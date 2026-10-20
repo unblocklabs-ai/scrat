@@ -5,7 +5,7 @@ import { createAgentSession, createBashToolDefinition, createFindToolDefinition,
 import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
 import { Type } from "typebox";
-import { blockedCommand } from "./commands.ts";
+import { backgroundsWork, heavyCommand, withValidationSlot } from "./commands.ts";
 import { config, thinkingLevels } from "./config.ts";
 import { db } from "./db.ts";
 import { runs } from "./schema.ts";
@@ -19,6 +19,7 @@ import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 
 // A malformed footer is corrected inside the same session instead of failing the run.
 const maxFormatCorrections = 2;
+const heavyTimeoutSeconds = 45 * 60;
 
 function correctionMessage(error: string, requireGrade: boolean) {
   return `Your previous final answer was not accepted: ${error}.\n\nSend your complete final answer again, with the same content, correctly formatted. It must end with these footer lines, in this order:\nSCRAT_READY (optional, only when ready)\nSCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of S, A, B, C, D, F, with no plus or minus)\nSCRAT_STATUS: complete, incomplete, or needs_decision (required, and the very last line)`;
@@ -75,16 +76,25 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
   const bash = createBashToolDefinition(cwd, {
     spawnHook: (context) => ({ ...context, env: { ...childEnvironment(context.env), ...environment } }),
   });
-  const blocked = (config.workspace?.blockedCommands ?? []).map((pattern) => new RegExp(pattern));
+  const heavy = (config.workspace?.heavyCommands ?? []).map((pattern) => new RegExp(pattern));
   const guardedBash: typeof bash = {
     ...bash,
     async execute(...args) {
-      const hit = blockedCommand(args[1].command, blocked);
-      if (hit) {
-        log.warn({ event: "pi.command_blocked", command: hit });
-        throw new Error(`\`${hit}\` is a heavy check that Scrat runs itself after you finish and reports back if it fails. Run only targeted checks (for example a single test file), then end your turn when ready.`);
+      const hit = heavyCommand(args[1].command, heavy);
+      if (!hit) return bash.execute(...args);
+      const segment = redactSecrets(hit).slice(0, 200);
+      // A background job would outlive its slot, so heavy work must run in the foreground where Scrat can queue it.
+      if (backgroundsWork(args[1].command)) {
+        log.warn({ event: "pi.command_blocked", command: segment });
+        throw new Error(`This command line runs a background job (a lone &, nohup, setsid or disown) and includes the heavy check \`${segment}\`. Run heavy checks in the foreground, in a command without background jobs, so Scrat can queue them behind other heavy jobs.`);
       }
-      return bash.execute(...args);
+      // A slot is shared with every run's validation, so an agent's heavy command may hold it for at most heavyTimeoutSeconds.
+      args[1] = { ...args[1], timeout: Math.min(args[1].timeout ?? heavyTimeoutSeconds, heavyTimeoutSeconds) };
+      const queuedAt = performance.now();
+      return withValidationSlot(() => {
+        log.info({ event: "pi.heavy_command", command: segment, waitedMs: Math.round(performance.now() - queuedAt) });
+        return bash.execute(...args);
+      }, { runId: run.id }, args[2]);
     },
   };
   // File tools stay inside the workspace, including through absolute paths, ~,

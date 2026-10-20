@@ -4,7 +4,7 @@ import { config, getRepositoryPath } from "./config.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { acknowledgedTaskIds } from "./markers.ts";
 import { observe, remoteUrl } from "./observation.ts";
-import { labelName } from "./labels.ts";
+import { labelName, reconcileLabels } from "./labels.ts";
 import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts, isAncestor } from "./git.ts";
 import { rateLimitLow, rateLimitState, type GitHubRepository } from "./github.ts";
@@ -14,7 +14,7 @@ import { cancelQueuedTasks, enqueueTask } from "./tasks.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { reconcileObserved, serializePr } from "./pr-review-publication.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
-import { planIssueTasks, planPrMaintenance, planReview, planSelfRepair, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
+import { planIssueTasks, planPrMaintenance, planReview, planSelfRepair, lowGrades, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
 
 type Item = typeof items.$inferSelect;
 type Action = typeof tasks.$inferSelect.action;
@@ -107,16 +107,28 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
         const state = await resolvePrReview(reviews, observation, mainSha);
         added += applyDecisions(item.id, planReview({ kind: "pr", state, latest, attempt, revision, mainSha }));
         const { maxSelfRepairs = 2 } = config.actions.address_review;
+        const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
+        const repairTask = latestTask(item.id, "address_review");
         const repair = planSelfRepair({
           owned, state, feedbackTask: latestTask(item.id, "address_pr_feedback"),
-          reviewTask: latestTask(item.id, "review_pr"), repairTask: latestTask(item.id, "address_review"),
-          count: db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count, limit: maxSelfRepairs,
+          reviewTask: latestTask(item.id, "review_pr"), repairTask, count, limit: maxSelfRepairs,
         });
         if (repair.limited && state.kind === "current" && !limitLogged.has(state.assessment.originId)) {
           limitLogged.add(state.assessment.originId);
           log.info({ event: "self_repair.limit_reached", itemId: item.id, limit: maxSelfRepairs }, "Self-repair limit reached");
         }
         added += applyDecisions(item.id, repair.decisions);
+        // Marks a PR whose current review still grades low once its repairs are used up and none is in flight
+        // (including a last repair that changed nothing); a stale review keeps the label until it is re-reviewed.
+        const { exhaustedLabel } = config.actions.address_review as { exhaustedLabel?: string | null };
+        const latestRepair = latestTask(item.id, "address_review"); // after this pass's decisions, which may have just queued one
+        const repairActive = latestRepair?.status === "queued" || latestRepair?.status === "running";
+        if (exhaustedLabel && owned && state.kind === "current" && !repairActive) {
+          const exhausted = lowGrades.includes(state.assessment.result.grade) && count >= maxSelfRepairs;
+          try {
+            await reconcileLabels(github, item.payload.number, { current: observation.labels, desired: exhausted ? [exhaustedLabel] : [], managed: [exhaustedLabel] }, { itemId: item.id });
+          } catch (error) { log.warn({ event: "self_repair.label_pending", itemId: item.id, err: error }); }
+        }
       } else {
         if (reviewTrigger({ latest, attempt, revision, mainSha }).covered) return added;
         const completed = db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))

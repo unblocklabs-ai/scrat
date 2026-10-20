@@ -1166,19 +1166,30 @@ try {
     assert.equal(graded.result.grade, "C"); await route();
     assert.equal(repairs(201).length, 1); assert.equal(repairs(201)[0].status, "queued"); assert.equal(repairs(201)[0].input.assessmentRunId, graded.id);
     assert.equal(count(201), 1); await route(); assert.equal(repairs(201).length, 1); assert.equal(count(201), 1);
+    const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length, validationsBefore = validations();
     f.reset(201, "no-change"); const repair = await success();
+    assert.equal(validations(), validationsBefore, "A repair that changed nothing skips validation");
+    assert.equal(repair.verification, null); assert.equal(repair.publication.status, "published");
     assert.equal(repair.taskId, repairs(201)[0].id);
     const request = f.requests.findLast((r) => r.context.action === "address_review");
     assert.match(readFileSync(request.context.files.review, "utf8"), /Consolidated source-verified review/);
     assert.equal(f.comments.get(201).length, 2); assert.match(f.comments.get(201)[1].body, /Implemented the change/);
     await route(); assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 0, "A reply-only repair leaves the assessment current and cannot retrigger");
     assert.equal(repairs(201).length, 1); assert.equal(count(201), 1);
+    // Had that been the last allowed repair, the unchanged low grade is marked without waiting for another review.
+    db.$client.prepare("update items set self_repair_count = 2 where id = ?").run(prItem(201).id); await route();
+    assert.ok(f.prs.find((pr) => pr.number === 201).labels.some((label) => label.name === "Scrat repair exhausted"), "A last repair that changed nothing still marks the PR");
     await implement(2); await review(202, "normal"); await route(); assert.equal(repairs(202).length, 0, "Grade B does not trigger");
     await implement(3); f.prs.find((pr) => pr.number === 203).user.login = "human";
     await review(203, "grade-C"); await route(); assert.equal(repairs(203).length, 0, "Human-authored PRs never trigger");
     await implement(4); await review(204, "grade-C");
     db.$client.prepare("update items set self_repair_count = 2 where id = ?").run(prItem(204).id);
+    const labels204 = () => f.prs.find((pr) => pr.number === 204).labels.map((label) => label.name).filter((name) => name === "Scrat repair exhausted").length;
+    assert.equal(labels204(), 0, "Below the cap there is no exhausted label");
     await route(); assert.equal(repairs(204).length, 0, "The cap blocks further repairs");
+    assert.equal(labels204(), 1, "A low grade at the cap is labelled");
+    const labelEvents = () => all(s.events).filter((event) => event.type.startsWith("github.labels_") && JSON.stringify(event.data).includes("Scrat repair exhausted")).length;
+    const written = labelEvents(); await route(); assert.equal(labels204(), 1); assert.equal(labelEvents(), written, "A steady state writes no label");
     db.$client.prepare("update items set self_repair_count = 1 where id = ?").run(prItem(204).id);
     await route(); assert.equal(repairs(204).length, 1); assert.equal(count(204), 2);
     const queuedRepair = repairs(204)[0], before = count(204);
@@ -1187,7 +1198,11 @@ try {
     assert.throws(() => tasks.enqueueManualTasks("address_review", ["204"]), /queued automatically/);
     f.prs.find((pr) => pr.number === 204).title = "Retitled after the review"; await route();
     assert.equal(repairs(204)[0].status, "cancelled", "A repair for a stale assessment is cancelled");
+    assert.equal(labels204(), 1, "The label waits for the next review");
     await success(); await route(); assert.equal(repairs(204).length, 1, "A new low grade at the cap queues nothing");
+    assert.equal(labels204(), 1, "Still low at the cap");
+    f.prs.find((pr) => pr.number === 204).title = "Retitled again"; await route(); f.reset(204, "normal"); assert.equal((await success()).result.grade, "B"); await route();
+    assert.equal(labels204(), 0, "A better grade removes the label");
     await implement(5);
     f.comments.set(205, [{ id: 9100, body: "Please rename it", user: { login: "human" }, updated_at: "2026-10-19T01:00:00Z", html_url: "https://github.com/fixture/project/pull/205#comment" }]);
     assert.equal((await review(205, "grade-C")).result.grade, "C"); await route();
@@ -1436,30 +1451,47 @@ try {
       }
     } finally { fs.writeSync = write; }
   } else if (scenario === "bash_guard") {
-    const { blockedCommand } = await f.app("commands.ts");
-    const patterns = JSON.parse(readFileSync(new URL("../scrat.config.json", import.meta.url), "utf8")).workspace.blockedCommands.map((pattern) => new RegExp(pattern));
+    const { heavyCommand, backgroundsWork } = await f.app("commands.ts");
+    for (const command of ["pnpm verify &", "nohup pnpm lint", "a & b", "setsid pnpm verify", "pnpm lint; disown", "pnpm verify &   "]) assert.ok(backgroundsWork(command), command);
+    for (const command of ["a && b", "x 2>&1", "x &> f", "y 3>&1", "a |& b", "pnpm lint > nohup.out", "echo a \\& b", 'echo "a & b"', "cat setsid.txt"]) assert.ok(!backgroundsWork(command), command);
+    const patterns = JSON.parse(readFileSync(new URL("../scrat.config.json", import.meta.url), "utf8")).workspace.heavyCommands.map((pattern) => new RegExp(pattern));
     for (const command of ["pnpm lint && pnpm type-check", "nohup pnpm verify > l 2>&1 &", "env X=1 tsc -b", "cd x && pnpm verify", "npx eslint .", "pnpm test:e2e:smoke", "FOO=1 timeout 60 pnpm run build", "echo hi; pnpm exec playwright test", "x=$(pnpm knip)", "pnpm  lint", "pnpm -r lint", "pnpm -w run verify", "npx playwright show-report", "pnpm exec playwright codegen"]) {
-      assert.ok(blockedCommand(command, patterns), command);
+      assert.ok(heavyCommand(command, patterns), command);
     }
     for (const command of ["pnpm test", "pnpm check src/a.ts", "pnpm exec vitest run a.test.ts", "pnpm build:cli", "pnpm test:db:ci", 'git commit -m "pnpm lint"', "grep eslint f", "eslint src/a.ts", "pnpm test:cli", 'git commit -m "a; pnpm lint ok"', "git commit -m \"fix\n\npnpm verify was failing\"", 'grep -E "foo|tsc b" f', "sh -c 'pnpm verify'", "pnpm exec playwright --version"]) {
-      assert.equal(blockedCommand(command, patterns), undefined, command);
+      assert.equal(heavyCommand(command, patterns), undefined, command);
     }
-    assert.equal(blockedCommand("cd x && pnpm verify", patterns), "pnpm verify");
+    assert.equal(heavyCommand("cd x && pnpm verify", patterns), "pnpm verify");
     const { validateStaticConfig } = await f.app("startup.ts");
     await validateStaticConfig(f.config);
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
     await assert.rejects(validateStaticConfig(variant((c) => { c.harness.maxConcurrentValidations = 0; })), /maxConcurrentValidations must be a positive integer/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.blockedCommands = ["^(unclosed"]; })), /blockedCommands\[0\] is not a valid regular expression/);
-    f.addIssue(1, ["scrat"]); f.modes.set(1, "heavy"); f.enqueue(1, "implement");
+    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.heavyCommands = ["^(unclosed"]; })), /heavyCommands\[0\] is not a valid regular expression/);
+    for (const disabled of [null, ""]) await validateStaticConfig(variant((c) => { c.actions.address_review.exhaustedLabel = disabled; }));
+    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.address_review.exhaustedLabel = 5; })), /exhaustedLabel must be a string, or null or "" to disable it/);
     const { default: fs } = await import("node:fs"), lines = [], write = fs.writeSync;
     fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string") { lines.push(...data.split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } })); return data.length; } return write(fd, data, ...rest); };
-    let r; try { r = await run(); } finally { fs.writeSync = write; }
-    assert.ok(r.error);
+    const toolResults = () => JSON.stringify(f.requests.findLast((entry) => entry.request.messages.some((message) => message.role === "tool")).request.messages.filter((message) => message.role === "tool"));
+    const attempt = async (number, mode) => { f.addIssue(number, ["scrat"]); f.modes.set(number, mode); f.enqueue(number, "implement"); return run(); };
+    let nohup, background, foreground, nohupSeen, backgroundSeen;
+    try { nohup = await attempt(1, "heavy"); nohupSeen = toolResults(); background = await attempt(2, "heavy-bg"); backgroundSeen = toolResults(); foreground = await attempt(3, "heavy-fg"); } finally { fs.writeSync = write; }
+    const workspaceOf = (r) => f.row(s.workspaces, r.workspaceId).path;
+    // A backgrounded heavy command is refused (it would escape its slot) and never runs; the refusal reaches the model.
+    assert.ok(nohup.error);
     const failed = lines.find((line) => line.event === "pi.tool_failed");
-    assert.ok(failed && failed.tool === "bash" && /pnpm verify/.test(failed.command) && /Scrat runs/.test(failed.error), JSON.stringify(failed));
-    const tools = f.requests[1].request.messages.filter((message) => message.role === "tool");
-    assert.equal(tools.length, 1); assert.match(JSON.stringify(tools[0].content), /Scrat runs/);
-    assert.ok(!existsSync(resolve(f.row(s.workspaces, r.workspaceId).path, "log")), "the blocked command must not run");
+    assert.ok(failed && failed.tool === "bash" && /pnpm verify/.test(failed.command) && /foreground/.test(failed.error), JSON.stringify(failed));
+    for (const seen of [nohupSeen, backgroundSeen]) assert.match(seen, /runs a background job/);
+    assert.ok(!existsSync(resolve(workspaceOf(nohup), "log")), "the backgrounded command must not run");
+    assert.ok(background.error);
+    assert.ok(!existsSync(resolve(workspaceOf(background), ".scrat/heavy-bg")), "the backgrounded command must not run");
+    assert.equal(lines.filter((line) => line.event === "pi.command_blocked").length, 2);
+    assert.equal(lines.filter((line) => line.event === "pi.heavy_command" && /heavy-bg/.test(line.command)).length, 0);
+    // A foreground match runs inside a validation slot.
+    assert.equal(foreground.error, null, JSON.stringify(foreground.error));
+    assert.ok(existsSync(resolve(workspaceOf(foreground), ".scrat/heavy-fg")));
+    const queued = lines.filter((line) => line.event === "pi.heavy_command");
+    assert.equal(queued.length, 1); assert.match(queued[0].command, /^touch \.scrat\/heavy-fg$/); assert.equal(typeof queued[0].waitedMs, "number");
+    assert.ok(lines.some((line) => line.event === "validation.started" && line.runId === foreground.id), "the heavy command took a validation slot");
   } else if (scenario === "validation_slots") {
     const { config } = await f.app("config.ts");
     const intervals = (skip) => readFileSync("validations.log", "utf8").trim().split("\n").slice(skip).map(JSON.parse).sort((a, b) => a.s - b.s);
@@ -1480,6 +1512,15 @@ try {
     unlinkSync("slot-fail"); f.addIssue(6, ["scrat"]); f.enqueue(6, "implement");
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("validation slot was not released")), 30_000));
     assert.equal((await Promise.race([run(), timeout])).error, null);
+    // A caller that aborts while queued leaves the line: it never runs, and the slot passes to the next waiter.
+    const { withValidationSlot } = await f.app("commands.ts");
+    let release; const holder = withValidationSlot(() => new Promise((done) => { release = done; }));
+    const controller = new AbortController(), ran = [];
+    const aborted = withValidationSlot(async () => { ran.push("aborted"); }, {}, controller.signal);
+    const next = withValidationSlot(async () => { ran.push("next"); });
+    controller.abort(new Error("cancelled"));
+    await assert.rejects(aborted, /cancelled/); release(); await holder; await next;
+    assert.deepEqual(ran, ["next"]);
   } else if (scenario === "config_overrides") {
     // Module load reads the overrides, so each case runs in a fresh process against the app copy.
     const local = resolve("app/scrat.local.json");
@@ -1492,13 +1533,13 @@ try {
     const defaults = JSON.parse(readFileSync("app/scrat.config.json", "utf8"));
     const merged = JSON.parse(probe({
       harness: { maxConcurrency: 8 }, actions: { implement: { model: "other-model" } },
-      workspace: { environment: { EXTRA: "1" }, blockedCommands: ["^only$"], database: null },
+      workspace: { environment: { EXTRA: "1" }, heavyCommands: ["^only$"], database: null },
     }, "console.log(JSON.stringify(config));"));
     assert.equal(merged.harness.maxConcurrency, 8); assert.equal(merged.harness.logLevel, defaults.harness.logLevel);
     assert.equal(merged.actions.implement.model, "other-model");
     assert.deepEqual({ ...merged.actions.implement, model: defaults.actions.implement.model }, defaults.actions.implement);
     assert.deepEqual(merged.workspace.environment, { ...defaults.workspace.environment, EXTRA: "1" });
-    assert.deepEqual(merged.workspace.blockedCommands, ["^only$"]); assert.equal(merged.workspace.database, null);
+    assert.deepEqual(merged.workspace.heavyCommands, ["^only$"]); assert.equal(merged.workspace.database, null);
     assert.deepEqual(merged.workspace.validate, defaults.workspace.validate);
 
     probe(undefined, ""); assert.equal(readFileSync(local, "utf8"), "{}\n");

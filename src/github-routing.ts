@@ -52,7 +52,7 @@ export function planPrMaintenance({ conflicts, stale, mainSha, headSha, pendingC
   return decisions;
 }
 
-const lowGrades: readonly (string | undefined)[] = ["C", "D", "F"];
+export const lowGrades: readonly (string | undefined)[] = ["C", "D", "F"];
 
 // A low grade on a current assessment of a Scrat PR queues one repair per assessment, up to the item's cap.
 // Anything else cancels a queued repair, so it never runs against a stale assessment or ahead of human feedback.

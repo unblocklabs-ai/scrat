@@ -52,7 +52,7 @@ async function asCheckFailure<T>(fn: () => Promise<T>) {
 function validationMessage(error: CheckFailure, round: number) {
   const { message, exitCode, stdout, stderr } = describeError(error.cause);
   const tail = (label: string, text?: string) => text?.trim() ? `\n${label} (last 6000 characters):\n${text.trim().slice(-6000)}\n` : "";
-  return `Scrat's validation failed after your changes (round ${round} of ${maxValidationCorrections}).\n\nCommand: ${message.split("\n")[0].replace(/^Command failed: /, "")}\nExit code: ${exitCode ?? "unknown"}\n${tail("stdout", stdout)}${tail("stderr", stderr)}\nFix only what is reported. Do not run the full lint, verify or type-check yourself; Scrat runs them again when you finish. Then end your turn with your complete final handoff (it becomes the PR or comment text) and the usual SCRAT_STATUS footer.`;
+  return `Scrat's validation failed after your changes (round ${round} of ${maxValidationCorrections}).\n\nCommand: ${message.split("\n")[0].replace(/^Command failed: /, "")}\nExit code: ${exitCode ?? "unknown"}\n${tail("stdout", stdout)}${tail("stderr", stderr)}\nFix only what is reported. Scrat re-validates after your turn, so a full rerun of the failing check is not needed. Then end your turn with your complete final handoff (it becomes the PR or comment text) and the usual SCRAT_STATUS footer.`;
 }
 
 function assertComplete(result: AgentResult) {
@@ -261,7 +261,12 @@ export async function runNextTask() {
       }
       if (!result) throw new Error("No saved agent result to validate");
       assertComplete(result);
-      if (!readOnly && !validated) {
+      // A repair that changed nothing (same head, no merge, clean tree) has nothing to prepare or validate; its reply publishes as is.
+      const unchanged = !readOnly && !validated && !validationOnly && contract.mode === "change" && contract.acceptance === "complete"
+        && startHeadSha === preparedHead && !mergeInProgress && await git(workspace.path, ["rev-parse", "HEAD"]) === startHeadSha
+        && !await git(workspace.path, ["status", "--porcelain"]);
+      if (unchanged) db.update(runs).set({ publication: { status: "pending", commitSha: startHeadSha } }).where(eq(runs.id, run.id)).run();
+      else if (!readOnly && !validated) {
         for (let round = 1; ; round++) {
           try { await validate(workspace, contract.acceptance); break; }
           catch (error) {

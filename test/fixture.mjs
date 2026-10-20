@@ -127,6 +127,9 @@ export async function fixture(scenario) {
     if (!review && step === 0 && mode.startsWith("feedback-")) tool = { name: "bash", args: { command: `printf 'export const value = ${context.item.number + 10};\\n' > src/app.ts && touch fail-validation` } };
     if (!review && feedback && turnStart && mode === "feedback-fix") tool = { name: "bash", args: { command: "rm -f fail-validation" } };
     if (!review && step === 0 && mode === "heavy") tool = { name: "bash", args: { command: "nohup pnpm verify > log 2>&1 &" } };
+    // Marker files under .scrat/ (never committed) show whether a command that matches the test-only heavy pattern ran.
+    if (!review && step === 0 && mode === "heavy-bg") tool = { name: "bash", args: { command: "mkdir -p .scrat; touch .scrat/heavy-bg &" } };
+    if (!review && step === 0 && mode === "heavy-fg") tool = { name: "bash", args: { command: "mkdir -p .scrat; touch .scrat/heavy-fg && printf 'export const value = 11;\\n' > src/app.ts" } };
     if (review && mode === "outside") tool = [{ name: "read", args: { path: resolve("outside-secret.txt") } }, { name: "read", args: { path: "src/link.txt" } },
       { name: "grep", args: { pattern: "outside", path: resolve(".") } }, { name: "ls", args: { path: ".." } }][step];
     if (!review && mode === "probe") tool = [{ name: "bash", args: { command: `${process.execPath} ${resolve("probe.mjs")} bash` } },
@@ -151,8 +154,8 @@ export async function fixture(scenario) {
   });
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   const config = JSON.parse(readFileSync("app/scrat.config.json", "utf8"));
-  const blockedCommands = config.workspace.blockedCommands;
-  if (scenario !== "config_overrides") config.workspace = scenario === "bash_guard" ? { blockedCommands } : {};
+  const heavyCommands = config.workspace.heavyCommands;
+  if (scenario !== "config_overrides") config.workspace = scenario === "bash_guard" ? { heavyCommands: [...heavyCommands, "^touch \\.scrat/heavy-"] } : {};
   config.harness.maxConcurrency = 6; config.github.repository = "fixture/project"; config.github.repositoryPath = resolve("checkout");
   config.providers = { fixture: { api: "openai-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: "fixture", models: [
     { id: "gpt-6.1-sol", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
@@ -187,7 +190,7 @@ export async function fixture(scenario) {
     writeFileSync("check.mjs", scenario === "validation_mutation" ? 'import{writeFileSync}from"node:fs";writeFileSync("src/app.ts","unexpected verification change\\n");' : 'import{existsSync}from"node:fs";if(existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed");process.exit(7);}console.log("checked actual source");');
     config.workspace.validate = [[process.execPath, resolve("check.mjs")]];
   }
-  if (["validation_feedback", "validation_feedback_cap", "validation_slots"].includes(scenario)) {
+  if (["validation_feedback", "validation_feedback_cap", "validation_slots", "self_repair"].includes(scenario)) {
     // Logs each validation's interval; flags in the fixture root slow it down (slow), fail it (slot-fail), kill it with a signal (kill-validation) or exit as a wrapper does for one (exit-137).
     const flag = (name) => JSON.stringify(resolve(name));
     writeFileSync("validate.mjs", 'import{appendFileSync,existsSync}from"node:fs";const s=Date.now();await new Promise((r)=>setTimeout(r,existsSync(' + flag("slow") + ')?1000:0));'

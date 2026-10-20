@@ -30,7 +30,7 @@ Requires Node.js **22.19+**, Git, and the tools used by the target repository's 
 
 1. Run `npm ci`.
 2. Edit `scrat.config.json`: GitHub repository/App installation, model provider, action skills, concurrency, and workspace preparation/validation commands.
-3. Create an untracked `.env` containing `GITHUB_APP_PRIVATE_KEY` and `CODEX_LB_API_KEY`. Install the GitHub App on the target repository with the necessary contents, issues, and pull-request permissions.
+3. Create an untracked `.env` containing `CODEX_LB_API_KEY` and the GitHub credential for the chosen `github.auth` mode: `GITHUB_APP_PRIVATE_KEY` (default `"app"`; install the GitHub App on the target repository with the necessary contents, issues, and pull-request permissions) or `GITHUB_PAT` (`"pat"`; see GitHub authentication below).
 4. Initialize the local schema and start the service:
 
    ```sh
@@ -90,10 +90,50 @@ For project review, run `typecheck`, `knip`, and the integration/E2E tests after
 | `github.repository` | Target GitHub repository as `owner/repo`. |
 | `github.repositoryPath` | Local repository clone; relative paths resolve from the config directory. `SCRAT_REPOSITORY_PATH` overrides it. |
 | `github.baseBranch` | Default base branch for issues and implementations. Existing PRs use their own base branch. |
-| `github.botLogin` | Scrat's GitHub identity, used to recognize its PRs/comments and exclude its own feedback. |
-| `github.appId` | GitHub App ID used for authentication. |
-| `github.installationId` | App installation granting access to the target repository. |
+| `github.auth` | `"app"` (default, GitHub App) or `"pat"` (classic personal access token). Startup requires the matching variable, `GITHUB_APP_PRIVATE_KEY` or `GITHUB_PAT`; there is no automatic fallback between modes. |
+| `github.botLogin` | The agent's GitHub login, used to recognize its PRs/comments and exclude its own feedback (compared case-insensitively). `scrat-unblock[bot]` for the App; the plain account login for a PAT. |
+| `github.botName` | Display name the agent uses in prompts and generated text (default `Scrat`). Its lowercase slug (`Mocha Agent` becomes `mocha-agent`) is also the implementation-selection label and the prefix of new branches. |
+| `github.appId` | GitHub App ID used for authentication (ignored in PAT mode). |
+| `github.installationId` | App installation granting access to the target repository (ignored in PAT mode). |
 | `github.fetchIntervalSeconds` | Delay between service syncs, in seconds. The service also syncs on startup. |
+
+### GitHub authentication
+
+Two modes are supported; `github.auth` picks one.
+
+- **App (default).** A GitHub App installation token, minted per repository and per permission set. Nothing changes for existing deployments.
+- **PAT.** A classic personal access token from a dedicated account that has write access to the repository (an outside collaborator is enough). Put `GITHUB_PAT=ghp_...` in `.env`; `GITHUB_APP_PRIVATE_KEY`, `appId` and `installationId` are not used.
+
+Example `scrat.local.json` for a PAT deployment (every key already exists in the defaults, so the override loader accepts it):
+
+```json
+{
+  "github": { "repository": "acme/widgets", "auth": "pat", "botLogin": "mocha-agent", "botName": "Mocha" },
+  "actions": { "address_review": { "exhaustedLabel": "Mocha repair exhausted" } }
+}
+```
+
+For the App, set `github.botLogin` to the bot login (`name[bot]`) and leave `auth` at its default.
+
+PAT notes:
+
+- Scopes: classic `repo` for a private repository (`public_repo` suffices for a public one), plus `workflow` only if the agent may change workflow files. Nothing administrative.
+- A PAT is account-wide, unlike an App token that is scoped to the repository. Scrat enforces `github.repository` itself (sync, fetch, claims, and every GitHub client), but the token can do more than Scrat asks of it. Use a dedicated account: comments authored by `botLogin` are treated as the agent's own, so a human sharing the account would have their feedback ignored.
+- On first use Scrat calls `GET /user` and refuses to run when the token's login differs from `github.botLogin` (case-insensitively); this prevents the agent from answering its own comments.
+- Expiry and rotation: a classic PAT has the expiry you chose and stops working then. A 401 fails with `GitHub rejected GITHUB_PAT (401)`; replace the token in `.env` and restart the service.
+- Organizations that enforce SAML SSO need the token authorized for the organization, and organizations may restrict classic PATs by policy; either shows up as a 401 or 403.
+- `GITHUB_PAT` and the base64 `x-access-token:<PAT>` Git header are registered as secrets: they are redacted from logs and errors, refused in published content, and never inherited by workspace commands, hooks or the agent's Bash.
+
+Renaming the bot: the label (`github.botName` slug) and branch prefix apply to new work. Issues labelled with the old name stop being selected, existing branches and PRs keep their names, `actions.address_review.exhaustedLabel` is a separate setting, and a resumed Pi session keeps the old name in its history. Relabel open issues when renaming.
+
+Before relying on a new deployment, run it once against a disposable repository (the integration suite uses a fake GitHub and cannot prove these):
+
+1. `npm run fetch` succeeds and its first PAT call logs no 401/403.
+2. A labelled issue becomes a PR: the branch pushes over HTTPS with the Git header, the PR and its comment are authored by `botLogin`.
+3. A comment from another account on that PR queues `address_pr_feedback`; the agent's own comment does not queue anything.
+4. The selection label is added and removed on a reviewed issue.
+5. With an SSO organization, the token works only after SSO authorization.
+6. Expire or revoke the token and confirm the `GITHUB_PAT` 401 message.
 
 ### Workspace
 

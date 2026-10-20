@@ -1,6 +1,7 @@
 import { and, desc, eq, isNotNull, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
 import { config, getRepositoryPath, isBotLogin } from "./config.ts";
+import { botSlug } from "./identity.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { acknowledgedTaskIds, commentKey } from "./markers.ts";
 import { observe, remoteUrl } from "./observation.ts";
@@ -30,7 +31,7 @@ function strings(value: unknown): string[] {
 }
 
 function hasScratLabel(item: Item) {
-  return item.payload.labels?.some((label) => labelName(label) === "scrat");
+  return item.payload.labels?.some((label) => labelName(label) === botSlug);
 }
 
 function applyDecisions(itemId: string, decisions: RoutingDecision[]) {

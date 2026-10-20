@@ -1,6 +1,6 @@
 import type { Action } from "./actions.ts";
 import type { Freshness } from "./freshness.ts";
-import { botName } from "./identity.ts";
+import { botName, botSlug } from "./identity.ts";
 import type { PrReviewState } from "./pr-assessment.ts";
 import type { runs, tasks } from "./schema.ts";
 
@@ -28,7 +28,7 @@ export function planIssueTasks({ labelled, implemented, workspaceId, previouslyL
   const decisions: RoutingDecision[] = [{ type: "cancel", action: "review_issue", reason: "Issue selected for implementation" }];
   if (implemented) decisions.push({ type: "cancel", action: "implement", reason: "An open PR already implements this issue" });
   else if (!workspaceId && (!latest || latest.status === "queued" || latest.status === "cancelled" || previouslyLabelled === false)) {
-    decisions.push(...queue(latest, "implement", "Issue has the scrat label", {
+    decisions.push(...queue(latest, "implement", `Issue has the ${botSlug} label`, {
       triggerKey: JSON.stringify({ labelledAt: updatedAt, mainSha }), mainSha,
     }));
   }

@@ -72,6 +72,7 @@ const scenarios = {
   config_overrides: "scrat.local.json overrides merge over the defaults, are created when missing, reject unknown settings and reach Pi's providers",
   pat_auth: "a personal access token authenticates every GitHub call and git credential without the App, is redacted, and must belong to botLogin case-insensitively",
   bot_name: "a configured bot name replaces every prose mention of Scrat in model requests across all actions while protocol markers stay",
+  bot_identity_names: "the selection label, its routing reason and the new branch prefix follow the bot name while the default scrat label stops selecting",
   database: "real PostgreSQL runs isolate databases, apply new migrations and remove resources",
 };
 

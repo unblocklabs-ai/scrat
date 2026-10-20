@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { db } from "./db.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
 import { git, hasPendingMerge } from "./git.ts";
+import { botSlug } from "./identity.ts";
 import { withOperation } from "./logging.ts";
 import { runs, workspaces } from "./schema.ts";
 import { errorCode } from "./errors.ts";
@@ -66,7 +67,7 @@ export async function createWorkspace(
   references: EventReferences = {},
 ) {
   const workspaceId = randomUUID();
-  branch ??= `scrat/${workspaceId}`;
+  branch ??= `${botSlug}/${workspaceId}`;
   let path = resolve("data/workspaces", workspaceId);
   return withOperation("workspace.create", {
     ...references, workspaceId, repositoryPath, path, branch, baseRef,

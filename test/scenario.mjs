@@ -1046,6 +1046,7 @@ try {
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.implement.thinkingLevel = "turbo"; })), /implement: invalid thinking level turbo/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.github.auth = "token"; })), /github\.auth must be "app" or "pat"/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.github.botLogin = " "; })), /github\.botLogin must not be empty/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.github.botName = " !! "; })), /github\.botName must contain a letter or digit/);
     const key = process.env.GITHUB_APP_PRIVATE_KEY;
     delete process.env.GITHUB_APP_PRIVATE_KEY;
     await assert.rejects(validateStaticConfig(f.config), /github\.auth is "app" but GITHUB_APP_PRIVATE_KEY is not set/);
@@ -1558,6 +1559,19 @@ try {
     assert.ok(prompts.every((text) => !/Scrat(?!_)/.test(text)), "No model request may name Scrat");
     assert.ok(prompts.every((text) => text.includes("Mocha") && !text.includes("{{bot}}") && text.includes("SCRAT_STATUS")));
     assert.ok(prompts.some((text) => text.includes("Mocha's validation failed")));
+  } else if (scenario === "bot_identity_names") {
+    const queued = () => all(s.tasks).filter((t) => t.status === "queued");
+    f.addIssue(1, ["scrat"]); f.addIssue(2, ["mocha-agent"]); await route();
+    assert.deepEqual(queued().map((t) => [t.itemId, t.action]).sort(), [["issue-1", "review_issue"], ["issue-2", "implement"]]);
+    assert.equal(queued().find((t) => t.itemId === "issue-2").reason, "Issue has the mocha-agent label");
+    await success(); await success();
+    const labels = (n) => f.issues.get(n).labels.map((label) => label.name);
+    f.addIssue(3); f.modes.set(3, "ready"); f.enqueue(3, "review_issue"); await success();
+    assert.deepEqual(labels(3), ["mocha-agent"]);
+    f.reset(3, "normal"); f.enqueue(3, "review_issue"); await success();
+    assert.deepEqual(labels(3), []);
+    assert.equal(f.prs.length, 1); assert.match(f.prs[0].head.ref, /^mocha-agent\/[0-9a-f-]{36}$/);
+    assert.deepEqual(labels(1), ["scrat"]);
   } else if (scenario === "config_overrides") {
     const local = resolve("app/scrat.local.json");
     const probe = (overrides, code) => {

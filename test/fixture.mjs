@@ -210,6 +210,7 @@ export async function fixture(scenario) {
     config.workspace = { ...config.workspace, environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), scenario === "validation_resume" ? "validate-resume" : "validate", resolve("database-receipts.jsonl")]] };
   }
   if (scenario === "bot_name") config.github.botName = "Mocha";
+  if (scenario === "bot_identity_names") config.github.botName = "Mocha Agent";
   if (patMode) { config.github.auth = "pat"; config.github.botLogin = "agent-account"; }
   writeFileSync("app/scrat.config.json", JSON.stringify(config));
   writeFileSync("app/scrat.local.json", "{}\n");

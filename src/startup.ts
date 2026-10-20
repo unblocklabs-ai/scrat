@@ -4,6 +4,7 @@ import { eq, sql } from "drizzle-orm";
 import { actionIds } from "./actions.ts";
 import { config, configUrl, thinkingLevels } from "./config.ts";
 import { db } from "./db.ts";
+import { slugOf } from "./identity.ts";
 import { logger } from "./logging.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 import { runs } from "./schema.ts";
@@ -26,7 +27,9 @@ export async function validateStaticConfig(settings: {
   else if (auth === "pat" && !process.env.GITHUB_PAT) problems.push('github.auth is "pat" but GITHUB_PAT is not set');
   else if (auth !== "pat" && !process.env.GITHUB_APP_PRIVATE_KEY) problems.push('github.auth is "app" but GITHUB_APP_PRIVATE_KEY is not set');
   if (settings.github?.botLogin !== undefined && !settings.github.botLogin.trim()) problems.push("github.botLogin must not be empty");
-  if (settings.github?.botName !== undefined && !settings.github.botName.trim()) problems.push("github.botName must not be empty");
+  if (settings.github?.botName !== undefined && !/^[a-z0-9][a-z0-9-]*$/.test(slugOf(settings.github.botName))) {
+    problems.push("github.botName must contain a letter or digit; its lowercase form names the selection label and the branch prefix");
+  }
   const slots = settings.harness?.maxConcurrentValidations;
   if (slots !== undefined && !(Number.isSafeInteger(slots) && slots > 0)) problems.push("harness.maxConcurrentValidations must be a positive integer");
   settings.workspace?.heavyCommands?.forEach((pattern, index) => {

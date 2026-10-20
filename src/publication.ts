@@ -5,6 +5,7 @@ import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
 import { branchContainsCommit } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
+import { botSlug } from "./identity.ts";
 import type { GithubContext } from "./github-types.ts";
 import { reconcileLabels } from "./labels.ts";
 import { isIssueComment, taskMarker } from "./markers.ts";
@@ -71,7 +72,7 @@ export async function publishRun(github: GitHubRepository, task: typeof tasks.$i
   }
   if (contract.publication === "issue-assessment") {
     await reconcileLabels(github, context.item.number, {
-      current: observation.labels, desired: result.ready ? ["scrat"] : [], managed: ["scrat"],
+      current: observation.labels, desired: result.ready ? [botSlug] : [], managed: [botSlug],
     }, references);
     saveReceipt({ scratLabel: result.ready });
   }

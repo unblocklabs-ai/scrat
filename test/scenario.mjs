@@ -1287,8 +1287,7 @@ try {
     const fallback = await timed(waitForWork(workGeneration(), 100));
     assert.ok(fallback >= 90 && fallback < 1000, `Timeout should resolve the waiter, took ${fallback}ms`);
     const controller = new AbortController();
-    setTimeout(() => controller.abort(), 20);
-    const aborted = await timed(waitForWork(workGeneration(), 5_000, controller.signal));
+    const aborted = await timed(((waiting) => { controller.abort(); return waiting; })(waitForWork(workGeneration(), 5_000, controller.signal)));
     assert.ok(aborted < 1000, `Abort should release the waiter, took ${aborted}ms`);
     const notified = await timed(((since) => { const waiting = waitForWork(since, 5_000); signalWork(); return waiting; })(workGeneration()));
     assert.ok(notified < 1000, `Explicit signal should wake the waiter, took ${notified}ms`);
@@ -1499,8 +1498,8 @@ try {
     config.harness.maxConcurrentValidations = 1; writeFileSync("slot-fail", "");
     f.addIssue(5, ["scrat"]); f.enqueue(5, "implement"); assert.equal((await run()).error.exitCode, 7);
     unlinkSync("slot-fail"); f.addIssue(6, ["scrat"]); f.enqueue(6, "implement");
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("validation slot was not released")), 30_000));
-    assert.equal((await Promise.race([run(), timeout])).error, null);
+    let expire; const timeout = new Promise((_, reject) => { expire = setTimeout(() => reject(new Error("validation slot was not released")), 30_000); });
+    try { assert.equal((await Promise.race([run(), timeout])).error, null); } finally { clearTimeout(expire); }
     const { withValidationSlot } = await f.app("commands.ts");
     let release; const holder = withValidationSlot(() => new Promise((done) => { release = done; }));
     const controller = new AbortController(), ran = [];

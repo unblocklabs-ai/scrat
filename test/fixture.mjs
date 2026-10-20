@@ -13,6 +13,12 @@ export async function fixture(scenario) {
   symlinkSync(resolve(repository, "node_modules"), resolve(root, "app/node_modules"));
   process.chdir(root);
   const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const pulled = new Map();
+  const headOf = (ref) => {
+    try { return readFileSync(resolve("remote.git/refs/heads", ref), "utf8").trim(); } catch {}
+    try { const packed = readFileSync(resolve("remote.git/packed-refs"), "utf8").split("\n").find((line) => line.endsWith(" refs/heads/" + ref)); if (packed) return packed.split(" ")[0]; } catch {}
+    return git(resolve("remote.git"), "rev-parse", ref);
+  };
   const commit = (cwd, message) => git(cwd, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", message);
   execFileSync("git", ["init", "--bare", "remote.git"], { stdio: "ignore" });
   execFileSync("git", ["init", "-b", "main", "seed"], { stdio: "ignore" });
@@ -191,7 +197,7 @@ export async function fixture(scenario) {
   }
   if (["validation_feedback", "validation_feedback_cap", "validation_slots", "self_repair", "bot_name"].includes(scenario)) {
     const flag = (name) => JSON.stringify(resolve(name));
-    writeFileSync("validate.mjs", 'import{appendFileSync,existsSync}from"node:fs";const s=Date.now();await new Promise((r)=>setTimeout(r,existsSync(' + flag("slow") + ')?1000:0));'
+    writeFileSync("validate.mjs", 'import{appendFileSync,existsSync}from"node:fs";const s=Date.now();await new Promise((r)=>setTimeout(r,existsSync(' + flag("slow") + ')?300:0));'
       + 'appendFileSync(' + flag("validations.log") + ',JSON.stringify({s,e:Date.now()})+"\\n");if(existsSync(' + flag("kill-validation") + '))process.kill(process.pid,"SIGKILL");if(existsSync(' + flag("exit-137") + '))process.exit(137);'
       + 'if(existsSync(' + flag("slot-fail") + ')||existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed: marker present");process.exit(7);}');
     config.workspace.validate = [[process.execPath, resolve("validate.mjs")]];
@@ -225,8 +231,9 @@ export async function fixture(scenario) {
     if (url.hostname !== "api.github.com") throw new Error("External network disabled");
     const path = url.pathname, method = options.method ?? "GET", body = options.body ? JSON.parse(options.body) : {};
     for (const pr of prs) {
-      pr.head.sha = git(resolve("remote.git"), "rev-parse", pr.head.ref);
-      git(resolve("remote.git"), "update-ref", `refs/pull/${pr.number}/head`, pr.head.sha);
+      const sha = headOf(pr.head.ref);
+      pr.head.sha = sha;
+      if (pulled.get(pr.number) !== sha) { pulled.set(pr.number, sha); git(resolve("remote.git"), "update-ref", `refs/pull/${pr.number}/head`, sha); }
     }
     const bearer = new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");
     const call = { method, path: path + url.search, token: bearer }; calls.push(call);

@@ -635,6 +635,7 @@ try {
     const system = ({ request }) => JSON.stringify(request.messages.filter((m) => m.role === "system" || m.role === "developer"));
     const change = f.requests.filter((entry) => entry.context.action === "implement");
     assert.ok(change.length && change.every((entry) => system(entry).includes(notes.replaceAll("\\", "\\\\"))), "Every change request carries the notes path");
+    assert.ok(change.every((entry) => system(entry).includes("do not say the changes are uncommitted")));
     assert.equal(readFileSync(notes, "utf8"), "Plan: change value\n");
     const commit = r.publication.publishedCommitSha;
     assert.deepEqual(git(resolve("remote.git"), "ls-tree", "-r", "--name-only", commit).split("\n").filter((path) => path.startsWith(".scrat")), []);
@@ -1005,6 +1006,7 @@ try {
       const head3 = remoteGit("rev-parse", f.prs[2].head.ref);
       assert.equal(parents(resolve("remote.git"), head3).length, 2);
       assert.equal(remoteGit("show", head3 + ":src/app.ts"), "export const value = 300;"); assert.equal(resolved.publication.publishedCommitSha, head3);
+      assert.equal(remoteGit("log", "-1", "--format=%s", head3), f.prs[2].title, "A PR's commit keeps its title's single conventional prefix");
       // Feedback on a behind, unpreparable Scrat PR merges the base first and ships it with its own push.
       await implement(4); drainExcept(204);
       needs("needed3.txt"); changeMain("needed3.txt", "ok\n");

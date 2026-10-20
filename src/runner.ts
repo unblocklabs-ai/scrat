@@ -76,7 +76,9 @@ async function validateAndCommit(options: {
   await git(workspace.path, ["add", "--all"]);
   if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
   await assertNoCommittedSecrets(workspace, options.secretBaseSha, validationTree);
-  const commitSha = await commitWorkspace(workspace, `fix: ${options.title}`, botAuthor(), references);
+  // PR titles already carry Scrat's conventional prefix; issue titles do not.
+  const message = /^[a-z]+(\([^)]*\))?!?: /.test(options.title) ? options.title : `fix: ${options.title}`;
+  const commitSha = await commitWorkspace(workspace, message, botAuthor(), references);
   if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
   db.update(runs).set({ headSha: commitSha, publication: { status: "pending", commitSha }, verification: { headSha: commitSha, commands } }).where(eq(runs.id, run.id)).run();
   if (acceptance.kind === "conflict-free" && await hasConflicts(acceptance.repositoryPath, acceptance.mainSha, commitSha)) {

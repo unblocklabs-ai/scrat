@@ -21,15 +21,15 @@ export async function readDiffScope(repositoryPath: string, mainSha: string, pre
   return { diffBaseSha, diffPaths };
 }
 
-export function evaluateContext(run: Run, task: Task, observation: ItemObservation, item: { number: number; title: string; body?: string | null; html_url: string }, headSha: string | undefined) {
+export function evaluateContext(run: Run, task: Task, observation: ItemObservation) {
   const requested = run.input.commentRevisions;
   const ids = new Set(Array.isArray(requested)
     ? requested.filter((entry: unknown): entry is string => typeof entry === "string").map((entry) => entry.split("@")[0]) : []);
   const comments = actionContracts[task.action].context === "feedback" && ids.size
     ? observation.external.filter((comment) => ids.has(comment.id)) : observation.external;
   return {
-    revision: observation.revision, baseBranch: observation.baseBranch, headSha,
-    item: { number: item.number, title: item.title, body: item.body, url: item.html_url },
+    revision: observation.revision, baseBranch: observation.baseBranch, headSha: "head" in observation.item ? observation.item.head.sha : undefined,
+    item: { number: observation.item.number, title: observation.item.title, body: observation.item.body, url: observation.item.html_url },
     comments,
     commentRevisions: comments.map((comment) => `${comment.id}@${comment.revision}`),
   };
@@ -45,7 +45,6 @@ export async function buildAgentInput(options: {
 }) {
   const { run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha } = options;
   const input = { ...run.input };
-  delete input.comments;
   delete input.manual;
   const changedPaths = Array.isArray(input.changedPaths) ? input.changedPaths.filter((path: unknown) => typeof path === "string") : [];
   if (changedPaths.length > inlineDiffPaths) { delete input.changedPaths; input.changedPathCount = changedPaths.length; }

@@ -311,7 +311,7 @@ export async function fixture(scenario) {
   };
   const enqueue = (number, action = "review_issue", input = {}) => tasks.enqueueTask({ itemId: "issue-" + number, action, reason: "Integration", input });
   const row = (table, id) => db.select().from(table).all().find((entry) => entry.id === id);
-  return { root, app, db, schema, tasks, runNextTask, git, commit, config, modes, requests, calls, rate, issues, prs, comments, reviews, writes, faults, addIssue, enqueue, row,
+  return { app, db, schema, tasks, runNextTask, git, commit, config, modes, requests, calls, rate, issues, prs, comments, reviews, writes, faults, addIssue, enqueue, row,
     set onModel(value) { onModel = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },
     async close() { globalThis.fetch = originalFetch; db.$client.close(); server.closeAllConnections(); await new Promise((done) => server.close(done)); },

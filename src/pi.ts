@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
 import { Type } from "typebox";
 import { backgroundsWork, heavyCommand, withValidationSlot } from "./commands.ts";
-import { config, thinkingLevels } from "./config.ts";
+import { config, type ThinkingLevel } from "./config.ts";
 import { db } from "./db.ts";
 import { runs } from "./schema.ts";
 import { parseResult, ResultFormatError, type Reviewer } from "./results.ts";
@@ -55,8 +55,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     dropModelRuntime();
     throw new Error(modelRuntime.getError() ?? `Configure a Pi model for ${run.provider}/${run.model}`);
   }
-  const thinkingLevel = thinkingLevels.find((level) => level === run.thinkingLevel);
-  if (!thinkingLevel) throw new Error(`Unknown thinking level: ${run.thinkingLevel}`);
+  const thinkingLevel = run.thinkingLevel as ThinkingLevel; // validated when the run was claimed
   const settingsManager = SettingsManager.inMemory();
   const resourceLoader = new DefaultResourceLoader({
     cwd, agentDir: getAgentDir(), settingsManager, noExtensions: true, noSkills: true,

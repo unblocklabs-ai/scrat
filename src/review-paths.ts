@@ -21,9 +21,7 @@ export function canonicalReviewPaths(scope: string[], tracked: string[]) {
   }))];
 }
 
-export type ReviewScope = { kind: "unknown" } | { kind: "observed"; paths: string[] };
-
-export function reviewScope(paths: string[], tracked: string[]): ReviewScope {
+export function reviewScope(paths: string[], tracked: string[]) {
   const canonical = canonicalReviewPaths(paths, tracked);
-  return !canonical.length || canonical.includes(".") ? { kind: "unknown" } : { kind: "observed", paths: canonical };
+  return !canonical.length || canonical.includes(".") ? undefined : canonical;
 }

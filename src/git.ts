@@ -28,9 +28,9 @@ export async function blobSize(repositoryPath: string, object: string) {
 
 // Streams git output, keeping only bytes [offset, offset + limit] so memory stays bounded however large the
 // output is. The child is stopped as soon as one lookahead byte proves more exists; that kill is not an error.
-export function gitPage(repositoryPath: string, args: string[], offset: number, limit: number, env = childEnvironment()) {
+export function gitPage(repositoryPath: string, args: string[], offset: number, limit: number) {
   return new Promise<GitPage>((done, fail) => {
-    const child = spawn("git", ["-C", repositoryPath, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("git", ["-C", repositoryPath, ...args], { env: childEnvironment(), stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
     let position = 0, kept = 0, stderr = "", stopped = false;
     child.stderr.on("data", (data: Buffer) => { if (stderr.length < 8192) stderr += data.toString(); });

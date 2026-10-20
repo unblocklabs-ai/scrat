@@ -65,8 +65,8 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
   const contexts = await github.fetchItemContexts(reviewable.map((item) => ({ kind: "issue", number: item.payload.number, item: item.payload })), { defer: true });
   const issueContexts = new Map(reviewable.map((item, index) => [item.id, contexts[index]]));
   // Routes one open item from an observation; for a PR the caller holds its review lock.
-  const routeObserved = async (item: Item, context: GithubContext, defaultSha: string) => {
-    let mainSha = defaultSha, added = 0;
+  const routeObserved = async (item: Item, context: GithubContext) => {
+    let mainSha = defaultBaseSha, added = 0;
     if (context.item.state !== "open") return added;
     const observation = observe(repository, context);
     if (observation.kind === "pr" && observation.baseBranch !== config.github.baseBranch) {
@@ -106,7 +106,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       if (reviews) {
         const state = await resolvePrReview(reviews, observation, mainSha);
         added += applyDecisions(item.id, planReview({ kind: "pr", state, latest, attempt, revision, mainSha }));
-        const { maxSelfRepairs = 2 } = config.actions.address_review;
+        const { maxSelfRepairs } = config.actions.address_review;
         const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
         const repairTask = latestTask(item.id, "address_review");
         const repair = planSelfRepair({
@@ -120,7 +120,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
         added += applyDecisions(item.id, repair.decisions);
         // Marks a PR whose current review still grades low once its repairs are used up and none is in flight
         // (including a last repair that changed nothing); a stale review keeps the label until it is re-reviewed.
-        const { exhaustedLabel } = config.actions.address_review as { exhaustedLabel?: string | null };
+        const { exhaustedLabel } = config.actions.address_review;
         const latestRepair = latestTask(item.id, "address_review"); // after this pass's decisions, which may have just queued one
         const repairActive = latestRepair?.status === "queued" || latestRepair?.status === "running";
         if (exhaustedLabel && owned && state.kind === "current" && !repairActive) {
@@ -146,7 +146,6 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
     return added;
   };
   for (const item of ordered) {
-    let mainSha = defaultBaseSha;
     if (item.state === "closed") {
       cancelQueuedTasks(item.id, "GitHub item closed");
       if (item.kind === "pr" && item.workspaceId) {
@@ -170,21 +169,21 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       const plan = planIssueTasks({
         labelled: Boolean(hasScratLabel(item)), implemented: implemented.has(item.payload.number), workspaceId: item.workspaceId,
         previouslyLabelled: previousItem ? Boolean(hasScratLabel(previousItem)) : undefined,
-        latest: latestTask(item.id, "implement"), updatedAt: item.payload.updated_at, mainSha,
+        latest: latestTask(item.id, "implement"), updatedAt: item.payload.updated_at, mainSha: defaultBaseSha,
       });
       queued += applyDecisions(item.id, plan.decisions);
       if (!plan.review) continue;
     }
     if (item.kind === "issue") {
       const context = issueContexts.get(item.id);
-      if (context) queued += await routeObserved(item, context, mainSha);
+      if (context) queued += await routeObserved(item, context);
       else deferred++;
     } else {
       // One observation per sync, taken inside the PR's lock: reconciliation reuses it, so a comment
       // published by a worker meanwhile cannot be missed. Workers wait on the lock, never the reverse.
       queued += await serializePr(github, item.payload.number, async () => {
         if (rateLimitLow()) { deferred++; return 0; }
-        return routeObserved(item, await github.fetchItemContext("pr", item.payload.number), mainSha);
+        return routeObserved(item, await github.fetchItemContext("pr", item.payload.number));
       });
     }
   }

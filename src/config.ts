@@ -7,6 +7,7 @@ import type { Action } from "./actions.ts";
 export const configUrl = new URL("../scrat.config.json", import.meta.url);
 const localConfigUrl = new URL("../scrat.local.json", import.meta.url);
 export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ThinkingLevel = (typeof thinkingLevels)[number];
 
 type WorkspaceConfig = {
   environment?: Record<string, string>;
@@ -49,16 +50,10 @@ export function getRepositoryPath() {
 
 export function getActionConfig(action: Action) {
   const actionConfig = config.actions[action];
-  const thinkingLevel = thinkingLevels.find((level) => level === actionConfig.thinkingLevel);
-  if (!thinkingLevel) throw new Error(`Invalid thinking level for ${action}: ${actionConfig.thinkingLevel}`);
   return {
     ...actionConfig,
-    thinkingLevel,
+    thinkingLevel: actionConfig.thinkingLevel as ThinkingLevel, // checked at startup by validateStaticConfig
     skill: fileURLToPath(new URL(actionConfig.skill, configUrl)),
-    reviewers: "reviewers" in actionConfig ? actionConfig.reviewers.map((reviewer) => {
-      const thinkingLevel = thinkingLevels.find((level) => level === reviewer.thinkingLevel);
-      if (!thinkingLevel) throw new Error(`Invalid reviewer thinking level: ${reviewer.thinkingLevel}`);
-      return { ...reviewer, thinkingLevel };
-    }) : [],
+    reviewers: "reviewers" in actionConfig ? actionConfig.reviewers.map((reviewer) => ({ ...reviewer, thinkingLevel: reviewer.thinkingLevel as ThinkingLevel })) : [],
   };
 }

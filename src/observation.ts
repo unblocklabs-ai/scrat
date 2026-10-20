@@ -17,8 +17,8 @@ export function assertConfiguredRepository(repository: string) {
 const baseBranchOf = (item: GithubItem) => "base" in item ? item.base.ref : config.github.baseBranch;
 
 export type ItemObservation = {
-  repository: string; remote: string; kind: "issue" | "pr"; number: number; item: GithubItem;
-  baseBranch: string; headSha?: string; revision: string;
+  remote: string; kind: "issue" | "pr"; item: GithubItem;
+  baseBranch: string; revision: string;
   external: GithubComment[]; own: GithubComment[]; labels: string[];
 };
 
@@ -28,8 +28,8 @@ export function observe(repository: string, context: GithubContext, headSha?: st
   const item = pullRequest && headSha ? { ...pullRequest, head: { ...pullRequest.head, sha: headSha } } : context.item;
   const { comments: external, revision } = evaluateGithubContext({ ...context, item }, config.github.botLogin);
   return {
-    repository, remote: remoteUrl(repository), kind: pullRequest ? "pr" : "issue", number: item.number, item,
-    baseBranch: baseBranchOf(item), headSha: "head" in item ? item.head.sha : undefined, revision, external,
+    remote: remoteUrl(repository), kind: pullRequest ? "pr" : "issue", item,
+    baseBranch: baseBranchOf(item), revision, external,
     own: context.comments.filter((comment) => comment.author === config.github.botLogin),
     labels: item.labels.map(labelName),
   };

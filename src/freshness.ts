@@ -4,7 +4,7 @@ import { reviewChanges } from "./relevance.ts";
 import type { runs } from "./schema.ts";
 
 // What a saved evaluation depends on.
-export type SavedEvaluation = { revision?: string; baseBranch?: string; mainSha?: string | null; paths: string[] };
+type SavedEvaluation = { revision?: string; baseBranch?: string; mainSha?: string | null; paths: string[] };
 export type Freshness =
   | { kind: "current"; baseMoved: boolean }
   | { kind: "stale"; reason: "context" | "base"; changedPaths: string[] };

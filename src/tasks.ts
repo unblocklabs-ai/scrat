@@ -23,7 +23,7 @@ function latestRun(taskId: string, database: Pick<typeof db, "select">) {
 const isKnownAction = (action: string): action is Action => (actionIds as readonly string[]).includes(action);
 
 function checkClaimable({ task, item }: { task: typeof tasks.$inferSelect; item: typeof items.$inferSelect }, database: Pick<typeof db, "select">) {
-  if (!isKnownAction(task.action) || !(task.action in config.actions)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
+  if (!isKnownAction(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   const actionConfig = config.actions[task.action];
   const invalid = [actionConfig, ...("reviewers" in actionConfig ? actionConfig.reviewers : [])]
     .find(({ thinkingLevel }) => !(thinkingLevels as readonly string[]).includes(thinkingLevel));
@@ -86,7 +86,7 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
 
 const issueActions: ReadonlySet<string> = new Set(["review_issue", "implement"]);
 
-export type ManualEnqueueResult = { target: string; number?: number; itemId?: string; taskId?: string; error?: string };
+type ManualEnqueueResult = { target: string; number?: number; itemId?: string; taskId?: string; error?: string };
 
 // Targets are PR/issue numbers in the configured repository or internal item ids. Tasks are marked
 // `input.manual` so sync routing never cancels them; only item closure does.

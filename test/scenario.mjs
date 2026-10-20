@@ -32,7 +32,7 @@ try {
     const { createWorkspace } = await f.app("workspaces.ts");
     const { fetchRepository } = await f.app("git.ts");
     await fetchRepository(f.config.github.repositoryPath, "https://github.com/fixture/project.git", "main");
-    const w = await createWorkspace({ repositoryPath: f.config.github.repositoryPath });
+    const w = await createWorkspace({ repositoryPath: f.config.github.repositoryPath, baseRef: "origin/main" });
     const { eq } = await import("drizzle-orm");
     db.update(s.items).set({ workspaceId: w.id }).where(eq(s.items.id, "issue-8")).run();
     db.update(s.items).set({ workspaceId: w.id }).where(eq(s.items.id, "issue-9")).run();

@@ -36,11 +36,10 @@ async function prepareWorkspace(workspace: Workspace, environment: Environment, 
   if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, environment, references);
 }
 
-// A command that exits nonzero is the agent's to fix. One killed by a signal (an OOM kill, a timeout) is infrastructure: validation-only retry is its remedy.
+// A command that exits nonzero is the agent's to fix. One killed by a signal, or a wrapper's 128+n exit for one (an OOM kill, a timeout), is infrastructure: validation-only retry is its remedy.
 async function asCheckFailure<T>(fn: () => Promise<T>) {
   try { return await fn(); }
   catch (error) {
-    // Only an ordinary failing exit is the agent's to fix. A signal, or a wrapper's 128+n exit for one (an OOM kill), is infrastructure.
     if (error instanceof Error && "code" in error && typeof error.code === "number" && error.code <= 128
       && !("signal" in error && error.signal) && !("killed" in error && error.killed)) {
       throw new CheckFailure(error.message, { cause: error });
@@ -129,7 +128,7 @@ export async function runNextTask() {
       if (workspace?.removedAt) throw new Error(`Workspace was removed: ${workspace.id}`);
       if (workspace) await validateWorkspace(workspace);
       if (validationOnly) {
-        if (readOnly || !hasValidationCheckpoint(run)) throw new Error("No complete agent checkpoint to resume; use normal retry to repair");
+        if (!hasValidationCheckpoint(run)) throw new Error("No complete agent checkpoint to resume; use normal retry to repair");
         if (!workspace || workspace.id !== run.workspaceId) throw new Error("Validation checkpoint workspace is no longer attached to this item");
         if ((await freshness(savedEvaluation(run), { ...observation, mainSha }, "exact")).kind === "stale") {
           throw new Error("Validation checkpoint context or base changed; use normal retry to repair against current requirements");
@@ -194,7 +193,7 @@ export async function runNextTask() {
         const scope = await readDiffScope(repositoryPath, mainSha, preparedHead, Boolean(pullRequest));
         const { diffPaths } = scope;
         let { diffBaseSha } = scope;
-        const evaluated = evaluateContext(run, task, observation, context.item, pullRequest?.head.sha);
+        const evaluated = evaluateContext(run, task, observation);
         db.update(runs).set({ context: evaluated }).where(eq(runs.id, run.id)).run();
         // Conflict repair merges first (in code or by the agent), so its branch is prepared only afterwards.
         const preparationDeferred = mergeInProgress || Boolean(run.retryOfRunId) || task.action === "resolve_conflicts";

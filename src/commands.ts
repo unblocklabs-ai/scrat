@@ -25,7 +25,7 @@ const waiters: (() => void)[] = [];
 
 export async function withValidationSlot<T>(fn: () => Promise<T>, references: EventReferences = {}, signal?: AbortSignal) {
   const queuedAt = performance.now();
-  if (active >= (config.harness.maxConcurrentValidations ?? 3)) {
+  if (active >= config.harness.maxConcurrentValidations) {
     logger.info({ ...references, event: "validation.waiting", position: waiters.length + 1 });
     // A caller that gives up while queued leaves the line rather than later taking a slot it no longer wants.
     await new Promise<void>((resolve, reject) => {

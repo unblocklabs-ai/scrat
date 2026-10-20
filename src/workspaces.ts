@@ -61,7 +61,7 @@ export async function assertNoCommittedSecrets(workspace: typeof workspaces.$inf
 }
 
 export async function createWorkspace(
-  { repositoryPath, baseRef = "origin/main", branch }: { repositoryPath: string; baseRef?: string; branch?: string },
+  { repositoryPath, baseRef, branch }: { repositoryPath: string; baseRef: string; branch?: string },
   references: EventReferences = {},
 ) {
   const workspaceId = randomUUID();

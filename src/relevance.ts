@@ -115,8 +115,8 @@ async function computeReview(repository: string, before: string, after: string, 
   if (!scope.length || scope.includes(".")) return { paths, relevant: paths.length > 0 };
   const tracked = await Promise.all([before, after].map((sha) => listTree(repository, sha)));
   const observed = reviewScope(scope, tracked.flatMap((files) => files.split("\0").filter(Boolean)));
-  if (observed.kind === "unknown") return { paths, relevant: paths.length > 0 };
-  scope = observed.paths;
+  if (!observed) return { paths, relevant: paths.length > 0 };
+  scope = observed;
   const metadata = new Set(["package.json", "pnpm-lock.yaml"]);
   if (affectsPaths(paths.filter((path) => !metadata.has(path)), scope)) return { paths, relevant: true };
   const dependencies = new Set(scope.flatMap((path) => [...path.matchAll(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)/g)]

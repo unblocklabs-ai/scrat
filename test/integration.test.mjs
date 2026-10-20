@@ -27,6 +27,7 @@ const scenarios = {
   absent_labels: "already absent labels reconcile without false removal events or hidden access failures",
   reviewer_failure: "a failed reviewer prevents consolidation and publication",
   footer: "quoted control markers stay report text and cannot supply a PR grade or issue approval",
+  format_retry: "malformed final footers are corrected inside the same Pi session up to a cap, while incomplete and undecided outcomes are not",
   incomplete: "partial or undecided implementations never become PRs",
   verification: "verification receipts bind to the published commit and failing checks block publication",
   validation_mutation: "checks that change source cannot certify the resulting commit",

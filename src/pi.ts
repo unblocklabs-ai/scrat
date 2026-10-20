@@ -8,12 +8,19 @@ import { Type } from "typebox";
 import { thinkingLevels } from "./config.ts";
 import { db } from "./db.ts";
 import { runs } from "./schema.ts";
-import { parseResult, type Reviewer } from "./results.ts";
+import { parseResult, ResultFormatError, type Reviewer } from "./results.ts";
 import { blobSize, git, gitPage } from "./git.ts";
 import { createReviewGitTool, defaultBytes, maxBytes, pageText } from "./review-git.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
 import { childEnvironment } from "./secrets.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
+
+// A malformed footer is corrected inside the same session instead of failing the run.
+const maxFormatCorrections = 2;
+
+function correctionMessage(error: string, requireGrade: boolean) {
+  return `Your previous final answer was not accepted: ${error}.\n\nSend your complete final answer again, with the same content, correctly formatted. It must end with these footer lines, in this order:\nSCRAT_READY (optional, only when ready)\nSCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of S, A, B, C, D, F, with no plus or minus)\nSCRAT_STATUS: complete, incomplete, or needs_decision (required, and the very last line)`;
+}
 
 export function saveReviewer(runId: string, index: number, patch: Partial<Reviewer>) {
   db.transaction((transaction) => {
@@ -23,7 +30,7 @@ export function saveReviewer(runId: string, index: number, patch: Partial<Review
   });
 }
 
-export async function executePi({ run, cwd, context, readOnly, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {} }: {
+export async function executePi({ run, cwd, context, readOnly, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {}, requireGrade = false }: {
   run: typeof runs.$inferSelect;
   cwd: string;
   context: string;
@@ -35,6 +42,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
   baseSha?: string;
   contextDir?: string;
   revisions?: Record<string, string>;
+  requireGrade?: boolean;
 }) {
   const modelRuntime = await sharedModelRuntime();
   const model = modelRuntime.getModel(run.provider, run.model);
@@ -149,19 +157,28 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     });
     const skill = await readFile(run.skill, "utf8");
     await session.prompt(`${skill}\n\n${context}`, { expandPromptTemplates: false });
-    const last = session.messages.findLast((message) => message.role === "assistant");
-    if (!last || last.role !== "assistant" || last.stopReason !== "stop") {
-      throw new Error(last?.role === "assistant" ? last.errorMessage || `Pi stopped: ${last.stopReason}` : "Pi returned no assistant response");
+    for (let corrections = 0; ; corrections++) {
+      const last = session.messages.findLast((message) => message.role === "assistant");
+      if (!last || last.role !== "assistant" || last.stopReason !== "stop") {
+        throw new Error(last?.role === "assistant" ? last.errorMessage || `Pi stopped: ${last.stopReason}` : "Pi returned no assistant response");
+      }
+      try {
+        const output = session.getLastAssistantText()?.trim();
+        if (!output) throw new ResultFormatError("Pi returned an empty response");
+        const result = parseResult(output, [], { requireGrade });
+        const tracked = (await git(cwd, ["ls-files", "-z"])).split("\0").filter(Boolean);
+        const baseTracked = baseSha && (basePaths.size || gitPaths.size)
+          ? (await git(cwd, ["ls-tree", "-r", "--name-only", "-z", baseSha])).split("\0").filter(Boolean) : [];
+        return { ...result, paths: [...new Set([
+          ...canonicalReviewPaths([...paths], tracked), ...canonicalReviewPaths([...basePaths], baseTracked),
+          ...canonicalReviewPaths([...gitPaths], tracked), ...canonicalReviewPaths([...gitPaths], baseTracked),
+        ])] };
+      } catch (error) {
+        if (!(error instanceof ResultFormatError) || corrections >= maxFormatCorrections) throw error;
+        log.warn({ event: "pi.format_retry", attempt: corrections + 1, error: error.message });
+        await session.prompt(correctionMessage(error.message, requireGrade), { expandPromptTemplates: false });
+      }
     }
-    const output = session.getLastAssistantText()?.trim();
-    if (!output) throw new Error("Pi returned an empty response");
-    const tracked = (await git(cwd, ["ls-files", "-z"])).split("\0").filter(Boolean);
-    const baseTracked = baseSha && (basePaths.size || gitPaths.size)
-      ? (await git(cwd, ["ls-tree", "-r", "--name-only", "-z", baseSha])).split("\0").filter(Boolean) : [];
-    return parseResult(output, [...new Set([
-      ...canonicalReviewPaths([...paths], tracked), ...canonicalReviewPaths([...basePaths], baseTracked),
-      ...canonicalReviewPaths([...gitPaths], tracked), ...canonicalReviewPaths([...gitPaths], baseTracked),
-    ])]);
   } finally {
     session.dispose();
   }

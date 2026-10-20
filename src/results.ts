@@ -37,22 +37,28 @@ export type Reviewer = {
   error?: ErrorDetails;
 };
 
-export function parseResult(output: string, paths: string[]): AgentResult {
+// A footer the model can fix by resending its answer, as opposed to a failed run.
+export class ResultFormatError extends Error {
+  readonly code = "SCRAT_FORMAT";
+}
+
+export function parseResult(output: string, paths: string[], { requireGrade = false }: { requireGrade?: boolean } = {}): AgentResult {
   const lines = output.trim().split("\n");
   const marker = lines.pop()?.trim();
   const outcome = marker?.startsWith("SCRAT_STATUS: ") ? marker.slice("SCRAT_STATUS: ".length) : undefined;
   if (outcome !== "complete" && outcome !== "incomplete" && outcome !== "needs_decision") {
-    throw new Error("Pi must end its response with SCRAT_STATUS: complete, incomplete, or needs_decision");
+    throw new ResultFormatError("Pi must end its response with SCRAT_STATUS: complete, incomplete, or needs_decision");
   }
   const gradeLine = lines.at(-1)?.trim();
   const grade = prGrades.find((value) => gradeLine === `SCRAT_GRADE: ${value}`);
   if (gradeLine?.startsWith("SCRAT_GRADE:")) {
-    if (!grade) throw new Error("Pi must return a valid SCRAT_GRADE: S, A, B, C, D, or F");
+    if (!grade) throw new ResultFormatError("Pi must return a valid SCRAT_GRADE: S, A, B, C, D, or F");
     lines.pop();
   }
   const ready = lines.at(-1)?.trim() === "SCRAT_READY";
   if (ready) lines.pop();
   const text = lines.join("\n").trim();
-  if (!text) throw new Error("Pi returned no report");
+  if (!text) throw new ResultFormatError("Pi returned no report");
+  if (requireGrade && outcome === "complete" && !grade) throw new ResultFormatError("A complete consolidated PR review must include SCRAT_GRADE");
   return { text, ready, paths, outcome, grade };
 }

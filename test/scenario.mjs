@@ -575,6 +575,40 @@ try {
     f.reset(202, "missing-grade"); tasks.retryTask(r.taskId);
     const invalid = await run(); assert.match(invalid.error.message, /grade/i);
     assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
+  } else if (scenario === "format_retry") {
+    // Implementation: a missing status line costs exactly one more request in the same session.
+    f.addIssue(1, ["scrat"]); f.modes.set(1, "format-once"); f.enqueue(1, "implement");
+    let before = f.requests.length; const implemented = await success();
+    assert.equal(f.requests.length - before, 3);
+    assert.equal(implemented.result.outcome, "complete");
+    // Panel: the first review is the baseline request count per model and consolidation.
+    const reviewCounts = () => {
+      const counts = {};
+      for (const r of f.requests.filter((r) => r.context.action === "review_pr")) { const k = `${r.request.model}/${r.consolidating}`; counts[k] = (counts[k] ?? 0) + 1; }
+      return counts;
+    };
+    await route(); const first = await success();
+    const normal = reviewCounts();
+    assert.equal(Object.keys(normal).length, 3);
+    for (const [mode, target] of [["reviewer-grade-once", "deepseek/deepseek-v4.1-flash/false"], ["consolidation-grade-once", "gpt-6.1-sol/true"]]) {
+      const start = reviewCounts(); f.reset(201, mode);
+      tasks.enqueueTask({ itemId: f.row(s.tasks, first.taskId).itemId, action: "review_pr", reason: "Review again", input: {} });
+      const reviewed = await success(); const end = reviewCounts();
+      for (const k of Object.keys(normal)) assert.equal(end[k] - (start[k] ?? 0), normal[k] + (k === target ? 1 : 0), `${mode} ${k}`);
+      assert.equal(reviewed.result.grade, "B");
+      assert.ok(reviewed.result.paths.includes("src/app.ts"));
+      assert.ok(reviewed.reviewers.every((r) => !r.error));
+    }
+    // Exhausted corrections fail after the cap: one tool request, one answer, two corrections.
+    f.addIssue(2); f.modes.set(2, "no-status"); f.enqueue(2, "implement");
+    before = f.requests.length; const stuck = await run();
+    assert.match(stuck.error.message, /SCRAT_STATUS/); assert.equal(f.requests.length - before, 4);
+    // Declared outcomes are valid answers and are never corrected.
+    for (const [i, mode] of ["incomplete", "needs_decision"].entries()) {
+      f.addIssue(i + 3); f.modes.set(i + 3, mode); f.enqueue(i + 3, "implement");
+      before = f.requests.length; const r = await run(); assert.ok(r.error);
+      assert.equal(f.requests.length - before, 2);
+    }
   } else if (scenario === "incomplete") {
     for (const [i, mode] of ["incomplete", "needs_decision", "no-status", "bare-status"].entries()) {
       f.addIssue(i + 1); f.enqueue(i + 1, "implement"); f.modes.set(i + 1, mode);

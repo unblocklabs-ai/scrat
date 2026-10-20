@@ -628,6 +628,20 @@ try {
     assert.match(failed.error.stdout, /validation detail \[redacted\]/);
     assert.match(failed.error.stderr, /Verification failed/);
     assert.ok(!JSON.stringify(failed.error).includes("ghs_fixture_sensitive"));
+  } else if (scenario === "working_notes") {
+    // Change sessions are told to keep notes in their workspace; the shared exclude keeps them out of the commit. Reviews cannot write, so get no such rule.
+    f.addIssue(1, ["scrat"]); f.modes.set(1, "notes"); f.enqueue(1, "implement"); const r = await success();
+    const notes = resolve(f.row(s.workspaces, r.workspaceId).path, ".scrat/notes.md");
+    const system = ({ request }) => JSON.stringify(request.messages.filter((m) => m.role === "system" || m.role === "developer"));
+    const change = f.requests.filter((entry) => entry.context.action === "implement");
+    assert.ok(change.length && change.every((entry) => system(entry).includes(notes.replaceAll("\\", "\\\\"))), "Every change request carries the notes path");
+    assert.equal(readFileSync(notes, "utf8"), "Plan: change value\n");
+    const commit = r.publication.publishedCommitSha;
+    assert.deepEqual(git(resolve("remote.git"), "ls-tree", "-r", "--name-only", commit).split("\n").filter((path) => path.startsWith(".scrat")), []);
+    assert.match(git(resolve("remote.git"), "show", `${commit}:src/app.ts`), /value = 5/);
+    await route(); await success();
+    const reviews = f.requests.filter((entry) => entry.context.action === "review_pr");
+    assert.ok(reviews.length && reviews.every((entry) => !system(entry).includes(".scrat/notes.md")));
   } else if (scenario === "implement_base_moved") {
     // The base carries a marker that fails validation, so the first attempt fails and its workspace is retained.
     changeMain("fail-validation", "fail\n"); const oldBase = git(resolve("remote.git"), "rev-parse", "main");

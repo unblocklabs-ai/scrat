@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { childEnvironment } from "./secrets.ts";
@@ -64,6 +64,15 @@ async function assertOrigin(repositoryPath: string, remote: string) {
   if (!expected || repositoryOfUrl(origin) !== expected) throw new Error(`Clone at ${repositoryPath} has origin ${origin || "(none)"}, not ${remote}`);
 }
 
+// Agents keep working notes under .scrat/ in their workspace (pi.ts). Every worktree shares this exclude, so the notes never reach a commit.
+async function excludeWorkingNotes(repositoryPath: string) {
+  const exclude = resolve(repositoryPath, await git(repositoryPath, ["rev-parse", "--git-common-dir"]), "info", "exclude");
+  const current = existsSync(exclude) ? await readFile(exclude, "utf8") : "";
+  if (current.split("\n").includes("/.scrat/")) return;
+  await mkdir(dirname(exclude), { recursive: true });
+  await appendFile(exclude, `${current && !current.endsWith("\n") ? "\n" : ""}/.scrat/\n`);
+}
+
 export async function fetchRepository(repositoryPath: string, remote: string, baseBranch: string, env = childEnvironment()) {
   repositoryPath = resolve(repositoryPath);
   const previous = repositoryFetches.get(repositoryPath);
@@ -74,6 +83,7 @@ export async function fetchRepository(repositoryPath: string, remote: string, ba
       await executeFile("git", ["clone", "--single-branch", "--branch", baseBranch, "--", remote, repositoryPath], { env });
     }
     await assertOrigin(repositoryPath, remote);
+    await excludeWorkingNotes(repositoryPath);
     await git(repositoryPath, ["fetch", "--", remote, `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`], env);
     return git(repositoryPath, ["rev-parse", `refs/remotes/origin/${baseBranch}`]);
   })();

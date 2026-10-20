@@ -179,7 +179,7 @@ export async function fixture(scenario) {
       + 'appendFileSync(' + JSON.stringify(resolve("isolation.jsonl")) + ',JSON.stringify({phase:process.argv[2],leaked,configured:process.env.SCRAT_WORKSPACE_VALUE})+"\\n");');
     config.workspace = { environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, prepare: [[process.execPath, resolve("probe.mjs"), "prepare"]], validate: [[process.execPath, resolve("probe.mjs"), "validate"]] };
   }
-  if (scenario === "verification" || scenario === "validation_mutation") {
+  if (["verification", "validation_mutation", "implement_base_moved"].includes(scenario)) {
     writeFileSync("check.mjs", scenario === "validation_mutation" ? 'import{writeFileSync}from"node:fs";writeFileSync("src/app.ts","unexpected verification change\\n");' : 'import{existsSync}from"node:fs";if(existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed");process.exit(7);}console.log("checked actual source");');
     config.workspace.validate = [[process.execPath, resolve("check.mjs")]];
   }

@@ -19,6 +19,7 @@ const scenarios = {
   stale_assessment: "a stale newest assessment clears its grade without resurrecting an older narrower review",
   assessment_order: "new inference on an old task outranks newer-created tasks regardless of timestamps",
   manual_queue: "manual tasks survive routing cancels and coalescing, run as normal authoritative reviews, die with their item, and enqueue by number",
+  implement_base_moved: "a retried implementation whose retained workspace began on an older base moves up to the current base first",
   run_sequence: "claims assign increasing run sequences and the backfill preserves journal order, is idempotent and survives schema push",
   run_latest: "latest-run decisions follow claim sequence, not startedAt, for issue baselines and Pi session continuation",
   scope_snapshots: "PR-only, renamed and deleted paths keep their identities across unrelated base changes",

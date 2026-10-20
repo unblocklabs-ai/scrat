@@ -16,7 +16,7 @@ import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { reviewPullRequest } from "./pr-review.ts";
 import { publishRun } from "./publication.ts";
 import { CheckFailure, hasValidationCheckpoint, type AgentResult } from "./results.ts";
-import { items, runs } from "./schema.ts";
+import { items, runs, workspaces } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { claimTask, finishRun } from "./tasks.ts";
 import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
@@ -146,7 +146,22 @@ export async function runNextTask() {
         else db.update(items).set({ workspaceId: workspace.id }).where(eq(items.id, item.id)).run();
       }
       const mergeInProgress = !readOnly && await hasPendingMerge(workspace.path);
-      if (!readOnly && pullRequest && !mergeInProgress && !validationOnly) await git(workspace.path, ["merge", "--ff-only", preparedHead]);
+      if (!readOnly && !mergeInProgress && !validationOnly) {
+        if (pullRequest) await git(workspace.path, ["merge", "--ff-only", preparedHead]);
+        else {
+          // A retained implementation that began on an older base moves up to the current one, keeping its uncommitted work,
+          // so its diff shows only its own changes. Work that overlaps the base's changes stays where it is.
+          try {
+            await git(workspace.path, ["merge", "--ff-only", preparedHead]);
+            // Without commits of its own the workspace now sits on the new base; cleanup compares HEAD to it.
+            if (await git(workspace.path, ["rev-parse", "HEAD"]) === preparedHead) {
+              db.update(workspaces).set({ baseSha: preparedHead }).where(eq(workspaces.id, workspace.id)).run();
+            }
+          } catch (error) {
+            operation.log.warn({ event: "workspace.base_update_skipped", workspaceId: workspace.id, err: error });
+          }
+        }
+      }
       // The head before any merge Scrat makes here: the base for scanning committed content for secrets.
       const startHeadSha = await git(workspace.path, ["rev-parse", "HEAD"]);
       let headSha = startHeadSha;

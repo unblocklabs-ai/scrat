@@ -8,7 +8,6 @@
   },
   "scripts": {
     "db:push": "drizzle-kit push",
-    "db:backfill": "node src/backfill.ts",
     "fetch": "node --env-file=.env src/fetch.ts",
     "enqueue": "node --env-file=.env src/enqueue.ts",
     "run-next": "node --env-file=.env src/run-next.ts",

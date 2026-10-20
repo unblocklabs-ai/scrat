@@ -52,6 +52,7 @@ export async function prepareService() {
 // Idempotent backfill for runs created before runs.sequence. Existing sequences are kept and unsequenced runs continue after the maximum:
 // first runs with no run.started event (startedAt, then rowid), so they never outrank an evented run as the old event-id ordering did,
 // then the rest in run.started event-id order (the old journal order).
+// @public: exported for the run_sequence scenario.
 export function ensureRunSequences(database: typeof db = db) {
   return database.transaction((transaction) => {
     const pending = transaction.all<{ id: string }>(sql`

@@ -628,6 +628,25 @@ try {
     assert.match(failed.error.stdout, /validation detail \[redacted\]/);
     assert.match(failed.error.stderr, /Verification failed/);
     assert.ok(!JSON.stringify(failed.error).includes("ghs_fixture_sensitive"));
+  } else if (scenario === "implement_base_moved") {
+    // The base carries a marker that fails validation, so the first attempt fails and its workspace is retained.
+    changeMain("fail-validation", "fail\n"); const oldBase = git(resolve("remote.git"), "rev-parse", "main");
+    f.addIssue(1); f.enqueue(1, "implement"); const failed = await run();
+    f.addIssue(2); f.enqueue(2, "implement"); const overlapping = await run();
+    assert.equal(failed.error.exitCode, 7); assert.equal(overlapping.error.exitCode, 7); assert.equal(f.prs.length, 0);
+    git(resolve("seed"), "rm", "-q", "fail-validation"); commit(resolve("seed"), "Remove marker");
+    git(resolve("seed"), "push", resolve("remote.git"), "main");
+    const base = git(resolve("remote.git"), "rev-parse", "main");
+    tasks.retryTask(failed.taskId); const retried = await success();
+    assert.equal(retried.retryOfRunId, failed.id); assert.equal(retried.mainSha, base);
+    assert.equal(git(resolve("remote.git"), "rev-parse", `${retried.publication.publishedCommitSha}^`), base, "The retry commits on the current base");
+    assert.equal(f.prs.length, 1); assert.equal(f.row(s.workspaces, retried.workspaceId).baseSha, base);
+    // Work that overlaps the base's newer changes is not moved: the retry keeps its old base (and its marker) and fails as before.
+    changeMain("src/app.ts", "export const value = 99;\n");
+    const stuck = f.row(s.workspaces, overlapping.workspaceId);
+    tasks.retryTask(overlapping.taskId); const kept = await run();
+    assert.equal(kept.error.exitCode, 7); assert.equal(git(stuck.path, "rev-parse", "HEAD"), oldBase);
+    assert.match(readFileSync(resolve(stuck.path, "src/app.ts"), "utf8"), /value = 12/); assert.equal(f.row(s.workspaces, stuck.id).baseSha, oldBase);
   } else if (scenario === "validation_mutation") {
     f.addIssue(1); f.enqueue(1, "implement"); const r = await run();
     assert.match(r.error.message, /Validation changed/); assert.equal(f.prs.length, 0);

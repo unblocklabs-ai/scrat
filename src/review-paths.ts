@@ -1,8 +1,6 @@
-// Git owns repository path spelling; filesystems may accept more than one Unicode form.
 export function canonicalReviewPaths(scope: string[], tracked: string[]) {
   const spellings = new Map<string, Set<string>>();
   for (const file of tracked) {
-    // Directory identities matter for legacy scopes as well as exact files.
     const parts = file.split("/");
     for (let end = 1; end <= parts.length; end++) {
       const path = parts.slice(0, end).join("/");
@@ -15,8 +13,6 @@ export function canonicalReviewPaths(scope: string[], tracked: string[]) {
   return [...new Set(scope.map((path) => {
     const names = spellings.get(path.normalize("NFC"));
     if (names?.size === 1) return names.values().next().value!;
-    // Absence in another snapshot is not uncertainty (e.g. a PR-added file).
-    // Only collisions between Git spellings make the identity ambiguous.
     return names ? "." : path;
   }))];
 }

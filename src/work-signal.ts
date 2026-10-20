@@ -10,7 +10,6 @@ export function signalWork() {
   for (const wake of [...waiters]) wake();
 }
 
-// Resolves at once if work was signalled after `since`, so a signal sent while a worker is busy is not lost.
 export function waitForWork(since: number, timeoutMs: number, signal?: AbortSignal) {
   if (signal?.aborted || generation !== since) return Promise.resolve();
   return new Promise<void>((resolve) => {

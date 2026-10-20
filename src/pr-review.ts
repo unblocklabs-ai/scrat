@@ -24,7 +24,6 @@ export async function reviewPullRequest(run: typeof runs.$inferSelect, cwd: stri
   const failed = settled.find((entry) => entry.status === "rejected");
   if (failed?.status === "rejected") throw new Error("An independent PR reviewer did not finish", { cause: failed.reason });
   const reviews = settled.flatMap((entry) => entry.status === "fulfilled" ? [entry.value] : []);
-  // Reports are files, so consolidation prompt size does not grow with their length.
   const independentReviews = await Promise.all(reviews.map(async ({ result, ...reviewer }, index) => {
     const report = resolve(contextDir, `reviewer-${index + 1}.md`);
     await writeFile(report, result.text + "\n");

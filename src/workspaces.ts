@@ -46,7 +46,6 @@ export async function validateCheckpoint(workspace: typeof workspaces.$inferSele
   }
 }
 
-// Pushed history is the most durable place for a credential to leak.
 export async function assertNoCommittedSecrets(workspace: typeof workspaces.$inferSelect, base: string, tree: string) {
   const changed = (await git(workspace.path, ["diff", "--name-only", "--no-renames", "-z", base, tree])).split("\0").filter(Boolean);
   for (const path of changed) {

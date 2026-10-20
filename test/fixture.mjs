@@ -60,10 +60,8 @@ export async function fixture(scenario) {
     const request = JSON.parse(body);
     const texts = request.messages.filter((message) => message.role === "user")
       .map((message) => typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("\n"));
-    // Correction turns carry no context, so read the task from the latest user message that has one.
     const text = texts.findLast((entry) => entry.includes('{\n  "action"'));
     const corrected = texts.at(-1).startsWith("Your previous final answer was not accepted");
-    // A feedback turn is a validation failure sent back into the session; its first request follows the user message directly.
     const feedback = texts.at(-1).startsWith("Scrat's validation failed"), turnStart = request.messages.at(-1).role === "user";
     const start = text.indexOf('{\n  "action"');
     const context = JSON.parse(text.slice(start, text.indexOf("\n}", start) + 2));
@@ -127,7 +125,6 @@ export async function fixture(scenario) {
     if (!review && step === 0 && mode.startsWith("feedback-")) tool = { name: "bash", args: { command: `printf 'export const value = ${context.item.number + 10};\\n' > src/app.ts && touch fail-validation` } };
     if (!review && feedback && turnStart && mode === "feedback-fix") tool = { name: "bash", args: { command: "rm -f fail-validation" } };
     if (!review && step === 0 && mode === "heavy") tool = { name: "bash", args: { command: "nohup pnpm verify > log 2>&1 &" } };
-    // Marker files under .scrat/ (never committed) show whether a command that matches the test-only heavy pattern ran.
     if (!review && step === 0 && mode === "heavy-bg") tool = { name: "bash", args: { command: "mkdir -p .scrat; touch .scrat/heavy-bg &" } };
     if (!review && step === 0 && mode === "heavy-fg") tool = { name: "bash", args: { command: "mkdir -p .scrat; touch .scrat/heavy-fg && printf 'export const value = 11;\\n' > src/app.ts" } };
     if (review && mode === "outside") tool = [{ name: "read", args: { path: resolve("outside-secret.txt") } }, { name: "read", args: { path: "src/link.txt" } },
@@ -175,7 +172,6 @@ export async function fixture(scenario) {
     config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
   }
   if (scenario.startsWith("stale_branch")) {
-    // Preparation fails while a `require-<name>` flag exists and the branch lacks <name>, like a lockfile main added later.
     writeFileSync("prepare.mjs", 'import{existsSync}from"node:fs";for(const name of ["needed.txt","needed2.txt","needed3.txt","needed4.txt"]){if(existsSync(' + JSON.stringify(resolve(".") + "/require-") + '+name)&&!existsSync(name)){console.error("ERR_MISSING "+name);process.exit(1);}}');
     writeFileSync("validate.mjs", 'import{existsSync}from"node:fs";if(existsSync(' + JSON.stringify(resolve(".") + "/require-validation") + ')&&existsSync("bad.txt")){console.error("bad.txt must not exist");process.exit(7);}');
     config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
@@ -191,7 +187,6 @@ export async function fixture(scenario) {
     config.workspace.validate = [[process.execPath, resolve("check.mjs")]];
   }
   if (["validation_feedback", "validation_feedback_cap", "validation_slots", "self_repair"].includes(scenario)) {
-    // Logs each validation's interval; flags in the fixture root slow it down (slow), fail it (slot-fail), kill it with a signal (kill-validation) or exit as a wrapper does for one (exit-137).
     const flag = (name) => JSON.stringify(resolve(name));
     writeFileSync("validate.mjs", 'import{appendFileSync,existsSync}from"node:fs";const s=Date.now();await new Promise((r)=>setTimeout(r,existsSync(' + flag("slow") + ')?1000:0));'
       + 'appendFileSync(' + flag("validations.log") + ',JSON.stringify({s,e:Date.now()})+"\\n");if(existsSync(' + flag("kill-validation") + '))process.kill(process.pid,"SIGKILL");if(existsSync(' + flag("exit-137") + '))process.exit(137);'
@@ -212,7 +207,6 @@ export async function fixture(scenario) {
     config.workspace = { ...config.workspace, environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), scenario === "validation_resume" ? "validate-resume" : "validate", resolve("database-receipts.jsonl")]] };
   }
   writeFileSync("app/scrat.config.json", JSON.stringify(config));
-  // The app copy never inherits a developer's own overrides.
   writeFileSync("app/scrat.local.json", "{}\n");
   mkdirSync("data");
   execFileSync(process.execPath, [resolve(repository, "node_modules/drizzle-kit/bin.cjs"), "push", "--dialect=sqlite", "--schema=./app/src/schema.ts", "--url=./data/scrat.sqlite"], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
@@ -233,7 +227,6 @@ export async function fixture(scenario) {
       const text = JSON.stringify(data), headers = { "content-type": "application/json", "x-ratelimit-limit": String(rate.limit), "x-ratelimit-reset": String(rate.reset), "x-ratelimit-resource": "core", ...extra };
       if (method === "GET" && status === 200) {
         headers.etag = `"${createHash("sha1").update(url.pathname + url.search + text).digest("hex")}"`;
-        // Like GitHub, a matching conditional request is answered 304 and is not counted against the limit.
         if (new Headers(options.headers).get("if-none-match") === headers.etag) {
           call.status = 304; return new Response(null, { status: 304, headers: { ...headers, "x-ratelimit-remaining": String(rate.remaining) } });
         }

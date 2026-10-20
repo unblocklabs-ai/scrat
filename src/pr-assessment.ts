@@ -28,14 +28,11 @@ function selectAssessment(history: History) {
       const parentId = origin.run.inferenceFromRunId ?? origin.run.retryOfRunId!;
       const parent = byId.get(parentId);
       if (!parent) throw new Error(`Missing PR assessment ancestor: ${parentId}`);
-      // New copies carry explicit provenance; legacy publication retries can
-      // still be reconstructed using their original publication-only rule.
       if (!origin.run.inferenceFromRunId && !hasPublicationSnapshot(parent.run)) break;
       origin = parent;
     }
     const { sequence } = origin.run;
     if (sequence === null || run.sequence === null) throw new Error(`Missing run sequence for PR assessment: ${run.id}`);
-    // History is claim-newest first. Copies retain their inference origin's order.
     if (!selected || sequence > selected.originSequence) {
       selected = { ...entry, result: run.result, originSequence: sequence, originId: origin.run.id };
     }
@@ -49,7 +46,6 @@ export type PrReviewState =
   | { kind: "stale"; assessment: Assessment; changedPaths: string[] }
   | { kind: "current"; assessment: Assessment };
 
-// Authority first, freshness second. A stale opinion never revives an older one.
 export async function resolvePrReview(history: History, now: ItemObservation, mainSha: string): Promise<PrReviewState> {
   const assessment = selectAssessment(history);
   if (!assessment) return { kind: "missing" };

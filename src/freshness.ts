@@ -3,13 +3,11 @@ import type { ItemObservation } from "./observation.ts";
 import { reviewChanges } from "./relevance.ts";
 import type { runs } from "./schema.ts";
 
-// What a saved evaluation depends on.
 type SavedEvaluation = { revision?: string; baseBranch?: string; mainSha?: string | null; paths: string[] };
 export type Freshness =
   | { kind: "current"; baseMoved: boolean }
   | { kind: "stale"; reason: "context" | "base"; changedPaths: string[] };
 type Current = Pick<ItemObservation, "revision" | "baseBranch"> & {
-  // Lazy so a changed context is reported before any fetch; absent skips the base check.
   mainSha?: string | (() => Promise<string>);
 };
 
@@ -17,10 +15,6 @@ export const savedEvaluation = (run: typeof runs.$inferSelect): SavedEvaluation 
   revision: run.context?.revision, baseBranch: run.context?.baseBranch, mainSha: run.mainSha, paths: run.result?.paths ?? [],
 });
 
-// "exact": revision, base branch and base SHA must all match (validation-only resume).
-// "relevant-paths": a moved base SHA only matters when it touches the reviewed paths and
-// their dependencies. A saved evaluation without a base SHA is stale unless `unknownBase`
-// is "current" (publication guard, which never knew it for such runs).
 export async function freshness(saved: SavedEvaluation, now: Current, mode: "exact" | "relevant-paths",
   { unknownBase = "stale" }: { unknownBase?: "stale" | "current" } = {}): Promise<Freshness> {
   const stale = (reason: "context" | "base", changedPaths: string[] = []): Freshness => ({ kind: "stale", reason, changedPaths });

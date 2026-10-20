@@ -4,7 +4,6 @@ import { git } from "./git.ts";
 import { reviewScope } from "./review-paths.ts";
 
 function affectsPaths(changed: string[], scope: string[]) {
-  // Persisted v2 scopes also include directory reads. Preserve their prefix scope.
   return changed.some((file) => scope.some((path) => file === path || file.startsWith(`${path.replace(/\/$/, "")}/`)));
 }
 
@@ -51,7 +50,6 @@ function lockfileChanged(before: string, after: string, dependencies: Set<string
     if (!record(packages) || !record(snapshots)) throw new Error("Unrecognized lockfile records");
     return { packages, snapshots, importers, rest };
   });
-  // Settings and unknown sections are not proven unrelated.
   if (!isDeepStrictEqual(documents[0].rest, documents[1].rest)) return true;
   if (importersChanged(documents[0].importers, documents[1].importers, dependencies)) return true;
   for (const section of ["packages", "snapshots"] as const) {
@@ -74,7 +72,6 @@ const reviewCache = new Map<string, Promise<Review>>();
 const treeCache = new Map<string, Promise<string>>();
 const commitSha = /^[0-9a-f]{40}$/;
 
-// Promises are stored so concurrent callers share one run. Rejections are evicted so they are retried.
 function memoize<T>(cache: Map<string, Promise<T>>, limit: number, key: string, load: () => Promise<T>) {
   const cached = cache.get(key);
   if (cached !== undefined) {
@@ -91,7 +88,6 @@ function memoize<T>(cache: Map<string, Promise<T>>, limit: number, key: string, 
   return pending;
 }
 
-// Ref names can move, so only immutable commit SHAs are cached.
 function listTree(repository: string, sha: string) {
   const command = ["ls-tree", "-r", "--name-only", "-z", sha];
   return commitSha.test(sha) ? memoize(treeCache, treeCacheLimit, JSON.stringify([repository, sha]), () => git(repository, command)) : git(repository, command);
@@ -105,7 +101,6 @@ export async function reviewChanges(repository: string, before: string, after: s
   const key = JSON.stringify([repository, before, after, [...new Set(scope)].sort()]);
   const pending = memoize(reviewCache, reviewCacheLimit, key, () => computeReview(repository, before, after, scope));
   const review = await pending;
-  // A degraded verdict is conservative but transient, so it must not outlive this call.
   if (review.degraded && reviewCache.get(key) === pending) reviewCache.delete(key);
   return { paths: [...review.paths], relevant: review.relevant };
 }
@@ -136,7 +131,6 @@ async function computeReview(repository: string, before: string, after: string, 
       if (lockfileChanged(contents[0], contents[1], dependencies)) return { paths, relevant: true };
     }
   } catch {
-    // Missing or malformed metadata is itself worth reviewing, not evidence of no impact.
     return { paths, relevant: true, degraded: true };
   }
   return { paths, relevant: false };

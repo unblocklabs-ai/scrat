@@ -17,7 +17,6 @@ import { errorCode, redactSecrets } from "./errors.ts";
 import { childEnvironment } from "./secrets.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 
-// A malformed footer is corrected inside the same session instead of failing the run.
 const maxFormatCorrections = 2;
 const heavyTimeoutSeconds = 45 * 60;
 
@@ -46,7 +45,6 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
   contextDir?: string;
   revisions?: Record<string, string>;
   requireGrade?: boolean;
-  // Resumes sessionFile with this message instead of starting the skill prompt.
   followUp?: string;
 }) {
   const modelRuntime = await sharedModelRuntime();
@@ -55,14 +53,13 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     dropModelRuntime();
     throw new Error(modelRuntime.getError() ?? `Configure a Pi model for ${run.provider}/${run.model}`);
   }
-  const thinkingLevel = run.thinkingLevel as ThinkingLevel; // validated when the run was claimed
+  const thinkingLevel = run.thinkingLevel as ThinkingLevel;
   const settingsManager = SettingsManager.inMemory();
   const resourceLoader = new DefaultResourceLoader({
     cwd, agentDir: getAgentDir(), settingsManager, noExtensions: true, noSkills: true,
     appendSystemPromptOverride: (base) => [...base,
       "Scrat handles Git commits, pushes, GitHub comments, labels, and PR creation. Do not publish or commit changes yourself.",
       "Use dependency implementations from this workspace and its lockfile. Another checkout or a globally cached version is not evidence for this revision.",
-      // Notes survive compaction and retries in the retained workspace; Scrat excludes .scrat/ from every commit (git.ts).
       ...readOnly ? [] : [`Keep working notes in ${resolve(cwd, ".scrat/notes.md")} (Git-ignored, never committed or published): the plan, decisions and why, findings, checks run and their results, and what remains. Update it at each milestone, keep it short, and read it first, if it exists, when resuming or after context compaction.`,
         "Your final response is published as written after Scrat validates, commits and pushes your changes; do not say the changes are uncommitted."],
       "End your final Markdown response with exactly one line: SCRAT_STATUS: complete, SCRAT_STATUS: incomplete, or SCRAT_STATUS: needs_decision. Complete means the assigned work is finished, not merely that this session ended. For reviews, a complete assessment may contain defects or find the issue unready; use incomplete only if the assessment itself cannot be completed. For implementation, partial work or unresolved blockers are not complete. The harness withholds incomplete implementations from publication. Put an issue's SCRAT_READY marker before the status line, only when warranted.",
@@ -82,12 +79,10 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
       const hit = heavyCommand(args[1].command, heavy);
       if (!hit) return bash.execute(...args);
       const segment = redactSecrets(hit).slice(0, 200);
-      // A background job would outlive its slot, so heavy work must run in the foreground where Scrat can queue it.
       if (backgroundsWork(args[1].command)) {
         log.warn({ event: "pi.command_blocked", command: segment });
         throw new Error(`This command line runs a background job (a lone &, nohup, setsid or disown) and includes the heavy check \`${segment}\`. Run heavy checks in the foreground, in a command without background jobs, so Scrat can queue them behind other heavy jobs.`);
       }
-      // A slot is shared with every run's validation, so an agent's heavy command may hold it for at most heavyTimeoutSeconds.
       args[1] = { ...args[1], timeout: Math.min(args[1].timeout ?? heavyTimeoutSeconds, heavyTimeoutSeconds) };
       const queuedAt = performance.now();
       return withValidationSlot(() => {
@@ -96,9 +91,6 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
       }, { runId: run.id }, args[2]);
     },
   };
-  // File tools stay inside the workspace, including through absolute paths, ~,
-  // .. and symlinks committed to the repository under review. The run's own
-  // context directory is also readable; it is never part of review scope.
   const roots = [await realpath(cwd), ...contextDir ? [await realpath(contextDir)] : []];
   async function insideWorkspace(path: string) {
     const real = await realpath(path).catch((error: unknown) => {
@@ -108,7 +100,6 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     if (!roots.some((root) => { const local = relative(root, real); return local !== ".." && !local.startsWith("../"); })) throw new Error(`Path is outside the workspace: ${path}`);
     return real;
   }
-  // Search roots mirror Pi's resolution: a leading @ is dropped and ~ means home.
   async function searchRoot(path = ".") {
     const requested = path.startsWith("@") ? path.slice(1) : path;
     if (requested === "~" || requested.startsWith("~/")) throw new Error(`Path is outside the workspace: ${path}`);
@@ -127,8 +118,6 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
   const read: typeof sdkRead = {
     ...sdkRead,
     async execute(...args) {
-      // Per-invocation operations observe Pi's resolved path, preserving its
-      // Unicode/path expansion, images, truncation and cancellation behavior.
       let absolute: string | undefined;
       const tool = createReadToolDefinition(cwd, { operations: {
         access: async (path) => access(await insideWorkspace(path), constants.R_OK),
@@ -175,7 +164,6 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     };
     if (reviewerIndex === undefined) db.update(runs).set(sessionDetails).where(eq(runs.id, run.id)).run();
     else saveReviewer(run.id, reviewerIndex, sessionDetails);
-    // A failed call logs its target and a short redacted reason, never file contents or edit text.
     const brief = (value: unknown) => typeof value === "string" ? redactSecrets(value).slice(0, 200) : undefined;
     const targets = new Map<string, Record<string, unknown>>();
     session.subscribe((event) => {
@@ -188,7 +176,6 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
         const target = targets.get(event.toolCallId);
         targets.delete(event.toolCallId);
         if (event.isError) {
-          // Argument-validation errors echo the call's arguments and bash errors lead with command output; keep neither.
           const text = (event.result?.content ?? []).map((part: { text?: string }) => part.text ?? "").join(" ").split("\n\nReceived arguments:")[0]!;
           const error = redactSecrets(text).replace(/\s+/g, " ").trim();
           log.warn({ event: "pi.tool_failed", tool: event.toolName, toolCallId: event.toolCallId, ...target, error: event.toolName === "bash" ? error.slice(-300) : error.slice(0, 300) });

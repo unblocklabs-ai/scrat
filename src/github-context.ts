@@ -2,8 +2,6 @@ import { createHash } from "node:crypto";
 import type { GithubContext } from "./github-types.ts";
 import { commentKey } from "./markers.ts";
 
-// Routing, execution, and freshness checks must evaluate the same comments.
-// Keep the digest compatible with stored revisions and leave delivery comments intact.
 export function evaluateGithubContext({ item, comments }: GithubContext, botLogin: string) {
   const external = comments.filter((comment) => comment.author !== botLogin && comment.body.trim());
   const pullRequest = "head" in item ? item : undefined;

@@ -1,5 +1,3 @@
-// Application-owned views. Existing stored API payloads remain structurally
-// compatible; fresh responses are reduced to these fields at the adapter boundary.
 export type GithubIssue = {
   node_id: string;
   number: number;

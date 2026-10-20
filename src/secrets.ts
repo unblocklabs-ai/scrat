@@ -1,8 +1,6 @@
 import { config } from "./config.ts";
 import { SecretLeakError } from "./results.ts";
 
-// Workspace commands, Git hooks and agent shells run repository code. They
-// inherit only what toolchains need; anything else belongs in workspace.environment.
 const inheritedVariables = new Set([
   "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ", "TERM", "TMPDIR", "TMP", "TEMP",
   "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
@@ -21,9 +19,6 @@ export function secretValues() {
   return secretVariables.map((name) => process.env[name]).filter((value): value is string => Boolean(value));
 }
 
-// Agents can quote or reflow what they read, so compare without whitespace and
-// treat any 40-character run of a configured secret as a leak (every window, so
-// a fragment at any offset is caught).
 export function containsSecret(text: string) {
   if (/\b(?:gh[oprsu]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})/.test(text)) return true;
   const compact = text.replace(/\s+/g, "");

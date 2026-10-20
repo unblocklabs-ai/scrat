@@ -34,8 +34,6 @@ export function planIssueTasks({ labelled, implemented, workspaceId, previouslyL
   return { review: false, decisions };
 }
 
-// A behind branch whose latest run could not be prepared at this very head is updated like a conflicting one;
-// the new head ends the condition, so each (mainSha, headSha) fires at most once.
 export function planPrMaintenance({ conflicts, stale, mainSha, headSha, pendingComments, conflictTask, feedbackTask }: {
   conflicts: boolean; stale: boolean; mainSha: string; headSha: string; pendingComments: string[];
   conflictTask?: TaskFacts; feedbackTask?: TaskFacts;
@@ -54,8 +52,6 @@ export function planPrMaintenance({ conflicts, stale, mainSha, headSha, pendingC
 
 export const lowGrades: readonly (string | undefined)[] = ["C", "D", "F"];
 
-// A low grade on a current assessment of a Scrat PR queues one repair per assessment, up to the item's cap.
-// Anything else cancels a queued repair, so it never runs against a stale assessment or ahead of human feedback.
 export function planSelfRepair({ owned, state, feedbackTask, reviewTask, repairTask, count, limit }: {
   owned: boolean; state: PrReviewState; feedbackTask?: TaskFacts; reviewTask?: TaskFacts; repairTask?: TaskFacts; count: number; limit: number;
 }): { decisions: RoutingDecision[]; limited: boolean } {
@@ -73,8 +69,6 @@ type ReviewTriggerFacts = {
   revision: string; mainSha: string; latest?: TaskFacts; attempt?: ReviewAttempt;
 };
 
-// Shared by observation gathering and final policy: covered work must not need
-// historical Git objects just to decide that there is nothing to enqueue.
 export function reviewTrigger({ latest, attempt, revision, mainSha }: ReviewTriggerFacts) {
   const triggerKey = JSON.stringify({ revision, mainSha });
   const covered = latest?.status !== "cancelled" && (latest?.input.triggerKey === triggerKey
@@ -88,8 +82,6 @@ type ReviewFacts = ReviewTriggerFacts & (
   | { kind: "issue"; completed?: PreviousReview; freshness?: Freshness }
 );
 
-// Observations in, intents out. Queue transactions and external effects belong
-// to the caller; publication independently rechecks freshness.
 export function planReview(facts: ReviewFacts): RoutingDecision[] {
   const { latest, revision, mainSha } = facts;
   const action = facts.kind === "pr" ? "review_pr" : "review_issue";

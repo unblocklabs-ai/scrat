@@ -9,7 +9,6 @@ const maxCommits = 200;
 const maxScopeBytes = 1024 * 1024;
 const operations = ["diff_stat", "diff", "log", "show"];
 
-// Page text plus the note that tells the model how to continue; `size` is the full length when known.
 export function pageText(page: GitPage, offset: number, size = page.total) {
   const note = !page.text && size && offset >= size ? `[no output at offset ${offset}; total ${size} bytes]`
     : page.more ? `\n[truncated: bytes ${offset}-${page.end}${size === undefined ? "; more output exists" : ` of ${size}`}. Call again with offset=${page.end} for the rest, or narrow the request with path.]`
@@ -17,8 +16,6 @@ export function pageText(page: GitPage, offset: number, size = page.total) {
   return page.text + note;
 }
 
-// Read-only Git for sessions without Bash. Every path it touches is reported to
-// `touched` so freshness sees the same scope as the wrapped read tool.
 export function createReviewGitTool(cwd: string, revisions: Record<string, string>, touched: Set<string>) {
   const names = Object.keys(revisions);
   async function resolveRevision(value: string | undefined, parameter: string) {
@@ -37,7 +34,6 @@ export function createReviewGitTool(cwd: string, revisions: Record<string, strin
     if (value.startsWith("-") || value.startsWith("/") || value.includes("\0") || value.split("/").includes("..")) {
       throw new Error(`path must be repository-relative and must not start with "-" or contain "..": ${value}`);
     }
-    // Git paths have one spelling: ./src/app.ts and src/app.ts must be one scope entry.
     const normalized = posix.normalize(value);
     return normalized.length > 1 ? normalized.replace(/\/$/, "") : normalized;
   }
@@ -69,7 +65,6 @@ export function createReviewGitTool(cwd: string, revisions: Record<string, strin
         const options = ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"];
         page = await gitPage(cwd, [...options, ...(operation === "diff_stat" ? ["--stat=240,200"] : []), ...range, ...(path ? ["--", path] : [])], offset, limit);
         if (!path) {
-          // An unlistable change set is recorded as unknown scope: over-recording is the safe direction.
           const names = await gitPage(cwd, [...options, "--name-only", "-z", ...range], 0, maxScopeBytes);
           scope.push(...(names.more ? ["."] : names.text.split("\0").filter(Boolean)));
         }

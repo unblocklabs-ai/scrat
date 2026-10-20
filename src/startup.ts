@@ -10,7 +10,6 @@ import { runs } from "./schema.ts";
 
 type Entry = { provider: string; model: string; thinkingLevel: string };
 
-// Fails before any worker claims, so a bad static setting stops startup instead of failing tasks one by one.
 // @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: {
   harness?: { maxConcurrentValidations?: number }; providers?: Record<string, { apiKey?: string }>; workspace?: { heavyCommands?: string[] };
@@ -27,7 +26,6 @@ export async function validateStaticConfig(settings: {
   settings.workspace?.heavyCommands?.forEach((pattern, index) => {
     try { new RegExp(pattern); } catch { problems.push(`workspace.heavyCommands[${index}] is not a valid regular expression`); }
   });
-  // Only ${VAR} placeholders are tracked as secrets, so a literal key would not be redacted. Never log the key itself.
   for (const [name, { apiKey }] of Object.entries(settings.providers ?? {})) {
     if (apiKey && !/\$\{\w+\}/.test(apiKey)) logger.warn({ provider: name }, "Provider apiKey is not a ${VAR} placeholder; it will not be redacted from output");
   }
@@ -51,15 +49,11 @@ export async function validateStaticConfig(settings: {
   }
 }
 
-// Everything a claiming entrypoint (serve, work, run-next) does before its first claim.
 export async function prepareService() {
   await validateStaticConfig();
   ensureRunSequences();
 }
 
-// Idempotent backfill for runs created before runs.sequence. Existing sequences are kept and unsequenced runs continue after the maximum:
-// first runs with no run.started event (startedAt, then rowid), so they never outrank an evented run as the old event-id ordering did,
-// then the rest in run.started event-id order (the old journal order).
 // @public: exported for the run_sequence scenario.
 export function ensureRunSequences(database: typeof db = db) {
   return database.transaction((transaction) => {

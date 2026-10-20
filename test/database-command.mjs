@@ -24,7 +24,6 @@ if (phase === "migrate") {
   const rows = Number(sql("SELECT count(*) FROM identities"));
   const first = !existsSync(owner);
   appendFileSync(owner, JSON.stringify({ id, rows, url: process.env.DATABASE_URL }) + "\n");
-  // A signal-killed command is infrastructure, so it is not sent back to the agent.
   if (first) { assert.equal(rows, 1); process.kill(process.pid, "SIGKILL"); }
   assert.equal(rows, 0, "Validation-only resume must use a fresh migrated database without rerunning agent inserts");
 }

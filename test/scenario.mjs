@@ -79,10 +79,8 @@ try {
       assert.equal(count(read), 1); assert.equal(count(contents), 1);
       await route(); assert.equal(count(read), 1); assert.equal(count(contents), 1);
       mock.timers.enable({ apis: ["Date"], now: Date.now() });
-      // Keep time monotonic until all cached clients have finished their work.
       mock.timers.tick(60 * 60 * 1000);
       await route(); assert.equal(count(read), 2); assert.equal(count(contents), 2);
-      // Exercise real publication with distinct contents-write and PR scopes.
       const implemented = await success(); assert.equal(implemented.publication.pullRequestNumber, 209);
       assert.equal(count({ contents: "write", metadata: "read" }), 1);
       assert.equal(count({ pull_requests: "write", contents: "read", metadata: "read" }), 1);
@@ -142,7 +140,6 @@ try {
     f.addIssue(1); f.enqueue(1); const completed = await success();
     changeMain("src/app.ts", "export const value = 2;\n"); await route();
     const { eq } = await import("drizzle-orm");
-    // Persisted history can outlive the Git object it describes (e.g. after GC).
     db.update(s.runs).set({ mainSha: "f".repeat(40) }).where(eq(s.runs.id, completed.id)).run();
     const isQueued = (id) => all(s.tasks).some((t) => t.itemId === id && t.status === "queued");
     f.addIssue(2); await route(); assert.ok(isQueued("issue-2"));
@@ -192,7 +189,6 @@ try {
     assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === 201).length, 1);
     assert.match(f.comments.get(201)[0].body, /Consolidated/);
     assert.equal(review.result.grade, "B");
-    // The prompt is a manifest: no patch bodies, with context in files outside the worktree and never committed.
     const prompts = (request) => request.request.messages.filter((m) => m.role === "user").map((m) => JSON.stringify(m.content)).join("\n");
     const toolText = (request, text) => request.request.messages.some((m) => m.role === "tool" && JSON.stringify(m.content).includes(text));
     for (const request of f.requests) {
@@ -223,7 +219,6 @@ try {
     assert.equal(git(resolve("remote.git"), "ls-tree", "-r", "--name-only", f.prs[0].head.ref), ".gitignore\nsrc/app.ts");
     assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["B · Solid", "human-label"]);
     for (const req of f.requests.filter((r) => r.context.action === "review_pr" && !r.consolidating)) assert.ok(!req.text.includes("Independent review from"));
-    // Adopt a pre-upgrade review comment too, without deleting its historical run.
     f.comments.get(201)[0].body = f.comments.get(201)[0].body.replace("<!-- scrat-review -->\n", "");
     f.reset(201, "grade-A");
     changeMain("src/app.ts", "export const value = 99;\n");
@@ -257,7 +252,6 @@ try {
     assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["A · Strong", "human-label"]);
   } else if (scenario === "git_paging") {
     await implement(1);
-    // The PR rewrites a 17 MiB base file into 18 MiB, so its history and its diff both exceed the 16 MiB buffer the old reader used.
     const branch = f.prs[0].head.ref;
     git(".", "clone", "-b", branch, resolve("remote.git"), "pr-edit");
     writeFileSync("pr-edit/src/huge.txt", ("b".repeat(63) + "\n").repeat(18 * 16384));
@@ -337,7 +331,6 @@ try {
     const older = await run(); assert.ok(older.error);
     const itemId = f.row(s.tasks, older.taskId).itemId;
     f.reset(201, "helper-grade-A");
-    // The newer assessment actually reads a broader scope than the older one.
     tasks.enqueueTask({ itemId, action: "review_pr", reason: "Broader fresh review", input: {} });
     const newer = await success();
     assert.ok(newer.result.paths.includes("src/helper.ts"));
@@ -358,7 +351,6 @@ try {
     const itemId = f.row(s.tasks, failed.taskId).itemId;
     f.reset(201, "normal"); tasks.enqueueTask({ itemId, action: "review_pr", reason: "New task", input: {} });
     const middle = await success();
-    // A misleading wall-clock timestamp must not decide inference precedence.
     const { eq } = await import("drizzle-orm");
     db.update(s.runs).set({ startedAt: "2099-01-01T00:00:00Z" }).where(eq(s.runs.id, middle.id)).run();
     f.reset(201, "grade-A"); tasks.retryTask(failed.taskId); const newest = await success();
@@ -369,7 +361,7 @@ try {
     assert.equal(f.requests.length, calls);
     assert.deepEqual(f.prs[0].labels.map((l) => l.name), ["A · Strong"]);
   } else if (scenario === "manual_queue") {
-    await implement(1); await route(); await success(); // reviews the new PR
+    await implement(1); await route(); await success();
     const prItem = all(s.items).find((i) => i.kind === "pr"), itemId = prItem.id;
     const reviewTasks = () => all(s.tasks).filter((t) => t.itemId === itemId && t.action === "review_pr");
     await route(); assert.equal(reviewTasks().filter((t) => t.status === "queued").length, 0, "review is current");
@@ -382,7 +374,6 @@ try {
     assert.equal(manual.input.manual, true); assert.equal(manual.priority, 77);
     await route();
     assert.equal(f.row(s.tasks, manual.id).status, "queued", "routing must not cancel a manual task");
-    // Routing enqueue coalescing keeps the mark and takes the routing fields.
     tasks.enqueueTask({ itemId, action: "review_pr", reason: "Routing", input: { triggerKey: "k", changedPaths: [] } });
     const merged = f.row(s.tasks, manual.id);
     assert.equal(merged.status, "queued"); assert.deepEqual(merged.input, { triggerKey: "k", changedPaths: [], manual: true });
@@ -391,16 +382,13 @@ try {
     assert.equal(result.taskId, manual.id);
     assert.match(f.comments.get(201).find((c) => c.user.login !== "human").body, new RegExp(manual.id));
     await route(); assert.equal(reviewTasks().filter((t) => t.status === "queued").length, 0, "the manual run is the current authoritative review");
-    // Closure cancels manual tasks too.
     const again = tasks.enqueueManualTasks("review_pr", ["201"])[0];
     f.prs[0].state = "closed"; await route();
     assert.equal(f.row(s.tasks, again.taskId).status, "cancelled");
     assert.equal(tasks.enqueueManualTasks("review_pr", ["201"])[0].error, "Item is closed");
-    // Issues resolve by number too; mixed batches report each result.
     f.addIssue(5); const mixed = tasks.enqueueManualTasks("review_issue", ["5", "404", "issue-5"]);
     assert.deepEqual(mixed.map((r) => Boolean(r.taskId)), [true, false, true]);
     assert.equal(mixed[0].taskId, mixed[2].taskId);
-    // A manual enqueue merging into a queued routing task keeps its routing fields.
     await implement(2); await route();
     const item2 = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 202).id;
     const reviews2 = () => all(s.tasks).filter((t) => t.itemId === item2 && t.action === "review_pr");
@@ -409,14 +397,12 @@ try {
     assert.equal(merge.taskId, routed.id);
     assert.deepEqual(f.row(s.tasks, routed.id).input, { ...routed.input, manual: true });
     await success(); await route();
-    // Actions must fit the item kind.
     const [prOnIssue] = tasks.enqueueManualTasks("review_pr", ["5"]), [issueOnPr] = tasks.enqueueManualTasks("review_issue", ["202"]);
     assert.match(prOnIssue.error, /review_pr needs a PR/); assert.match(issueOnPr.error, /review_issue needs an issue/);
     assert.match(tasks.enqueueManualTasks("implement", ["202"])[0].error, /needs an issue/);
     assert.match(tasks.enqueueManualTasks("resolve_conflicts", ["5"])[0].error, /needs a PR/);
     assert.match(tasks.enqueueManualTasks("address_pr_feedback", ["5"])[0].error, /needs a PR/);
     assert.ok(!all(s.tasks).some((t) => t.itemId === "issue-5" && t.action === "review_pr"));
-    // A sync during a running manual review must not queue a duplicate.
     f.prs.find((pr) => pr.number === 202).title = "Retitled after the review";
     const running = tasks.enqueueManualTasks("review_pr", ["202"])[0];
     const claimed = tasks.claimTask(); assert.equal(claimed.task.id, running.taskId);
@@ -425,7 +411,7 @@ try {
   } else if (scenario === "run_sequence") {
     const { eq } = await import("drizzle-orm");
     for (let n = 1; n <= 5; n++) f.addIssue(n);
-    f.enqueue(1); f.enqueue(2, "implement"); // created first, claimed second
+    f.enqueue(1); f.enqueue(2, "implement");
     const claims = [tasks.claimTask(), tasks.claimTask()];
     assert.deepEqual(claims.map((c) => c.task.action), ["implement", "review_issue"]);
     assert.deepEqual(claims.map((c) => c.run.sequence), [1, 2]);
@@ -436,7 +422,6 @@ try {
     for (const r of more) tasks.finishRun(r.id, { status: "completed" });
     const [r1, r2, r3, r4, r5] = all(s.runs).sort((a, b) => a.sequence - b.sequence);
     assert.throws(() => db.$client.exec("UPDATE runs SET sequence = 1 WHERE sequence = 2"), /UNIQUE/);
-    // Pre-upgrade shape: no sequence column, event ids that disagree with creation order, and runs without a run.started event.
     const swap = db.$client.prepare("UPDATE events SET id = ? WHERE id = ?");
     const eventId = (r) => db.$client.prepare("SELECT id FROM events WHERE run_id = ? AND type = 'run.started'").get(r.id).id;
     const [e1, e2] = [eventId(r1), eventId(r2)];
@@ -458,18 +443,15 @@ try {
     const { ensureRunSequences } = await f.app("startup.ts");
     assert.equal(ensureRunSequences(), 5);
     const order = () => all(s.runs).sort((a, b) => a.sequence - b.sequence).map((r) => r.id);
-    // Eventless runs first (by startedAt), then event order (r2's event now precedes r1's).
     assert.deepEqual(order(), [r4.id, r5.id, r2.id, r1.id, r3.id]);
     assert.deepEqual(all(s.runs).map((r) => r.sequence).sort(), [1, 2, 3, 4, 5]);
     const before = all(s.runs);
     assert.equal(ensureRunSequences(), 0); assert.deepEqual(all(s.runs), before);
     db.update(s.runs).set({ sequence: null }).where(eq(s.runs.id, r4.id)).run();
     assert.equal(ensureRunSequences(), 1); assert.equal(f.row(s.runs, r4.id).sequence, 6);
-    // Claims continue after the backfill.
     f.enqueue(1); assert.equal(tasks.claimTask().run.sequence, 7);
   } else if (scenario === "run_latest") {
     const { eq } = await import("drizzle-orm");
-    // Issue-review baseline: the later claim is latest even when its startedAt is earlier.
     changeMain("src/helper.ts", "export const helper = 1;\n");
     f.addIssue(1); await route(); const first = await success(); assert.ok(first.result.paths.includes("src/app.ts"));
     f.enqueue(1); f.reset(1, "helper");
@@ -479,7 +461,6 @@ try {
     await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
     changeMain("src/helper.ts", "export const helper = 2;\n"); await route();
     assert.ok(all(s.tasks).some((t) => t.action === "review_issue" && t.status === "queued"), "The latest claimed review is the baseline");
-    // Pi session continuation follows claim order in a workspace, not timestamps.
     f.addIssue(2, ["scrat"]); f.enqueue(2, "implement"); const implemented = await success();
     const prItem = all(s.items).find((i) => i.kind === "pr");
     const feedback = async () => { tasks.enqueueTask({ itemId: prItem.id, action: "address_pr_feedback", reason: "Reply", input: {} }); f.reset(202, "no-change"); return success(); };
@@ -585,12 +566,10 @@ try {
     const invalid = await run(); assert.match(invalid.error.message, /grade/i);
     assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
   } else if (scenario === "format_retry") {
-    // Implementation: a missing status line costs exactly one more request in the same session.
     f.addIssue(1, ["scrat"]); f.modes.set(1, "format-once"); f.enqueue(1, "implement");
     let before = f.requests.length; const implemented = await success();
     assert.equal(f.requests.length - before, 3);
     assert.equal(implemented.result.outcome, "complete");
-    // Panel: the first review is the baseline request count per model and consolidation.
     const reviewCounts = () => {
       const counts = {};
       for (const r of f.requests.filter((r) => r.context.action === "review_pr")) { const k = `${r.request.model}/${r.consolidating}`; counts[k] = (counts[k] ?? 0) + 1; }
@@ -608,11 +587,9 @@ try {
       assert.ok(reviewed.result.paths.includes("src/app.ts"));
       assert.ok(reviewed.reviewers.every((r) => !r.error));
     }
-    // Exhausted corrections fail after the cap: one tool request, one answer, two corrections.
     f.addIssue(2); f.modes.set(2, "no-status"); f.enqueue(2, "implement");
     before = f.requests.length; const stuck = await run();
     assert.match(stuck.error.message, /SCRAT_STATUS/); assert.equal(f.requests.length - before, 4);
-    // Declared outcomes are valid answers and are never corrected.
     for (const [i, mode] of ["incomplete", "needs_decision"].entries()) {
       f.addIssue(i + 3); f.modes.set(i + 3, mode); f.enqueue(i + 3, "implement");
       before = f.requests.length; const r = await run(); assert.ok(r.error);
@@ -638,7 +615,6 @@ try {
     assert.match(failed.error.stderr, /Verification failed/);
     assert.ok(!JSON.stringify(failed.error).includes("ghs_fixture_sensitive"));
   } else if (scenario === "working_notes") {
-    // Change sessions are told to keep notes in their workspace; the shared exclude keeps them out of the commit. Reviews cannot write, so get no such rule.
     f.addIssue(1, ["scrat"]); f.modes.set(1, "notes"); f.enqueue(1, "implement"); const r = await success();
     const notes = resolve(f.row(s.workspaces, r.workspaceId).path, ".scrat/notes.md");
     const system = ({ request }) => JSON.stringify(request.messages.filter((m) => m.role === "system" || m.role === "developer"));
@@ -653,7 +629,6 @@ try {
     const reviews = f.requests.filter((entry) => entry.context.action === "review_pr");
     assert.ok(reviews.length && reviews.every((entry) => !system(entry).includes(".scrat/notes.md")));
   } else if (scenario === "implement_base_moved") {
-    // The base carries a marker that fails validation, so the first attempt fails and its workspace is retained.
     changeMain("fail-validation", "fail\n"); const oldBase = git(resolve("remote.git"), "rev-parse", "main");
     f.addIssue(1); f.enqueue(1, "implement"); const failed = await run();
     f.addIssue(2); f.enqueue(2, "implement"); const overlapping = await run();
@@ -665,7 +640,6 @@ try {
     assert.equal(retried.retryOfRunId, failed.id); assert.equal(retried.mainSha, base);
     assert.equal(git(resolve("remote.git"), "rev-parse", `${retried.publication.publishedCommitSha}^`), base, "The retry commits on the current base");
     assert.equal(f.prs.length, 1); assert.equal(f.row(s.workspaces, retried.workspaceId).baseSha, base);
-    // Work that overlaps the base's newer changes is not moved: the retry keeps its old base (and its marker) and fails as before.
     changeMain("src/app.ts", "export const value = 99;\n");
     const stuck = f.row(s.workspaces, overlapping.workspaceId);
     tasks.retryTask(overlapping.taskId); const kept = await run();
@@ -679,7 +653,6 @@ try {
     assert.ok(failed.error); assert.equal(failed.stage, "validating");
     const calls = f.requests.length;
     assert.equal(readFileSync("prepare.log", "utf8").trim().split("\n").length, 2);
-    // Exercise the public CLI, including its persisted queue mode across processes.
     execFileSync(process.execPath, [resolve("app/src/retry.ts"), failed.taskId, "--validation-only"], { stdio: "pipe" });
     f.faults.pr.add(1); const publishing = await run();
     assert.equal(f.requests.length, calls, "Validation resume must not invoke Pi");
@@ -736,8 +709,6 @@ try {
     f.reset(1, "normal"); tasks.retryTask(first.taskId); const failed = await run();
     assert.equal(failed.retryOfRunId, first.id);
     const history = all(s.events);
-    // Rebuild only this disposable fixture's table: SQLite cannot DROP a
-    // column while its table-level foreign-key constraint still references it.
     const removed = ["agent_checkpoint", "inference_from_run_id"];
     const create = db.$client.prepare("SELECT sql FROM sqlite_master WHERE name = 'runs'").get().sql;
     const legacySql = create.split("\n").filter((line) => !removed.some((name) => line.includes("`" + name + "`"))).join("\n")
@@ -903,7 +874,6 @@ try {
   } else if (scenario === "merge") {
     const original = await implement(1); changeMain("src/app.ts", "export const value = 200;\n");
     await route(); f.modes.set(201, "merge-failure");
-    // Conflict repair and reviews share the item; explicitly take repair first here.
     const { eq } = await import("drizzle-orm");
     for (const t of all(s.tasks).filter((t) => t.action === "review_pr")) db.update(s.tasks).set({ status: "cancelled" }).where(eq(s.tasks.id, t.id)).run();
     const failed = await run(); assert.ok(failed.error);
@@ -936,7 +906,6 @@ try {
       branchOff("feature-b", "src/app.ts", "export const value = 7;\n");
       needs("needed.txt");
       changeMain("needed.txt", "ok\n");
-      // Behind and clean: reviewed through a throwaway merge, never pushed.
       addPr(301, "feature-a", "human"); await route();
       const heads = remoteGit("for-each-ref", "refs/heads"), realHead = remoteGit("rev-parse", "feature-a"), main1 = mainHead();
       const reviewed = await success();
@@ -955,7 +924,6 @@ try {
       assert.ok(all(s.workspaces).every((w) => w.removedAt), "review workspaces are cleaned up");
       assert.equal(git(checkout, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree ")).length, 1);
       f.prs[0].state = "closed"; await route();
-      // Behind and conflicting: a clear failure, no model and no push.
       changeMain("src/app.ts", "export const value = 9;\n");
       addPr(302, "feature-b", "human"); await route();
       const calls = f.requests.length, heads2 = remoteGit("for-each-ref", "refs/heads");
@@ -965,14 +933,12 @@ try {
       assert.equal(f.comments.get(302)?.length ?? 0, 0);
       assert.ok(all(s.workspaces).every((w) => w.removedAt));
       f.prs[1].state = "closed"; await route();
-      // Not behind: the preparation failure is reported as is.
       branchOff("feature-c", "src/c.ts", "export const c = 1;\n"); needs("needed4.txt");
       addPr(303, "feature-c", "human"); await route();
       const workspaces = all(s.workspaces).length, unmasked = await run();
       assert.match(unmasked.error.message, /ERR_MISSING needed4\.txt/); assert.equal(f.requests.length, calls);
       assert.equal(all(s.workspaces).length, workspaces + 1, "no synthetic workspace is made");
     } else {
-      // A Scrat PR that failed review preparation while behind is updated in code, then reviewed again.
       await implement(1); await route(); drainExcept(201);
       const pr = f.prs[0];
       needs("needed.txt"); changeMain("needed.txt", "ok\n");
@@ -992,7 +958,6 @@ try {
       await route(); assert.deepEqual(queuedFor(201), ["review_pr"], "the new head gets a fresh review and no further update");
       await success(); await route(); assert.deepEqual(queuedFor(201), []);
       assert.equal(all(s.tasks).filter((t) => t.action === "resolve_conflicts").length, 1);
-      // Validation failing after the code-only merge falls back to the agent in the same run.
       await implement(2); drainExcept(202);
       changeMain("bad.txt", "bad\n"); writeFileSync("require-validation", "");
       const fallback = tasks.enqueueTask({ itemId: prItem(202).id, action: "resolve_conflicts", reason: "Exercise fallback", input: {} });
@@ -1006,7 +971,6 @@ try {
       remoteGit("merge-base", "--is-ancestor", mainHead(), head2);
       assert.throws(() => remoteGit("cat-file", "-e", head2 + ":bad.txt"));
       unlinkSync("require-validation");
-      // A conflicting branch that cannot be prepared still reaches the agent (it merges before preparation).
       await implement(3); drainExcept(203);
       needs("needed2.txt"); changeMain("needed2.txt", "ok\n"); changeMain("src/app.ts", "export const value = 99;\n");
       tasks.enqueueTask({ itemId: prItem(203).id, action: "resolve_conflicts", reason: "Exercise bug fix", input: {} });
@@ -1016,7 +980,6 @@ try {
       assert.equal(parents(resolve("remote.git"), head3).length, 2);
       assert.equal(remoteGit("show", head3 + ":src/app.ts"), "export const value = 300;"); assert.equal(resolved.publication.publishedCommitSha, head3);
       assert.equal(remoteGit("log", "-1", "--format=%s", head3), f.prs[2].title, "A PR's commit keeps its title's single conventional prefix");
-      // Feedback on a behind, unpreparable Scrat PR merges the base first and ships it with its own push.
       await implement(4); drainExcept(204);
       needs("needed3.txt"); changeMain("needed3.txt", "ok\n");
       tasks.enqueueTask({ itemId: prItem(204).id, action: "address_pr_feedback", reason: "Exercise self-heal", input: {} });
@@ -1129,7 +1092,6 @@ try {
       await assert.rejects(fetchRepository(checkout, remote, "main"), /has origin .* not https:\/\/github\.com\/fixture\/project\.git/);
       assert.equal(git(checkout, "rev-parse", "refs/remotes/origin/main"), before);
     }
-    // The shared lock helper: same-key work never overlaps, and a failure does not block the next caller.
     const { serialized } = await f.app("single-flight.ts");
     const locks = new Map(), order = []; let release;
     const first = serialized(locks, "k", async () => { order.push("start1"); await new Promise((done) => { release = done; }); order.push("end1"); });
@@ -1200,7 +1162,6 @@ try {
     assert.equal(f.comments.get(201).length, 2); assert.match(f.comments.get(201)[1].body, /Implemented the change/);
     await route(); assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 0, "A reply-only repair leaves the assessment current and cannot retrigger");
     assert.equal(repairs(201).length, 1); assert.equal(count(201), 1);
-    // Had that been the last allowed repair, the unchanged low grade is marked without waiting for another review.
     db.$client.prepare("update items set self_repair_count = 2 where id = ?").run(prItem(201).id); await route();
     assert.ok(f.prs.find((pr) => pr.number === 201).labels.some((label) => label.name === "Scrat repair exhausted"), "A last repair that changed nothing still marks the PR");
     await implement(2); await review(202, "normal"); await route(); assert.equal(repairs(202).length, 0, "Grade B does not trigger");
@@ -1235,14 +1196,12 @@ try {
     tasks.cancelQueuedTasks(prItem(205).id, "Drain"); await implement(6); await review(206, "grade-C"); await route(); assert.equal(repairs(206)[0].status, "queued");
     f.comments.set(206, [{ id: 9200, body: "Please rename it", user: { login: "human" }, updated_at: "2026-10-19T01:00:00Z", html_url: "https://github.com/fixture/project/pull/206#comment" }]);
     await route(); assert.equal(repairs(206)[0].status, "cancelled", "Human feedback arriving later cancels the queued repair");
-    // A queued or running review cancels a queued repair at sync time.
-    for (const pr of f.prs) pr.state = "closed"; // retire earlier PRs so their leftovers cannot be claimed
+    for (const pr of f.prs) pr.state = "closed";
     await route(); await implement(7); await review(207, "grade-C"); await route();
     assert.equal(repairs(207)[0].status, "queued");
     tasks.enqueueManualTasks("review_pr", ["207"]); await route();
     assert.equal(repairs(207)[0].status, "cancelled", "A queued review cancels the queued repair");
     f.prs.find((pr) => pr.number === 207).state = "closed"; await route();
-    // A repair whose review was superseded before a worker claimed it must fail without a model call or push.
     await implement(8); const graded8 = await review(208, "grade-C"); await route();
     const repair8 = repairs(208)[0]; assert.equal(repair8.status, "queued"); assert.equal(repair8.input.assessmentRunId, graded8.id);
     tasks.enqueueManualTasks("review_pr", ["208"]); f.reset(208, "grade-A");
@@ -1253,7 +1212,6 @@ try {
     const superseded = await run(); assert.equal(superseded.taskId, repair8.id); assert.equal(superseded.error.message, guarded);
     assert.equal(f.requests.length, modelCalls, "no model call"); assert.equal(head208(), headBefore, "no push");
     assert.equal(f.row(s.tasks, repair8.id).status, "failed");
-    // A repair whose PR head moved after it was queued fails the same way.
     await implement(9); await review(209, "grade-C"); await route();
     const repair9 = repairs(209)[0]; assert.equal(repair9.status, "queued");
     const branch9 = f.prs.find((pr) => pr.number === 209).head.ref;
@@ -1327,7 +1285,6 @@ try {
     const count = (since, pattern) => reads(since).filter((call) => pattern.test(call.path)).length;
     let since = f.calls.length;
     await route();
-    // One observation per PR (four concurrent reads, none repeated by reconciliation); issues reuse list metadata.
     for (const number of [201, 202]) {
       assert.equal(count(since, new RegExp(`/pulls/${number}$`)), 1);
       assert.equal(count(since, new RegExp(`/issues/${number}/comments`)), 1);
@@ -1337,18 +1294,15 @@ try {
       assert.equal(count(since, new RegExp(`/issues/${number}$`)), 0);
       assert.equal(count(since, new RegExp(`/issues/${number}/comments`)), 1);
     }
-    // Nothing changed: every read is a conditional request answered 304.
     since = f.calls.length; await route();
     assert.ok(reads(since).length >= 12);
     assert.deepEqual(reads(since).filter((call) => call.status !== 304), []);
     const remaining = f.rate.remaining; await route(); assert.equal(f.rate.remaining, remaining, "304s do not consume the rate limit");
-    // A comment added between syncs is seen; unchanged resources stay cached.
     f.comments.set(202, [{ id: 900, body: "Please rename this", user: { login: "human" }, updated_at: "2026-10-19T02:00:00Z", html_url: "https://github.com/fixture/project/pull/202#c900" }]);
     since = f.calls.length; await route();
     assert.equal(reads(since).find((call) => call.path.includes("/issues/202/comments")).status, 200);
     assert.equal(reads(since).find((call) => call.path.includes("/issues/201/comments")).status, 304);
     assert.ok(all(s.tasks).some((task) => task.action === "address_pr_feedback" && f.row(s.items, task.itemId).payload.number === 202));
-    // A full page is never served from cache: the 101st comment must appear even though page one is byte-identical.
     const comment = (id) => ({ id, body: "c" + id, user: { login: "human" }, updated_at: "2026-10-19T02:00:00Z", html_url: "https://github.com/fixture/project/issues/10#c" + id });
     f.comments.set(10, Array.from({ length: 100 }, (_, i) => comment(1000 + i)));
     const github = new GitHubRepository("fixture/project");
@@ -1360,13 +1314,11 @@ try {
     since = f.calls.length;
     assert.equal((await github.fetchItemContext("issue", 10, { item: f.issues.get(10) })).comments.length, 101);
     assert.deepEqual(reads(since).map((call) => call.status), [200, 304]);
-    // Low rate-limit headroom defers item reads but still lists, and recovers when the window has room.
     f.rate.remaining = 100; since = f.calls.length; await route();
     assert.equal(count(since, /\/comments|\/reviews|\/pulls\/\d+$/), 0);
     assert.ok(count(since, /\/issues\?/) > 0);
     f.rate.remaining = 5000; since = f.calls.length; await route();
     assert.ok(count(since, /\/issues\/10\/comments/) > 0);
-    // One failing read of a PR's four concurrent reads fails the sync, leaves no read running, and the next sync recovers.
     {
       const original = globalThis.fetch;
       let active = 0, failing = true;
@@ -1387,7 +1339,6 @@ try {
         failing = false; await route();
       } finally { globalThis.fetch = original; }
     }
-    // A worker publishing while sync holds a PR's observation cannot be missed or duplicated.
     const fetch = globalThis.fetch;
     let blocked, release;
     const held = new Promise((done) => { blocked = done; }), released = new Promise((done) => { release = done; });
@@ -1400,7 +1351,6 @@ try {
     try {
       const syncing = route(); await held;
       const working = run();
-      // Wait until the worker has its result and is heading for publication, which must queue behind sync's lock.
       while (!all(s.runs).some((r) => r.result && !r.finishedAt)) await new Promise((done) => setTimeout(done, 10));
       for (let turn = 0; turn < 50; turn++) await new Promise((done) => setImmediate(done));
       release();
@@ -1466,12 +1416,10 @@ try {
         assert.equal(validations(), 3); assert.equal(feedbackRequests().length, 2);
         assert.equal(lines.filter((line) => line.event === "pi.validation_retry").length, 2);
         assert.match(lastUser(feedbackRequests()[1]), /round 2 of 2/);
-        // A signal-killed command is infrastructure: no feedback, and validation-only retry stays the remedy.
         writeFileSync("kill-validation", ""); f.addIssue(2, ["scrat"]); f.enqueue(2, "implement");
         const calls = f.requests.length, before = validations(), killed = await run();
         assert.ok(killed.error); assert.equal(killed.error.name, "Error"); assert.equal(killed.error.exitCode, undefined); assert.equal(killed.stage, "validating");
         assert.equal(validations(), before + 1); assert.equal(f.requests.length, calls + 2, "agent turn only"); assert.equal(feedbackRequests().length, 2);
-        // So is a wrapper's 128+n exit for a killed child (pnpm reporting an OOM kill).
         rmSync("kill-validation"); writeFileSync("exit-137", ""); f.addIssue(3, ["scrat"]); f.enqueue(3, "implement");
         const wrapped = await run();
         assert.equal(wrapped.error.exitCode, 137); assert.equal(f.requests.length, calls + 4, "agent turn only"); assert.equal(feedbackRequests().length, 2);
@@ -1503,7 +1451,6 @@ try {
     let nohup, background, foreground, nohupSeen, backgroundSeen;
     try { nohup = await attempt(1, "heavy"); nohupSeen = toolResults(); background = await attempt(2, "heavy-bg"); backgroundSeen = toolResults(); foreground = await attempt(3, "heavy-fg"); } finally { fs.writeSync = write; }
     const workspaceOf = (r) => f.row(s.workspaces, r.workspaceId).path;
-    // A backgrounded heavy command is refused (it would escape its slot) and never runs; the refusal reaches the model.
     assert.ok(nohup.error);
     const failed = lines.find((line) => line.event === "pi.tool_failed");
     assert.ok(failed && failed.tool === "bash" && /pnpm verify/.test(failed.command) && /foreground/.test(failed.error), JSON.stringify(failed));
@@ -1513,7 +1460,6 @@ try {
     assert.ok(!existsSync(resolve(workspaceOf(background), ".scrat/heavy-bg")), "the backgrounded command must not run");
     assert.equal(lines.filter((line) => line.event === "pi.command_blocked").length, 2);
     assert.equal(lines.filter((line) => line.event === "pi.heavy_command" && /heavy-bg/.test(line.command)).length, 0);
-    // A foreground match runs inside a validation slot.
     assert.equal(foreground.error, null, JSON.stringify(foreground.error));
     assert.ok(existsSync(resolve(workspaceOf(foreground), ".scrat/heavy-fg")));
     const queued = lines.filter((line) => line.event === "pi.heavy_command");
@@ -1533,13 +1479,11 @@ try {
     config.harness.maxConcurrentValidations = 2;
     for (const r of await both(3)) assert.equal(r.error, null, JSON.stringify(r.error));
     const parallel = intervals(2); assert.equal(parallel.length, 2); assert.ok(parallel[1].s < parallel[0].e, "two slots overlap validations");
-    // A failing validation must hand its slot back: the failed run holds it for three attempts, then the next run still gets it.
     config.harness.maxConcurrentValidations = 1; writeFileSync("slot-fail", "");
     f.addIssue(5, ["scrat"]); f.enqueue(5, "implement"); assert.equal((await run()).error.exitCode, 7);
     unlinkSync("slot-fail"); f.addIssue(6, ["scrat"]); f.enqueue(6, "implement");
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("validation slot was not released")), 30_000));
     assert.equal((await Promise.race([run(), timeout])).error, null);
-    // A caller that aborts while queued leaves the line: it never runs, and the slot passes to the next waiter.
     const { withValidationSlot } = await f.app("commands.ts");
     let release; const holder = withValidationSlot(() => new Promise((done) => { release = done; }));
     const controller = new AbortController(), ran = [];
@@ -1549,7 +1493,6 @@ try {
     await assert.rejects(aborted, /cancelled/); release(); await holder; await next;
     assert.deepEqual(ran, ["next"]);
   } else if (scenario === "config_overrides") {
-    // Module load reads the overrides, so each case runs in a fresh process against the app copy.
     const local = resolve("app/scrat.local.json");
     const probe = (overrides, code) => {
       if (overrides === undefined) rmSync(local, { force: true }); else writeFileSync(local, JSON.stringify(overrides));

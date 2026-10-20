@@ -15,7 +15,6 @@ import { serialized } from "./single-flight.ts";
 
 type Run = typeof runs.$inferSelect;
 type Task = typeof tasks.$inferSelect;
-// One serve process owns delivery; serialize its poller and worker calls per PR.
 const pendingReviews = new Map<string, Promise<unknown>>();
 
 function reviewBody(text: string, taskId: string) {
@@ -25,8 +24,6 @@ function reviewBody(text: string, taskId: string) {
 function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeof prReviewHistory>) {
   const issueComments = own.filter(isIssueComment);
   for (const { run, task } of reviews) {
-    // Receipts identify physical comments, not assessment authority. Recover lost
-    // responses only from a complete rendered report, never a quoted marker.
     const existing = issueComments.findLast((comment) => comment.id === issueCommentId(run.publication.commentId)
       || (run.result && comment.body === reviewBody(run.result.text, task.id)));
     if (existing) return existing;
@@ -46,8 +43,6 @@ async function reconcile(github: GitHubRepository, itemId: string, number: numbe
   const body = desired ? reviewBody(desired.result.text, desired.task.id) : undefined;
   const replacing = desired && existing?.body !== body;
   if (!desired || replacing) {
-    // GitHub cannot atomically replace a report and its grade. Prefer no grade
-    // over a grade attached to the wrong report if either write fails.
     await reconcileLabels(github, number, { current: labels, desired: [], managed: Object.values(gradeLabels) }, deliveryReferences);
     const managed = new Set<string>(Object.values(gradeLabels).map((name) => name.toLowerCase()));
     labels = labels.filter((label) => !managed.has(label.toLowerCase()));
@@ -71,14 +66,11 @@ async function reconcile(github: GitHubRepository, itemId: string, number: numbe
     .where(eq(runs.id, publication.run.id)).run();
 }
 
-// Runs `work` as the only operation on this PR's review state. Work already inside the lock must call
-// reconcileObserved, never reconcilePrReview, or it would wait on itself.
 export const serializePr = <T>(github: GitHubRepository, number: number, work: () => Promise<T>) =>
   serialized(pendingReviews, `${github.repository}#${number}`, work);
 
 export const reconcilePrReview = (github: GitHubRepository, itemId: string, number: number, references: EventReferences = {}, publication?: { task: Task; run: Run }) =>
   serializePr(github, number, () => reconcile(github, itemId, number, references, publication));
 
-// Reconcile from an observation taken inside the already-held lock, saving a second read of the PR.
 export const reconcileObserved = (github: GitHubRepository, itemId: string, number: number, references: EventReferences, current: GithubContext) =>
   reconcile(github, itemId, number, references, undefined, current);

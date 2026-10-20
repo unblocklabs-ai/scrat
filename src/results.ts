@@ -1,7 +1,6 @@
 import type { ErrorDetails } from "./errors.ts";
 import type { runs } from "./schema.ts";
 
-// Claiming and assessment provenance must agree on which retries copy inference.
 export function hasPublicationSnapshot(run: typeof runs.$inferSelect | undefined): run is typeof runs.$inferSelect & {
   result: AgentResult; context: NonNullable<typeof runs.$inferSelect.context>;
 } {
@@ -37,17 +36,14 @@ export type Reviewer = {
   error?: ErrorDetails;
 };
 
-// A footer the model can fix by resending its answer, as opposed to a failed run.
 export class ResultFormatError extends Error {
   readonly code = "SCRAT_FORMAT";
 }
 
-// A validation command that failed on the agent's changes, which the agent can fix in its own session.
 export class CheckFailure extends Error {
   readonly code = "CHECK_FAILED";
 }
 
-// Output that carried credential material; never handed to the agent to repair.
 export class SecretLeakError extends Error {
   readonly code = "SECRET_IN_OUTPUT";
 }

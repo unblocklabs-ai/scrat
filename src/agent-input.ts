@@ -41,7 +41,6 @@ export async function buildAgentInput(options: {
   mainSha: string; headSha: string; baseRef: string; mergeInProgress: boolean;
   workspace: { path: string; branch: string | null };
   database?: Record<string, unknown>;
-  // Redacted details of a failed validation of Scrat's own code-only merge, handed to the agent that repairs it.
   validationFailure?: ErrorDetails;
 }) {
   const { run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha } = options;
@@ -49,7 +48,6 @@ export async function buildAgentInput(options: {
   delete input.manual;
   const changedPaths = Array.isArray(input.changedPaths) ? input.changedPaths.filter((path: unknown) => typeof path === "string") : [];
   if (changedPaths.length > inlineDiffPaths) { delete input.changedPaths; input.changedPathCount = changedPaths.length; }
-  // Larger context lives beside, not inside, the worktree: `git add --all` would commit it.
   const contextDir = resolve("data/runs", run.id);
   await mkdir(contextDir, { recursive: true });
   const files: Record<string, string> = { directory: contextDir };

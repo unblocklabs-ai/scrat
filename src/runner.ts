@@ -26,7 +26,6 @@ type DatabaseConfig = NonNullable<NonNullable<typeof config.workspace>["database
 type Environment = Record<string, string | undefined>;
 type References = { itemId: string; taskId: string; runId: string };
 
-// A failed validation is sent back into the agent's session this many times before the run fails.
 const maxValidationCorrections = 2;
 
 const botAuthor = () => ({ name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com` });
@@ -36,7 +35,6 @@ async function prepareWorkspace(workspace: Workspace, environment: Environment, 
   if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, environment, references);
 }
 
-// A command that exits nonzero is the agent's to fix. One killed by a signal, or a wrapper's 128+n exit for one (an OOM kill, a timeout), is infrastructure: validation-only retry is its remedy.
 async function asCheckFailure<T>(fn: () => Promise<T>) {
   try { return await fn(); }
   catch (error) {
@@ -77,7 +75,6 @@ async function validateAndCommit(options: {
   await git(workspace.path, ["add", "--all"]);
   if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
   await assertNoCommittedSecrets(workspace, options.secretBaseSha, validationTree);
-  // PR titles already carry Scrat's conventional prefix; issue titles do not.
   const message = /^[a-z]+(\([^)]*\))?!?: /.test(options.title) ? options.title : `fix: ${options.title}`;
   const commitSha = await commitWorkspace(workspace, message, botAuthor(), references);
   if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
@@ -113,7 +110,6 @@ export async function runNextTask() {
     const gitEnvironment = await github.getGitEnvironment();
     const mainSha = await fetchRepository(repositoryPath, remote, baseBranch, gitEnvironment);
     if (run.stage !== "publishing") {
-      // A repair is queued from one assessment; a newer review or a moved head must not let it run and push.
       if (task.action === "address_review") {
         const state = await resolvePrReview(prReviewHistory(item.id), observation, mainSha);
         if (state.kind !== "current" || state.assessment.originId !== task.input.assessmentRunId) {
@@ -152,11 +148,8 @@ export async function runNextTask() {
       if (!readOnly && !mergeInProgress && !validationOnly) {
         if (pullRequest) await git(workspace.path, ["merge", "--ff-only", preparedHead]);
         else {
-          // A retained implementation that began on an older base moves up to the current one, keeping its uncommitted work,
-          // so its diff shows only its own changes. Work that overlaps the base's changes stays where it is.
           try {
             await git(workspace.path, ["merge", "--ff-only", preparedHead]);
-            // Without commits of its own the workspace now sits on the new base; cleanup compares HEAD to it.
             if (await git(workspace.path, ["rev-parse", "HEAD"]) === preparedHead) {
               db.update(workspaces).set({ baseSha: preparedHead }).where(eq(workspaces.id, workspace.id)).run();
             }
@@ -165,7 +158,6 @@ export async function runNextTask() {
           }
         }
       }
-      // The head before any merge Scrat makes here: the base for scanning committed content for secrets.
       const startHeadSha = await git(workspace.path, ["rev-parse", "HEAD"]);
       let headSha = startHeadSha;
       if (!validationOnly) db.update(runs).set({ workspaceId: workspace.id, mainSha, headSha }).where(eq(runs.id, run.id)).run();
@@ -182,7 +174,6 @@ export async function runNextTask() {
       let result = run.result;
       const validate = (target: Workspace, kind: "conflict-free" | "nonempty-diff" | "complete") => validateAndCommit({
         run, workspace: target, validationOnly, title: context.item.title, commandEnvironment, databaseConfig, references,
-        // A validation-only retry keeps the original run's pre-agent head.
         secretBaseSha: validationOnly ? run.headSha ?? baseRef : startHeadSha,
         acceptance: { kind, repositoryPath, mainSha, baseRef },
       });
@@ -197,9 +188,7 @@ export async function runNextTask() {
         let { diffBaseSha } = scope;
         const evaluated = evaluateContext(run, task, observation);
         db.update(runs).set({ context: evaluated }).where(eq(runs.id, run.id)).run();
-        // Conflict repair merges first (in code or by the agent), so its branch is prepared only afterwards.
         const preparationDeferred = mergeInProgress || Boolean(run.retryOfRunId) || task.action === "resolve_conflicts";
-        // A fresh repair of a branch that is merely behind needs no model: merge in code and validate.
         if (contract.mode === "change" && task.action === "resolve_conflicts" && !mergeInProgress && !run.retryOfRunId
           && await behindCleanly(repositoryPath, mainSha, headSha)) {
           await mergeBase(workspace.path, mainSha, `Merge ${baseBranch} into ${pullRequest!.head.ref}`, botAuthor());
@@ -210,7 +199,6 @@ export async function runNextTask() {
             await validate(workspace, contract.acceptance);
             validated = true;
           } catch (error) {
-            // A failing check or a tree that still conflicts is the agent's to repair in this run; infrastructure failures are not, so they fail the run.
             if (!(error instanceof CheckFailure) && !(error instanceof Error && error.message === unresolvedConflict)) throw error;
             validationFailure = describeError(error instanceof CheckFailure ? error.cause : error);
           }
@@ -219,7 +207,6 @@ export async function runNextTask() {
           if (readOnly || !preparationDeferred) {
             try { await prepareWorkspace(workspace, commandEnvironment, databaseConfig, references); }
             catch (error) {
-              // A branch that cannot be prepared because it is behind its base is merged with the base and prepared once more.
               const humanReview = readOnly && context.item.user?.login !== config.github.botLogin;
               if (!pullRequest || !(humanReview || !readOnly) || await isAncestor(repositoryPath, mainSha, headSha)) throw error;
               if (await hasConflicts(repositoryPath, mainSha, headSha)) {
@@ -227,7 +214,6 @@ export async function runNextTask() {
                 throw new Error(`PR branch is behind ${baseBranch} and does not merge cleanly; the author needs to update it`);
               }
               if (readOnly) {
-                // Human branches are never pushed: review a throwaway merge commit that is the workspace's own base.
                 const synthetic = await createMergeCommit(repositoryPath, mainSha, headSha, `Review merge of ${baseBranch} into the PR head`, botAuthor());
                 reviewWorkspace = undefined;
                 try { await removeWorkspace(workspace.id, references); }
@@ -237,7 +223,6 @@ export async function runNextTask() {
                 headSha = synthetic;
                 diffBaseSha = mainSha;
               } else {
-                // A merge that cannot start (e.g. a dirty retained workspace) keeps the original preparation error.
                 await mergeBase(workspace.path, mainSha, `Merge ${baseBranch} into ${pullRequest.head.ref}`, botAuthor()).catch(() => { throw error; });
                 headSha = await git(workspace.path, ["rev-parse", "HEAD"]);
               }
@@ -262,7 +247,6 @@ export async function runNextTask() {
       }
       if (!result) throw new Error("No saved agent result to validate");
       assertComplete(result);
-      // A repair that changed nothing (same head, no merge, clean tree) has nothing to prepare or validate; its reply publishes as is.
       const unchanged = !readOnly && !validated && !validationOnly && contract.mode === "change" && contract.acceptance === "complete"
         && startHeadSha === preparedHead && !mergeInProgress && await git(workspace.path, ["rev-parse", "HEAD"]) === startHeadSha
         && !await git(workspace.path, ["status", "--porcelain"]);
@@ -299,7 +283,6 @@ export async function runNextTask() {
     const current = observe(repository, publicationContext, headOverride);
     const currentMainSha = readOnly ? async () => run.stage === "publishing" ? mainSha
       : await fetchRepository(repositoryPath, remote, current.baseBranch, await github.getGitEnvironment()) : undefined;
-    // PR assessments are checked by the serialized reconciliation, not here.
     if (contract.publication === "pr-assessment") await currentMainSha?.();
     else {
       const state = await freshness(savedEvaluation(evaluatedRun), { ...current, mainSha: currentMainSha }, "relevant-paths", { unknownBase: "current" });

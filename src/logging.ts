@@ -42,9 +42,7 @@ type OperationScope = {
   operationId: string;
   log: typeof logger;
   stage(name: string): void;
-  // Merged into the `operation.failed` event alongside the last stage.
   failure(details: Record<string, unknown>): void;
-  // Callers log completion themselves, once, so early returns can report their own details.
   complete(details?: Record<string, unknown>): void;
 };
 

@@ -55,16 +55,11 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
     .flatMap((item) => [...(item.payload.body ?? "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi)]
       .map((match) => Number(match[1]))));
   let queued = 0, deferred = 0;
-  // Start each sync at a different item so a low budget never starves the same tail. Deferring a PR also defers its
-  // sync-driven reconciliation (worker publication reconciles on its own and is never deferred).
   const offset = current.length ? syncRound++ % current.length : 0;
   const ordered = [...current.slice(offset), ...current.slice(0, offset)];
-  // Issue metadata is already fresh from this sync's list response; only the discussion is read, up to four at a time.
-  // PR contexts are read one at a time inside each PR's review lock.
   const reviewable = ordered.filter((item) => item.state === "open" && item.kind === "issue" && !hasScratLabel(item));
   const contexts = await github.fetchItemContexts(reviewable.map((item) => ({ kind: "issue", number: item.payload.number, item: item.payload })), { defer: true });
   const issueContexts = new Map(reviewable.map((item, index) => [item.id, contexts[index]]));
-  // Routes one open item from an observation; for a PR the caller holds its review lock.
   const routeObserved = async (item: Item, context: GithubContext) => {
     let mainSha = defaultBaseSha, added = 0;
     if (context.item.state !== "open") return added;
@@ -118,10 +113,8 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
           log.info({ event: "self_repair.limit_reached", itemId: item.id, limit: maxSelfRepairs }, "Self-repair limit reached");
         }
         added += applyDecisions(item.id, repair.decisions);
-        // Marks a PR whose current review still grades low once its repairs are used up and none is in flight
-        // (including a last repair that changed nothing); a stale review keeps the label until it is re-reviewed.
         const { exhaustedLabel } = config.actions.address_review;
-        const latestRepair = latestTask(item.id, "address_review"); // after this pass's decisions, which may have just queued one
+        const latestRepair = latestTask(item.id, "address_review");
         const repairActive = latestRepair?.status === "queued" || latestRepair?.status === "running";
         if (exhaustedLabel && owned && state.kind === "current" && !repairActive) {
           const exhausted = lowGrades.includes(state.assessment.result.grade) && count >= maxSelfRepairs;
@@ -155,7 +148,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
           const related = db.select().from(items).where(eq(items.workspaceId, workspace.id)).all();
           for (const linked of related) cancelQueuedTasks(linked.id, "PR merged or closed");
           try { await removeWorkspace(workspace.id, { itemId: item.id }); }
-          catch { /* Cleanup logs the failure and retains the work; keep routing unrelated items. */ }
+          catch { }
         }
       }
       continue;
@@ -179,8 +172,6 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       if (context) queued += await routeObserved(item, context);
       else deferred++;
     } else {
-      // One observation per sync, taken inside the PR's lock: reconciliation reuses it, so a comment
-      // published by a worker meanwhile cannot be missed. Workers wait on the lock, never the reverse.
       queued += await serializePr(github, item.payload.number, async () => {
         if (rateLimitLow()) { deferred++; return 0; }
         return routeObserved(item, await github.fetchItemContext("pr", item.payload.number));

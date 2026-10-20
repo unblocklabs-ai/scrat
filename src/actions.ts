@@ -1,9 +1,6 @@
 export const actionIds = ["review_issue", "review_pr", "implement", "resolve_conflicts", "address_pr_feedback", "address_review"] as const;
 export type Action = typeof actionIds[number];
 
-// Safety policy belongs in code; prompts, models and priorities remain config.
-// Review mode implies a temporary workspace and no code publication. Change mode
-// implies a retained workspace and exact-tree validation before publication.
 type ActionContract =
   | { mode: "review"; agent: "single"; publication: "issue-assessment"; context: "all" }
   | { mode: "review"; agent: "panel"; publication: "pr-assessment"; context: "all" }

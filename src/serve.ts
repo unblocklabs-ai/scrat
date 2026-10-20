@@ -7,7 +7,6 @@ import { runNextTask } from "./runner.ts";
 import { prepareService } from "./startup.ts";
 import { signalWork, waitForWork, workGeneration } from "./work-signal.ts";
 
-// Other processes (enqueue, retry) cannot signal this one, so idle workers also re-check periodically.
 const idleWorkerFallbackMs = 30_000;
 const shutdown = new AbortController();
 const wait = (ms: number) => setTimeout(ms, undefined, { signal: shutdown.signal }).catch((error: unknown) => {
@@ -22,7 +21,7 @@ async function poll() {
     await wait(config.github.fetchIntervalSeconds * 1000);
     if (shutdown.signal.aborted) break;
     try { await syncGitHub(); signalWork(); }
-    catch { /* sync owns its failure log; the next poll can recover. */ }
+    catch { }
   }
 }
 async function worker() {
@@ -38,9 +37,8 @@ async function worker() {
 try {
   await prepareService();
   logger.info({ event: "worker.started", concurrency: config.harness.maxConcurrency });
-  // Discover all priorities before the first claims, rather than starting with a partial queue.
   try { await syncGitHub(); }
-  catch { /* Keep the worker available for persisted tasks and the next poll. */ }
+  catch { }
   await Promise.all([poll(), ...Array.from({ length: config.harness.maxConcurrency }, worker)]);
 } catch (error) {
   logger.error({ err: error, event: "serve.failed" }, "Serve failed");

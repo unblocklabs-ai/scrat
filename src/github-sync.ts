@@ -11,13 +11,11 @@ import { withOperation } from "./logging.ts";
 import { githubSnapshots, items } from "./schema.ts";
 import type { GithubContext } from "./github-types.ts";
 
-// Raw snapshots are diagnostic only (about 4 h at the default poll); bound them so the SQLite file and its backups stay small.
 const snapshotsKept = 48;
 
 export async function syncGitHub(repository = config.github.repository, queueTasks = true) {
   return withOperation(queueTasks ? "github.sync" : "github.fetch", { repository }, async (operation) => {
     operation.stage("repository");
-    // Before any read or write; inside the operation so the CLI's silent catch still leaves a log.
     assertConfiguredRepository(repository);
     operation.stage("fetch");
     const previousItems = db.select().from(items).where(eq(items.source, "github")).all()
@@ -41,7 +39,6 @@ export async function syncGitHub(repository = config.github.repository, queueTas
       operation.stage("reconcile_closed");
       const openIds = new Set([...issues, ...pullRequests].map((payload) => payload.node_id));
       const missing = previousItems.filter((item) => item.state === "open" && !openIds.has(item.externalId));
-      // One unreadable item must not stop routing: 404/410 means it is gone; any other failure is retried next sync.
       const reads = new Array<PromiseSettledResult<GithubContext>>(missing.length);
       let next = 0;
       await Promise.all(Array.from({ length: Math.min(4, missing.length) }, async () => {

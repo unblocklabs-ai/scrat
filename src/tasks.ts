@@ -12,14 +12,11 @@ import { hasPublicationSnapshot, hasValidationCheckpoint } from "./results.ts";
 import { items, runs, tasks } from "./schema.ts";
 import { signalWork } from "./work-signal.ts";
 
-// An unsequenced run sorts first so damage is seen instead of silently skipped.
 function latestRun(taskId: string, database: Pick<typeof db, "select">) {
   return database.select().from(runs).where(eq(runs.taskId, taskId))
     .orderBy(sql`${runs.sequence} is null desc`, desc(runs.sequence)).limit(1).get();
 }
 
-// Pure and non-throwing for task-specific faults, so one damaged task cannot stall the queue; add new reasons here.
-// Infrastructure errors from the reads below still propagate and never reject a task.
 const isKnownAction = (action: string): action is Action => (actionIds as readonly string[]).includes(action);
 
 function checkClaimable({ task, item }: { task: typeof tasks.$inferSelect; item: typeof items.$inferSelect }, database: Pick<typeof db, "select">) {
@@ -44,8 +41,6 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
       const previous = transaction.select().from(tasks).where(and(
         eq(tasks.itemId, task.itemId), eq(tasks.action, task.action), eq(tasks.status, "queued"),
       )).get();
-      // Coalescing replaces input. A queued manual task keeps its mark so routing cannot later cancel it;
-      // a manual enqueue keeps the queued task's routing fields and adds the mark.
       const input = task.input.manual === true && previous ? { ...previous.input, ...task.input, manual: true }
         : previous?.input.manual === true ? { ...task.input, manual: true } : task.input;
       const queuedTask = transaction.insert(tasks).values({ ...task, input, priority: task.priority ?? config.actions[task.action].priority }).onConflictDoUpdate({
@@ -88,8 +83,6 @@ const issueActions: ReadonlySet<string> = new Set(["review_issue", "implement"])
 
 type ManualEnqueueResult = { target: string; number?: number; itemId?: string; taskId?: string; error?: string };
 
-// Targets are PR/issue numbers in the configured repository or internal item ids. Tasks are marked
-// `input.manual` so sync routing never cancels them; only item closure does.
 export function enqueueManualTasks(action: string, targets: string[], priority?: number): ManualEnqueueResult[] {
   if (!isKnownAction(action)) throw new Error(`Unknown action: ${action}; expected one of ${actionIds.join(", ")}`);
   if (action === "address_review") throw new Error("address_review needs a review assessment and is queued automatically by sync");
@@ -220,7 +213,6 @@ export function finishRun(runId: string, outcome: { status: "completed" } | { st
   return finished;
 }
 
-// Routing passes `keepManual`; item closure cancels everything.
 export function cancelQueuedTasks(itemId: string, reason: string, action?: typeof tasks.$inferSelect.action, keepManual = false) {
   return db.transaction((transaction) => {
     const cancelled = transaction.update(tasks).set({ status: "cancelled" }).where(and(

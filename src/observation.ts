@@ -22,7 +22,6 @@ export type ItemObservation = {
   external: GithubComment[]; own: GithubComment[]; labels: string[];
 };
 
-// `headSha` replaces the PR head in the revision, for change runs whose own commits move it.
 export function observe(repository: string, context: GithubContext, headSha?: string): ItemObservation {
   const pullRequest = "head" in context.item ? context.item : undefined;
   const item = pullRequest && headSha ? { ...pullRequest, head: { ...pullRequest.head, sha: headSha } } : context.item;

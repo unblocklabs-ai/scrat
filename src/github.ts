@@ -17,15 +17,12 @@ const permissions = {
   contents_read: { contents: "read", metadata: "read" },
   contents_write: { contents: "write", metadata: "read" },
 } as const;
-// Read responses keyed by full request URL (query included). The cache lives outside the clients so it
-// survives hourly token rotation; if GitHub rejects the old ETag for a new token it simply answers 200.
 const etags = new Map<string, { etag: string; body: string; headers: [string, string][] }>();
-const maxCachedResponses = 2000, maxCachedChars = 64 * 1024 * 1024; // UTF-16 characters of body text, not exact bytes
+const maxCachedResponses = 2000, maxCachedChars = 64 * 1024 * 1024;
 let cachedChars = 0;
 const rateLimit = { remaining: Infinity, limit: 5000, reset: 0 };
 let authenticate: ReturnType<typeof createAppAuth> | undefined;
 
-// Below a tenth of the installation allowance, sync defers non-essential reads until the window resets.
 export function rateLimitLow() {
   return Date.now() < rateLimit.reset * 1000 && rateLimit.remaining < rateLimit.limit * 0.1;
 }
@@ -36,8 +33,6 @@ function forget(key: string) {
   if (old) { cachedChars -= old.body.length; etags.delete(key); }
 }
 
-// A 304 is answered from the cached 200 of the identical URL, so Octokit (and its retry plugin) never sees an error.
-// Page-sized arrays are never cached: a full page's body can stay unchanged while its Link header gains a next page.
 async function conditionalFetch(input: string | URL | Request, init: RequestInit = {}) {
   const key = typeof input === "string" && (init.method ?? "GET") === "GET" ? input : undefined;
   const hit = key ? etags.get(key) : undefined;
@@ -53,7 +48,7 @@ async function conditionalFetch(input: string | URL | Request, init: RequestInit
   }
   if (!key) return response;
   if (response.status === 304 && hit) {
-    const merged = new Headers(hit.headers); // stored without content-length/-encoding: the replayed body is decoded text
+    const merged = new Headers(hit.headers);
     for (const name of ["x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-used", "x-ratelimit-resource"]) {
       const value = response.headers.get(name);
       if (value) merged.set(name, value);
@@ -68,9 +63,9 @@ async function conditionalFetch(input: string | URL | Request, init: RequestInit
     try {
       const data: unknown = JSON.parse(body);
       full = Array.isArray(data) && data.length >= Number(new URL(key).searchParams.get("per_page") ?? 30);
-    } catch { /* not JSON */ }
+    } catch { }
     if (!full && body.length <= maxCachedChars) {
-      forget(key); // a concurrent request for this URL may have stored an entry while we awaited
+      forget(key);
       etags.set(key, { etag, body, headers: [...response.headers].filter(([name]) => name !== "content-length" && name !== "content-encoding") });
       cachedChars += body.length;
       for (const [oldest] of etags) {
@@ -88,7 +83,6 @@ async function githubForRepository(repository: string, access: keyof typeof perm
   const [owner, repo] = repository.split("/");
   const key = `${repository}:${access}`;
   const refresh = clients.get(key)?.invalid ?? false;
-  // Retain Octokit's scoped token cache and concurrent-auth deduplication.
   authenticate ??= createAppAuth({
     appId: config.github.appId,
     privateKey: process.env.GITHUB_APP_PRIVATE_KEY!,
@@ -101,19 +95,15 @@ async function githubForRepository(repository: string, access: keyof typeof perm
     permissions: permissions[access],
     refresh,
   });
-  // Other callers may have populated the client while authentication awaited.
   const cached = clients.get(key);
   if (cached?.token === token && !cached.invalid) return { github: cached.github, owner, repo, token };
   const github = new Octokit({
     auth: token,
-    // Cached clients must not retain the first caller's operation/run identity.
     log: logger.child({ component: "octokit", repository, access }),
     ...(access !== "read" ? { retry: { enabled: false }, throttle: { enabled: false } } : { request: { fetch: conditionalFetch } }),
   });
   const entry = { token, github, invalid: false };
   github.hook.error("request", (error) => {
-    // Recover on the next operation; never replay a possibly ambiguous write.
-    // An old client's failure cannot invalidate a replacement's credentials.
     if (errorStatus(error) === 401) entry.invalid = true;
     throw error;
   });
@@ -144,7 +134,6 @@ export class GitHubRepository {
 
   async getGitEnvironment(write = false) {
     const { token } = await githubForRepository(this.repository, write ? "contents_write" : "contents_read");
-    // Repository hooks must never run with the installation token in their environment.
     return {
       ...childEnvironment(),
       GIT_TERMINAL_PROMPT: "0",
@@ -173,7 +162,6 @@ export class GitHubRepository {
     };
   }
 
-  // `item` reuses metadata that is already fresh (the sync's list response), leaving only the discussion to read.
   async fetchItemContext(kind: "issue" | "pr", number: number, { comments: withComments = true, item: known }: { comments?: boolean; item?: GithubItem } = {}): Promise<GithubContext> {
     const { github, owner, repo } = await githubForRepository(this.repository, "read");
     const when = <T>(enabled: boolean, read: () => Promise<T[]>) => enabled ? read() : Promise.resolve([] as T[]);
@@ -185,7 +173,6 @@ export class GitHubRepository {
       when(withComments && kind === "pr", () => github.paginate(github.rest.pulls.listReviewComments, { owner, repo, pull_number: number, per_page: 100 })),
       when(withComments && kind === "pr", () => github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: number, per_page: 100 })),
     ] as const;
-    // Settle every read even on error, so a failure leaves no background requests.
     for (const read of await Promise.allSettled(reads)) if (read.status === "rejected") throw read.reason;
     const [item, discussion, inline, reviews] = await Promise.all(reads);
     const comments: GithubComment[] = [
@@ -205,7 +192,6 @@ export class GitHubRepository {
     return { item, comments };
   }
 
-  // With `defer`, readers stop starting reads once the rate limit runs low; skipped entries stay undefined.
   async fetchItemContexts(items: readonly { kind: "issue" | "pr"; number: number; item?: GithubItem }[], options: { comments?: boolean; defer?: boolean } = {}) {
     const contexts = new Array<GithubContext | undefined>(items.length);
     let next = 0;
@@ -216,7 +202,6 @@ export class GitHubRepository {
         contexts[index] = await this.fetchItemContext(kind, number, { comments: options.comments, item });
       }
     }));
-    // Await all readers even on error, so a failed sync leaves no background reads.
     for (const worker of workers) if (worker.status === "rejected") throw worker.reason;
     return contexts;
   }
@@ -305,7 +290,6 @@ export class GitHubRepository {
             if (errorStatus(error) !== 404) throw error;
             const { data } = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
             if (data.labels.some((current) => labelName(current).toLowerCase() === label.toLowerCase())) throw error;
-            // Already absent: report a 404 with no event instead of a false removal.
             return { status: 404, headers: {} };
           }
         },

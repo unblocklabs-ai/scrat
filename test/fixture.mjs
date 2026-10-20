@@ -113,7 +113,10 @@ export async function fixture(scenario) {
     if (review && scenario === "scope_snapshots" && step === 1) tool = { name: "read", args: { path: " leading.ts" } };
     if (review && scenario === "scope_snapshots" && step === 2) tool = { name: "read", args: { path: "src/generated.ts" } };
     if (!review && step === 0 && mode !== "no-change") {
-      tool = mode === "merge-failure" ? { name: "bash", args: { command: `git -c user.name=Fixture -c user.email=fixture@example.invalid merge --no-commit ${git(resolve("seed"), "rev-parse", "main")}` } }
+      const mainSha = () => git(resolve("seed"), "rev-parse", "main");
+      tool = mode === "remove-bad" ? { name: "bash", args: { command: "rm -f bad.txt" } }
+        : mode === "resolve" ? { name: "bash", args: { command: `git -c user.name=Fixture -c user.email=fixture@example.invalid merge --no-commit ${mainSha()}; printf 'export const value = 300;\\n' > src/app.ts && git add src/app.ts` } }
+        : mode === "merge-failure" ? { name: "bash", args: { command: `git -c user.name=Fixture -c user.email=fixture@example.invalid merge --no-commit ${git(resolve("seed"), "rev-parse", "main")}` } }
         : context.database ? { name: "bash", args: { command: `${process.execPath} ${resolve("database-command.mjs")} query ${context.item.number}` } }
           : { name: "write", args: { path: "src/app.ts", content: `export const value = ${context.item.number + 10};\n${scenario === "verification" ? "\n" : ""}` } };
     }
@@ -157,6 +160,13 @@ export async function fixture(scenario) {
   if (["relevance", "lockfile_scope", "importer_scope"].includes(scenario)) {
     writeFileSync("prepare.mjs", 'import{mkdirSync,writeFileSync}from"node:fs";for(const name of ["wrangler","string-width-cjs"]){mkdirSync("node_modules/"+name,{recursive:true});writeFileSync("node_modules/"+name+"/package.json",JSON.stringify({name,version:"1.0.0"}));}');
     config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
+  }
+  if (scenario.startsWith("stale_branch")) {
+    // Preparation fails while a `require-<name>` flag exists and the branch lacks <name>, like a lockfile main added later.
+    writeFileSync("prepare.mjs", 'import{existsSync}from"node:fs";for(const name of ["needed.txt","needed2.txt","needed3.txt","needed4.txt"]){if(existsSync(' + JSON.stringify(resolve(".") + "/require-") + '+name)&&!existsSync(name)){console.error("ERR_MISSING "+name);process.exit(1);}}');
+    writeFileSync("validate.mjs", 'import{existsSync}from"node:fs";if(existsSync(' + JSON.stringify(resolve(".") + "/require-validation") + ')&&existsSync("bad.txt")){console.error("bad.txt must not exist");process.exit(7);}');
+    config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
+    config.workspace.validate = [[process.execPath, resolve("validate.mjs")]];
   }
   if (scenario === "isolation") {
     writeFileSync("probe.mjs", 'import{appendFileSync}from"node:fs";const leaked=Object.entries(process.env).filter(([name,value])=>/PRIVATE_KEY|API_KEY/.test(name)||value.includes("PRIVATE KEY-----")).map(([name])=>name);'

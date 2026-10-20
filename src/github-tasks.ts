@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
 import { config, getRepositoryPath } from "./config.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
@@ -6,7 +6,7 @@ import { acknowledgedTaskIds } from "./markers.ts";
 import { observe, remoteUrl } from "./observation.ts";
 import { labelName } from "./labels.ts";
 import { db } from "./db.ts";
-import { fetchPullRequestHead, fetchRepository, git, hasConflicts } from "./git.ts";
+import { fetchPullRequestHead, fetchRepository, git, hasConflicts, isAncestor } from "./git.ts";
 import { rateLimitLow, rateLimitState, type GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { items, runs, tasks } from "./schema.ts";
@@ -80,6 +80,10 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       const headRef = await fetchPullRequestHead(repositoryPath, remote, pr.number, env);
       const headSha = await git(repositoryPath, ["rev-parse", headRef]);
       const conflicts = await hasConflicts(repositoryPath, mainSha, headSha);
+      const lastRun = db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
+        .where(and(eq(tasks.itemId, item.id), isNotNull(runs.finishedAt))).orderBy(desc(runs.sequence)).limit(1).get()?.run;
+      const stale = !conflicts && Boolean(lastRun?.error) && lastRun?.stage === "preparing" && lastRun.headSha === headSha
+        && !await isAncestor(repositoryPath, mainSha, headSha);
       const acknowledged = new Set(observation.own.flatMap((comment) => acknowledgedTaskIds(comment.body)));
       const handled = db.select({ run: runs, task: tasks }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
         .where(and(eq(tasks.itemId, item.id), eq(tasks.action, "address_pr_feedback"))).all()
@@ -88,7 +92,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       const consumed = new Set(handled.flatMap(({ run }) => run.context?.commentRevisions ?? strings(run.input.commentRevisions)));
       const pending = comments.filter((comment) => !consumed.has(`${comment.id}@${comment.revision}`));
       added += applyDecisions(item.id, planPrMaintenance({
-        conflicts, mainSha, headSha, pendingComments: pending.map((comment) => `${comment.id}@${comment.revision}`),
+        conflicts, stale, mainSha, headSha, pendingComments: pending.map((comment) => `${comment.id}@${comment.revision}`),
         conflictTask: latestTask(item.id, "resolve_conflicts"), feedbackTask: latestTask(item.id, "address_pr_feedback"),
       }));
     }

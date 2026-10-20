@@ -870,6 +870,118 @@ try {
     assert.equal(f.requests.findLast((r) => r.context.action === "resolve_conflicts").context.workspace.mergeInProgress, true);
     assert.equal(git(w.path, "show", "-s", "--format=%P").split(" ").length, 2);
     assert.equal(recovered.workspaceId, original.workspaceId);
+  } else if (scenario === "stale_branch" || scenario === "stale_branch_scrat") {
+    const { eq } = await import("drizzle-orm");
+    const remoteGit = (...args) => git(resolve("remote.git"), ...args);
+    const needs = (name) => writeFileSync(`require-${name}`, "");
+    const branchOff = (branch, path, text) => {
+      git(resolve("seed"), "switch", "-c", branch); writeFileSync(resolve("seed", path), text);
+      git(resolve("seed"), "add", "."); commit(resolve("seed"), "Branch " + branch);
+      git(resolve("seed"), "push", resolve("remote.git"), branch); git(resolve("seed"), "switch", "main");
+    };
+    const addPr = (number, branch, login) => f.prs.push({ id: number, node_id: "PR_" + number, number, title: "PR " + number, body: "", state: "open",
+      html_url: `https://github.com/fixture/project/pull/${number}`, labels: [], updated_at: "2026-10-19T00:00:00Z", user: { login },
+      head: { ref: branch, sha: remoteGit("rev-parse", branch), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } } });
+    const prItem = (n) => all(s.items).find((i) => i.kind === "pr" && i.payload.number === n);
+    const queuedFor = (n) => all(s.tasks).filter((t) => t.itemId === prItem(n).id && t.status === "queued").map((t) => t.action).sort();
+    const drainExcept = (n) => { for (const item of all(s.items)) if (item.id !== prItem(n).id) tasks.cancelQueuedTasks(item.id, "Isolate"); };
+    const parents = (cwd, rev) => git(cwd, "show", "-s", "--format=%P", rev).split(" ");
+    const checkout = f.config.github.repositoryPath;
+    const mainHead = () => git(resolve("seed"), "rev-parse", "main");
+    if (scenario === "stale_branch") {
+      branchOff("feature-a", "src/feature.ts", "export const feature = 1;\n");
+      branchOff("feature-b", "src/app.ts", "export const value = 7;\n");
+      needs("needed.txt");
+      changeMain("needed.txt", "ok\n");
+      // Behind and clean: reviewed through a throwaway merge, never pushed.
+      addPr(301, "feature-a", "human"); await route();
+      const heads = remoteGit("for-each-ref", "refs/heads"), realHead = remoteGit("rev-parse", "feature-a"), main1 = mainHead();
+      const reviewed = await success();
+      assert.equal(reviewed.headSha, realHead, "the run records the real PR head");
+      const reviewRequests = f.requests.filter((r) => r.context.action === "review_pr");
+      assert.ok(reviewRequests.length >= 3);
+      for (const { context } of reviewRequests) {
+        assert.notEqual(context.workspace.headSha, realHead);
+        assert.deepEqual(parents(checkout, context.workspace.headSha), [realHead, main1]);
+        assert.equal(context.diffBaseSha, main1); assert.deepEqual(context.diffPaths, ["src/feature.ts"]);
+        assert.equal(context.headSha, realHead);
+      }
+      assert.equal(remoteGit("for-each-ref", "refs/heads"), heads, "nothing is pushed");
+      assert.ok(!f.writes.some((w) => w.type === "pr"));
+      assert.equal(f.comments.get(301).length, 1); assert.doesNotMatch(f.comments.get(301)[0].body, /behind|merge/i);
+      assert.ok(all(s.workspaces).every((w) => w.removedAt), "review workspaces are cleaned up");
+      assert.equal(git(checkout, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree ")).length, 1);
+      f.prs[0].state = "closed"; await route();
+      // Behind and conflicting: a clear failure, no model and no push.
+      changeMain("src/app.ts", "export const value = 9;\n");
+      addPr(302, "feature-b", "human"); await route();
+      const calls = f.requests.length, heads2 = remoteGit("for-each-ref", "refs/heads");
+      const conflicted = await run();
+      assert.equal(conflicted.error.message, "PR branch is behind main and does not merge cleanly; the author needs to update it");
+      assert.equal(f.requests.length, calls); assert.equal(remoteGit("for-each-ref", "refs/heads"), heads2);
+      assert.equal(f.comments.get(302)?.length ?? 0, 0);
+      assert.ok(all(s.workspaces).every((w) => w.removedAt));
+      f.prs[1].state = "closed"; await route();
+      // Not behind: the preparation failure is reported as is.
+      branchOff("feature-c", "src/c.ts", "export const c = 1;\n"); needs("needed4.txt");
+      addPr(303, "feature-c", "human"); await route();
+      const workspaces = all(s.workspaces).length, unmasked = await run();
+      assert.match(unmasked.error.message, /ERR_MISSING needed4\.txt/); assert.equal(f.requests.length, calls);
+      assert.equal(all(s.workspaces).length, workspaces + 1, "no synthetic workspace is made");
+    } else {
+      // A Scrat PR that failed review preparation while behind is updated in code, then reviewed again.
+      await implement(1); await route(); drainExcept(201);
+      const pr = f.prs[0];
+      needs("needed.txt"); changeMain("needed.txt", "ok\n");
+      tasks.cancelQueuedTasks(prItem(201).id, "Fresh start"); await route();
+      assert.deepEqual(queuedFor(201), ["review_pr"], "a clean, behind branch is not updated before anything fails");
+      const calls = f.requests.length, staleHead = remoteGit("rev-parse", pr.head.ref);
+      const failed = await run();
+      assert.match(failed.error.message, /ERR_MISSING needed\.txt/); assert.equal(failed.stage, "preparing"); assert.equal(failed.headSha, staleHead);
+      await route(); assert.deepEqual(queuedFor(201), ["resolve_conflicts"]);
+      await route(); assert.deepEqual(queuedFor(201), ["resolve_conflicts"], "routing neither duplicates nor cancels the update");
+      const update = await success();
+      assert.equal(f.requests.length, calls, "a clean update needs no model");
+      const merged = remoteGit("rev-parse", pr.head.ref);
+      assert.notEqual(merged, staleHead); assert.equal(parents(resolve("remote.git"), merged).length, 2);
+      remoteGit("merge-base", "--is-ancestor", mainHead(), merged);
+      assert.equal(update.publication.publishedCommitSha, merged); assert.match(f.comments.get(201).at(-1).body, /Merged main \(\w{7}\) into this branch; no conflicts/);
+      await route(); assert.deepEqual(queuedFor(201), ["review_pr"], "the new head gets a fresh review and no further update");
+      await success(); await route(); assert.deepEqual(queuedFor(201), []);
+      assert.equal(all(s.tasks).filter((t) => t.action === "resolve_conflicts").length, 1);
+      // Validation failing after the code-only merge falls back to the agent in the same run.
+      await implement(2); drainExcept(202);
+      changeMain("bad.txt", "bad\n"); writeFileSync("require-validation", "");
+      const fallback = tasks.enqueueTask({ itemId: prItem(202).id, action: "resolve_conflicts", reason: "Exercise fallback", input: {} });
+      f.reset(202, "remove-bad");
+      const repaired = await success(); assert.equal(repaired.taskId, fallback.id);
+      const request = f.requests.findLast((r) => r.context.action === "resolve_conflicts" && r.context.item.number === 202);
+      assert.match(readFileSync(request.context.files.validationFailure, "utf8"), /bad\.txt must not exist/);
+      assert.equal(request.context.workspace.mergeInProgress, false);
+      assert.equal(parents(f.row(s.workspaces, repaired.workspaceId).path, request.context.workspace.headSha).length, 2, "the agent starts from the merge commit");
+      const head2 = remoteGit("rev-parse", f.prs[1].head.ref);
+      remoteGit("merge-base", "--is-ancestor", mainHead(), head2);
+      assert.throws(() => remoteGit("cat-file", "-e", head2 + ":bad.txt"));
+      unlinkSync("require-validation");
+      // A conflicting branch that cannot be prepared still reaches the agent (it merges before preparation).
+      await implement(3); drainExcept(203);
+      needs("needed2.txt"); changeMain("needed2.txt", "ok\n"); changeMain("src/app.ts", "export const value = 99;\n");
+      tasks.enqueueTask({ itemId: prItem(203).id, action: "resolve_conflicts", reason: "Exercise bug fix", input: {} });
+      f.reset(203, "resolve"); const resolved = await success();
+      assert.ok(f.requests.some((r) => r.context.action === "resolve_conflicts" && r.context.item.number === 203));
+      const head3 = remoteGit("rev-parse", f.prs[2].head.ref);
+      assert.equal(parents(resolve("remote.git"), head3).length, 2);
+      assert.equal(remoteGit("show", head3 + ":src/app.ts"), "export const value = 300;"); assert.equal(resolved.publication.publishedCommitSha, head3);
+      // Feedback on a behind, unpreparable Scrat PR merges the base first and ships it with its own push.
+      await implement(4); drainExcept(204);
+      needs("needed3.txt"); changeMain("needed3.txt", "ok\n");
+      tasks.enqueueTask({ itemId: prItem(204).id, action: "address_pr_feedback", reason: "Exercise self-heal", input: {} });
+      f.reset(204, "normal"); const healed = await success();
+      const head4 = remoteGit("rev-parse", f.prs[3].head.ref);
+      remoteGit("merge-base", "--is-ancestor", mainHead(), head4);
+      assert.equal(healed.publication.publishedCommitSha, head4); assert.equal(remoteGit("show", head4 + ":src/app.ts"), "export const value = 214;");
+      assert.equal(remoteGit("show", head4 + ":needed3.txt"), "ok");
+    }
   } else if (scenario === "reopen") {
     const original = await implement(1); await route();
     f.prs[0].state = "closed"; await route(); assert.ok(f.row(s.workspaces, original.workspaceId).removedAt);

@@ -5,7 +5,8 @@ import { config, getRepositoryPath } from "./config.ts";
 import { runCommands } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
-import { fetchPullRequestHead, fetchRepository, git, hasConflicts, hasPendingMerge } from "./git.ts";
+import { describeError, type ErrorDetails } from "./errors.ts";
+import { behindCleanly, createMergeCommit, fetchPullRequestHead, fetchRepository, git, hasConflicts, hasPendingMerge, isAncestor, mergeBase } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { startOperation } from "./logging.ts";
@@ -24,6 +25,8 @@ type Workspace = Awaited<ReturnType<typeof createWorkspace>>;
 type DatabaseConfig = NonNullable<NonNullable<typeof config.workspace>["database"]>;
 type Environment = Record<string, string | undefined>;
 type References = { itemId: string; taskId: string; runId: string };
+
+const botAuthor = () => ({ name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com` });
 
 async function prepareWorkspace(workspace: Workspace, environment: Environment, databaseConfig: DatabaseConfig | null | undefined, references: References) {
   await runCommands(config.workspace?.prepare ?? [], workspace.path, environment, references);
@@ -45,9 +48,7 @@ async function validateAndCommit(options: {
   await git(workspace.path, ["add", "--all"]);
   if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
   await assertNoCommittedSecrets(workspace, options.secretBaseSha, validationTree);
-  const commitSha = await commitWorkspace(workspace, `fix: ${options.title}`, {
-    name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com`,
-  }, references);
+  const commitSha = await commitWorkspace(workspace, `fix: ${options.title}`, botAuthor(), references);
   if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
   db.update(runs).set({ headSha: commitSha, publication: { status: "pending", commitSha }, verification: { headSha: commitSha, commands } }).where(eq(runs.id, run.id)).run();
   if (acceptance.kind === "conflict-free" && await hasConflicts(acceptance.repositoryPath, acceptance.mainSha, commitSha)) {
@@ -118,7 +119,9 @@ export async function runNextTask() {
       }
       const mergeInProgress = !readOnly && await hasPendingMerge(workspace.path);
       if (!readOnly && pullRequest && !mergeInProgress && !validationOnly) await git(workspace.path, ["merge", "--ff-only", preparedHead]);
-      const headSha = await git(workspace.path, ["rev-parse", "HEAD"]);
+      // The head before any merge Scrat makes here: the base for scanning committed content for secrets.
+      const startHeadSha = await git(workspace.path, ["rev-parse", "HEAD"]);
+      let headSha = startHeadSha;
       if (!validationOnly) db.update(runs).set({ workspaceId: workspace.id, mainSha, headSha }).where(eq(runs.id, run.id)).run();
       const databaseConfig = !readOnly ? config.workspace?.database : undefined;
       let database: Awaited<ReturnType<typeof createRunDatabase>> | undefined;
@@ -131,41 +134,89 @@ export async function runNextTask() {
       };
       const commandEnvironment = { ...childEnvironment(), ...environment };
       let result = run.result;
+      const validate = (target: Workspace, kind: "conflict-free" | "nonempty-diff" | "complete") => validateAndCommit({
+        run, workspace: target, validationOnly, title: context.item.title, commandEnvironment, databaseConfig, references,
+        // A validation-only retry keeps the original run's pre-agent head.
+        secretBaseSha: validationOnly ? run.headSha ?? baseRef : startHeadSha,
+        acceptance: { kind, repositoryPath, mainSha, baseRef },
+      });
+      let validated = false, validationFailure: ErrorDetails | undefined;
       if (!validationOnly) {
         const previous = !readOnly ? db.select().from(runs).where(and(
           eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile),
         )).orderBy(desc(runs.sequence)).limit(1).get() : undefined;
-        const { diffBaseSha, diffPaths } = await readDiffScope(repositoryPath, mainSha, preparedHead, Boolean(pullRequest));
+        const scope = await readDiffScope(repositoryPath, mainSha, preparedHead, Boolean(pullRequest));
+        const { diffPaths } = scope;
+        let { diffBaseSha } = scope;
         const evaluated = evaluateContext(run, task, observation, context.item, pullRequest?.head.sha);
         db.update(runs).set({ context: evaluated }).where(eq(runs.id, run.id)).run();
-        const preparationDeferred = mergeInProgress || Boolean(run.retryOfRunId);
-        if (readOnly || !preparationDeferred) await prepareWorkspace(workspace, commandEnvironment, databaseConfig, references);
-        db.update(runs).set({ stage: "agent" }).where(eq(runs.id, run.id)).run();
-        const { prompt, contextDir, revisions } = await buildAgentInput({
-          run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha, baseRef, mergeInProgress, workspace,
-          database: database ? {
-            ...database, environment, schemaPrepared: !preparationDeferred,
-            prepare: config.workspace?.prepare, migrate: databaseConfig?.migrate,
-          } : undefined,
-        });
-        const agentResult = contract.agent === "panel"
-          ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { baseSha: diffBaseSha, contextDir, revisions })
-          : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, log: operation.log, sessionFile: previous?.piSessionFile ?? undefined, environment, contextDir, revisions });
-        result = { ...agentResult, paths: [...new Set([...diffPaths, ...agentResult.paths])] };
-        db.update(runs).set({ result, stage: "validating" }).where(eq(runs.id, run.id)).run();
+        // Conflict repair merges first (in code or by the agent), so its branch is prepared only afterwards.
+        const preparationDeferred = mergeInProgress || Boolean(run.retryOfRunId) || task.action === "resolve_conflicts";
+        // A fresh repair of a branch that is merely behind needs no model: merge in code and validate.
+        if (contract.mode === "change" && task.action === "resolve_conflicts" && !mergeInProgress && !run.retryOfRunId
+          && await behindCleanly(repositoryPath, mainSha, headSha)) {
+          await mergeBase(workspace.path, mainSha, `Merge ${baseBranch} into ${pullRequest!.head.ref}`, botAuthor());
+          headSha = await git(workspace.path, ["rev-parse", "HEAD"]);
+          result = { text: `Merged ${baseBranch} (${mainSha.slice(0, 7)}) into this branch; no conflicts`, ready: false, paths: [...new Set(diffPaths)], outcome: "complete" };
+          db.update(runs).set({ result, stage: "validating" }).where(eq(runs.id, run.id)).run();
+          try {
+            await validate(workspace, contract.acceptance);
+            validated = true;
+          } catch (error) {
+            if (error instanceof Error && "code" in error && error.code === "SECRET_IN_OUTPUT") throw error;
+            // The agent repairs the merged tree in this same run, starting from what validation reported.
+            validationFailure = describeError(error);
+          }
+        }
+        if (!validated) {
+          if (readOnly || !preparationDeferred) {
+            try { await prepareWorkspace(workspace, commandEnvironment, databaseConfig, references); }
+            catch (error) {
+              // A branch that cannot be prepared because it is behind its base is merged with the base and prepared once more.
+              const humanReview = readOnly && context.item.user?.login !== config.github.botLogin;
+              if (!pullRequest || !(humanReview || !readOnly) || await isAncestor(repositoryPath, mainSha, headSha)) throw error;
+              if (await hasConflicts(repositoryPath, mainSha, headSha)) {
+                if (!readOnly) throw error;
+                throw new Error(`PR branch is behind ${baseBranch} and does not merge cleanly; the author needs to update it`);
+              }
+              if (readOnly) {
+                // Human branches are never pushed: review a throwaway merge commit that is the workspace's own base.
+                const synthetic = await createMergeCommit(repositoryPath, mainSha, headSha, `Review merge of ${baseBranch} into the PR head`, botAuthor());
+                reviewWorkspace = undefined;
+                try { await removeWorkspace(workspace.id, references); }
+                catch { operation.log.warn({ event: "run.cleanup_pending", workspaceId: workspace.id }); }
+                workspace = reviewWorkspace = await createWorkspace({ repositoryPath, baseRef: synthetic }, references);
+                db.update(runs).set({ workspaceId: workspace.id }).where(eq(runs.id, run.id)).run();
+                headSha = synthetic;
+                diffBaseSha = mainSha;
+              } else {
+                // A merge that cannot start (e.g. a dirty retained workspace) keeps the original preparation error.
+                await mergeBase(workspace.path, mainSha, `Merge ${baseBranch} into ${pullRequest.head.ref}`, botAuthor()).catch(() => { throw error; });
+                headSha = await git(workspace.path, ["rev-parse", "HEAD"]);
+              }
+              await prepareWorkspace(workspace, commandEnvironment, databaseConfig, references);
+            }
+          }
+          db.update(runs).set({ stage: "agent" }).where(eq(runs.id, run.id)).run();
+          const { prompt, contextDir, revisions } = await buildAgentInput({
+            run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha, baseRef, mergeInProgress, workspace, validationFailure,
+            database: database ? {
+              ...database, environment, schemaPrepared: !preparationDeferred,
+              prepare: config.workspace?.prepare, migrate: databaseConfig?.migrate,
+            } : undefined,
+          });
+          const agentResult = contract.agent === "panel"
+            ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { baseSha: diffBaseSha, contextDir, revisions })
+            : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, log: operation.log, sessionFile: previous?.piSessionFile ?? undefined, environment, contextDir, revisions });
+          result = { ...agentResult, paths: [...new Set([...diffPaths, ...agentResult.paths])] };
+          db.update(runs).set({ result, stage: "validating" }).where(eq(runs.id, run.id)).run();
+        }
       }
       if (!result) throw new Error("No saved agent result to validate");
       if (result.outcome !== "complete") {
         throw Object.assign(new Error(`Agent returned ${result.outcome}: ${result.text}`), { code: "AGENT_INCOMPLETE" });
       }
-      if (!readOnly) {
-        await validateAndCommit({
-          run, workspace, validationOnly, title: context.item.title, commandEnvironment, databaseConfig, references,
-          // A validation-only retry keeps the original run's pre-agent head.
-          secretBaseSha: validationOnly ? run.headSha ?? baseRef : headSha,
-          acceptance: { kind: contract.acceptance, repositoryPath, mainSha, baseRef },
-        });
-      }
+      if (!readOnly && !validated) await validate(workspace, contract.acceptance);
       db.update(runs).set({ stage: "publishing" }).where(eq(runs.id, run.id)).run();
     }
     const evaluatedRun = db.select().from(runs).where(eq(runs.id, run.id)).get()!;

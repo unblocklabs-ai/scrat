@@ -9,6 +9,8 @@ Reconcile the supplied PR with `workspace.baseRef` in its existing `workspace.pa
 
 If `workspace.mergeInProgress` is true, continue the existing merge and partial resolutions. Otherwise merge `workspace.baseRef` with `--no-commit --no-ff` so Scrat can create the merge commit. Do not reset, abort or replace retained work merely to start clean. Address the previous failure file (`files.previousFailure`) when supplied.
 
+When `files.validationFailure` is supplied, Scrat has already merged `workspace.baseRef` into the branch without conflicts and committed the merge, but validation failed. Do not merge again; read the failure, then repair the merged tree (for example, adapt the PR's code to the incoming base) and leave the fix uncommitted.
+
 Resolve conflicts deliberately; never choose ours/theirs indiscriminately. Inspect and stage resolved files with `git add`, checking for unresolved index entries and conflict markers. Keep the repair focused; do not add unrelated refactors or rebuild the PR. Use type safety and existing abstractions instead of unnecessary machinery.
 
 When `database` is supplied, its current environment is injected into bash. Use it instead of old session URLs. Retained failed work or a merge may leave `database.schemaPrepared` false: repair failed setup/schema files and resolve conflicts before running the supplied prepare/migration commands and database checks. Scrat reruns preparation, migrations and validation after inference and owns container cleanup. Preserve both branches' migration history; do not rewrite applied migrations or replace the database yourself.

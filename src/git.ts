@@ -112,11 +112,33 @@ export async function branchContainsCommit(repositoryPath: string, remote: strin
   if (!remoteSha) return false;
   if (remoteSha === commitSha) return true;
   await git(repositoryPath, ["fetch", "--no-write-fetch-head", "--", remote, remoteSha], env);
+  return isAncestor(repositoryPath, commitSha, remoteSha);
+}
+
+export async function isAncestor(repositoryPath: string, ancestor: string, descendant: string) {
   try {
-    await git(repositoryPath, ["merge-base", "--is-ancestor", commitSha, remoteSha]);
+    await git(repositoryPath, ["merge-base", "--is-ancestor", ancestor, descendant]);
     return true;
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === 1) return false;
     throw error;
   }
+}
+
+// A branch can be brought up to date in code only when it lacks the base and the merge is clean.
+export async function behindCleanly(repositoryPath: string, base: string, head: string) {
+  return !await isAncestor(repositoryPath, base, head) && !await hasConflicts(repositoryPath, base, head);
+}
+
+type Author = { name: string; email: string };
+const identity = (author: Author) => ["-c", `user.name=${author.name}`, "-c", `user.email=${author.email}`];
+
+export async function mergeBase(workspacePath: string, base: string, message: string, author: Author) {
+  await git(workspacePath, [...identity(author), "merge", "--no-ff", "-m", message, base]);
+}
+
+// The merge of base into head as a commit object only: no ref, no worktree, nothing pushed.
+export async function createMergeCommit(repositoryPath: string, base: string, head: string, message: string, author: Author) {
+  const tree = (await git(repositoryPath, ["merge-tree", "--write-tree", base, head])).split("\n")[0]!;
+  return git(repositoryPath, [...identity(author), "commit-tree", tree, "-p", head, "-p", base, "-m", message]);
 }

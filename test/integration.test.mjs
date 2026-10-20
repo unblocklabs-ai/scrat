@@ -45,6 +45,8 @@ const scenarios = {
   unicode_scope: "Pi filename normalization cannot hide relevant base changes",
   unicode_nfd: "current and persisted Unicode read scopes map to Git filenames across filesystem spellings",
   legacy_scope: "historical unknown scope remains conservative even alongside known paths",
+  stale_branch: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or fails clearly when the merge conflicts",
+  stale_branch_scrat: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting",
   merge: "retry resumes an unfinished merge and preserves partial work",
   reopen: "fetch-only reopening cannot keep a deleted workspace attached",
   existing_pr: "existing implementation PRs suppress duplicate implementation tasks",

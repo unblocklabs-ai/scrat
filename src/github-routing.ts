@@ -34,12 +34,14 @@ export function planIssueTasks({ labelled, implemented, workspaceId, previouslyL
   return { review: false, decisions };
 }
 
-export function planPrMaintenance({ conflicts, mainSha, headSha, pendingComments, conflictTask, feedbackTask }: {
-  conflicts: boolean; mainSha: string; headSha: string; pendingComments: string[];
+// A behind branch whose latest run could not be prepared at this very head is updated like a conflicting one;
+// the new head ends the condition, so each (mainSha, headSha) fires at most once.
+export function planPrMaintenance({ conflicts, stale, mainSha, headSha, pendingComments, conflictTask, feedbackTask }: {
+  conflicts: boolean; stale: boolean; mainSha: string; headSha: string; pendingComments: string[];
   conflictTask?: TaskFacts; feedbackTask?: TaskFacts;
 }): RoutingDecision[] {
-  const decisions: RoutingDecision[] = conflicts
-    ? queue(conflictTask, "resolve_conflicts", "Scrat PR conflicts with its base branch", {
+  const decisions: RoutingDecision[] = conflicts || stale
+    ? queue(conflictTask, "resolve_conflicts", conflicts ? "Scrat PR conflicts with its base branch" : "Scrat PR is behind its base branch and could not be prepared", {
       triggerKey: JSON.stringify({ mainSha, headSha }), mainSha, headSha,
     }) : [{ type: "cancel", action: "resolve_conflicts", reason: "PR no longer conflicts" }];
   const commentRevisions = [...pendingComments].sort();

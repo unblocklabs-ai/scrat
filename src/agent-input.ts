@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { eq } from "drizzle-orm";
 import { actionContracts } from "./actions.ts";
 import { db } from "./db.ts";
+import type { ErrorDetails } from "./errors.ts";
 import { git } from "./git.ts";
 import type { ItemObservation } from "./observation.ts";
 import { runs, tasks } from "./schema.ts";
@@ -39,6 +40,8 @@ export async function buildAgentInput(options: {
   mainSha: string; headSha: string; baseRef: string; mergeInProgress: boolean;
   workspace: { path: string; branch: string | null };
   database?: Record<string, unknown>;
+  // Redacted details of a failed validation of Scrat's own code-only merge, handed to the agent that repairs it.
+  validationFailure?: ErrorDetails;
 }) {
   const { run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha } = options;
   const input = { ...run.input };
@@ -61,6 +64,7 @@ export async function buildAgentInput(options: {
     writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),
     report && writeContext("review", "review.md", report),
     failure && writeContext("previousFailure", "previous-failure.json", JSON.stringify(failure, null, 2)),
+    options.validationFailure && writeContext("validationFailure", "validation-failure.json", JSON.stringify(options.validationFailure, null, 2)),
     diffPaths.length > inlineDiffPaths && writeContext("diffPaths", "diff-paths.txt", diffPaths.join("\n") + "\n"),
     changedPaths.length > inlineDiffPaths && writeContext("changedPaths", "changed-paths.txt", changedPaths.join("\n") + "\n"),
   ]);

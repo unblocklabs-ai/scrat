@@ -65,7 +65,7 @@ export async function fixture(scenario) {
       .map((message) => typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("\n"));
     const text = texts.findLast((entry) => entry.includes('{\n  "action"'));
     const corrected = texts.at(-1).startsWith("Your previous final answer was not accepted");
-    const feedback = texts.at(-1).startsWith("Scrat's validation failed"), turnStart = request.messages.at(-1).role === "user";
+    const feedback = texts.at(-1).startsWith(`${config.github.botName}'s validation failed`), turnStart = request.messages.at(-1).role === "user";
     const start = text.indexOf('{\n  "action"');
     const context = JSON.parse(text.slice(start, text.indexOf("\n}", start) + 2));
     const consolidating = text.includes("Consolidate the two independent reviews below");
@@ -189,7 +189,7 @@ export async function fixture(scenario) {
     writeFileSync("check.mjs", scenario === "validation_mutation" ? 'import{writeFileSync}from"node:fs";writeFileSync("src/app.ts","unexpected verification change\\n");' : 'import{existsSync}from"node:fs";if(existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed");process.exit(7);}console.log("checked actual source");');
     config.workspace.validate = [[process.execPath, resolve("check.mjs")]];
   }
-  if (["validation_feedback", "validation_feedback_cap", "validation_slots", "self_repair"].includes(scenario)) {
+  if (["validation_feedback", "validation_feedback_cap", "validation_slots", "self_repair", "bot_name"].includes(scenario)) {
     const flag = (name) => JSON.stringify(resolve(name));
     writeFileSync("validate.mjs", 'import{appendFileSync,existsSync}from"node:fs";const s=Date.now();await new Promise((r)=>setTimeout(r,existsSync(' + flag("slow") + ')?1000:0));'
       + 'appendFileSync(' + flag("validations.log") + ',JSON.stringify({s,e:Date.now()})+"\\n");if(existsSync(' + flag("kill-validation") + '))process.kill(process.pid,"SIGKILL");if(existsSync(' + flag("exit-137") + '))process.exit(137);'
@@ -209,6 +209,7 @@ export async function fixture(scenario) {
     const helper = fileURLToPath(new URL("database-command.mjs", import.meta.url)); cpSync(helper, "database-command.mjs");
     config.workspace = { ...config.workspace, environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), scenario === "validation_resume" ? "validate-resume" : "validate", resolve("database-receipts.jsonl")]] };
   }
+  if (scenario === "bot_name") config.github.botName = "Mocha";
   if (patMode) { config.github.auth = "pat"; config.github.botLogin = "agent-account"; }
   writeFileSync("app/scrat.config.json", JSON.stringify(config));
   writeFileSync("app/scrat.local.json", "{}\n");

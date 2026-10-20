@@ -12,7 +12,7 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 
 // @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: {
-  harness?: { maxConcurrentValidations?: number }; github?: { auth?: string; botLogin?: string }; providers?: Record<string, { apiKey?: string }>; workspace?: { heavyCommands?: string[] };
+  harness?: { maxConcurrentValidations?: number }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; workspace?: { heavyCommands?: string[] };
   actions: Record<string, Entry & { skill: string; reviewers?: Entry[]; maxSelfRepairs?: number; exhaustedLabel?: string | null }>;
 } = config) {
   const modelRuntime = await sharedModelRuntime();
@@ -26,6 +26,7 @@ export async function validateStaticConfig(settings: {
   else if (auth === "pat" && !process.env.GITHUB_PAT) problems.push('github.auth is "pat" but GITHUB_PAT is not set');
   else if (auth !== "pat" && !process.env.GITHUB_APP_PRIVATE_KEY) problems.push('github.auth is "app" but GITHUB_APP_PRIVATE_KEY is not set');
   if (settings.github?.botLogin !== undefined && !settings.github.botLogin.trim()) problems.push("github.botLogin must not be empty");
+  if (settings.github?.botName !== undefined && !settings.github.botName.trim()) problems.push("github.botName must not be empty");
   const slots = settings.harness?.maxConcurrentValidations;
   if (slots !== undefined && !(Number.isSafeInteger(slots) && slots > 0)) problems.push("harness.maxConcurrentValidations must be a positive integer");
   settings.workspace?.heavyCommands?.forEach((pattern, index) => {

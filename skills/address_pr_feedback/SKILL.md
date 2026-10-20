@@ -1,6 +1,6 @@
 ---
 name: address-pr-feedback
-description: Verify and address new feedback on an existing Scrat PR, continuing its workspace and session.
+description: Verify and address new feedback on an existing {{bot}} PR, continuing its workspace and session.
 ---
 
 # PR feedback and repair
@@ -15,13 +15,13 @@ Use the comments in `files.discussion` as the pending feedback; do not replay pr
 
 Distinguish code failures from infrastructure flakes or checks that never ran. Do not weaken verification just to get green checks. Inspect package metadata and the actual available environment before choosing validation commands; do not assume a database or browser is present. Never obtain production secrets or use shared databases to fill a missing environment.
 
-Continue retained work and address the previous failure (`files.previousFailure`) when supplied. When `previous` is present, it holds the base and head SHAs of the last handled state; diff them against `workspace.mainSha`/`workspace.headSha` to see what moved since. Preserve an unfinished merge and partial resolutions rather than resetting or rebuilding the PR. Scrat owns the branch/worktree lifecycle; do not create a replacement PR, rebase or force-push.
+Continue retained work and address the previous failure (`files.previousFailure`) when supplied. When `previous` is present, it holds the base and head SHAs of the last handled state; diff them against `workspace.mainSha`/`workspace.headSha` to see what moved since. Preserve an unfinished merge and partial resolutions rather than resetting or rebuilding the PR. {{bot}} owns the branch/worktree lifecycle; do not create a replacement PR, rebase or force-push.
 
-When `database` is supplied, use its current `environment` values, already injected into bash, rather than an old session URL. Scrat owns this run's disposable PostgreSQL container and applies configured migrations before and after inference, with final validation afterward. If `schemaPrepared` is false, repair retained failed work or resolve the merge first, then run the supplied prepare/migration commands before database checks. Add new migrations instead of rewriting applied history, and leave container cleanup to Scrat.
+When `database` is supplied, use its current `environment` values, already injected into bash, rather than an old session URL. {{bot}} owns this run's disposable PostgreSQL container and applies configured migrations before and after inference, with final validation afterward. If `schemaPrepared` is false, repair retained failed work or resolve the merge first, then run the supplied prepare/migration commands before database checks. Add new migrations instead of rewriting applied history, and leave container cleanup to {{bot}}.
 
-After changes, review the complete diff against the original request and verified feedback, fix concrete self-review findings, and run targeted checks and supported real-path validation. Prefer meaningful behavior checks over coverage or implementation-coupled tests. Stop once targeted checks pass; rerun only after a change, failure or unresolved concern. Do not run full lint, type-check, verify, build or e2e suites as routine checks; Scrat validates after you finish and sends failures back into this session. When the task itself needs a full run (a benchmark or measurement, or reproducing a failure only the full suite shows), run it in the foreground; Scrat queues it for a heavy-check slot, so it may wait. Never background heavy commands (`&`, `nohup`). Targeted checks are always fine. End your turn when the change is ready. Report checks you could not run as limitations, never passes.
+After changes, review the complete diff against the original request and verified feedback, fix concrete self-review findings, and run targeted checks and supported real-path validation. Prefer meaningful behavior checks over coverage or implementation-coupled tests. Stop once targeted checks pass; rerun only after a change, failure or unresolved concern. Do not run full lint, type-check, verify, build or e2e suites as routine checks; {{bot}} validates after you finish and sends failures back into this session. When the task itself needs a full run (a benchmark or measurement, or reproducing a failure only the full suite shows), run it in the foreground; {{bot}} queues it for a heavy-check slot, so it may wait. Never background heavy commands (`&`, `nohup`). Targeted checks are always fine. End your turn when the change is ready. Report checks you could not run as limitations, never passes.
 
-Leave changes uncommitted. Scrat handles commits, pushes and the reply. Do not publish comments yourself, change labels, approve/merge/close a PR, alter runtime credentials or edit other repositories.
+Leave changes uncommitted. {{bot}} handles commits, pushes and the reply. Do not publish comments yourself, change labels, approve/merge/close a PR, alter runtime credentials or edit other repositories.
 
 ## Reply
 

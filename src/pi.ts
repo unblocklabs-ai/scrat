@@ -8,6 +8,7 @@ import { Type } from "typebox";
 import { backgroundsWork, heavyCommand, withValidationSlot } from "./commands.ts";
 import { config, type ThinkingLevel } from "./config.ts";
 import { db } from "./db.ts";
+import { botName, withBotName } from "./identity.ts";
 import { runs } from "./schema.ts";
 import { parseResult, ResultFormatError, type Reviewer } from "./results.ts";
 import { blobSize, git, gitPage } from "./git.ts";
@@ -58,10 +59,10 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
   const resourceLoader = new DefaultResourceLoader({
     cwd, agentDir: getAgentDir(), settingsManager, noExtensions: true, noSkills: true,
     appendSystemPromptOverride: (base) => [...base,
-      "Scrat handles Git commits, pushes, GitHub comments, labels, and PR creation. Do not publish or commit changes yourself.",
+      `${botName} handles Git commits, pushes, GitHub comments, labels, and PR creation. Do not publish or commit changes yourself.`,
       "Use dependency implementations from this workspace and its lockfile. Another checkout or a globally cached version is not evidence for this revision.",
       ...readOnly ? [] : [`Keep working notes in ${resolve(cwd, ".scrat/notes.md")} (Git-ignored, never committed or published): the plan, decisions and why, findings, checks run and their results, and what remains. Update it at each milestone, keep it short, and read it first, if it exists, when resuming or after context compaction.`,
-        "Your final response is published as written after Scrat validates, commits and pushes your changes; do not say the changes are uncommitted."],
+        `Your final response is published as written after ${botName} validates, commits and pushes your changes; do not say the changes are uncommitted.`],
       "End your final Markdown response with exactly one line: SCRAT_STATUS: complete, SCRAT_STATUS: incomplete, or SCRAT_STATUS: needs_decision. Complete means the assigned work is finished, not merely that this session ended. For reviews, a complete assessment may contain defects or find the issue unready; use incomplete only if the assessment itself cannot be completed. For implementation, partial work or unresolved blockers are not complete. The harness withholds incomplete implementations from publication. Put an issue's SCRAT_READY marker before the status line, only when warranted.",
     ],
   });
@@ -81,7 +82,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
       const segment = redactSecrets(hit).slice(0, 200);
       if (backgroundsWork(args[1].command)) {
         log.warn({ event: "pi.command_blocked", command: segment });
-        throw new Error(`This command line runs a background job (a lone &, nohup, setsid or disown) and includes the heavy check \`${segment}\`. Run heavy checks in the foreground, in a command without background jobs, so Scrat can queue them behind other heavy jobs.`);
+        throw new Error(`This command line runs a background job (a lone &, nohup, setsid or disown) and includes the heavy check \`${segment}\`. Run heavy checks in the foreground, in a command without background jobs, so ${botName} can queue them behind other heavy jobs.`);
       }
       args[1] = { ...args[1], timeout: Math.min(args[1].timeout ?? heavyTimeoutSeconds, heavyTimeoutSeconds) };
       const queuedAt = performance.now();
@@ -182,7 +183,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
         }
       }
     });
-    await session.prompt(followUp ?? `${await readFile(run.skill, "utf8")}\n\n${context}`, { expandPromptTemplates: false });
+    await session.prompt(followUp ?? `${withBotName(await readFile(run.skill, "utf8"))}\n\n${context}`, { expandPromptTemplates: false });
     for (let corrections = 0; ; corrections++) {
       const last = session.messages.findLast((message) => message.role === "assistant");
       if (!last || last.role !== "assistant" || last.stopReason !== "stop") {

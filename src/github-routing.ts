@@ -1,5 +1,6 @@
 import type { Action } from "./actions.ts";
 import type { Freshness } from "./freshness.ts";
+import { botName } from "./identity.ts";
 import type { PrReviewState } from "./pr-assessment.ts";
 import type { runs, tasks } from "./schema.ts";
 
@@ -23,7 +24,7 @@ export function planIssueTasks({ labelled, implemented, workspaceId, previouslyL
   labelled: boolean; implemented: boolean; workspaceId: string | null; previouslyLabelled?: boolean;
   latest?: TaskFacts; updatedAt: string; mainSha: string;
 }): { review: boolean; decisions: RoutingDecision[] } {
-  if (!labelled) return { review: true, decisions: [{ type: "cancel", action: "implement", reason: "Scrat label removed" }] };
+  if (!labelled) return { review: true, decisions: [{ type: "cancel", action: "implement", reason: `${botName} label removed` }] };
   const decisions: RoutingDecision[] = [{ type: "cancel", action: "review_issue", reason: "Issue selected for implementation" }];
   if (implemented) decisions.push({ type: "cancel", action: "implement", reason: "An open PR already implements this issue" });
   else if (!workspaceId && (!latest || latest.status === "queued" || latest.status === "cancelled" || previouslyLabelled === false)) {
@@ -39,11 +40,11 @@ export function planPrMaintenance({ conflicts, stale, mainSha, headSha, pendingC
   conflictTask?: TaskFacts; feedbackTask?: TaskFacts;
 }): RoutingDecision[] {
   const decisions: RoutingDecision[] = conflicts || stale
-    ? queue(conflictTask, "resolve_conflicts", conflicts ? "Scrat PR conflicts with its base branch" : "Scrat PR is behind its base branch and could not be prepared", {
+    ? queue(conflictTask, "resolve_conflicts", conflicts ? `${botName} PR conflicts with its base branch` : `${botName} PR is behind its base branch and could not be prepared`, {
       triggerKey: JSON.stringify({ mainSha, headSha }), mainSha, headSha,
     }) : [{ type: "cancel", action: "resolve_conflicts", reason: "PR no longer conflicts" }];
   const commentRevisions = [...pendingComments].sort();
-  if (commentRevisions.length) decisions.push(...queue(feedbackTask, "address_pr_feedback", "New feedback on a Scrat PR", {
+  if (commentRevisions.length) decisions.push(...queue(feedbackTask, "address_pr_feedback", `New feedback on a ${botName} PR`, {
     triggerKey: JSON.stringify(commentRevisions), commentRevisions,
   }));
   else decisions.push({ type: "cancel", action: "address_pr_feedback", reason: "Feedback already handled" });

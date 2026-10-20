@@ -1410,7 +1410,7 @@ try {
     fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string") { lines.push(...data.split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } })); return data.length; } return write(fd, data, ...rest); };
     const validations = () => existsSync("validations.log") ? readFileSync("validations.log", "utf8").trim().split("\n").length : 0;
     const lastUser = ({ request }) => { const { content } = request.messages.at(-1); return typeof content === "string" ? content : content.map((part) => part.text ?? "").join("\n"); };
-    const feedbackRequests = () => f.requests.filter((entry) => entry.request.messages.at(-1).role === "user" && lastUser(entry).startsWith("Scrat's validation failed"));
+    const feedbackRequests = () => f.requests.filter((entry) => entry.request.messages.at(-1).role === "user" && lastUser(entry).startsWith(`${f.config.github.botName}'s validation failed`));
     try {
       if (scenario === "validation_feedback") {
         f.addIssue(1, ["scrat"]); f.modes.set(1, "feedback-fix"); f.enqueue(1, "implement"); const r = await success();
@@ -1539,6 +1539,25 @@ try {
     assert.ok(!redactSecrets(`${f.pat} ${header}`).includes(f.pat.slice(4)) && !redactSecrets(header).includes(header.slice(8)));
     assert.equal(git(resolve("remote.git"), "log", "-1", "--format=%an", f.prs[0].head.ref), "agent-account");
     assert.ok(f.writes.some((write) => write.type === "pr") && f.writes.some((write) => write.type === "comment") && f.writes.some((write) => write.type === "label"));
+  } else if (scenario === "bot_name") {
+    const drain = async () => { for (let n = 0; n < 12 && all(s.tasks).some((t) => t.status === "queued"); n++) await success(); };
+    f.addIssue(1, ["scrat"]); f.modes.set(1, "feedback-fix"); f.enqueue(1, "implement"); await success();
+    f.addIssue(2); f.enqueue(2, "review_issue"); await success();
+    await route(); await drain();
+    f.comments.get(201).push({ id: 9001, body: "Please rename the value", user: { login: "human" }, updated_at: "2026-10-19T01:00:00Z", html_url: "https://github.com/fixture/project/pull/201#comment" });
+    await route(); await drain();
+    const { eq } = await import("drizzle-orm");
+    f.reset(201, "resolve"); changeMain("src/app.ts", "export const value = 99;\n"); await route();
+    for (const t of all(s.tasks).filter((t) => t.action === "review_pr" && t.status === "queued")) db.update(s.tasks).set({ status: "cancelled" }).where(eq(s.tasks.id, t.id)).run();
+    await drain();
+    f.reset(201, "grade-C"); tasks.enqueueManualTasks("review_pr", ["201"]); await route(); await drain(); await route(); await drain();
+    const actions = new Set(f.requests.map((r) => r.context.action));
+    assert.deepEqual([...actions].sort(), ["address_pr_feedback", "address_review", "implement", "resolve_conflicts", "review_issue", "review_pr"]);
+    assert.ok(f.requests.some((r) => r.consolidating) && f.requests.some((r) => r.request.model.includes("deepseek")));
+    const prompts = f.requests.map((r) => JSON.stringify(r.request.messages) + JSON.stringify(r.request.tools ?? []));
+    assert.ok(prompts.every((text) => !/Scrat(?!_)/.test(text)), "No model request may name Scrat");
+    assert.ok(prompts.every((text) => text.includes("Mocha") && !text.includes("{{bot}}") && text.includes("SCRAT_STATUS")));
+    assert.ok(prompts.some((text) => text.includes("Mocha's validation failed")));
   } else if (scenario === "config_overrides") {
     const local = resolve("app/scrat.local.json");
     const probe = (overrides, code) => {

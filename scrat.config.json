@@ -10,6 +10,7 @@
     "baseBranch": "main",
     "auth": "app",
     "botLogin": "scrat-unblock[bot]",
+    "botName": "Scrat",
     "appId": 5017746,
     "installationId": 163420479,
     "fetchIntervalSeconds": 300

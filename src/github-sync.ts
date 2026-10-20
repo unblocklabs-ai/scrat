@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { GitHubRepository } from "./github.ts";
@@ -8,6 +8,9 @@ import { upsertItem } from "./items.ts";
 import { assertConfiguredRepository, itemRepository, sameRepository } from "./observation.ts";
 import { withOperation } from "./logging.ts";
 import { githubSnapshots, items } from "./schema.ts";
+
+// Raw snapshots are diagnostic only (about 4 h at the default poll); bound them so the SQLite file and its backups stay small.
+const snapshotsKept = 48;
 
 export async function syncGitHub(repository = config.github.repository, queueTasks = true) {
   return withOperation(queueTasks ? "github.sync" : "github.fetch", { repository }, async (operation) => {
@@ -27,6 +30,7 @@ export async function syncGitHub(repository = config.github.repository, queueTas
     operation.stage("persistence");
     db.transaction((transaction) => {
       transaction.insert(githubSnapshots).values({ repository, fetchedAt: new Date().toISOString(), ...snapshot }).run();
+      transaction.run(sql`DELETE FROM github_snapshots WHERE repository = ${repository} AND id <= (SELECT id FROM github_snapshots WHERE repository = ${repository} ORDER BY id DESC LIMIT 1 OFFSET ${snapshotsKept})`);
       for (const payload of issues) upsertItem({ source: "github", externalId: payload.node_id, kind: "issue", payload }, transaction);
       for (const payload of pullRequests) upsertItem({ source: "github", externalId: payload.node_id, kind: "pr", payload }, transaction);
     });

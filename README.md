@@ -147,7 +147,7 @@ The checked-in configuration currently uses six task slots and three validation 
 ## Project layout
 
 - `src/github-tasks.ts` — GitHub observations, queue effects, and closure cleanup.
-- `src/github.ts`, `src/github-types.ts` — repository client, scoped authentication, and narrow issue/PR views; raw sync snapshots remain in SQLite and `tmp/responses/github/` for diagnostics.
+- `src/github.ts`, `src/github-types.ts` — repository client, scoped authentication, and narrow issue/PR views; the newest 48 raw sync snapshots per repository remain in SQLite, and the latest in `tmp/responses/github/`, for diagnostics.
 - `src/github-context.ts` — pure shared comment filtering and context revisions for routing, execution, and freshness checks.
 - `src/actions.ts` — typed execution, acceptance, and publication contracts; workspace lifetime follows action mode.
 - `src/github-routing.ts` — pure issue-selection, PR-maintenance, and review-routing decisions.

@@ -96,6 +96,10 @@ try {
       await github.addLabels(1, ["another-note"]);
       assert.equal(count(write), 2); assert.equal(count(read), 2, "Refresh only the revoked scope");
       assert.ok(f.issues.get(1).labels.some((label) => label.name === "another-note"));
+      for (let sync = 0; sync < 50; sync++) await (await f.app("github-sync.ts")).syncGitHub(undefined, false);
+      const snapshots = all(s.githubSnapshots);
+      assert.equal(snapshots.length, 48, "Keep only the newest snapshots");
+      assert.equal(snapshots.at(-1).id, Math.max(...snapshots.map((snapshot) => snapshot.id)));
       fail = true;
       await assert.rejects(route(), (error) => error.status === 404);
       assert.equal(active, 0, "A failed sync must wait for its other in-flight readers");

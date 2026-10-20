@@ -29,7 +29,14 @@ Report only defensible findings tied to changed code and reachable behavior or a
 
 Order findings by severity: P1 breaks functionality or security; P2 is a correctness/reliability risk; P3 is a material maintainability problem. Reserve P0 for exceptional critical defects with concrete evidence. Each finding needs a precise file/line reference on the supplied head (or base for deleted code), triggering condition, affected consumer, impact, concise proof, introduced/preexisting distinction and a concrete fix recommendation. Separate code reading from executed or observed evidence. Never invent a command, exit status or test pass.
 
-Give a patch grade with one concise evidence-backed reason: S = exceptional and rare; A = strong; B = solid; C = needs work; D = weak; F = unsafe or broken. Judge correctness, simplicity, scope, compatibility and evidence together; grade the patch, not the author. S/A/B cannot coexist with introduced P0/P1/P2 findings or essential unverified behavior. Infrastructure failure alone is not a patch defect. Draft status, pending CI and human product choices do not alone lower the grade. Name required changes and material decisions explicitly rather than hiding them in the grade reason.
+Give a patch grade with one concise reason, graded only on verified defects: source-backed, with a reachable trigger and consequence, introduced or worsened by this PR. Grade the patch, not the author.
+- S: exceptional, no findings.
+- A: strong, no verified defects.
+- B: solid, no verified defects. Unverified concerns, checks you could not run or measure, thin tests, pending CI, draft status, human decisions and suggestions cap the grade at B; list them in a one-line "Not defects" list.
+- C: at least one verified P3, or exactly one contained P2.
+- D: two or more verified P2s, or a P2 that breaks the change's main flow.
+- F: any verified P0 or P1, security flaw or data loss.
+Pre-existing problems the PR did not introduce or worsen are follow-ups and do not affect the grade. Infrastructure failure alone is not a patch defect. If you cannot name a verified defect that requires a code change, the grade is A or B.
 
 For a complete review, include exactly one machine-readable `SCRAT_GRADE: <grade>` line immediately before the final `SCRAT_STATUS` line, where `<grade>` is S, A, B, C, D, or F. Keep the grade and its reason in the Markdown assessment too. This is a quality assessment, not merge authorization.
 

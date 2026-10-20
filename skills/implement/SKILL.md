@@ -31,11 +31,17 @@ When `database` is supplied, Scrat owns a fresh PostgreSQL container for this ru
 - Tests should catch bugs we care about, not increase coverage or freeze the implementation. If the need for a new test is doubtful, skip it.
 - For a complex user flow, exercise the real path end to end when the available environment supports it; unit tests are not a substitute.
 - Run targeted checks and move on once they pass. Rerun only when something changed, failed or remains unresolved.
-- Do not run the repository's full lint, type-check, verify, build or e2e suites. Scrat runs them after you finish and sends any failure back into this session. Targeted checks, such as a single test file or a path-scoped check, are fine. End your turn when the change is ready.
+- Do not run full lint, type-check, verify, build or e2e suites as routine checks; Scrat validates after you finish and sends failures back into this session. When the task itself needs a full run (a benchmark or measurement, or reproducing a failure only the full suite shows), run it in the foreground; Scrat queues it for a heavy-check slot, so it may wait. Never background heavy commands (`&`, `nohup`). Targeted checks are always fine. End your turn when the change is ready.
 - Do not merely make an old test green. Fix broken code; update intentionally changed behavior; remove obsolete implementation-coupled checks. Never weaken useful verification to get green checks.
 - If nursing tests outweighs making the change, reassess. Escalate only when the desired behavior or scope needs human input.
 
-Before returning, review the complete diff against the issue and AGENTS.md, fix concrete self-review findings and run targeted verification. Never certify external-provider behavior from offline checks or claim a browser/test check you did not run. State unavailable checks and their effect on confidence.
+Before returning, review the complete diff against the issue and AGENTS.md, fix concrete self-review findings and run targeted verification. Never certify external-provider behavior from offline checks or claim a browser/test check you did not run. State unavailable checks and their effect on confidence. Self-review against these recurring defects:
+- Every reader, writer and entry point of changed data (sibling queries, jobs, branches, existing UI actions) is updated or consciously excluded.
+- Existing or stored data (old records, configs, cached values) is handled or named as a decision.
+- Every output that new secrets or metadata reach (responses, errors, logs, notifications) uses the existing sanitizer.
+- Every state in which a new control is shown (pending, disabled, empty) works, or the control is disabled or explained.
+- Check-then-write sequences are atomic; expected conflicts return specific statuses, not a generic 500.
+- A regression test fails without the fix through the real path, not a direct helper call or mock; generated files are regenerated, never hand-edited.
 
 Leave changes uncommitted. Scrat owns commits, branch publication, PR creation and GitHub labels/comments. Do not push, open or merge a PR, rebase, force-push, change runtime credentials, weaken CI, or edit other repositories. The supplied base snapshot is the execution baseline; report unresolved compatibility concerns rather than inventing a separate branch workflow.
 

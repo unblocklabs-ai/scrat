@@ -59,6 +59,7 @@ const scenarios = {
   rejection: "invalid queued tasks are rejected with a journal reason while later work still runs, and bad static config blocks startup",
   recovery: "recover releases an abandoned claim without rewriting the saved result",
   cleanup: "cleanup failure cannot turn a published review into a failed task",
+  sync_missing_item: "a deleted open item is marked closed and its failed read does not stop routing for the others",
   single_repository: "sync, fetch, claims and clone refs refuse any repository other than the configured one",
   identity: "retained workspaces reject branch replacement and retain unpublished commits",
   feedback: "edited review summaries and same-commit PR retargets produce fresh tasks",

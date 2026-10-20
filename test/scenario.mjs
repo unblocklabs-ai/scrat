@@ -1032,6 +1032,11 @@ try {
     f.prs[0].state = "open"; await (await f.app("github-sync.ts")).syncGitHub(undefined, false); await route();
     const pr = all(s.items).find((i) => i.kind === "pr"); assert.equal(pr.workspaceId, null);
     assert.ok(all(s.tasks).some((t) => t.itemId === pr.id && t.status === "queued"));
+  } else if (scenario === "sync_missing_item") {
+    f.addIssue(1); f.addIssue(2); await route();
+    f.issues.delete(1); f.addIssue(3); await route();
+    assert.equal(f.row(s.items, "issue-1").state, "closed"); assert.equal(f.row(s.items, "issue-2").state, "open");
+    assert.ok(all(s.tasks).some((t) => t.itemId === "issue-3" && t.status === "queued"));
   } else if (scenario === "existing_pr") {
     await implement(1); f.addIssue(2, ["scrat"]); f.prs[0].body += "\nFixes #2";
     f.enqueue(2, "implement"); await route();

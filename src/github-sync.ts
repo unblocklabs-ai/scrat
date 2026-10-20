@@ -8,6 +8,7 @@ import { upsertItem } from "./items.ts";
 import { assertConfiguredRepository, itemRepository, sameRepository } from "./observation.ts";
 import { withOperation } from "./logging.ts";
 import { githubSnapshots, items } from "./schema.ts";
+import type { GithubContext } from "./github-types.ts";
 
 // Raw snapshots are diagnostic only (about 4 h at the default poll); bound them so the SQLite file and its backups stay small.
 const snapshotsKept = 48;
@@ -39,10 +40,26 @@ export async function syncGitHub(repository = config.github.repository, queueTas
       operation.stage("reconcile_closed");
       const openIds = new Set([...issues, ...pullRequests].map((payload) => payload.node_id));
       const missing = previousItems.filter((item) => item.state === "open" && !openIds.has(item.externalId));
-      const contexts = await github.fetchItemContexts(missing.map((item) => ({ kind: item.kind, number: item.payload.number })), { comments: false });
+      // One unreadable item must not stop routing: 404/410 means it is gone; any other failure is retried next sync.
+      const reads = new Array<PromiseSettledResult<GithubContext>>(missing.length);
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(4, missing.length) }, async () => {
+        while (next < missing.length) {
+          const index = next++;
+          const item = missing[index]!;
+          try { reads[index] = { status: "fulfilled", value: await github.fetchItemContext(item.kind, item.payload.number, { comments: false }) }; }
+          catch (reason) { reads[index] = { status: "rejected", reason }; }
+        }
+      }));
       for (const [index, previousItem] of missing.entries()) {
-        const context = contexts[index]!;
-        upsertItem({ source: "github", externalId: previousItem.externalId, kind: previousItem.kind, payload: context.item, state: context.item.state === "open" ? "open" : "closed" });
+        const read = reads[index]!;
+        if (read.status === "fulfilled") {
+          upsertItem({ source: "github", externalId: previousItem.externalId, kind: previousItem.kind, payload: read.value.item, state: read.value.item.state === "open" ? "open" : "closed" });
+        } else if (typeof read.reason === "object" && read.reason !== null && "status" in read.reason && (read.reason.status === 404 || read.reason.status === 410)) {
+          upsertItem({ source: "github", externalId: previousItem.externalId, kind: previousItem.kind, payload: previousItem.payload, state: "closed" });
+        } else {
+          operation.log.warn({ event: "github.reconcile_failed", kind: previousItem.kind, number: previousItem.payload.number, err: read.reason });
+        }
       }
       operation.stage("route_tasks");
       const current = db.select().from(items).where(eq(items.source, "github")).all()

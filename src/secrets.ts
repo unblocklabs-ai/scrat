@@ -1,4 +1,5 @@
 import { config } from "./config.ts";
+import { SecretLeakError } from "./results.ts";
 
 // Workspace commands, Git hooks and agent shells run repository code. They
 // inherit only what toolchains need; anything else belongs in workspace.environment.
@@ -39,6 +40,6 @@ export function containsSecret(text: string) {
 
 export function assertPublishable(...texts: string[]) {
   if (texts.some(containsSecret)) {
-    throw Object.assign(new Error("Refusing to publish content containing credential material"), { code: "SECRET_IN_OUTPUT" });
+    throw new SecretLeakError("Refusing to publish content containing credential material");
   }
 }

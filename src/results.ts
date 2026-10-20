@@ -47,6 +47,11 @@ export class CheckFailure extends Error {
   readonly code = "CHECK_FAILED";
 }
 
+// Output that carried credential material; never handed to the agent to repair.
+export class SecretLeakError extends Error {
+  readonly code = "SECRET_IN_OUTPUT";
+}
+
 export function parseResult(output: string, paths: string[], { requireGrade = false }: { requireGrade?: boolean } = {}): AgentResult {
   const lines = output.trim().split("\n");
   const marker = lines.pop()?.trim();

@@ -23,6 +23,14 @@ export function redactSecrets(value: string) {
     .replace(/\b(Bearer|token)\s+\S+/gi, "$1 [redacted]");
 }
 
+export function errorCode(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;
+}
+
+export function errorStatus(error: unknown) {
+  return typeof error === "object" && error !== null && "status" in error && typeof error.status === "number" ? error.status : undefined;
+}
+
 export function describeError(error: unknown, seen = new Set<unknown>()): ErrorDetails {
   if (!(error instanceof Error)) {
     return { name: "Error", message: typeof error === "string" ? redactSecrets(error) : "Non-Error exception" };

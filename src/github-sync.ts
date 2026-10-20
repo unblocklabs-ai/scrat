@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { eq, sql } from "drizzle-orm";
 import { config } from "./config.ts";
+import { errorStatus } from "./errors.ts";
 import { db } from "./db.ts";
 import { GitHubRepository } from "./github.ts";
 import { routeGithubTasks } from "./github-tasks.ts";
@@ -55,7 +56,7 @@ export async function syncGitHub(repository = config.github.repository, queueTas
         const read = reads[index]!;
         if (read.status === "fulfilled") {
           upsertItem({ source: "github", externalId: previousItem.externalId, kind: previousItem.kind, payload: read.value.item, state: read.value.item.state === "open" ? "open" : "closed" });
-        } else if (typeof read.reason === "object" && read.reason !== null && "status" in read.reason && (read.reason.status === 404 || read.reason.status === 410)) {
+        } else if (errorStatus(read.reason) === 404 || errorStatus(read.reason) === 410) {
           upsertItem({ source: "github", externalId: previousItem.externalId, kind: previousItem.kind, payload: previousItem.payload, state: "closed" });
         } else {
           operation.log.warn({ event: "github.reconcile_failed", kind: previousItem.kind, number: previousItem.payload.number, err: read.reason });

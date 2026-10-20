@@ -13,7 +13,7 @@ import { parseResult, ResultFormatError, type Reviewer } from "./results.ts";
 import { blobSize, git, gitPage } from "./git.ts";
 import { createReviewGitTool, defaultBytes, maxBytes, pageText } from "./review-git.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
-import { redactSecrets } from "./errors.ts";
+import { errorCode, redactSecrets } from "./errors.ts";
 import { childEnvironment } from "./secrets.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 
@@ -102,7 +102,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
   const roots = [await realpath(cwd), ...contextDir ? [await realpath(contextDir)] : []];
   async function insideWorkspace(path: string) {
     const real = await realpath(path).catch((error: unknown) => {
-      if (error instanceof Error && "code" in error && error.code === "ENOENT") return resolve(path);
+      if (errorCode(error) === "ENOENT") return resolve(path);
       throw error;
     });
     if (!roots.some((root) => { const local = relative(root, real); return local !== ".." && !local.startsWith("../"); })) throw new Error(`Path is outside the workspace: ${path}`);

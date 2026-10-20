@@ -7,6 +7,8 @@ import { recordEvent, type EventReferences } from "./events.ts";
 import { git, hasPendingMerge } from "./git.ts";
 import { withOperation } from "./logging.ts";
 import { runs, workspaces } from "./schema.ts";
+import { errorCode } from "./errors.ts";
+import { SecretLeakError } from "./results.ts";
 import { containsSecret } from "./secrets.ts";
 
 export function getWorkspace(workspaceId: string) {
@@ -50,12 +52,12 @@ export async function assertNoCommittedSecrets(workspace: typeof workspaces.$inf
   for (const path of changed) {
     const file = resolve(workspace.path, path);
     const stats = await lstat(file).catch((error: unknown) => {
-      if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+      if (errorCode(error) === "ENOENT") return undefined;
       throw error;
     });
     const content = stats?.isSymbolicLink() ? await readlink(file) : stats?.isFile() ? (await readFile(file)).toString("latin1") : "";
     if (containsSecret(content)) {
-      throw Object.assign(new Error(`Refusing to commit credential material in ${path}`), { code: "SECRET_IN_OUTPUT" });
+      throw new SecretLeakError(`Refusing to commit credential material in ${path}`);
     }
   }
 }
@@ -106,7 +108,7 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
     }
     const { repositoryPath, branch } = workspace;
     const path = await realpath(workspace.path).catch((error: unknown) => {
-      if (error instanceof Error && "code" in error && error.code === "ENOENT") return workspace.path;
+      if (errorCode(error) === "ENOENT") return workspace.path;
       throw error;
     });
     operation.stage("remove_worktree");

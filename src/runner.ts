@@ -15,7 +15,7 @@ import { executePi } from "./pi.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { reviewPullRequest } from "./pr-review.ts";
 import { publishRun } from "./publication.ts";
-import { CheckFailure, hasValidationCheckpoint, type AgentResult } from "./results.ts";
+import { CheckFailure, hasValidationCheckpoint, SecretLeakError, type AgentResult } from "./results.ts";
 import { items, runs, workspaces } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { claimTask, finishRun } from "./tasks.ts";
@@ -208,7 +208,7 @@ export async function runNextTask() {
             await validate(workspace, contract.acceptance);
             validated = true;
           } catch (error) {
-            if (error instanceof Error && "code" in error && error.code === "SECRET_IN_OUTPUT") throw error;
+            if (error instanceof SecretLeakError) throw error;
             // The agent repairs the merged tree in this same run, starting from what validation reported.
             validationFailure = describeError(error instanceof CheckFailure ? error.cause : error);
           }

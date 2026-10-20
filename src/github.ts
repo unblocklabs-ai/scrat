@@ -7,6 +7,7 @@ import { labelName } from "./labels.ts";
 import { logger, withOperation } from "./logging.ts";
 import { inlineCommentId, issueCommentId, reviewCommentId } from "./markers.ts";
 import type { GithubComment, GithubContext, GithubIssue, GithubItem, GithubPullRequest } from "./github-types.ts";
+import { errorStatus } from "./errors.ts";
 import { assertPublishable, childEnvironment } from "./secrets.ts";
 
 const permissions = {
@@ -113,7 +114,7 @@ async function githubForRepository(repository: string, access: keyof typeof perm
   github.hook.error("request", (error) => {
     // Recover on the next operation; never replay a possibly ambiguous write.
     // An old client's failure cannot invalidate a replacement's credentials.
-    if ("status" in error && error.status === 401) entry.invalid = true;
+    if (errorStatus(error) === 401) entry.invalid = true;
     throw error;
   });
   clients.set(key, entry);
@@ -301,7 +302,7 @@ export class GitHubRepository {
           try {
             return await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name: label });
           } catch (error) {
-            if (!(error instanceof Error && "status" in error && error.status === 404)) throw error;
+            if (errorStatus(error) !== 404) throw error;
             const { data } = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
             if (data.labels.some((current) => labelName(current).toLowerCase() === label.toLowerCase())) throw error;
             // Already absent: report a 404 with no event instead of a false removal.

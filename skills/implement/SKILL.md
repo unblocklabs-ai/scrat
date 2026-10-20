@@ -30,11 +30,12 @@ When `database` is supplied, Scrat owns a fresh PostgreSQL container for this ru
 
 - Tests should catch bugs we care about, not increase coverage or freeze the implementation. If the need for a new test is doubtful, skip it.
 - For a complex user flow, exercise the real path end to end when the available environment supports it; unit tests are not a substitute.
-- Run relevant checks and move on once they pass. Rerun only when something changed, failed or remains unresolved.
+- Run targeted checks and move on once they pass. Rerun only when something changed, failed or remains unresolved.
+- Do not run the repository's full lint, type-check, verify, build or e2e suites. Scrat runs them after you finish and sends any failure back into this session. Targeted checks, such as a single test file or a path-scoped check, are fine. End your turn when the change is ready.
 - Do not merely make an old test green. Fix broken code; update intentionally changed behavior; remove obsolete implementation-coupled checks. Never weaken useful verification to get green checks.
 - If nursing tests outweighs making the change, reassess. Escalate only when the desired behavior or scope needs human input.
 
-Before returning, review the complete diff against the issue and AGENTS.md, fix concrete self-review findings and run relevant verification. Never certify external-provider behavior from offline checks or claim a browser/test check you did not run. State unavailable checks and their effect on confidence.
+Before returning, review the complete diff against the issue and AGENTS.md, fix concrete self-review findings and run targeted verification. Never certify external-provider behavior from offline checks or claim a browser/test check you did not run. State unavailable checks and their effect on confidence.
 
 Leave changes uncommitted. Scrat owns commits, branch publication, PR creation and GitHub labels/comments. Do not push, open or merge a PR, rebase, force-push, change runtime credentials, weaken CI, or edit other repositories. The supplied base snapshot is the execution baseline; report unresolved compatibility concerns rather than inventing a separate branch workflow.
 

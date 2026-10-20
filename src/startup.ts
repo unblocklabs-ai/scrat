@@ -11,13 +11,21 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 
 // Fails before any worker claims, so a bad static setting stops startup instead of failing tasks one by one.
 // @public: exported for the scenario tests, which validate alternative configurations directly.
-export async function validateStaticConfig(settings: { actions: Record<string, Entry & { skill: string; reviewers?: Entry[]; maxSelfRepairs?: number }> } = config) {
+export async function validateStaticConfig(settings: {
+  harness?: { maxConcurrentValidations?: number }; workspace?: { blockedCommands?: string[] };
+  actions: Record<string, Entry & { skill: string; reviewers?: Entry[]; maxSelfRepairs?: number }>;
+} = config) {
   const modelRuntime = await sharedModelRuntime();
   const problems: string[] = [];
   const checkEntry = (label: string, { provider, model, thinkingLevel }: Entry) => {
     if (!(thinkingLevels as readonly string[]).includes(thinkingLevel)) problems.push(`${label}: invalid thinking level ${thinkingLevel}`);
     if (!modelRuntime.getModel(provider, model)) problems.push(`${label}: no Pi model ${provider}/${model}${modelRuntime.getError() ? ` (${modelRuntime.getError()})` : ""}`);
   };
+  const slots = settings.harness?.maxConcurrentValidations;
+  if (slots !== undefined && !(Number.isSafeInteger(slots) && slots > 0)) problems.push("harness.maxConcurrentValidations must be a positive integer");
+  settings.workspace?.blockedCommands?.forEach((pattern, index) => {
+    try { new RegExp(pattern); } catch { problems.push(`workspace.blockedCommands[${index}] is not a valid regular expression`); }
+  });
   for (const action of actionIds) {
     const entry = settings.actions[action];
     if (!entry) { problems.push(`${action}: missing from configuration`); continue; }

@@ -17,7 +17,7 @@ Never weaken tests, checks or validation to make them pass, and do not delete or
 
 Continue retained work and address the previous failure (`files.previousFailure`) when supplied. Preserve an unfinished merge and partial work rather than resetting or rebuilding the PR. Scrat owns the branch/worktree lifecycle; do not create a replacement PR, rebase or force-push. When `database` is supplied, use its current `environment` values and add new migrations instead of rewriting applied history.
 
-After changes, review the complete diff against the original request and the verified findings, run relevant checks, and stop once they pass. Report checks you could not run as limitations, never passes.
+After changes, review the complete diff against the original request and the verified findings, run targeted checks, and stop once they pass. Do not run the repository's full lint, type-check, verify, build or e2e suites. Scrat runs them after you finish and sends any failure back into this session. Targeted checks, such as a single test file or a path-scoped check, are fine. End your turn when the change is ready. Report checks you could not run as limitations, never passes.
 
 Leave changes uncommitted. Scrat handles commits, pushes and the reply. Do not publish comments yourself, change labels, approve/merge/close a PR, alter runtime credentials or edit other repositories.
 

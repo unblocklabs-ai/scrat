@@ -56,11 +56,13 @@ npm run knip                     # Unused files, exports, and dependencies
 npm test                         # Integration/E2E tests; PostgreSQL case needs Docker
 ```
 
+When the final validation fails because a command exited nonzero (including preparation commands), the failure is sent back into the same Pi session, up to two rounds, before the run fails. Commands killed by a signal (an out-of-memory kill or a timeout), tree mutation, secret-scan and acceptance failures are not sent back and fail the run as before; use `--validation-only` for the infrastructure cases.
+
 Normal retries rerun Pi for pre-publication failures, reusing the workspace/session so it can repair the problem. Publication-only retries reuse the saved validated result.
 
 Use `--validation-only` for a transient validation failure after a mutating agent returned complete. It requires a saved checkpoint with unchanged task input, workspace identity, HEAD, source tree, merge state, GitHub context, and base SHA. Scrat skips Pi, creates a fresh disposable database when configured, reruns preparation/migrations and all checks, and still enforces action postconditions before publication. Ignored files are outside the source checkpoint; configured preparation must restore any required dependency/generated state. Changed or incomplete work requires a normal repair retry.
 
-When upgrading an existing installation, run `npm run db:push` before starting the new code (the installer does this). Old run history is preserved, but runs without checkpoints cannot use validation-only retry. No validation is bypassed or automatically retried.
+When upgrading an existing installation, run `npm run db:push` before starting the new code (the installer does this). Old run history is preserved, but runs without checkpoints cannot use validation-only retry. No validation is bypassed, and a failed validation is retried only through the in-session feedback above.
 
 For project review, run `typecheck`, `knip`, and the integration/E2E tests after `npm ci` (including dev dependencies). TypeScript checks `src/` and the Drizzle config without emitting JavaScript. Knip includes the CLI, deployment-only recovery, and subprocess-driven test entrypoints; ordinary source modules remain eligible for unused-code detection. Review findings before removing code or adding exceptions.
 
@@ -72,7 +74,8 @@ For project review, run `typecheck`, `knip`, and the integration/E2E tests after
 
 | Setting | Purpose |
 | --- | --- |
-| `harness.maxConcurrency` | Maximum simultaneous tasks, not model sessions or test subprocesses. Each PR review starts two reviewer sessions within one task. Change-mode tasks run the full validation suite and a database container, so size this to the host's memory. |
+| `harness.maxConcurrency` | Maximum simultaneous tasks, not model sessions or test subprocesses. Each PR review starts two reviewer sessions within one task. Change-mode tasks run a database container and, at the end, the validation suite (bounded by `maxConcurrentValidations`), so size this to the host's memory. |
+| `harness.maxConcurrentValidations` | Maximum `workspace.validate` runs at once (default 3, a positive integer). Further runs wait in a FIFO queue; preparation does not take a slot. |
 | `harness.logLevel` | Pino log verbosity, such as `info` or `debug`. |
 | `github.repository` | Target GitHub repository as `owner/repo`. |
 | `github.repositoryPath` | Local repository clone; relative paths resolve from the config directory. `SCRAT_REPOSITORY_PATH` overrides it. |
@@ -90,6 +93,7 @@ Workspace commands are argument arrays, not shell strings: `["pnpm", "verify"]`.
 | --- | --- |
 | `workspace.environment` | Environment variables added to Pi's Bash commands and harness preparation/validation commands. These commands inherit only path, home, user, locale, temporary-directory, proxy, certificate and `DOCKER_HOST` settings, so any other variable they need belongs here. Test-process limits belong here too; task concurrency does not serialize tests. |
 | `workspace.prepare` | Setup commands, including dependency installation and code generation. Also used for read-only reviews, and rerun before mutating-work validation. |
+| `workspace.blockedCommands` | Optional regular expressions, matched against each shell command segment of Pi's Bash tool, with quoted text ignored and whitespace collapsed (leading `VAR=value`, `env`, `nohup`, `time`, `sudo`, `exec` and `timeout N` are stripped). A match is refused with a message telling the agent that Scrat runs the heavy check itself. This is a speed bump against accidental parallel lint/type-check/verify runs, not a sandbox: `sh -c '...'` or a script can still evade it. |
 | `workspace.validate` | Required checks for mutating tasks before committing or publishing. Not run as a harness gate for read-only reviews. |
 | `workspace.database` | Optional per-run PostgreSQL container configuration for mutating tasks; omit or set to `null` to disable. |
 | `workspace.database.image` | PostgreSQL-compatible Docker image to start. |
@@ -127,7 +131,7 @@ Execution mode, acceptance rules, and publication behavior live in `src/actions.
 | `reviewers` | PR review panel: exactly two entries, each with its own `provider`, `model`, and `thinkingLevel`. |
 | `maxSelfRepairs` | `address_review` only: most self-repair tasks queued for one PR (non-negative integer, default 2; 0 disables self-repair; not enqueueable manually). A push makes the review stale and Scrat re-reviews; a reply-only repair is not retriggered for the same assessment. |
 
-The checked-in configuration currently uses three task slots (sized for a 24 GB host running concurrent validation), priorities **PR 100 > implementation/maintenance 60 > issue 10**, and a Sol-high/DeepSeek-high review panel with Sol-high consolidation. These are configurable values, not built-in limits or model choices.
+The checked-in configuration currently uses six task slots and three validation slots (sized for a 24 GB host, with the service capped at `MemoryMax=20G`), priorities **PR 100 > implementation/maintenance 60 > issue 10**, and a Sol-high/DeepSeek-high review panel with Sol-high consolidation. These are configurable values, not built-in limits or model choices.
 
 ## Project layout
 

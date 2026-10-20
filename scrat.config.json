@@ -1,6 +1,7 @@
 {
   "harness": {
-    "maxConcurrency": 3,
+    "maxConcurrency": 6,
+    "maxConcurrentValidations": 3,
     "logLevel": "info"
   },
   "github": {
@@ -28,6 +29,13 @@
     "validate": [
       ["env", "TEST_DATABASE_URL=", "pnpm", "verify"],
       ["pnpm", "test:db:ci"]
+    ],
+    "blockedCommands": [
+      "^pnpm( -\\S+)*( run)? (verify|lint|knip|type-check|build|test:coverage|test:e2e\\S*)( |$)",
+      "^(pnpm (exec )?|npx )?tsc( |$)",
+      "^(pnpm (exec )?|npx )?knip( |$)",
+      "^(pnpm (exec )?|npx )?eslint +(\\.|--max-warnings)",
+      "^(pnpm (exec )?|npx )?playwright( |$)"
     ]
   },
   "providers": {

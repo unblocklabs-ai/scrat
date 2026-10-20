@@ -11,6 +11,7 @@ type WorkspaceConfig = {
   prepare?: string[][];
   database?: { image: string; environment: string[]; migrate: string[] } | null;
   validate?: string[][];
+  blockedCommands?: string[];
 };
 
 export const config: Omit<typeof settings, "workspace"> & { workspace?: WorkspaceConfig } = settings;

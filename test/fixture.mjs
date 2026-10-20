@@ -63,6 +63,8 @@ export async function fixture(scenario) {
     // Correction turns carry no context, so read the task from the latest user message that has one.
     const text = texts.findLast((entry) => entry.includes('{\n  "action"'));
     const corrected = texts.at(-1).startsWith("Your previous final answer was not accepted");
+    // A feedback turn is a validation failure sent back into the session; its first request follows the user message directly.
+    const feedback = texts.at(-1).startsWith("Scrat's validation failed"), turnStart = request.messages.at(-1).role === "user";
     const start = text.indexOf('{\n  "action"');
     const context = JSON.parse(text.slice(start, text.indexOf("\n}", start) + 2));
     const consolidating = text.includes("Consolidate the two independent reviews below");
@@ -121,6 +123,9 @@ export async function fixture(scenario) {
           : { name: "write", args: { path: "src/app.ts", content: `export const value = ${context.item.number + 10};\n${scenario === "verification" ? "\n" : ""}` } };
     }
     if (!review && context.database && step === 1) tool = { name: "write", args: { path: "migration.sql", content: "ALTER TABLE identities ADD COLUMN IF NOT EXISTS extra integer;\n" } };
+    if (!review && step === 0 && mode.startsWith("feedback-")) tool = { name: "bash", args: { command: `printf 'export const value = ${context.item.number + 10};\\n' > src/app.ts && touch fail-validation` } };
+    if (!review && feedback && turnStart && mode === "feedback-fix") tool = { name: "bash", args: { command: "rm -f fail-validation" } };
+    if (!review && step === 0 && mode === "heavy") tool = { name: "bash", args: { command: "nohup pnpm verify > log 2>&1 &" } };
     if (review && mode === "outside") tool = [{ name: "read", args: { path: resolve("outside-secret.txt") } }, { name: "read", args: { path: "src/link.txt" } },
       { name: "grep", args: { pattern: "outside", path: resolve(".") } }, { name: "ls", args: { path: ".." } }][step];
     if (!review && mode === "probe") tool = [{ name: "bash", args: { command: `${process.execPath} ${resolve("probe.mjs")} bash` } },
@@ -143,7 +148,8 @@ export async function fixture(scenario) {
   });
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   const config = JSON.parse(readFileSync("app/scrat.config.json", "utf8"));
-  config.workspace = {}; config.harness.maxConcurrency = 6; config.github.repository = "fixture/project"; config.github.repositoryPath = resolve("checkout");
+  const blockedCommands = config.workspace.blockedCommands;
+  config.workspace = scenario === "bash_guard" ? { blockedCommands } : {}; config.harness.maxConcurrency = 6; config.github.repository = "fixture/project"; config.github.repositoryPath = resolve("checkout");
   config.providers = { fixture: { api: "openai-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: "fixture", models: [
     { id: "gpt-6.1-sol", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
     { id: "deepseek/deepseek-v4.1-flash", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
@@ -176,6 +182,14 @@ export async function fixture(scenario) {
   if (scenario === "verification" || scenario === "validation_mutation") {
     writeFileSync("check.mjs", scenario === "validation_mutation" ? 'import{writeFileSync}from"node:fs";writeFileSync("src/app.ts","unexpected verification change\\n");' : 'import{existsSync}from"node:fs";if(existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed");process.exit(7);}console.log("checked actual source");');
     config.workspace.validate = [[process.execPath, resolve("check.mjs")]];
+  }
+  if (["validation_feedback", "validation_feedback_cap", "validation_slots"].includes(scenario)) {
+    // Logs each validation's interval; flags in the fixture root slow it down (slow), fail it (slot-fail), kill it with a signal (kill-validation) or exit as a wrapper does for one (exit-137).
+    const flag = (name) => JSON.stringify(resolve(name));
+    writeFileSync("validate.mjs", 'import{appendFileSync,existsSync}from"node:fs";const s=Date.now();await new Promise((r)=>setTimeout(r,existsSync(' + flag("slow") + ')?1000:0));'
+      + 'appendFileSync(' + flag("validations.log") + ',JSON.stringify({s,e:Date.now()})+"\\n");if(existsSync(' + flag("kill-validation") + '))process.kill(process.pid,"SIGKILL");if(existsSync(' + flag("exit-137") + '))process.exit(137);'
+      + 'if(existsSync(' + flag("slot-fail") + ')||existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed: marker present");process.exit(7);}');
+    config.workspace.validate = [[process.execPath, resolve("validate.mjs")]];
   }
   if (["validation_resume", "validation_guards", "resume_migration"].includes(scenario)) {
     writeFileSync("prepare.mjs", 'import{appendFileSync,mkdirSync,writeFileSync}from"node:fs";appendFileSync(' + JSON.stringify(resolve("prepare.log")) + ',"prepare\\n");mkdirSync("node_modules",{recursive:true});writeFileSync("node_modules/prepared","ready");');

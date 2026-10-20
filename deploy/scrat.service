@@ -13,6 +13,7 @@ Environment=SCRAT_REPOSITORY_PATH=/home/bek/.local/share/scrat-v2/repository
 ExecStart=/usr/bin/flock --no-fork --exclusive --nonblock /home/bek/.local/share/scrat-v2/data/worker.lock /bin/sh -c 'node --env-file=.env src/recover-active.ts && exec node --env-file=.env src/serve.ts'
 Restart=on-failure
 OOMPolicy=continue
+MemoryMax=20G
 RestartSec=10
 TimeoutStopSec=infinity
 KillMode=mixed

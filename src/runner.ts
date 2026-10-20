@@ -2,7 +2,7 @@ import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { actionContracts } from "./actions.ts";
 import { buildAgentInput, evaluateContext, readDiffScope } from "./agent-input.ts";
 import { config, getRepositoryPath } from "./config.ts";
-import { runCommands } from "./commands.ts";
+import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
 import { describeError, type ErrorDetails } from "./errors.ts";
@@ -15,7 +15,7 @@ import { executePi } from "./pi.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { reviewPullRequest } from "./pr-review.ts";
 import { publishRun } from "./publication.ts";
-import { hasValidationCheckpoint } from "./results.ts";
+import { CheckFailure, hasValidationCheckpoint, type AgentResult } from "./results.ts";
 import { items, runs } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { claimTask, finishRun } from "./tasks.ts";
@@ -26,11 +26,39 @@ type DatabaseConfig = NonNullable<NonNullable<typeof config.workspace>["database
 type Environment = Record<string, string | undefined>;
 type References = { itemId: string; taskId: string; runId: string };
 
+// A failed validation is sent back into the agent's session this many times before the run fails.
+const maxValidationCorrections = 2;
+
 const botAuthor = () => ({ name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com` });
 
 async function prepareWorkspace(workspace: Workspace, environment: Environment, databaseConfig: DatabaseConfig | null | undefined, references: References) {
   await runCommands(config.workspace?.prepare ?? [], workspace.path, environment, references);
   if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, environment, references);
+}
+
+// A command that exits nonzero is the agent's to fix. One killed by a signal (an OOM kill, a timeout) is infrastructure: validation-only retry is its remedy.
+async function asCheckFailure<T>(fn: () => Promise<T>) {
+  try { return await fn(); }
+  catch (error) {
+    // Only an ordinary failing exit is the agent's to fix. A signal, or a wrapper's 128+n exit for one (an OOM kill), is infrastructure.
+    if (error instanceof Error && "code" in error && typeof error.code === "number" && error.code <= 128
+      && !("signal" in error && error.signal) && !("killed" in error && error.killed)) {
+      throw new CheckFailure(error.message, { cause: error });
+    }
+    throw error;
+  }
+}
+
+function validationMessage(error: CheckFailure, round: number) {
+  const { message, exitCode, stdout, stderr } = describeError(error.cause);
+  const tail = (label: string, text?: string) => text?.trim() ? `\n${label} (last 6000 characters):\n${text.trim().slice(-6000)}\n` : "";
+  return `Scrat's validation failed after your changes (round ${round} of ${maxValidationCorrections}).\n\nCommand: ${message.split("\n")[0].replace(/^Command failed: /, "")}\nExit code: ${exitCode ?? "unknown"}\n${tail("stdout", stdout)}${tail("stderr", stderr)}\nFix only what is reported. Do not run the full lint, verify or type-check yourself; Scrat runs them again when you finish. Then end your turn with your complete final handoff (it becomes the PR or comment text) and the usual SCRAT_STATUS footer.`;
+}
+
+function assertComplete(result: AgentResult) {
+  if (result.outcome !== "complete") {
+    throw Object.assign(new Error(`Agent returned ${result.outcome}: ${result.text}`), { code: "AGENT_INCOMPLETE" });
+  }
 }
 
 async function validateAndCommit(options: {
@@ -40,11 +68,11 @@ async function validateAndCommit(options: {
 }) {
   const { run, workspace, commandEnvironment, references, acceptance } = options;
   if (!options.validationOnly) db.update(runs).set({ agentCheckpoint: await checkpointWorkspace(workspace) }).where(eq(runs.id, run.id)).run();
-  await prepareWorkspace(workspace, commandEnvironment, options.databaseConfig, references);
+  await asCheckFailure(() => prepareWorkspace(workspace, commandEnvironment, options.databaseConfig, references));
   const checkpoint = await checkpointWorkspace(workspace);
   db.update(runs).set({ agentCheckpoint: checkpoint }).where(eq(runs.id, run.id)).run();
   const validationTree = checkpoint.treeSha;
-  const commands = await runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references);
+  const commands = await asCheckFailure(() => withValidationSlot(() => runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references), references));
   await git(workspace.path, ["add", "--all"]);
   if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
   await assertNoCommittedSecrets(workspace, options.secretBaseSha, validationTree);
@@ -141,6 +169,7 @@ export async function runNextTask() {
         acceptance: { kind, repositoryPath, mainSha, baseRef },
       });
       let validated = false, validationFailure: ErrorDetails | undefined;
+      let agentInput: { contextDir: string; revisions: Record<string, string> } | undefined;
       if (!validationOnly) {
         const previous = !readOnly ? db.select().from(runs).where(and(
           eq(runs.workspaceId, workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile),
@@ -165,7 +194,7 @@ export async function runNextTask() {
           } catch (error) {
             if (error instanceof Error && "code" in error && error.code === "SECRET_IN_OUTPUT") throw error;
             // The agent repairs the merged tree in this same run, starting from what validation reported.
-            validationFailure = describeError(error);
+            validationFailure = describeError(error instanceof CheckFailure ? error.cause : error);
           }
         }
         if (!validated) {
@@ -205,6 +234,7 @@ export async function runNextTask() {
               prepare: config.workspace?.prepare, migrate: databaseConfig?.migrate,
             } : undefined,
           });
+          agentInput = { contextDir, revisions };
           const agentResult = contract.agent === "panel"
             ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { baseSha: diffBaseSha, contextDir, revisions })
             : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, log: operation.log, sessionFile: previous?.piSessionFile ?? undefined, environment, contextDir, revisions });
@@ -213,10 +243,23 @@ export async function runNextTask() {
         }
       }
       if (!result) throw new Error("No saved agent result to validate");
-      if (result.outcome !== "complete") {
-        throw Object.assign(new Error(`Agent returned ${result.outcome}: ${result.text}`), { code: "AGENT_INCOMPLETE" });
+      assertComplete(result);
+      if (!readOnly && !validated) {
+        for (let round = 1; ; round++) {
+          try { await validate(workspace, contract.acceptance); break; }
+          catch (error) {
+            if (!(error instanceof CheckFailure)) throw error;
+            const sessionFile = db.select().from(runs).where(eq(runs.id, run.id)).get()!.piSessionFile ?? undefined;
+            if (validationOnly || !agentInput || !sessionFile || round > maxValidationCorrections) throw error.cause;
+            operation.log.warn({ event: "pi.validation_retry", round });
+            db.update(runs).set({ stage: "agent" }).where(eq(runs.id, run.id)).run();
+            const followUp = await executePi({ run, cwd: workspace.path, context: "", readOnly, log: operation.log, sessionFile, environment, ...agentInput, followUp: validationMessage(error, round) });
+            result = { ...followUp, paths: [...new Set([...result.paths, ...followUp.paths])] };
+            db.update(runs).set({ result, stage: "validating" }).where(eq(runs.id, run.id)).run();
+            assertComplete(result);
+          }
+        }
       }
-      if (!readOnly && !validated) await validate(workspace, contract.acceptance);
       db.update(runs).set({ stage: "publishing" }).where(eq(runs.id, run.id)).run();
     }
     const evaluatedRun = db.select().from(runs).where(eq(runs.id, run.id)).get()!;

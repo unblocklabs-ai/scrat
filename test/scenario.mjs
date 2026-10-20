@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fixture } from "./fixture.mjs";
 
@@ -1364,6 +1364,78 @@ try {
     assert.deepEqual(events("test.sync"), ["operation.started", "operation.completed"]);
     assert.equal(lines.find((line) => line.operation === "test.sync_fail" && line.event === "operation.failed").stage, "tx");
     assert.equal(db.all(sql`select n from op_check`).length, 1);
+  } else if (scenario === "validation_feedback" || scenario === "validation_feedback_cap") {
+    const { default: fs } = await import("node:fs"), lines = [], write = fs.writeSync;
+    fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string") { lines.push(...data.split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } })); return data.length; } return write(fd, data, ...rest); };
+    const validations = () => existsSync("validations.log") ? readFileSync("validations.log", "utf8").trim().split("\n").length : 0;
+    const lastUser = ({ request }) => { const { content } = request.messages.at(-1); return typeof content === "string" ? content : content.map((part) => part.text ?? "").join("\n"); };
+    const feedbackRequests = () => f.requests.filter((entry) => entry.request.messages.at(-1).role === "user" && lastUser(entry).startsWith("Scrat's validation failed"));
+    try {
+      if (scenario === "validation_feedback") {
+        f.addIssue(1, ["scrat"]); f.modes.set(1, "feedback-fix"); f.enqueue(1, "implement"); const r = await success();
+        assert.equal(r.verification.headSha, r.publication.publishedCommitSha); assert.equal(validations(), 2);
+        assert.equal(readdirSync("data/pi-sessions", { recursive: true }).filter((name) => name.endsWith(".jsonl")).length, 1);
+        const [message] = feedbackRequests(), text = lastUser(message);
+        assert.equal(feedbackRequests().length, 1); assert.equal(f.requests.length, 4, "one tool turn and one answer for each of the agent and its feedback");
+        assert.match(text, /round 1 of 2/); assert.match(text, /Exit code: 7/); assert.match(text, /Verification failed: marker present/); assert.ok(text.length < 20_000);
+        assert.ok(!text.includes("ghs_fixture_sensitive")); assert.match(text, /validation detail/);
+        assert.equal(git(resolve("remote.git"), "rev-list", "--count", `main..${f.prs[0].head.ref}`), "1");
+        assert.ok(!existsSync(resolve(f.row(s.workspaces, r.workspaceId).path, "fail-validation")));
+        assert.ok(lines.some((line) => line.event === "pi.validation_retry" && line.round === 1));
+      } else {
+        f.addIssue(1, ["scrat"]); f.modes.set(1, "feedback-stubborn"); f.enqueue(1, "implement"); const failed = await run();
+        assert.equal(failed.error.exitCode, 7); assert.equal(failed.verification, null); assert.equal(f.prs.length, 0);
+        assert.equal(validations(), 3); assert.equal(feedbackRequests().length, 2);
+        assert.equal(lines.filter((line) => line.event === "pi.validation_retry").length, 2);
+        assert.match(lastUser(feedbackRequests()[1]), /round 2 of 2/);
+        // A signal-killed command is infrastructure: no feedback, and validation-only retry stays the remedy.
+        writeFileSync("kill-validation", ""); f.addIssue(2, ["scrat"]); f.enqueue(2, "implement");
+        const calls = f.requests.length, before = validations(), killed = await run();
+        assert.ok(killed.error); assert.equal(killed.error.name, "Error"); assert.equal(killed.error.exitCode, undefined); assert.equal(killed.stage, "validating");
+        assert.equal(validations(), before + 1); assert.equal(f.requests.length, calls + 2, "agent turn only"); assert.equal(feedbackRequests().length, 2);
+        // So is a wrapper's 128+n exit for a killed child (pnpm reporting an OOM kill).
+        rmSync("kill-validation"); writeFileSync("exit-137", ""); f.addIssue(3, ["scrat"]); f.enqueue(3, "implement");
+        const wrapped = await run();
+        assert.equal(wrapped.error.exitCode, 137); assert.equal(f.requests.length, calls + 4, "agent turn only"); assert.equal(feedbackRequests().length, 2);
+      }
+    } finally { fs.writeSync = write; }
+  } else if (scenario === "bash_guard") {
+    const { blockedCommand } = await f.app("commands.ts");
+    const patterns = JSON.parse(readFileSync(new URL("../scrat.config.json", import.meta.url), "utf8")).workspace.blockedCommands.map((pattern) => new RegExp(pattern));
+    for (const command of ["pnpm lint && pnpm type-check", "nohup pnpm verify > l 2>&1 &", "env X=1 tsc -b", "cd x && pnpm verify", "npx eslint .", "pnpm test:e2e:smoke", "FOO=1 timeout 60 pnpm run build", "echo hi; pnpm exec playwright test", "x=$(pnpm knip)", "pnpm  lint", "pnpm -r lint", "pnpm -w run verify"]) {
+      assert.ok(blockedCommand(command, patterns), command);
+    }
+    for (const command of ["pnpm test", "pnpm check src/a.ts", "pnpm exec vitest run a.test.ts", "pnpm build:cli", "pnpm test:db:ci", 'git commit -m "pnpm lint"', "grep eslint f", "eslint src/a.ts", "pnpm test:cli", 'git commit -m "a; pnpm lint ok"', "git commit -m \"fix\n\npnpm verify was failing\"", 'grep -E "foo|tsc b" f', "sh -c 'pnpm verify'"]) {
+      assert.equal(blockedCommand(command, patterns), undefined, command);
+    }
+    assert.equal(blockedCommand("cd x && pnpm verify", patterns), "pnpm verify");
+    const { validateStaticConfig } = await f.app("startup.ts");
+    await validateStaticConfig(f.config);
+    const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
+    await assert.rejects(validateStaticConfig(variant((c) => { c.harness.maxConcurrentValidations = 0; })), /maxConcurrentValidations must be a positive integer/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.blockedCommands = ["^(unclosed"]; })), /blockedCommands\[0\] is not a valid regular expression/);
+    f.addIssue(1, ["scrat"]); f.modes.set(1, "heavy"); f.enqueue(1, "implement"); const r = await run();
+    assert.ok(r.error);
+    const tools = f.requests[1].request.messages.filter((message) => message.role === "tool");
+    assert.equal(tools.length, 1); assert.match(JSON.stringify(tools[0].content), /Scrat runs/);
+    assert.ok(!existsSync(resolve(f.row(s.workspaces, r.workspaceId).path, "log")), "the blocked command must not run");
+  } else if (scenario === "validation_slots") {
+    const { config } = await f.app("config.ts");
+    const intervals = (skip) => readFileSync("validations.log", "utf8").trim().split("\n").slice(skip).map(JSON.parse).sort((a, b) => a.s - b.s);
+    const both = (first) => { for (const n of [first, first + 1]) { f.addIssue(n, ["scrat"]); f.enqueue(n, "implement"); } return Promise.all([f.runNextTask(), f.runNextTask()]); };
+    writeFileSync("slow", "");
+    config.harness.maxConcurrentValidations = 1;
+    for (const r of await both(1)) assert.equal(r.error, null, JSON.stringify(r.error));
+    const serial = intervals(0); assert.equal(serial.length, 2); assert.ok(serial[0].e <= serial[1].s, "one slot serializes validations");
+    config.harness.maxConcurrentValidations = 2;
+    for (const r of await both(3)) assert.equal(r.error, null, JSON.stringify(r.error));
+    const parallel = intervals(2); assert.equal(parallel.length, 2); assert.ok(parallel[1].s < parallel[0].e, "two slots overlap validations");
+    // A failing validation must hand its slot back: the failed run holds it for three attempts, then the next run still gets it.
+    config.harness.maxConcurrentValidations = 1; writeFileSync("slot-fail", "");
+    f.addIssue(5, ["scrat"]); f.enqueue(5, "implement"); assert.equal((await run()).error.exitCode, 7);
+    unlinkSync("slot-fail"); f.addIssue(6, ["scrat"]); f.enqueue(6, "implement");
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("validation slot was not released")), 30_000));
+    assert.equal((await Promise.race([run(), timeout])).error, null);
   } else throw new Error("Unknown scenario " + scenario);
   console.log("SCENARIO_PASSED " + scenario);
 } finally { await f.close(); }

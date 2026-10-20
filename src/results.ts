@@ -42,6 +42,11 @@ export class ResultFormatError extends Error {
   readonly code = "SCRAT_FORMAT";
 }
 
+// A validation command that failed on the agent's changes, which the agent can fix in its own session.
+export class CheckFailure extends Error {
+  readonly code = "CHECK_FAILED";
+}
+
 export function parseResult(output: string, paths: string[], { requireGrade = false }: { requireGrade?: boolean } = {}): AgentResult {
   const lines = output.trim().split("\n");
   const marker = lines.pop()?.trim();

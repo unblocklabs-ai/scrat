@@ -5,7 +5,8 @@ import { createAgentSession, createBashToolDefinition, createFindToolDefinition,
 import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
 import { Type } from "typebox";
-import { thinkingLevels } from "./config.ts";
+import { blockedCommand } from "./commands.ts";
+import { config, thinkingLevels } from "./config.ts";
 import { db } from "./db.ts";
 import { runs } from "./schema.ts";
 import { parseResult, ResultFormatError, type Reviewer } from "./results.ts";
@@ -30,7 +31,7 @@ export function saveReviewer(runId: string, index: number, patch: Partial<Review
   });
 }
 
-export async function executePi({ run, cwd, context, readOnly, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {}, requireGrade = false }: {
+export async function executePi({ run, cwd, context, readOnly, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {}, requireGrade = false, followUp }: {
   run: typeof runs.$inferSelect;
   cwd: string;
   context: string;
@@ -43,6 +44,8 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
   contextDir?: string;
   revisions?: Record<string, string>;
   requireGrade?: boolean;
+  // Resumes sessionFile with this message instead of starting the skill prompt.
+  followUp?: string;
 }) {
   const modelRuntime = await sharedModelRuntime();
   const model = modelRuntime.getModel(run.provider, run.model);
@@ -68,6 +71,18 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
   const bash = createBashToolDefinition(cwd, {
     spawnHook: (context) => ({ ...context, env: { ...childEnvironment(context.env), ...environment } }),
   });
+  const blocked = (config.workspace?.blockedCommands ?? []).map((pattern) => new RegExp(pattern));
+  const guardedBash: typeof bash = {
+    ...bash,
+    async execute(...args) {
+      const hit = blockedCommand(args[1].command, blocked);
+      if (hit) {
+        log.warn({ event: "pi.command_blocked", command: hit });
+        throw new Error(`\`${hit}\` is a heavy check that Scrat runs itself after you finish and reports back if it fails. Run only targeted checks (for example a single test file), then end your turn when ready.`);
+      }
+      return bash.execute(...args);
+    },
+  };
   // File tools stay inside the workspace, including through absolute paths, ~,
   // .. and symlinks committed to the repository under review. The run's own
   // context directory is also readable; it is never part of review scope.
@@ -137,7 +152,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     tools: readOnly ? ["read", "grep", "find", "ls", "git", ...(readBase ? ["read_base"] : [])] : ["read", "grep", "find", "ls", "bash", "edit", "write"],
     customTools: [
       ...[read, grep, find, ls].map((tool) => ({ ...tool, renderCall: undefined, renderResult: undefined })),
-      ...(gitTool ? [gitTool, ...(readBase ? [readBase] : [])] : [{ ...bash, renderCall: undefined, renderResult: undefined }]),
+      ...(gitTool ? [gitTool, ...(readBase ? [readBase] : [])] : [{ ...guardedBash, renderCall: undefined, renderResult: undefined }]),
     ],
   });
   try {
@@ -155,8 +170,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
         log.warn({ event: "pi.tool_failed", tool: event.toolName, toolCallId: event.toolCallId });
       }
     });
-    const skill = await readFile(run.skill, "utf8");
-    await session.prompt(`${skill}\n\n${context}`, { expandPromptTemplates: false });
+    await session.prompt(followUp ?? `${await readFile(run.skill, "utf8")}\n\n${context}`, { expandPromptTemplates: false });
     for (let corrections = 0; ; corrections++) {
       const last = session.messages.findLast((message) => message.role === "assistant");
       if (!last || last.role !== "assistant" || last.stopReason !== "stop") {

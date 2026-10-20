@@ -235,7 +235,7 @@ export class GitHubRepository {
     { inspect, request, journal }: {
       inspect?: () => void;
       request: (client: { github: Octokit; owner: string; repo: string }) => Promise<R>;
-      journal: (response: R) => { event: GithubEvent; details?: Record<string, unknown>; failure?: Record<string, unknown> };
+      journal: (response: R) => { event?: GithubEvent; details?: Record<string, unknown>; failure?: Record<string, unknown> };
     },
   ) {
     return withOperation(name, { ...references, repository: this.repository, ...context }, async (operation) => {
@@ -250,7 +250,7 @@ export class GitHubRepository {
       const { event, details, failure } = journal(response);
       if (failure) operation.failure(failure);
       operation.stage("journal");
-      recordEvent({ ...references, operationId: operation.operationId, ...event });
+      if (event) recordEvent({ ...references, operationId: operation.operationId, ...event });
       operation.complete({ ...details, status: response.status, requestId: response.headers["x-github-request-id"] });
       return response;
     });
@@ -293,29 +293,22 @@ export class GitHubRepository {
   async removeLabels(issueNumber: number, labels: string[], references: EventReferences = {}): Promise<void> {
     const { repository } = this;
     if (labels.length === 0) return;
-    await withOperation("github.remove_labels", { ...references, repository, issueNumber, labels }, async (operation) => {
-      let removedLabels = 0;
-      operation.failure({ removedLabels });
-      operation.stage("authentication");
-      const { github, owner, repo } = await githubForRepository(repository, "write");
-      for (const label of labels) {
-        operation.failure({ label, removedLabels });
-        operation.stage("request");
-        try {
-          await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name: label });
-        } catch (error) {
-          if (!(error instanceof Error && "status" in error && error.status === 404)) throw error;
-          const { data } = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
-          if (data.labels.some((current) => (typeof current === "string" ? current : current.name)?.toLowerCase() === label.toLowerCase())) throw error;
-          continue;
-        }
-        removedLabels++;
-        operation.failure({ removedLabels });
-        operation.stage("journal");
-        recordEvent({ ...references, operationId: operation.operationId, type: "github.label_removed", data: { repository, issueNumber, label } });
-      }
-      operation.complete({ removedLabels });
-    });
+    for (const label of labels) {
+      await this.write("github.remove_label", { issueNumber, label }, references, "write", {
+        request: async ({ github, owner, repo }) => {
+          try {
+            return await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name: label });
+          } catch (error) {
+            if (!(error instanceof Error && "status" in error && error.status === 404)) throw error;
+            const { data } = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
+            if (data.labels.some((current) => (typeof current === "string" ? current : current.name)?.toLowerCase() === label.toLowerCase())) throw error;
+            // Already absent: report a 404 with no event instead of a false removal.
+            return { status: 404, headers: {} };
+          }
+        },
+        journal: ({ status }) => ({ event: status === 404 ? undefined : { type: "github.label_removed", data: { repository, issueNumber, label } } }),
+      });
+    }
   }
 
   async createPullRequest(

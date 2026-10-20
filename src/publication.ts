@@ -1,12 +1,13 @@
 import { eq } from "drizzle-orm";
 import { actionContracts } from "./actions.ts";
+import { upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
 import { branchContainsCommit } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { reconcileLabels } from "./labels.ts";
-import { isIssueComment, parseIssueCommentId, taskMarker } from "./markers.ts";
+import { isIssueComment, taskMarker } from "./markers.ts";
 import { observe, remoteUrl } from "./observation.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
 import { upsertItem } from "./items.ts";
@@ -65,13 +66,7 @@ export async function publishRun(github: GitHubRepository, task: typeof tasks.$i
   const observation = observe(repository, current);
   const existing = observation.own.findLast((comment) => isIssueComment(comment) && comment.body.trimEnd().endsWith(marker));
   if (!publication.commentId) {
-    let commentId: number;
-    if (existing) {
-      commentId = parseIssueCommentId(existing.id);
-      if (existing.body !== body) await github.updateComment(commentId, body, references);
-    } else {
-      commentId = await github.postComment(context.item.number, body, references);
-    }
+    const commentId = await upsertComment(github, context.item.number, existing, body, references);
     saveReceipt({ commentId });
   }
   if (contract.publication === "issue-assessment") {

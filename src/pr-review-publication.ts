@@ -1,4 +1,5 @@
 import { eq } from "drizzle-orm";
+import { upsertComment } from "./comments.ts";
 import { getRepositoryPath } from "./config.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
@@ -6,7 +7,7 @@ import { git } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { gradeLabels, reconcileLabels } from "./labels.ts";
-import { isIssueComment, issueCommentId, parseIssueCommentId, reviewMarker, taskMarker } from "./markers.ts";
+import { isIssueComment, issueCommentId, reviewMarker, taskMarker } from "./markers.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { runs, tasks } from "./schema.ts";
@@ -54,11 +55,7 @@ async function reconcile(github: GitHubRepository, itemId: string, number: numbe
 
   if (desired && body) {
     const { run } = desired;
-    let commentId: number;
-    if (existing) {
-      commentId = parseIssueCommentId(existing.id);
-      if (existing.body !== body) await github.updateComment(commentId, body, deliveryReferences);
-    } else commentId = await github.postComment(number, body, deliveryReferences);
+    const commentId = await upsertComment(github, number, existing, body, deliveryReferences);
     run.publication = { ...run.publication, commentId };
     db.update(runs).set({ publication: run.publication }).where(eq(runs.id, run.id)).run();
   }

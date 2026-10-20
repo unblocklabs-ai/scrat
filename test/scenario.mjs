@@ -548,7 +548,11 @@ try {
     f.addIssue(1); const { reconcileLabels } = await f.app("labels.ts");
     const { GitHubRepository } = await f.app("github.ts");
     const request = () => reconcileLabels(new GitHubRepository("fixture/project"), 1, { current: ["scrat"], desired: [], managed: ["scrat"] });
-    await request();
+    const { default: fs } = await import("node:fs"), lines = [], write = fs.writeSync;
+    fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string") { lines.push(...data.split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } })); return data.length; } return write(fd, data, ...rest); };
+    try { await reconcileLabels(new GitHubRepository("fixture/project"), 1, { current: ["scrat", "B"], desired: [], managed: ["scrat", "B"] }); }
+    finally { fs.writeSync = write; }
+    assert.deepEqual(lines.filter((line) => line.operation === "github.remove_label" && line.event === "operation.completed").map((line) => line.label), ["scrat", "B"]);
     assert.equal(all(s.events).filter((e) => e.type === "github.label_removed").length, 0);
     f.issues.get(1).labels = [{ name: "scrat" }];
     const fetch = globalThis.fetch;

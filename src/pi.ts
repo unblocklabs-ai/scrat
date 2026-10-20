@@ -13,6 +13,7 @@ import { parseResult, ResultFormatError, type Reviewer } from "./results.ts";
 import { blobSize, git, gitPage } from "./git.ts";
 import { createReviewGitTool, defaultBytes, maxBytes, pageText } from "./review-git.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
+import { redactSecrets } from "./errors.ts";
 import { childEnvironment } from "./secrets.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 
@@ -62,7 +63,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
       "Scrat handles Git commits, pushes, GitHub comments, labels, and PR creation. Do not publish or commit changes yourself.",
       "Use dependency implementations from this workspace and its lockfile. Another checkout or a globally cached version is not evidence for this revision.",
       // Notes survive compaction and retries in the retained workspace; Scrat excludes .scrat/ from every commit (git.ts).
-      ...readOnly ? [] : [`Keep working notes in ${resolve(cwd, ".scrat/notes.md")} (Git-ignored, never committed or published): the plan, decisions and why, findings, checks run and their results, and what remains. Update it at each milestone, keep it short, and read it first when resuming or after context compaction.`,
+      ...readOnly ? [] : [`Keep working notes in ${resolve(cwd, ".scrat/notes.md")} (Git-ignored, never committed or published): the plan, decisions and why, findings, checks run and their results, and what remains. Update it at each milestone, keep it short, and read it first, if it exists, when resuming or after context compaction.`,
         "Your final response is published as written after Scrat validates, commits and pushes your changes; do not say the changes are uncommitted."],
       "End your final Markdown response with exactly one line: SCRAT_STATUS: complete, SCRAT_STATUS: incomplete, or SCRAT_STATUS: needs_decision. Complete means the assigned work is finished, not merely that this session ended. For reviews, a complete assessment may contain defects or find the issue unready; use incomplete only if the assessment itself cannot be completed. For implementation, partial work or unresolved blockers are not complete. The harness withholds incomplete implementations from publication. Put an issue's SCRAT_READY marker before the status line, only when warranted.",
     ],
@@ -165,12 +166,24 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     };
     if (reviewerIndex === undefined) db.update(runs).set(sessionDetails).where(eq(runs.id, run.id)).run();
     else saveReviewer(run.id, reviewerIndex, sessionDetails);
+    // A failed call logs its target and a short redacted reason, never file contents or edit text.
+    const brief = (value: unknown) => typeof value === "string" ? redactSecrets(value).slice(0, 200) : undefined;
+    const targets = new Map<string, Record<string, unknown>>();
     session.subscribe((event) => {
       if (event.type === "tool_execution_start") {
+        const { path, pattern, operation, command } = event.args ?? {};
+        targets.set(event.toolCallId, { path: brief(path), pattern: brief(pattern), operation: brief(operation), command: brief(command) });
         log.debug({ event: "pi.tool_started", tool: event.toolName, toolCallId: event.toolCallId });
       }
-      if (event.type === "tool_execution_end" && event.isError) {
-        log.warn({ event: "pi.tool_failed", tool: event.toolName, toolCallId: event.toolCallId });
+      if (event.type === "tool_execution_end") {
+        const target = targets.get(event.toolCallId);
+        targets.delete(event.toolCallId);
+        if (event.isError) {
+          // Argument-validation errors echo the call's arguments and bash errors lead with command output; keep neither.
+          const text = (event.result?.content ?? []).map((part: { text?: string }) => part.text ?? "").join(" ").split("\n\nReceived arguments:")[0]!;
+          const error = redactSecrets(text).replace(/\s+/g, " ").trim();
+          log.warn({ event: "pi.tool_failed", tool: event.toolName, toolCallId: event.toolCallId, ...target, error: event.toolName === "bash" ? error.slice(-300) : error.slice(0, 300) });
+        }
       }
     });
     await session.prompt(followUp ?? `${await readFile(run.skill, "utf8")}\n\n${context}`, { expandPromptTemplates: false });

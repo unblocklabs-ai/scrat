@@ -35,7 +35,7 @@
       "^(pnpm (exec )?|npx )?tsc( |$)",
       "^(pnpm (exec )?|npx )?knip( |$)",
       "^(pnpm (exec )?|npx )?eslint +(\\.|--max-warnings)",
-      "^(pnpm (exec )?|npx )?playwright( |$)"
+      "^(pnpm (exec )?|npx )?playwright (test|show-report|open|codegen)( |$)"
     ]
   },
   "providers": {

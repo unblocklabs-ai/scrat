@@ -263,8 +263,8 @@ try {
     const hugeSize = 64 * (17 * 16384 + 10), midSize = readFileSync("seed/src/mid.txt").length, mid = readFileSync("seed/src/mid.txt", "latin1");
     const mine = f.requests.filter((r) => r.context.action === "review_pr" && !r.consolidating && r.request.model === "gpt-6.1-sol").at(-1);
     const results = mine.request.messages.filter((m) => m.role === "tool").map((m) => typeof m.content === "string" ? m.content : m.content.map((part) => part.text ?? "").join(""));
-    assert.equal(results.length, 10, results.map((text) => text.slice(0, 80)).join("\n"));
-    const [, first, second, multibyte, show, diff, diffNext, deep, stat, missing] = results;
+    assert.equal(results.length, 11, results.map((text) => text.slice(0, 80)).join("\n"));
+    const [, first, second, multibyte, show, diff, diffNext, deep, stat, missing, whole] = results;
     assert.ok(first.length < 33_000 && first.startsWith(mid.slice(0, 100)) && first.includes(`truncated: bytes 0-32768 of ${midSize}`) && first.includes("offset=32768"), first.slice(-200));
     assert.ok(second.startsWith(mid.slice(32768, 33792)) && second.includes(`bytes 32768-33792 of ${midSize}`) && second.includes("offset=33792"), second.slice(-200));
     assert.ok(multibyte.includes("bytes 0-1000 of 6000") && multibyte.includes("offset=1000"), multibyte.slice(-200));
@@ -276,6 +276,7 @@ try {
     assert.ok(deep.includes(`bytes 10000000-10001024 of ${18 * 16384 * 64}`), deep.slice(-200));
     assert.ok(stat.includes("src/huge.txt"), stat.slice(0, 200));
     assert.ok(/does not exist|exists on disk, but not in|fatal/.test(missing), missing);
+    assert.ok(whole.startsWith("diff --git a/") && whole.includes("offset=1024"), whole.slice(0, 200));
     assert.ok(review.result.paths.includes("src/huge.txt") && review.result.paths.includes("src/mid.txt"), "paged paths join review scope");
   } else if (scenario === "canonical") {
     await implement(1); await route(); f.faults.comment.add(201);
@@ -1437,10 +1438,10 @@ try {
   } else if (scenario === "bash_guard") {
     const { blockedCommand } = await f.app("commands.ts");
     const patterns = JSON.parse(readFileSync(new URL("../scrat.config.json", import.meta.url), "utf8")).workspace.blockedCommands.map((pattern) => new RegExp(pattern));
-    for (const command of ["pnpm lint && pnpm type-check", "nohup pnpm verify > l 2>&1 &", "env X=1 tsc -b", "cd x && pnpm verify", "npx eslint .", "pnpm test:e2e:smoke", "FOO=1 timeout 60 pnpm run build", "echo hi; pnpm exec playwright test", "x=$(pnpm knip)", "pnpm  lint", "pnpm -r lint", "pnpm -w run verify"]) {
+    for (const command of ["pnpm lint && pnpm type-check", "nohup pnpm verify > l 2>&1 &", "env X=1 tsc -b", "cd x && pnpm verify", "npx eslint .", "pnpm test:e2e:smoke", "FOO=1 timeout 60 pnpm run build", "echo hi; pnpm exec playwright test", "x=$(pnpm knip)", "pnpm  lint", "pnpm -r lint", "pnpm -w run verify", "npx playwright show-report", "pnpm exec playwright codegen"]) {
       assert.ok(blockedCommand(command, patterns), command);
     }
-    for (const command of ["pnpm test", "pnpm check src/a.ts", "pnpm exec vitest run a.test.ts", "pnpm build:cli", "pnpm test:db:ci", 'git commit -m "pnpm lint"', "grep eslint f", "eslint src/a.ts", "pnpm test:cli", 'git commit -m "a; pnpm lint ok"', "git commit -m \"fix\n\npnpm verify was failing\"", 'grep -E "foo|tsc b" f', "sh -c 'pnpm verify'"]) {
+    for (const command of ["pnpm test", "pnpm check src/a.ts", "pnpm exec vitest run a.test.ts", "pnpm build:cli", "pnpm test:db:ci", 'git commit -m "pnpm lint"', "grep eslint f", "eslint src/a.ts", "pnpm test:cli", 'git commit -m "a; pnpm lint ok"', "git commit -m \"fix\n\npnpm verify was failing\"", 'grep -E "foo|tsc b" f', "sh -c 'pnpm verify'", "pnpm exec playwright --version"]) {
       assert.equal(blockedCommand(command, patterns), undefined, command);
     }
     assert.equal(blockedCommand("cd x && pnpm verify", patterns), "pnpm verify");
@@ -1449,8 +1450,13 @@ try {
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
     await assert.rejects(validateStaticConfig(variant((c) => { c.harness.maxConcurrentValidations = 0; })), /maxConcurrentValidations must be a positive integer/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.blockedCommands = ["^(unclosed"]; })), /blockedCommands\[0\] is not a valid regular expression/);
-    f.addIssue(1, ["scrat"]); f.modes.set(1, "heavy"); f.enqueue(1, "implement"); const r = await run();
+    f.addIssue(1, ["scrat"]); f.modes.set(1, "heavy"); f.enqueue(1, "implement");
+    const { default: fs } = await import("node:fs"), lines = [], write = fs.writeSync;
+    fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string") { lines.push(...data.split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } })); return data.length; } return write(fd, data, ...rest); };
+    let r; try { r = await run(); } finally { fs.writeSync = write; }
     assert.ok(r.error);
+    const failed = lines.find((line) => line.event === "pi.tool_failed");
+    assert.ok(failed && failed.tool === "bash" && /pnpm verify/.test(failed.command) && /Scrat runs/.test(failed.error), JSON.stringify(failed));
     const tools = f.requests[1].request.messages.filter((message) => message.role === "tool");
     assert.equal(tools.length, 1); assert.match(JSON.stringify(tools[0].content), /Scrat runs/);
     assert.ok(!existsSync(resolve(f.row(s.workspaces, r.workspaceId).path, "log")), "the blocked command must not run");
@@ -1460,7 +1466,10 @@ try {
     const both = (first) => { for (const n of [first, first + 1]) { f.addIssue(n, ["scrat"]); f.enqueue(n, "implement"); } return Promise.all([f.runNextTask(), f.runNextTask()]); };
     writeFileSync("slow", "");
     config.harness.maxConcurrentValidations = 1;
-    for (const r of await both(1)) assert.equal(r.error, null, JSON.stringify(r.error));
+    const { default: fs } = await import("node:fs"), lines = [], write = fs.writeSync;
+    fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string") { lines.push(...data.split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } })); return data.length; } return write(fd, data, ...rest); };
+    try { for (const r of await both(1)) assert.equal(r.error, null, JSON.stringify(r.error)); } finally { fs.writeSync = write; }
+    assert.ok(lines.some((line) => line.event === "validation.waiting" && line.position === 1), "the waiting run logs its own place in line");
     const serial = intervals(0); assert.equal(serial.length, 2); assert.ok(serial[0].e <= serial[1].s, "one slot serializes validations");
     config.harness.maxConcurrentValidations = 2;
     for (const r of await both(3)) assert.equal(r.error, null, JSON.stringify(r.error));

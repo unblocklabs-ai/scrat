@@ -109,6 +109,7 @@ export async function fixture(scenario) {
         { name: "git", args: { ...fileArgs, revision: "head", offset: 10_000_000 } },
         { name: "git", args: { operation: "diff_stat", from: "base", to: "head" } },
         { name: "git", args: { operation: "show", revision: "base", path: "src/missing.txt" } },
+        { name: "git", args: { operation: "diff", from: "base", to: "head", limit: 1024 } },
       ][step - 1];
     }
     if (review && scenario === "scope_snapshots" && step === 0) tool = { name: "read_base", args: { path: "src/deleted.ts" } };

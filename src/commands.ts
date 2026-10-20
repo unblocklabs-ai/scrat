@@ -12,7 +12,7 @@ export async function runCommands(commands: string[][], cwd: string, environment
     await withOperation("workspace.command", { ...references, command: [file, ...args], cwd }, async (operation) => {
       const started = performance.now();
       const { stdout, stderr } = await executeFile(file, args, { cwd, env: environment, maxBuffer: 16 * 1024 * 1024 });
-      operation.complete({ stdout, stderr });
+      operation.complete();
       receipts.push({ command: [file, ...args], durationMs: Math.round(performance.now() - started), stdout, stderr });
     });
   }
@@ -26,7 +26,7 @@ const waiters: (() => void)[] = [];
 export async function withValidationSlot<T>(fn: () => Promise<T>, references: EventReferences = {}) {
   const queuedAt = performance.now();
   if (active >= (config.harness.maxConcurrentValidations ?? 3)) {
-    logger.info({ ...references, event: "validation.waiting", queued: waiters.length });
+    logger.info({ ...references, event: "validation.waiting", position: waiters.length + 1 });
     await new Promise<void>((resolve) => waiters.push(resolve));
   } else active++;
   logger.info({ ...references, event: "validation.started", waitedMs: Math.round(performance.now() - queuedAt) });

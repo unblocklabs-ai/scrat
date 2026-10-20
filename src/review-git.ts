@@ -48,7 +48,7 @@ export function createReviewGitTool(cwd: string, revisions: Record<string, strin
       "Inspect Git history without a shell. Output is capped at 64 KiB per call (default 32 KiB); when it is truncated the result says so and gives the offset for the next call.",
       `Revisions are hex commit SHAs or: ${names.join(", ")}.`,
       "operation=diff_stat: change summary between `from` and `to` (optional `path` limits it to a file or directory).",
-      "operation=diff: patch between `from` and `to` limited to `path`.",
+      "operation=diff: patch between `from` and `to` (optional `path` limits it to a file or directory).",
       `operation=log: commit history ending at \`revision\` (default head), at most ${maxCommits} commits, optionally for \`path\`.`,
       "operation=show: contents of `path` at `revision`.",
     ].join("\n"),
@@ -61,14 +61,14 @@ export function createReviewGitTool(cwd: string, revisions: Record<string, strin
     }),
     async execute(_id, { operation, from, to, revision, path: requestedPath, offset = 0, limit = defaultBytes }) {
       if (!operations.includes(operation)) throw new Error(`operation must be one of: ${operations.join(", ")}`);
-      const path = repositoryPath(requestedPath, operation === "diff" || operation === "show");
+      const path = repositoryPath(requestedPath, operation === "show");
       const scope: string[] = path ? [path] : [];
       let page: GitPage, size: number | undefined;
       if (operation === "diff_stat" || operation === "diff") {
         const range = [await resolveRevision(from, "from"), await resolveRevision(to, "to")];
         const options = ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"];
         page = await gitPage(cwd, [...options, ...(operation === "diff_stat" ? ["--stat=240,200"] : []), ...range, ...(path ? ["--", path] : [])], offset, limit);
-        if (operation === "diff_stat" && !path) {
+        if (!path) {
           // An unlistable change set is recorded as unknown scope: over-recording is the safe direction.
           const names = await gitPage(cwd, [...options, "--name-only", "-z", ...range], 0, maxScopeBytes);
           scope.push(...(names.more ? ["."] : names.text.split("\0").filter(Boolean)));

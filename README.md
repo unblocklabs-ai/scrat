@@ -26,7 +26,7 @@ The newest complete PR assessment is authoritative. Context and observed source/
 
 ## Configure and run
 
-Requires Node.js **22.19+**, Git, and the tools used by the target repository's workspace commands. Docker is required when per-run databases are configured.
+Requires Node.js **22.19+**, Git, and the tools used by the target repository's workspace commands. Workspace commands and agents run on Scrat's Node, so the deployment uses the target repository's Node major (24 on the VM). Docker is required when per-run databases are configured.
 
 1. Run `npm ci`.
 2. Edit `scrat.config.json`: GitHub repository/App installation, model provider, action skills, concurrency, and workspace preparation/validation commands.

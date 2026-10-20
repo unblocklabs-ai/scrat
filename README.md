@@ -69,7 +69,16 @@ For project review, run `typecheck`, `knip`, and the integration/E2E tests after
 
 ## Configuration
 
-`scrat.config.json` controls runtime behavior. Restart the service after changing it; action settings are captured when a run is claimed, and retries retain their saved settings.
+`scrat.config.json` controls runtime behavior (deployment overrides: see below). Restart the service after changing it; action settings are captured when a run is claimed, and retries retain their saved settings.
+
+### Deployment overrides
+
+`scrat.config.json` holds the defaults and ships with each release. Settings specific to one deployment go in `scrat.local.json`, a gitignored file next to it that holds only the overrides, for example `{"harness":{"maxConcurrency":8}}`. If it is missing, Scrat creates it containing `{}`.
+
+- Plain objects merge recursively; arrays and primitives replace the default. `null` is accepted only under `workspace` (`"workspace":{"database":null}` disables the database).
+- Every override key must exist in the defaults. An unknown key stops startup with a message such as `Unknown setting in scrat.local.json: harness.maxConcurency`, as does a non-object where the default is an object. `workspace.environment` (variable names) and `providers` are open: they accept keys the defaults do not show, so a provider can be overridden or added.
+- Relative paths in overrides resolve from the config directory, like the defaults.
+- On the VM the file lives at `~/.local/share/scrat-v2/scrat.local.json` and is linked into each release by the installer, which checks it before stopping the running service. After editing it, check it with `node src/config.ts` from `~/.local/share/scrat-v2/current`, then apply it with `systemctl --user restart scrat.service`, which waits for running tasks like a deploy.
 
 ### Harness and GitHub
 

@@ -151,7 +151,8 @@ export async function fixture(scenario) {
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   const config = JSON.parse(readFileSync("app/scrat.config.json", "utf8"));
   const blockedCommands = config.workspace.blockedCommands;
-  config.workspace = scenario === "bash_guard" ? { blockedCommands } : {}; config.harness.maxConcurrency = 6; config.github.repository = "fixture/project"; config.github.repositoryPath = resolve("checkout");
+  if (scenario !== "config_overrides") config.workspace = scenario === "bash_guard" ? { blockedCommands } : {};
+  config.harness.maxConcurrency = 6; config.github.repository = "fixture/project"; config.github.repositoryPath = resolve("checkout");
   config.providers = { fixture: { api: "openai-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: "fixture", models: [
     { id: "gpt-6.1-sol", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
     { id: "deepseek/deepseek-v4.1-flash", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
@@ -207,6 +208,8 @@ export async function fixture(scenario) {
     config.workspace = { ...config.workspace, environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), scenario === "validation_resume" ? "validate-resume" : "validate", resolve("database-receipts.jsonl")]] };
   }
   writeFileSync("app/scrat.config.json", JSON.stringify(config));
+  // The app copy never inherits a developer's own overrides.
+  writeFileSync("app/scrat.local.json", "{}\n");
   mkdirSync("data");
   execFileSync(process.execPath, [resolve(repository, "node_modules/drizzle-kit/bin.cjs"), "push", "--dialect=sqlite", "--schema=./app/src/schema.ts", "--url=./data/scrat.sqlite"], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
   const app = async (path) => import(pathToFileURL(resolve("app/src", path)));

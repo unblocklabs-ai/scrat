@@ -13,6 +13,9 @@ corepack enable --install-directory "$install_root/bin" pnpm
 corepack prepare pnpm@11.7.0 --activate
 ln -sfn "$install_root/data" data
 ln -sfn "$install_root/.env" .env
+[ -e "$install_root/scrat.local.json" ] || printf '{}\n' > "$install_root/scrat.local.json"
+ln -sfn "$install_root/scrat.local.json" scrat.local.json
+node src/config.ts # Fail on a bad scrat.local.json while the old release is still running.
 
 # Stop/drain the existing sole worker before migrating or moving its release.
 systemctl --user stop scrat.service

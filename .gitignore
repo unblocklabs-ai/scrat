@@ -4,3 +4,4 @@ node_modules/
 data/
 tmp/
 .DS_Store
+scrat.local.json

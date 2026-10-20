@@ -1469,6 +1469,43 @@ try {
     unlinkSync("slot-fail"); f.addIssue(6, ["scrat"]); f.enqueue(6, "implement");
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("validation slot was not released")), 30_000));
     assert.equal((await Promise.race([run(), timeout])).error, null);
+  } else if (scenario === "config_overrides") {
+    // Module load reads the overrides, so each case runs in a fresh process against the app copy.
+    const local = resolve("app/scrat.local.json");
+    const probe = (overrides, code) => {
+      if (overrides === undefined) rmSync(local, { force: true }); else writeFileSync(local, JSON.stringify(overrides));
+      const script = `const { config } = await import(${JSON.stringify(resolve("app/src/config.ts"))}); ${code}`;
+      return execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    };
+    const rejected = (overrides, message) => assert.throws(() => probe(overrides, ""), (error) => message.test(error.stderr));
+    const defaults = JSON.parse(readFileSync("app/scrat.config.json", "utf8"));
+    const merged = JSON.parse(probe({
+      harness: { maxConcurrency: 8 }, actions: { implement: { model: "other-model" } },
+      workspace: { environment: { EXTRA: "1" }, blockedCommands: ["^only$"], database: null },
+    }, "console.log(JSON.stringify(config));"));
+    assert.equal(merged.harness.maxConcurrency, 8); assert.equal(merged.harness.logLevel, defaults.harness.logLevel);
+    assert.equal(merged.actions.implement.model, "other-model");
+    assert.deepEqual({ ...merged.actions.implement, model: defaults.actions.implement.model }, defaults.actions.implement);
+    assert.deepEqual(merged.workspace.environment, { ...defaults.workspace.environment, EXTRA: "1" });
+    assert.deepEqual(merged.workspace.blockedCommands, ["^only$"]); assert.equal(merged.workspace.database, null);
+    assert.deepEqual(merged.workspace.validate, defaults.workspace.validate);
+
+    probe(undefined, ""); assert.equal(readFileSync(local, "utf8"), "{}\n");
+    rejected({ harness: { maxConcurency: 8 } }, /Unknown setting in scrat\.local\.json: harness\.maxConcurency/);
+    rejected({ actions: { bogus: {} } }, /Unknown setting in scrat\.local\.json: actions\.bogus/);
+    rejected({ harness: 8 }, /must be an object: harness/);
+    rejected({ harness: null }, /must be an object: harness/);
+    rejected({ harness: { toString: 1 } }, /Unknown setting in scrat\.local\.json: harness\.toString/);
+    rejected(JSON.parse('{"workspace":{"environment":{"__proto__":{"x":"1"}}}}'), /Unknown setting in scrat\.local\.json: workspace\.environment\.__proto__/);
+
+    const provider = Object.keys(defaults.providers)[0], model = defaults.providers[provider].models[0].id;
+    const seen = probe({ providers: { [provider]: { baseUrl: "http://override.invalid/v1" } } }, `
+      const { sharedModelRuntime } = await import(${JSON.stringify(resolve("app/src/model-runtime.ts"))});
+      const runtime = await sharedModelRuntime(); console.log("BASE " + runtime.getModel(${JSON.stringify(provider)}, ${JSON.stringify(model)})?.baseUrl);`);
+    assert.match(seen, /^BASE http:\/\/override\.invalid\/v1$/m);
+    const written = JSON.parse(readFileSync("data/pi-models.json", "utf8")).providers[provider];
+    assert.equal(written.baseUrl, "http://override.invalid/v1"); assert.equal(written.apiKey, defaults.providers[provider].apiKey);
+    assert.deepEqual(written.models, defaults.providers[provider].models);
   } else throw new Error("Unknown scenario " + scenario);
   console.log("SCENARIO_PASSED " + scenario);
 } finally { await f.close(); }

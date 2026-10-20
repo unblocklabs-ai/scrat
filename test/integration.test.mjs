@@ -68,6 +68,7 @@ const scenarios = {
   isolation: "workspace commands, hooks and agent tools cannot reach Scrat credentials, and credential material is never published",
   wakeup: "idle workers wake on enqueue, keep signals sent while busy, fall back on timeout and release on abort",
   operations: "withOperation returns results, rethrows errors unchanged, logs the last stage on failure and works inside synchronous transactions",
+  config_overrides: "scrat.local.json overrides merge over the defaults, are created when missing, reject unknown settings and reach Pi's providers",
   database: "real PostgreSQL runs isolate databases, apply new migrations and remove resources",
 };
 

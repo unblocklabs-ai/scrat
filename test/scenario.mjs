@@ -1129,6 +1129,17 @@ try {
       await assert.rejects(fetchRepository(checkout, remote, "main"), /has origin .* not https:\/\/github\.com\/fixture\/project\.git/);
       assert.equal(git(checkout, "rev-parse", "refs/remotes/origin/main"), before);
     }
+    // The shared lock helper: same-key work never overlaps, and a failure does not block the next caller.
+    const { serialized } = await f.app("single-flight.ts");
+    const locks = new Map(), order = []; let release;
+    const first = serialized(locks, "k", async () => { order.push("start1"); await new Promise((done) => { release = done; }); order.push("end1"); });
+    const second = serialized(locks, "k", async () => { order.push("start2"); });
+    await Promise.resolve(); assert.deepEqual(order, ["start1"]);
+    release(); await Promise.all([first, second]);
+    assert.deepEqual(order, ["start1", "end1", "start2"]); assert.equal(locks.size, 0);
+    const failing = serialized(locks, "k", async () => { throw new Error("first"); }), after = serialized(locks, "k", async () => "ok");
+    const [failed, ran] = await Promise.allSettled([failing, after]);
+    assert.equal(failed.reason.message, "first"); assert.equal(ran.value, "ok"); assert.equal(locks.size, 0);
   } else if (scenario === "recovery") {
     f.addIssue(1); f.enqueue(1); const claim = tasks.claimTask();
     const { eq } = await import("drizzle-orm");

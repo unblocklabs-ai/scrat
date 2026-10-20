@@ -4,9 +4,10 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { childEnvironment } from "./secrets.ts";
+import { serialized } from "./single-flight.ts";
 
 const executeFile = promisify(execFile);
-const repositoryFetches = new Map<string, Promise<string>>();
+const repositoryFetches = new Map<string, Promise<unknown>>();
 
 // Workspace Git commands can run repository hooks, so they get the child environment.
 export async function git(repositoryPath: string, args: string[], env = childEnvironment()) {
@@ -75,9 +76,7 @@ async function excludeWorkingNotes(repositoryPath: string) {
 
 export async function fetchRepository(repositoryPath: string, remote: string, baseBranch: string, env = childEnvironment()) {
   repositoryPath = resolve(repositoryPath);
-  const previous = repositoryFetches.get(repositoryPath);
-  const pending = (async () => {
-    if (previous) await previous.catch(() => {});
+  return serialized(repositoryFetches, repositoryPath, async () => {
     if (!existsSync(repositoryPath)) {
       await mkdir(dirname(repositoryPath), { recursive: true });
       await executeFile("git", ["clone", "--single-branch", "--branch", baseBranch, "--", remote, repositoryPath], { env });
@@ -86,18 +85,13 @@ export async function fetchRepository(repositoryPath: string, remote: string, ba
     await excludeWorkingNotes(repositoryPath);
     await git(repositoryPath, ["fetch", "--", remote, `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`], env);
     return git(repositoryPath, ["rev-parse", `refs/remotes/origin/${baseBranch}`]);
-  })();
-  repositoryFetches.set(repositoryPath, pending);
-  try {
-    return await pending;
-  } finally {
-    if (repositoryFetches.get(repositoryPath) === pending) repositoryFetches.delete(repositoryPath);
-  }
+  });
 }
 
+// Shares the clone's fetch chain so two fetches never contend for git's ref locks.
 export async function fetchPullRequestHead(repositoryPath: string, remote: string, number: number, env = childEnvironment()) {
   const ref = `refs/remotes/origin/pr/${number}`;
-  await git(repositoryPath, ["fetch", "--", remote, `+refs/pull/${number}/head:${ref}`], env);
+  await serialized(repositoryFetches, resolve(repositoryPath), () => git(repositoryPath, ["fetch", "--", remote, `+refs/pull/${number}/head:${ref}`], env));
   return ref;
 }
 

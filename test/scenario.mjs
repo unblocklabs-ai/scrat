@@ -1300,6 +1300,9 @@ try {
     const committed = await run(); assert.equal(committed.error.code, "SECRET_IN_OUTPUT");
     assert.equal(committed.verification, null); assert.ok(!f.writes.some((write) => write.type === "pr" && write.number === 4));
     assert.ok(!JSON.stringify(all(s.runs).map((r) => r.error)).includes(key.split("\n")[1]));
+    const { containsSecret } = await f.app("secrets.ts"), body = key.split("\n").slice(1, -2).join("");
+    assert.ok(containsSecret(`x ${body.slice(0, 40)} x`) && containsSecret(`x ${body.slice(10, 50)} x`) && containsSecret(`x ${body.slice(20, 60)} x`));
+    assert.ok(!containsSecret(body.slice(0, 39)));
   } else if (scenario === "wakeup") {
     const { signalWork, waitForWork, workGeneration } = await f.app("work-signal.ts");
     const timed = async (promise) => { const start = Date.now(); await promise; return Date.now() - start; };

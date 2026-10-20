@@ -14,14 +14,15 @@ export function childEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJ
 }
 
 const secretVariables = ["GITHUB_APP_PRIVATE_KEY", ...Object.values(config.providers)
-  .flatMap((provider) => [...provider.apiKey.matchAll(/\$\{(\w+)\}/g)].map((match) => match[1]))];
+  .flatMap((provider) => [...(provider.apiKey ?? "").matchAll(/\$\{(\w+)\}/g)].map((match) => match[1]))];
 
 export function secretValues() {
   return secretVariables.map((name) => process.env[name]).filter((value): value is string => Boolean(value));
 }
 
 // Agents can quote or reflow what they read, so compare without whitespace and
-// treat any 40-character run of a configured secret as a leak.
+// treat any 40-character run of a configured secret as a leak (every window, so
+// a fragment at any offset is caught).
 export function containsSecret(text: string) {
   if (/\b(?:gh[oprsu]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})/.test(text)) return true;
   const compact = text.replace(/\s+/g, "");
@@ -29,7 +30,7 @@ export function containsSecret(text: string) {
     const value = secret.replace(/-----(?:BEGIN|END) [^-]*-----/g, "").replace(/\s+/g, "");
     if (value.length < 8) return false;
     if (value.length <= 40) return compact.includes(value);
-    for (let start = 0; start + 40 <= value.length; start += 20) {
+    for (let start = 0; start + 40 <= value.length; start++) {
       if (compact.includes(value.slice(start, start + 40))) return true;
     }
     return false;

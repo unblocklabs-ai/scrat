@@ -4,6 +4,7 @@ import { eq, sql } from "drizzle-orm";
 import { actionIds } from "./actions.ts";
 import { config, configUrl, thinkingLevels } from "./config.ts";
 import { db } from "./db.ts";
+import { logger } from "./logging.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 import { runs } from "./schema.ts";
 
@@ -12,7 +13,7 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 // Fails before any worker claims, so a bad static setting stops startup instead of failing tasks one by one.
 // @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: {
-  harness?: { maxConcurrentValidations?: number }; workspace?: { heavyCommands?: string[] };
+  harness?: { maxConcurrentValidations?: number }; providers?: Record<string, { apiKey?: string }>; workspace?: { heavyCommands?: string[] };
   actions: Record<string, Entry & { skill: string; reviewers?: Entry[]; maxSelfRepairs?: number; exhaustedLabel?: string | null }>;
 } = config) {
   const modelRuntime = await sharedModelRuntime();
@@ -26,6 +27,10 @@ export async function validateStaticConfig(settings: {
   settings.workspace?.heavyCommands?.forEach((pattern, index) => {
     try { new RegExp(pattern); } catch { problems.push(`workspace.heavyCommands[${index}] is not a valid regular expression`); }
   });
+  // Only ${VAR} placeholders are tracked as secrets, so a literal key would not be redacted. Never log the key itself.
+  for (const [name, { apiKey }] of Object.entries(settings.providers ?? {})) {
+    if (apiKey && !/\$\{\w+\}/.test(apiKey)) logger.warn({ provider: name }, "Provider apiKey is not a ${VAR} placeholder; it will not be redacted from output");
+  }
   for (const action of actionIds) {
     const entry = settings.actions[action];
     if (!entry) { problems.push(`${action}: missing from configuration`); continue; }

@@ -49,7 +49,7 @@ async function asCheckFailure<T>(fn: () => Promise<T>) {
 function validationMessage(error: CheckFailure, round: number) {
   const { message, exitCode, stdout, stderr } = describeError(error.cause);
   const tail = (label: string, text?: string) => text?.trim() ? `\n${label} (last 6000 characters):\n${text.trim().slice(-6000)}\n` : "";
-  return `Scrat's validation failed after your changes (round ${round} of ${maxValidationCorrections}).\n\nCommand: ${message.split("\n")[0].replace(/^Command failed: /, "")}\nExit code: ${exitCode ?? "unknown"}\n${tail("stdout", stdout)}${tail("stderr", stderr)}\nFix only what is reported. Scrat re-validates after your turn, so a full rerun of the failing check is not needed. Then end your turn with your complete final handoff (it becomes the PR or comment text) and the usual SCRAT_STATUS footer.`;
+  return `Scrat's validation failed after your changes (round ${round} of ${maxValidationCorrections}).\n\nCommand: ${message.split("\n")[0].replace(/^Command failed: /, "")}\nExit code: ${exitCode ?? "unknown"}\n${tail("stdout", stdout)}${tail("stderr", stderr)}\nFix only what is reported. Scrat re-validates after your turn, so a full rerun of the failing check is not needed. Then end your turn with one or two sentences on what you changed to fix this (it is appended to your earlier handoff), and the usual SCRAT_STATUS footer (add SCRAT_READY if the change is still ready).`;
 }
 
 function assertComplete(result: AgentResult) {
@@ -261,7 +261,7 @@ export async function runNextTask() {
             operation.log.warn({ event: "pi.validation_retry", round });
             db.update(runs).set({ stage: "agent" }).where(eq(runs.id, run.id)).run();
             const followUp = await executePi({ run, cwd: workspace.path, context: "", readOnly, log: operation.log, sessionFile, environment, ...agentInput, followUp: validationMessage(error, round) });
-            result = { ...followUp, paths: [...new Set([...result.paths, ...followUp.paths])] };
+            result = { ...followUp, text: `${result.text}\n\n**Validation correction ${round}:** ${followUp.text}`, paths: [...new Set([...result.paths, ...followUp.paths])] };
             db.update(runs).set({ result, stage: "validating" }).where(eq(runs.id, run.id)).run();
             assertComplete(result);
           }

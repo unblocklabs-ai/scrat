@@ -1410,6 +1410,9 @@ try {
         assert.equal(git(resolve("remote.git"), "rev-list", "--count", `main..${f.prs[0].head.ref}`), "1");
         assert.ok(!existsSync(resolve(f.row(s.workspaces, r.workspaceId).path, "fail-validation")));
         assert.ok(lines.some((line) => line.event === "pi.validation_retry" && line.round === 1));
+        assert.match(r.result.text, /^Implemented the change\./);
+        assert.match(r.result.text, /\*\*Validation correction 1:\*\* Fixed the validation failure\./);
+        assert.match(f.prs[0].body, /Implemented the change\.[\s\S]*Fixed the validation failure\./);
       } else {
         f.addIssue(1, ["scrat"]); f.modes.set(1, "feedback-stubborn"); f.enqueue(1, "implement"); const failed = await run();
         assert.equal(failed.error.exitCode, 7); assert.equal(failed.verification, null); assert.equal(f.prs.length, 0);

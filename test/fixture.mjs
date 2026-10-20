@@ -137,7 +137,7 @@ export async function fixture(scenario) {
     const fumble = !corrected && (mode === "format-once" || (mode === "reviewer-grade-once" && review && !consolidating && request.model.includes("deepseek"))
       || (mode === "consolidation-grade-once" && consolidating));
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : "complete";
-    const output = (review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : "Implemented the change.")
+    const output = (review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : feedback ? "Fixed the validation failure." : "Implemented the change.")
       + (mode === "leak-report" ? "\n" + process.env.GITHUB_APP_PRIVATE_KEY : "")
       + (mode.startsWith("quoted-") ? "\n```\nSCRAT_GRADE: F\nSCRAT_READY\n```" : "")
       + (mode === "ready" ? "\nSCRAT_READY" : "")

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { GithubContext } from "./github-types.ts";
+import { commentKey } from "./markers.ts";
 
 // Routing, execution, and freshness checks must evaluate the same comments.
 // Keep the digest compatible with stored revisions and leave delivery comments intact.
@@ -8,7 +9,7 @@ export function evaluateGithubContext({ item, comments }: GithubContext, botLogi
   const pullRequest = "head" in item ? item : undefined;
   const revision = createHash("sha256").update(JSON.stringify({
     title: item.title, body: item.body, head: pullRequest?.head.sha, base: pullRequest?.base.ref,
-    comments: external.map((comment) => `${comment.id}@${comment.revision}`).sort(),
+    comments: external.map((comment) => commentKey(comment)).sort(),
   })).digest("hex");
   return { comments: external, revision };
 }

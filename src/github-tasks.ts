@@ -2,7 +2,7 @@ import { and, desc, eq, isNotNull, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
 import { config, getRepositoryPath } from "./config.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
-import { acknowledgedTaskIds } from "./markers.ts";
+import { acknowledgedTaskIds, commentKey } from "./markers.ts";
 import { observe, remoteUrl } from "./observation.ts";
 import { labelName, reconcileLabels } from "./labels.ts";
 import { db } from "./db.ts";
@@ -90,9 +90,9 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
         .filter(({ run, task }) => (!run.finishedAt && task.status === "running") || (run.finishedAt && !run.error)
           || run.publication.commentId || acknowledged.has(task.id));
       const consumed = new Set(handled.flatMap(({ run }) => run.context?.commentRevisions ?? strings(run.input.commentRevisions)));
-      const pending = comments.filter((comment) => !consumed.has(`${comment.id}@${comment.revision}`));
+      const pending = comments.filter((comment) => !consumed.has(commentKey(comment)));
       added += applyDecisions(item.id, planPrMaintenance({
-        conflicts, stale, mainSha, headSha, pendingComments: pending.map((comment) => `${comment.id}@${comment.revision}`),
+        conflicts, stale, mainSha, headSha, pendingComments: pending.map((comment) => commentKey(comment)),
         conflictTask: latestTask(item.id, "resolve_conflicts"), feedbackTask: latestTask(item.id, "address_pr_feedback"),
       }));
     }

@@ -3,7 +3,9 @@ import { createHash } from "node:crypto";
 import { Octokit } from "octokit";
 import { config } from "./config.ts";
 import { recordEvent, type EventReferences, type JournalEvent } from "./events.ts";
+import { labelName } from "./labels.ts";
 import { logger, withOperation } from "./logging.ts";
+import { inlineCommentId, issueCommentId, reviewCommentId } from "./markers.ts";
 import type { GithubComment, GithubContext, GithubIssue, GithubItem, GithubPullRequest } from "./github-types.ts";
 import { assertPublishable, childEnvironment } from "./secrets.ts";
 
@@ -187,15 +189,15 @@ export class GitHubRepository {
     const [item, discussion, inline, reviews] = await Promise.all(reads);
     const comments: GithubComment[] = [
       ...discussion.map((comment) => ({
-        id: `issue:${comment.id}`, body: comment.body ?? "", author: comment.user?.login,
+        id: issueCommentId(comment.id), body: comment.body ?? "", author: comment.user?.login,
         revision: comment.updated_at, url: comment.html_url,
       })),
       ...inline.map((comment) => ({
-        id: `inline:${comment.id}`, body: comment.body, author: comment.user?.login,
+        id: inlineCommentId(comment.id), body: comment.body, author: comment.user?.login,
         revision: comment.updated_at, url: comment.html_url, path: comment.path, line: comment.line,
       })),
       ...reviews.filter((review) => review.body).map((review) => ({
-        id: `review:${review.id}`, body: review.body, author: review.user?.login,
+        id: reviewCommentId(review.id), body: review.body, author: review.user?.login,
         revision: createHash("sha256").update(review.body).digest("hex"), url: review.html_url,
       })),
     ];
@@ -301,7 +303,7 @@ export class GitHubRepository {
           } catch (error) {
             if (!(error instanceof Error && "status" in error && error.status === 404)) throw error;
             const { data } = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
-            if (data.labels.some((current) => (typeof current === "string" ? current : current.name)?.toLowerCase() === label.toLowerCase())) throw error;
+            if (data.labels.some((current) => labelName(current).toLowerCase() === label.toLowerCase())) throw error;
             // Already absent: report a 404 with no event instead of a false removal.
             return { status: 404, headers: {} };
           }

@@ -5,6 +5,7 @@ import { actionContracts } from "./actions.ts";
 import { db } from "./db.ts";
 import type { ErrorDetails } from "./errors.ts";
 import { git } from "./git.ts";
+import { commentKey, parseCommentKey } from "./markers.ts";
 import type { ItemObservation } from "./observation.ts";
 import { runs, tasks } from "./schema.ts";
 
@@ -24,14 +25,14 @@ export async function readDiffScope(repositoryPath: string, mainSha: string, pre
 export function evaluateContext(run: Run, task: Task, observation: ItemObservation) {
   const requested = run.input.commentRevisions;
   const ids = new Set(Array.isArray(requested)
-    ? requested.filter((entry: unknown): entry is string => typeof entry === "string").map((entry) => entry.split("@")[0]) : []);
+    ? requested.filter((entry: unknown): entry is string => typeof entry === "string").map(parseCommentKey) : []);
   const comments = actionContracts[task.action].context === "feedback" && ids.size
     ? observation.external.filter((comment) => ids.has(comment.id)) : observation.external;
   return {
     revision: observation.revision, baseBranch: observation.baseBranch, headSha: "head" in observation.item ? observation.item.head.sha : undefined,
     item: { number: observation.item.number, title: observation.item.title, body: observation.item.body, url: observation.item.html_url },
     comments,
-    commentRevisions: comments.map((comment) => `${comment.id}@${comment.revision}`),
+    commentRevisions: comments.map((comment) => commentKey(comment)),
   };
 }
 

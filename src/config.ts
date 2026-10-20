@@ -54,3 +54,5 @@ export function getActionConfig(action: Action) {
     reviewers: "reviewers" in actionConfig ? actionConfig.reviewers.map((reviewer) => ({ ...reviewer, thinkingLevel: reviewer.thinkingLevel as ThinkingLevel })) : [],
   };
 }
+
+export const isBotLogin = (login: string | null | undefined) => login?.toLowerCase() === config.github.botLogin.toLowerCase();

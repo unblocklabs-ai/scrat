@@ -49,11 +49,14 @@ export async function fixture(scenario) {
   execFileSync("git", ["--git-dir=" + resolve("remote.git"), "symbolic-ref", "HEAD", "refs/heads/main"]);
   writeFileSync("gitconfig", `[url "${resolve("remote.git")}"]\n insteadOf = https://github.com/fixture/project.git\n`);
   process.env.GIT_CONFIG_GLOBAL = resolve("gitconfig");
-  process.env.GITHUB_APP_PRIVATE_KEY = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+  const patMode = scenario === "pat_auth", pat = "ghp_" + "a1B2c3D4e".repeat(4), user = { login: "Agent-Account", status: 200 };
+  if (patMode) delete process.env.GITHUB_APP_PRIVATE_KEY;
+  else process.env.GITHUB_APP_PRIVATE_KEY = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+  if (patMode || scenario === "isolation") process.env.GITHUB_PAT = pat;
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
   const modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set() };
-  const tokens = new Map();
+  const tokens = new Map(patMode ? [[pat, { issues: "write", pull_requests: "write", contents: "write" }]] : []);
   let onModel, nextCommentId = 1000;
   const server = createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
@@ -178,7 +181,7 @@ export async function fixture(scenario) {
     config.workspace.validate = [[process.execPath, resolve("validate.mjs")]];
   }
   if (scenario === "isolation") {
-    writeFileSync("probe.mjs", 'import{appendFileSync}from"node:fs";const leaked=Object.entries(process.env).filter(([name,value])=>/PRIVATE_KEY|API_KEY/.test(name)||value.includes("PRIVATE KEY-----")).map(([name])=>name);'
+    writeFileSync("probe.mjs", 'import{appendFileSync}from"node:fs";const leaked=Object.entries(process.env).filter(([name,value])=>/PRIVATE_KEY|API_KEY|GITHUB_PAT/.test(name)||value.includes("PRIVATE KEY-----")||value.includes("ghp_")).map(([name])=>name);'
       + 'appendFileSync(' + JSON.stringify(resolve("isolation.jsonl")) + ',JSON.stringify({phase:process.argv[2],leaked,configured:process.env.SCRAT_WORKSPACE_VALUE})+"\\n");');
     config.workspace = { environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, prepare: [[process.execPath, resolve("probe.mjs"), "prepare"]], validate: [[process.execPath, resolve("probe.mjs"), "validate"]] };
   }
@@ -206,6 +209,7 @@ export async function fixture(scenario) {
     const helper = fileURLToPath(new URL("database-command.mjs", import.meta.url)); cpSync(helper, "database-command.mjs");
     config.workspace = { ...config.workspace, environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), scenario === "validation_resume" ? "validate-resume" : "validate", resolve("database-receipts.jsonl")]] };
   }
+  if (patMode) { config.github.auth = "pat"; config.github.botLogin = "agent-account"; }
   writeFileSync("app/scrat.config.json", JSON.stringify(config));
   writeFileSync("app/scrat.local.json", "{}\n");
   mkdirSync("data");
@@ -222,7 +226,8 @@ export async function fixture(scenario) {
       pr.head.sha = git(resolve("remote.git"), "rev-parse", pr.head.ref);
       git(resolve("remote.git"), "update-ref", `refs/pull/${pr.number}/head`, pr.head.sha);
     }
-    const call = { method, path: path + url.search }; calls.push(call);
+    const bearer = new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");
+    const call = { method, path: path + url.search, token: bearer }; calls.push(call);
     const reply = (data, status = 200, extra = {}) => {
       const text = JSON.stringify(data), headers = { "content-type": "application/json", "x-ratelimit-limit": String(rate.limit), "x-ratelimit-reset": String(rate.reset), "x-ratelimit-resource": "core", ...extra };
       if (method === "GET" && status === 200) {
@@ -234,6 +239,8 @@ export async function fixture(scenario) {
       call.status = status; if (!path.endsWith("/access_tokens")) rate.remaining--;
       return new Response(text, { status, headers: { ...headers, "x-ratelimit-remaining": String(rate.remaining) } });
     };
+    if (patMode && bearer !== pat) return reply({ message: "Bad credentials" }, 401);
+    if (path === "/user") return user.status === 200 ? reply({ login: user.login }) : reply({ message: "Bad credentials" }, user.status);
     if (path.endsWith("/access_tokens")) {
       const token = "ghs_fixture_" + tokens.size; tokens.set(token, body.permissions);
       return reply({ token, expires_at: new Date(Date.now() + 3600000).toISOString() }, 201);
@@ -304,7 +311,7 @@ export async function fixture(scenario) {
   };
   const enqueue = (number, action = "review_issue", input = {}) => tasks.enqueueTask({ itemId: "issue-" + number, action, reason: "Integration", input });
   const row = (table, id) => db.select().from(table).all().find((entry) => entry.id === id);
-  return { app, db, schema, tasks, runNextTask, git, commit, config, modes, requests, calls, rate, issues, prs, comments, reviews, writes, faults, addIssue, enqueue, row,
+  return { app, db, schema, tasks, runNextTask, git, commit, config, pat, user, modes, requests, calls, rate, issues, prs, comments, reviews, writes, faults, addIssue, enqueue, row,
     set onModel(value) { onModel = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },
     async close() { globalThis.fetch = originalFetch; db.$client.close(); server.closeAllConnections(); await new Promise((done) => server.close(done)); },

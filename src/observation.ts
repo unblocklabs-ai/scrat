@@ -1,4 +1,4 @@
-import { config } from "./config.ts";
+import { config, isBotLogin } from "./config.ts";
 import { evaluateGithubContext } from "./github-context.ts";
 import type { GithubComment, GithubContext, GithubItem } from "./github-types.ts";
 import { labelName } from "./labels.ts";
@@ -25,11 +25,11 @@ export type ItemObservation = {
 export function observe(repository: string, context: GithubContext, headSha?: string): ItemObservation {
   const pullRequest = "head" in context.item ? context.item : undefined;
   const item = pullRequest && headSha ? { ...pullRequest, head: { ...pullRequest.head, sha: headSha } } : context.item;
-  const { comments: external, revision } = evaluateGithubContext({ ...context, item }, config.github.botLogin);
+  const { comments: external, revision } = evaluateGithubContext({ ...context, item });
   return {
     remote: remoteUrl(repository), kind: pullRequest ? "pr" : "issue", item,
     baseBranch: baseBranchOf(item), revision, external,
-    own: context.comments.filter((comment) => comment.author === config.github.botLogin),
+    own: context.comments.filter((comment) => isBotLogin(comment.author)),
     labels: item.labels.map(labelName),
   };
 }

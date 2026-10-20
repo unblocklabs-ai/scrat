@@ -1044,6 +1044,14 @@ try {
     await validateStaticConfig(f.config);
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.implement.thinkingLevel = "turbo"; })), /implement: invalid thinking level turbo/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.github.auth = "token"; })), /github\.auth must be "app" or "pat"/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.github.botLogin = " "; })), /github\.botLogin must not be empty/);
+    const key = process.env.GITHUB_APP_PRIVATE_KEY;
+    delete process.env.GITHUB_APP_PRIVATE_KEY;
+    await assert.rejects(validateStaticConfig(f.config), /github\.auth is "app" but GITHUB_APP_PRIVATE_KEY is not set/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.github.auth = "pat"; })), /github\.auth is "pat" but GITHUB_PAT is not set/);
+    process.env.GITHUB_PAT = "ghp_x"; await validateStaticConfig(variant((c) => { c.github.auth = "pat"; })); delete process.env.GITHUB_PAT;
+    process.env.GITHUB_APP_PRIVATE_KEY = key;
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.reviewers[1].thinkingLevel = "turbo"; })), /review_pr reviewer 2: invalid thinking level/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_issue.model = "missing-model"; })), /review_issue: no Pi model fixture\/missing-model/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.reviewers[0].provider = "nowhere"; })), /review_pr reviewer 1: no Pi model nowhere/);
@@ -1056,6 +1064,8 @@ try {
       await assert.rejects(syncGitHub(other), /serves only fixture\/project/);
       await assert.rejects(syncGitHub(other, false), /serves only fixture\/project/);
     }
+    const { GitHubRepository } = await f.app("github.ts");
+    assert.throws(() => new GitHubRepository("other/repo"), /serves only fixture\/project/);
     assert.equal(calls.length, 0); assert.equal(all(s.githubSnapshots).length, 0); assert.equal(all(s.items).length, 0);
     await syncGitHub(undefined, false); assert.ok(calls.length > 0);
 
@@ -1261,6 +1271,9 @@ try {
     const { containsSecret } = await f.app("secrets.ts"), body = key.split("\n").slice(1, -2).join("");
     assert.ok(containsSecret(`x ${body.slice(0, 40)} x`) && containsSecret(`x ${body.slice(10, 50)} x`) && containsSecret(`x ${body.slice(20, 60)} x`));
     assert.ok(!containsSecret(body.slice(0, 39)));
+    const { redactSecrets } = await f.app("errors.ts"), header = Buffer.from("x-access-token:" + f.pat).toString("base64");
+    assert.ok(containsSecret(f.pat) && containsSecret(header));
+    assert.ok(!redactSecrets(`${f.pat} ${header}`).includes(f.pat.slice(4)) && !redactSecrets(header).includes(header.slice(8)));
   } else if (scenario === "wakeup") {
     const { signalWork, waitForWork, workGeneration } = await f.app("work-signal.ts");
     const timed = async (promise) => { const start = Date.now(); await promise; return Date.now() - start; };
@@ -1495,6 +1508,37 @@ try {
     controller.abort(new Error("cancelled"));
     await assert.rejects(aborted, /cancelled/); release(); await holder; await next;
     assert.deepEqual(ran, ["next"]);
+  } else if (scenario === "pat_auth") {
+    const { GitHubRepository } = await f.app("github.ts"), { containsSecret } = await f.app("secrets.ts"), { redactSecrets } = await f.app("errors.ts");
+    const repository = new GitHubRepository("fixture/project");
+    f.user.login = "someone-else";
+    await assert.rejects(repository.fetchOpenItems(), /GITHUB_PAT belongs to someone-else, but github\.botLogin is agent-account/);
+    f.user.login = "Agent-Account"; f.user.status = 401;
+    await assert.rejects(repository.fetchOpenItems(), (error) => error.status === 401 && /GitHub rejected GITHUB_PAT \(401\)/.test(error.message));
+    f.user.status = 200;
+    process.env.GITHUB_PAT = ""; await assert.rejects(repository.fetchOpenItems(), /GITHUB_PAT is not set/); process.env.GITHUB_PAT = f.pat;
+    await repository.fetchOpenItems();
+
+    await implement(1); assert.equal(f.prs.length, 1);
+    await route(); await success();
+    assert.match(f.comments.get(201)[0].body, /Consolidated/);
+    f.comments.get(201).push({ ...f.comments.get(201)[0], id: 9000, body: "Mixed-case own follow-up", user: { login: "Agent-Account" } });
+    await route();
+    assert.ok(!all(s.tasks).some((task) => task.status === "queued"), "The PAT account's own comments must not be treated as feedback");
+    f.comments.get(201).push({ id: 9001, body: "Please rename the value", user: { login: "human" }, updated_at: "2026-10-19T01:00:00Z", html_url: "https://github.com/fixture/project/pull/201#comment" });
+    await route();
+    await success(); await success();
+    assert.ok(all(s.tasks).some((task) => task.action === "address_pr_feedback" && task.status === "completed"));
+
+    assert.ok(f.calls.length > 10 && f.calls.every((call) => call.token === f.pat), "Every GitHub call must carry the PAT");
+    assert.ok(!f.calls.some((call) => call.path.endsWith("/access_tokens")));
+    const header = Buffer.from("x-access-token:" + f.pat).toString("base64");
+    assert.equal((await repository.getGitEnvironment(true)).GIT_CONFIG_VALUE_0, "Authorization: Basic " + header);
+    assert.equal((await repository.getGitEnvironment(false)).GIT_CONFIG_VALUE_0, "Authorization: Basic " + header);
+    assert.ok(containsSecret(`x ${f.pat} x`) && containsSecret(`x ${header} x`));
+    assert.ok(!redactSecrets(`${f.pat} ${header}`).includes(f.pat.slice(4)) && !redactSecrets(header).includes(header.slice(8)));
+    assert.equal(git(resolve("remote.git"), "log", "-1", "--format=%an", f.prs[0].head.ref), "agent-account");
+    assert.ok(f.writes.some((write) => write.type === "pr") && f.writes.some((write) => write.type === "comment") && f.writes.some((write) => write.type === "label"));
   } else if (scenario === "config_overrides") {
     const local = resolve("app/scrat.local.json");
     const probe = (overrides, code) => {
@@ -1505,10 +1549,11 @@ try {
     const rejected = (overrides, message) => assert.throws(() => probe(overrides, ""), (error) => message.test(error.stderr));
     const defaults = JSON.parse(readFileSync("app/scrat.config.json", "utf8"));
     const merged = JSON.parse(probe({
-      harness: { maxConcurrency: 8 }, actions: { implement: { model: "other-model" } },
+      harness: { maxConcurrency: 8 }, github: { auth: "pat" }, actions: { implement: { model: "other-model" } },
       workspace: { environment: { EXTRA: "1" }, heavyCommands: ["^only$"], database: null },
     }, "console.log(JSON.stringify(config));"));
     assert.equal(merged.harness.maxConcurrency, 8); assert.equal(merged.harness.logLevel, defaults.harness.logLevel);
+    assert.equal(merged.github.auth, "pat"); assert.equal(defaults.github.auth, "app"); assert.equal(merged.github.botLogin, defaults.github.botLogin);
     assert.equal(merged.actions.implement.model, "other-model");
     assert.deepEqual({ ...merged.actions.implement, model: defaults.actions.implement.model }, defaults.actions.implement);
     assert.deepEqual(merged.workspace.environment, { ...defaults.workspace.environment, EXTRA: "1" });

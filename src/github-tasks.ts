@@ -1,6 +1,6 @@
 import { and, desc, eq, isNotNull, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
-import { config, getRepositoryPath } from "./config.ts";
+import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { acknowledgedTaskIds, commentKey } from "./markers.ts";
 import { observe, remoteUrl } from "./observation.ts";
@@ -68,7 +68,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       mainSha = await fetchRepository(repositoryPath, remote, observation.baseBranch, env);
     }
     const { external: comments, revision } = observation;
-    const owned = item.kind === "pr" && context.item.user?.login === config.github.botLogin;
+    const owned = item.kind === "pr" && isBotLogin(context.item.user?.login);
     if (owned && "head" in context.item) {
       const pr = context.item;
       if (pr.head.repo?.full_name !== repository) return added;

@@ -1,7 +1,7 @@
 import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { actionContracts } from "./actions.ts";
 import { buildAgentInput, evaluateContext, readDiffScope } from "./agent-input.ts";
-import { config, getRepositoryPath } from "./config.ts";
+import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
@@ -207,7 +207,7 @@ export async function runNextTask() {
           if (readOnly || !preparationDeferred) {
             try { await prepareWorkspace(workspace, commandEnvironment, databaseConfig, references); }
             catch (error) {
-              const humanReview = readOnly && context.item.user?.login !== config.github.botLogin;
+              const humanReview = readOnly && !isBotLogin(context.item.user?.login);
               if (!pullRequest || !(humanReview || !readOnly) || await isAncestor(repositoryPath, mainSha, headSha)) throw error;
               if (await hasConflicts(repositoryPath, mainSha, headSha)) {
                 if (!readOnly) throw error;

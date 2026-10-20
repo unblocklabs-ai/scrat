@@ -8,6 +8,7 @@
     "repository": "unblocklabs-ai/agent-platform",
     "repositoryPath": "../agent-platform",
     "baseBranch": "main",
+    "auth": "app",
     "botLogin": "scrat-unblock[bot]",
     "appId": 5017746,
     "installationId": 163420479,

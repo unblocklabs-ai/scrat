@@ -1,14 +1,15 @@
 import { createAppAuth } from "@octokit/auth-app";
 import { createHash } from "node:crypto";
 import { Octokit } from "octokit";
-import { config } from "./config.ts";
+import { config, isBotLogin } from "./config.ts";
 import { recordEvent, type EventReferences, type JournalEvent } from "./events.ts";
 import { labelName } from "./labels.ts";
 import { logger, withOperation } from "./logging.ts";
 import { inlineCommentId, issueCommentId, reviewCommentId } from "./markers.ts";
 import type { GithubComment, GithubContext, GithubIssue, GithubItem, GithubPullRequest } from "./github-types.ts";
 import { errorStatus } from "./errors.ts";
-import { assertPublishable, childEnvironment } from "./secrets.ts";
+import { assertConfiguredRepository } from "./observation.ts";
+import { assertPublishable, basicCredential, childEnvironment } from "./secrets.ts";
 
 const permissions = {
   read: { issues: "read", pull_requests: "read", metadata: "read" },
@@ -79,10 +80,7 @@ async function conditionalFetch(input: string | URL | Request, init: RequestInit
 type GithubEvent = Extract<JournalEvent, { type: `github.${string}` }>;
 const clients = new Map<string, { token: string; github: Octokit; invalid: boolean }>();
 
-async function githubForRepository(repository: string, access: keyof typeof permissions) {
-  const [owner, repo] = repository.split("/");
-  const key = `${repository}:${access}`;
-  const refresh = clients.get(key)?.invalid ?? false;
+async function appToken(repo: string, access: keyof typeof permissions, refresh: boolean) {
   authenticate ??= createAppAuth({
     appId: config.github.appId,
     privateKey: process.env.GITHUB_APP_PRIVATE_KEY!,
@@ -95,6 +93,37 @@ async function githubForRepository(repository: string, access: keyof typeof perm
     permissions: permissions[access],
     refresh,
   });
+  return token;
+}
+
+const patRejected = (error: unknown) => Object.assign(
+  new Error("GitHub rejected GITHUB_PAT (401): the token is expired, revoked, lacks scope, or is not SSO-authorized", { cause: error }),
+  { status: 401 },
+);
+let patVerified: Promise<void> | undefined;
+
+async function verifiedPat() {
+  const token = process.env.GITHUB_PAT;
+  if (!token) throw new Error("GITHUB_PAT is not set");
+  patVerified ??= (async () => {
+    let login: string;
+    try {
+      login = (await new Octokit({ auth: token, retry: { enabled: false }, throttle: { enabled: false } }).rest.users.getAuthenticated()).data.login;
+    } catch (error) {
+      throw errorStatus(error) === 401 ? patRejected(error) : error;
+    }
+    if (!isBotLogin(login)) throw new Error(`GITHUB_PAT belongs to ${login}, but github.botLogin is ${config.github.botLogin}`);
+  })().catch((error) => { patVerified = undefined; throw error; });
+  await patVerified;
+  return token;
+}
+
+async function githubForRepository(repository: string, access: keyof typeof permissions) {
+  const [owner, repo] = repository.split("/");
+  const key = `${repository}:${access}`;
+  const refresh = clients.get(key)?.invalid ?? false;
+  const pat = config.github.auth === "pat";
+  const token = pat ? await verifiedPat() : await appToken(repo, access, refresh);
   const cached = clients.get(key);
   if (cached?.token === token && !cached.invalid) return { github: cached.github, owner, repo, token };
   const github = new Octokit({
@@ -105,7 +134,7 @@ async function githubForRepository(repository: string, access: keyof typeof perm
   const entry = { token, github, invalid: false };
   github.hook.error("request", (error) => {
     if (errorStatus(error) === 401) entry.invalid = true;
-    throw error;
+    throw pat && errorStatus(error) === 401 ? patRejected(error) : error;
   });
   clients.set(key, entry);
   return { github, owner, repo, token };
@@ -130,7 +159,10 @@ function pullRequestView(item: GithubPullRequest): GithubPullRequest {
 export class GitHubRepository {
   readonly repository: string;
 
-  constructor(repository: string) { this.repository = repository; }
+  constructor(repository: string) {
+    assertConfiguredRepository(repository);
+    this.repository = repository;
+  }
 
   async getGitEnvironment(write = false) {
     const { token } = await githubForRepository(this.repository, write ? "contents_write" : "contents_read");
@@ -139,7 +171,7 @@ export class GitHubRepository {
       GIT_TERMINAL_PROMPT: "0",
       GIT_CONFIG_COUNT: "2",
       GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
-      GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+      GIT_CONFIG_VALUE_0: `Authorization: Basic ${basicCredential(token)}`,
       GIT_CONFIG_KEY_1: "core.hooksPath",
       GIT_CONFIG_VALUE_1: "/dev/null",
     };
@@ -211,7 +243,7 @@ export class GitHubRepository {
     const matches = await github.paginate(github.rest.pulls.list, {
       owner, repo, state: "all", head: `${owner}:${branch}`, base, per_page: 100,
     });
-    const found = matches.find((pr) => pr.user?.login === config.github.botLogin && pr.head.repo?.full_name === this.repository && pr.head.ref === branch);
+    const found = matches.find((pr) => isBotLogin(pr.user?.login) && pr.head.repo?.full_name === this.repository && pr.head.ref === branch);
     return found ? pullRequestView(found) : undefined;
   }
 

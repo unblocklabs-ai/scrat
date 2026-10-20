@@ -12,11 +12,14 @@ export function childEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJ
   return Object.fromEntries(Object.entries(source).filter(([name]) => inheritedVariables.has(name) || name.startsWith("LC_")));
 }
 
-const secretVariables = ["GITHUB_APP_PRIVATE_KEY", ...Object.values(config.providers)
+const secretVariables = ["GITHUB_APP_PRIVATE_KEY", "GITHUB_PAT", ...Object.values(config.providers)
   .flatMap((provider) => [...(provider.apiKey ?? "").matchAll(/\$\{(\w+)\}/g)].map((match) => match[1]))];
 
+export const basicCredential = (token: string) => Buffer.from(`x-access-token:${token}`).toString("base64");
+
 export function secretValues() {
-  return secretVariables.map((name) => process.env[name]).filter((value): value is string => Boolean(value));
+  const values = secretVariables.map((name) => process.env[name]).filter((value): value is string => Boolean(value));
+  return process.env.GITHUB_PAT ? [...values, basicCredential(process.env.GITHUB_PAT)] : values;
 }
 
 export function containsSecret(text: string) {

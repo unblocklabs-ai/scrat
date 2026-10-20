@@ -15,7 +15,7 @@ import { executePi } from "./pi.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { reviewPullRequest } from "./pr-review.ts";
 import { publishRun } from "./publication.ts";
-import { CheckFailure, hasValidationCheckpoint, SecretLeakError, type AgentResult } from "./results.ts";
+import { CheckFailure, hasValidationCheckpoint, type AgentResult } from "./results.ts";
 import { items, runs, workspaces } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { claimTask, finishRun } from "./tasks.ts";
@@ -60,6 +60,8 @@ function assertComplete(result: AgentResult) {
   }
 }
 
+const unresolvedConflict = "PR still conflicts with its base branch after resolution";
+
 async function validateAndCommit(options: {
   run: typeof runs.$inferSelect; workspace: Workspace; validationOnly: boolean; title: string;
   commandEnvironment: Environment; databaseConfig: DatabaseConfig | null | undefined; references: References; secretBaseSha: string;
@@ -81,7 +83,7 @@ async function validateAndCommit(options: {
   if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
   db.update(runs).set({ headSha: commitSha, publication: { status: "pending", commitSha }, verification: { headSha: commitSha, commands } }).where(eq(runs.id, run.id)).run();
   if (acceptance.kind === "conflict-free" && await hasConflicts(acceptance.repositoryPath, acceptance.mainSha, commitSha)) {
-    throw new Error("PR still conflicts with its base branch after resolution");
+    throw new Error(unresolvedConflict);
   }
   if (acceptance.kind === "nonempty-diff" && !await git(workspace.path, ["diff", "--name-only", `${acceptance.baseRef}...HEAD`])) {
     throw new Error("Implementation produced no changes against the base branch");
@@ -208,8 +210,8 @@ export async function runNextTask() {
             await validate(workspace, contract.acceptance);
             validated = true;
           } catch (error) {
-            if (error instanceof SecretLeakError) throw error;
-            // The agent repairs the merged tree in this same run, starting from what validation reported.
+            // A failing check or a tree that still conflicts is the agent's to repair in this run; infrastructure failures are not, so they fail the run.
+            if (!(error instanceof CheckFailure) && !(error instanceof Error && error.message === unresolvedConflict)) throw error;
             validationFailure = describeError(error instanceof CheckFailure ? error.cause : error);
           }
         }

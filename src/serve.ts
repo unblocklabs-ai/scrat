@@ -42,4 +42,7 @@ try {
   try { await syncGitHub(); }
   catch { /* Keep the worker available for persisted tasks and the next poll. */ }
   await Promise.all([poll(), ...Array.from({ length: config.harness.maxConcurrency }, worker)]);
+} catch (error) {
+  logger.error({ err: error, event: "serve.failed" }, "Serve failed");
+  process.exitCode = 1;
 } finally { db.$client.close(); }

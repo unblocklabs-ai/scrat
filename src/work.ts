@@ -20,6 +20,9 @@ try {
       process.exitCode = 1;
     }
   }
+} catch (error) {
+  logger.error({ err: error, event: "work.failed" }, "Work failed");
+  process.exitCode = 1;
 } finally {
   db.$client.close();
 }

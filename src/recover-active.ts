@@ -8,8 +8,13 @@ import { finishRun } from "./tasks.ts";
 
 try {
   for (const run of db.select().from(runs).where(isNull(runs.finishedAt)).all()) {
-    finishRun(run.id, { status: "failed", error: Object.assign(new Error("Worker stopped before finishing this run"), { code: "RUN_INTERRUPTED" }) });
-    if (config.workspace?.database) await removeRunDatabase(run.id, { taskId: run.taskId });
-    logger.warn({ event: "run.recovered", runId: run.id, taskId: run.taskId });
+    // One inconsistent run must not block recovery of the rest or the service start that follows it.
+    try {
+      finishRun(run.id, { status: "failed", error: Object.assign(new Error("Worker stopped before finishing this run"), { code: "RUN_INTERRUPTED" }) });
+      if (config.workspace?.database) await removeRunDatabase(run.id, { taskId: run.taskId });
+      logger.info({ event: "run.recovered", runId: run.id, taskId: run.taskId });
+    } catch (error) {
+      logger.error({ err: error, event: "run.recovery_failed", runId: run.id, taskId: run.taskId }, "Run recovery failed");
+    }
   }
 } finally { db.$client.close(); }

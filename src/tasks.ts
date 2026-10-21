@@ -54,9 +54,6 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
           retryMode: "repair",
         },
       }).returning().get()!;
-      if (!previous && typeof task.input.assessmentRunId === "string") {
-        transaction.update(items).set({ selfRepairCount: sql`${items.selfRepairCount} + 1` }).where(eq(items.id, task.itemId)).run();
-      }
       const references = { itemId: queuedTask.itemId, taskId: queuedTask.id, operationId: operation.operationId };
       recordEvent(previous ? {
         ...references,
@@ -160,6 +157,9 @@ export function claimTask() {
       } : {}),
       startedAt: new Date().toISOString(),
     }).returning().get()!;
+    if (!previousRun && typeof task.input.assessmentRunId === "string") {
+      transaction.update(items).set({ selfRepairCount: sql`${items.selfRepairCount} + 1` }).where(eq(items.id, task.itemId)).run();
+    }
     recordEvent({ itemId: task.itemId, taskId: task.id, runId: run.id, type: "run.started", data: {
       action: task.action, skill: run.skill, provider: run.provider, model: run.model, thinkingLevel: run.thinkingLevel,
     } }, transaction);

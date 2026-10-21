@@ -1253,7 +1253,7 @@ try {
     await implement(1); const graded = await review(201, "grade-C");
     assert.equal(graded.result.grade, "C"); await route();
     assert.equal(repairs(201).length, 1); assert.equal(repairs(201)[0].status, "queued"); assert.equal(repairs(201)[0].input.assessmentRunId, graded.id);
-    assert.equal(count(201), 1); await route(); assert.equal(repairs(201).length, 1); assert.equal(count(201), 1);
+    assert.equal(count(201), 0, "A queued repair spends no cap slot until it runs"); await route(); assert.equal(repairs(201).length, 1); assert.equal(count(201), 0);
     const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length, validationsBefore = validations();
     f.reset(201, "no-change"); const repair = await success();
     assert.equal(validations(), validationsBefore, "A repair that changed nothing skips validation");
@@ -1278,7 +1278,7 @@ try {
     const labelEvents = () => all(s.events).filter((event) => event.type.startsWith("github.labels_") && JSON.stringify(event.data).includes("Scrat repair exhausted")).length;
     const written = labelEvents(); await route(); assert.equal(labels204(), 1); assert.equal(labelEvents(), written, "A steady state writes no label");
     db.$client.prepare("update items set self_repair_count = 1 where id = ?").run(prItem(204).id);
-    await route(); assert.equal(repairs(204).length, 1); assert.equal(count(204), 2);
+    await route(); assert.equal(repairs(204).length, 1); assert.equal(count(204), 1);
     const queuedRepair = repairs(204)[0], before = count(204);
     tasks.enqueueTask({ itemId: queuedRepair.itemId, action: "address_review", reason: "Coalesce", input: queuedRepair.input });
     assert.equal(count(204), before, "A coalesced repair does not spend a cap slot");
@@ -1286,6 +1286,7 @@ try {
     f.prs.find((pr) => pr.number === 204).title = "Retitled after the review"; await route();
     assert.equal(repairs(204)[0].status, "cancelled", "A repair for a stale assessment is cancelled");
     assert.equal(labels204(), 1, "The label waits for the next review");
+    db.$client.prepare("update items set self_repair_count = 2 where id = ?").run(prItem(204).id);
     await success(); await route(); assert.equal(repairs(204).length, 1, "A new low grade at the cap queues nothing");
     assert.equal(labels204(), 1, "Still low at the cap");
     f.prs.find((pr) => pr.number === 204).title = "Retitled again"; await route(); f.reset(204, "normal"); assert.equal((await success()).result.grade, "B"); await route();
@@ -1314,6 +1315,15 @@ try {
     const superseded = await run(); assert.equal(superseded.taskId, repair8.id); assert.equal(superseded.error.message, guarded);
     assert.equal(f.requests.length, modelCalls, "no model call"); assert.equal(head208(), headBefore, "no push");
     assert.equal(f.row(s.tasks, repair8.id).status, "failed");
+    await implement(10); const graded10 = await review(210, "grade-C"); await route();
+    assert.equal(repairs(210)[0].status, "queued"); assert.equal(count(210), 0, "A queued repair spends no cap slot until it runs");
+    tasks.cancelQueuedTasks(prItem(210).id, "Human feedback", "address_review"); assert.equal(repairs(210)[0].status, "cancelled");
+    await route(); const requeued10 = repairs(210).find((t) => t.status === "queued");
+    assert.equal(repairs(210).length, 2); assert.equal(requeued10.input.assessmentRunId, graded10.id);
+    assert.equal(count(210), 0, "Re-queuing the same assessment after a cancel spends no cap slot");
+    f.reset(210, "no-change"); const repaired10 = await success(); assert.equal(repaired10.taskId, requeued10.id);
+    assert.equal(count(210), 1, "One claimed repair counts once"); await route();
+    assert.equal(repairs(210).length, 2); assert.equal(count(210), 1);
     await implement(9); await review(209, "grade-C"); await route();
     const repair9 = repairs(209)[0]; assert.equal(repair9.status, "queued");
     const branch9 = f.prs.find((pr) => pr.number === 209).head.ref;

@@ -79,7 +79,7 @@ async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observatio
 }
 
 async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation: ItemObservation, owned: boolean, state: PrReviewState, count: number) {
-  const { exhaustedLabel, maxSelfRepairs } = config.actions.address_review;
+  const { exhaustedLabel, maxSelfRepairs } = config.actions.address_review as Required<typeof config.actions[string]>;
   const latestRepair = latestTask(item.id, "address_review");
   const repairActive = latestRepair?.status === "queued" || latestRepair?.status === "running";
   if (!exhaustedLabel || !owned || state.kind !== "current" || repairActive) return;
@@ -95,7 +95,7 @@ async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObse
   const attempt = reviews.find(({ task }) => task.id === latest?.id)?.run;
   const state = await resolvePrReview(reviews, observation, mainSha);
   let added = applyDecisions(item.id, planReview({ kind: "pr", state, latest, attempt, revision: observation.revision, mainSha }));
-  const { maxSelfRepairs } = config.actions.address_review;
+  const { maxSelfRepairs } = config.actions.address_review as Required<typeof config.actions[string]>;
   const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
   const repair = planSelfRepair({
     owned, state, feedbackTask: latestTask(item.id, "address_pr_feedback"),

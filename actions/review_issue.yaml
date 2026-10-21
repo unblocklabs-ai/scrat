@@ -1,0 +1,11 @@
+name: review_issue
+trigger: { source: github_items, kind: item_changed, item: issue }
+mode: review
+agent: single
+context: all
+tools: [read, grep, find, ls, git]
+files: [discussion]
+publish: [comment, labels]
+skill: skills/review_issue/SKILL.md
+model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }
+priority: 10

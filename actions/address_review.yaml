@@ -1,0 +1,14 @@
+name: address_review
+trigger: { source: github_items, kind: low_grade, item: pr, author: bot, grades: [C, D, F], manual: false }
+mode: change
+agent: single
+context: all
+tools: [read, grep, find, ls, bash, edit, write]
+files: [discussion, review]
+acceptance: complete
+publish: [push, comment]
+skill: skills/address_review/SKILL.md
+model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }
+priority: 60
+maxSelfRepairs: 2
+exhaustedLabel: Scrat repair exhausted

@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { actionContracts } from "./actions.ts";
+import { manifestOf } from "./actions.ts";
 import { config } from "./config.ts";
 import type { ErrorDetails } from "./errors.ts";
 import { git } from "./git.ts";
@@ -44,7 +44,7 @@ export function evaluateContext(run: Run, task: Task, observation: ItemObservati
   const trigger = parseTriggerInput(run.input);
   const ids = new Set(trigger.kind === "pr_feedback" ? trigger.commentRevisions.map(parseCommentKey) : []);
   const { action } = task;
-  const comments = actionContracts[action].context === "feedback" && ids.size
+  const comments = manifestOf(action).context === "feedback" && ids.size
     ? observation.external.filter((comment) => ids.has(comment.id)) : observation.external;
   return {
     revision: observation.revision, baseBranch: observation.baseBranch, headSha: "head" in observation.item ? observation.item.head.sha : undefined,
@@ -82,14 +82,14 @@ export async function buildAgentInput(options: {
   const report = repair ? getRun(repair.assessmentRunId)?.result?.text : undefined;
   if (repair && !report) throw new Error("Missing review report for self-repair");
   const failure = run.retryOfRunId ? getRun(run.retryOfRunId)?.error : undefined;
-  const history = actionContracts[action].publication === "pr-assessment" ? undefined
-    : historyReport(completedRunsOfActionInRepository(config.github.repository, action, historyRuns), action);
+  const listed = manifestOf(action).files;
+  const history = listed.includes("history") ? historyReport(completedRunsOfActionInRepository(config.github.repository, action, historyRuns), action) : undefined;
   const prior = options.priorReviews ? priorReviewTexts(task.subjectId) : undefined;
   await Promise.all([
-    writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),
-    report && writeContext("review", "review.md", report),
-    prior && writeContext("previous_assessment", "previous-assessment.md", prior.assessment),
-    prior?.repair && writeContext("previous_repair", "previous-repair.md", prior.repair),
+    listed.includes("discussion") && writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),
+    listed.includes("review") && report && writeContext("review", "review.md", report),
+    listed.includes("previous_assessment") && prior && writeContext("previous_assessment", "previous-assessment.md", prior.assessment),
+    listed.includes("previous_repair") && prior?.repair && writeContext("previous_repair", "previous-repair.md", prior.repair),
     history && writeContext("history", "history.md", history),
     failure && writeContext("previousFailure", "previous-failure.json", JSON.stringify(failure, null, 2)),
     options.validationFailure && writeContext("validationFailure", "validation-failure.json", JSON.stringify(options.validationFailure, null, 2)),

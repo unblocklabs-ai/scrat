@@ -1,4 +1,4 @@
-import { actionContracts } from "./actions.ts";
+import { manifestOf } from "./actions.ts";
 import { db } from "./db.ts";
 import { applyEffects, type EffectContext } from "./effects.ts";
 import type { EventReferences } from "./events.ts";
@@ -24,19 +24,19 @@ export async function publishRun(github: GitHubRepository, task: Task, run: Run,
   const { result, context } = run;
   if (!result || !context) throw new Error("Run has no evaluated result to publish");
   if (result.outcome !== "complete") throw new Error("Incomplete agent work cannot be published");
-  const contract = actionContracts[task.action];
+  const manifest = manifestOf(task.action);
   const effectContext = { ...receiptContext(run, references), github, task, run: { ...run, result, context }, current };
-  if (contract.mode === "change") {
+  if (manifest.mode === "change") {
     const workspace = run.workspaceId ? getWorkspace(run.workspaceId) : undefined;
     if (!workspace || workspace.removedAt) throw new Error("Publication workspace is no longer active");
     const commitSha = run.publication.commitSha;
     if (!commitSha) throw new Error("Run has no validated commit to publish");
-    return applyEffects(contract.publication, { ...effectContext, workspace, commitSha });
+    return applyEffects(manifest.publish, { ...effectContext, workspace, commitSha });
   }
-  return applyEffects(contract.publication, effectContext);
+  return applyEffects(manifest.publish, effectContext);
 }
 
-export function publishCommit(subject: Subject, run: Run) {
+export function publishCommit(subject: Subject, task: Task, run: Run) {
   const saved = getRun(run.id)!;
-  return applyEffects("slack-thread", { ...receiptContext(saved, {}), subject, run });
+  return applyEffects(manifestOf(task.action).publish, { ...receiptContext(saved, {}), subject, run });
 }

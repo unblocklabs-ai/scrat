@@ -1,5 +1,4 @@
 import { eq } from "drizzle-orm";
-import type { Publication } from "./actions.ts";
 import { postCommitReply } from "./commit-review.ts";
 import { upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
@@ -9,6 +8,7 @@ import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { isBotLogin } from "./config.ts";
 import { botSlug } from "./identity.ts";
+import type { EffectName } from "./manifests.ts";
 import { upsertItem } from "./items.ts";
 import { reconcileLabels } from "./labels.ts";
 import { fingerprintMarker, isIssueComment, taskMarker } from "./markers.ts";
@@ -140,21 +140,10 @@ const slackReply = {
   },
 } satisfies Effect<SlackEffectContext>;
 
-const effects = { push, pull_request: pullRequest, comment, labels, pr_assessment: prAssessment, issue, slack_reply: slackReply };
+const effects = { push, pull_request: pullRequest, comment, labels, pr_assessment: prAssessment, issue, slack_reply: slackReply } satisfies Record<EffectName, Effect<never>>;
 
-const publicationEffects = {
-  "pull-request": [effects.push, effects.pull_request],
-  comment: [effects.push, effects.comment],
-  "issue-assessment": [effects.comment, effects.labels],
-  "pr-assessment": [effects.pr_assessment],
-  "issue-report": [effects.issue],
-  "slack-thread": [effects.slack_reply],
-} as const satisfies Record<Publication, readonly Effect<never>[]>;
-
-export type PublicationKind = keyof typeof publicationEffects;
-
-export async function applyEffects<Context extends EffectContext>(kind: PublicationKind, context: Context) {
-  const list = publicationEffects[kind] as unknown as readonly Effect<Context>[];
+export async function applyEffects<Context extends EffectContext>(names: readonly EffectName[], context: Context) {
+  const list = names.map((name) => effects[name]) as unknown as readonly Effect<Context>[];
   for (const effect of list) {
     if (!effect.receipted?.(context.publication(), context)) await effect.apply(context);
   }

@@ -1,8 +1,9 @@
 import { eq } from "drizzle-orm";
-import { actionContracts, type Action } from "./actions.ts";
+import { manifestOf } from "./actions.ts";
 import { buildAgentInput, evaluateContext, readDiffScope } from "./agent-input.ts";
 import { commitMetadata, describeCommit, startCommitThread } from "./commit-review.ts";
 import { config, getActionConfig, getRepositoryPath, isBotLogin } from "./config.ts";
+import type { Manifest } from "./manifests.ts";
 import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
@@ -32,7 +33,7 @@ import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createW
 type DatabaseConfig = NonNullable<NonNullable<typeof config.workspace>["database"]>;
 type Environment = Record<string, string | undefined>;
 type References = { subjectId: string; taskId: string; runId: string };
-type Acceptance = "conflict-free" | "nonempty-diff" | "complete";
+type Acceptance = NonNullable<Manifest["acceptance"]>;
 
 const maxValidationCorrections = 2;
 
@@ -82,10 +83,10 @@ async function validateAndCommit({ run, references, repositoryPath, stop }: Ctx,
   const message = /^[a-z]+(\([^)]*\))?!?: /.test(p.title) ? p.title : `fix: ${p.title}`;
   const commitSha = await commitWorkspace(workspace, message, botAuthor(), references);
   if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
-  if (kind === "conflict-free" && await hasConflicts(repositoryPath, p.mainSha, commitSha)) {
+  if (kind === "conflict_free" && await hasConflicts(repositoryPath, p.mainSha, commitSha)) {
     throw new Error(unresolvedConflict);
   }
-  if (kind === "nonempty-diff" && !await git(workspace.path, ["diff", "--name-only", `${p.baseRef}...HEAD`])) {
+  if (kind === "nonempty_diff" && !await git(workspace.path, ["diff", "--name-only", `${p.baseRef}...HEAD`])) {
     throw new Error("Implementation produced no changes against the base branch");
   }
   updateRun(run.id, { headSha: commitSha, publication: { status: "pending", commitSha }, verification: { headSha: commitSha, commands }, stage: "publishing" });
@@ -94,7 +95,7 @@ async function validateAndCommit({ run, references, repositoryPath, stop }: Ctx,
 type Ctx = {
   task: Task; run: Run; subject: Subject; item: Item | undefined;
   references: References; operation: ReturnType<typeof startOperation>;
-  contract: typeof actionContracts[Action]; repositoryPath: string;
+  manifest: Manifest; repositoryPath: string;
   readOnly: boolean; acceptance: Acceptance | undefined; stop: AbortSignal | undefined;
   cleanup: { reviewWorkspace?: Workspace; databaseRequested: boolean };
 };
@@ -117,10 +118,10 @@ function beginRun({ task, run, subject, item }: NonNullable<ReturnType<typeof cl
   const references = { subjectId: subject.id, taskId: task.id, runId: run.id };
   const { action } = task;
   const operation = startOperation("run.execute", { ...references, action });
-  const contract = actionContracts[action];
+  const manifest = manifestOf(action);
   return {
-    task, run, subject, item, references, operation, contract, repositoryPath: getRepositoryPath(),
-    readOnly: contract.mode === "review", acceptance: contract.mode === "change" ? contract.acceptance : undefined, stop,
+    task, run, subject, item, references, operation, manifest, repositoryPath: getRepositoryPath(),
+    readOnly: manifest.mode === "review", acceptance: manifest.mode === "change" ? manifest.acceptance : undefined, stop,
     cleanup: { databaseRequested: false },
   };
 }
@@ -232,13 +233,13 @@ async function planAgent({ task, run, subject, readOnly, acceptance, repositoryP
   updateRun(run.id, { context: evaluated });
   Object.assign(p, {
     evaluated, diffPaths, diffBaseSha, previousSessionFile: previous?.piSessionFile ?? undefined,
-    deferred: p.mergeInProgress || Boolean(run.retryOfRunId) || acceptance === "conflict-free",
+    deferred: p.mergeInProgress || Boolean(run.retryOfRunId) || acceptance === "conflict_free",
   });
 }
 
 async function mergeBehind(ctx: Ctx, observed: Observed | undefined, p: Prepared) {
   const { run, acceptance, repositoryPath } = ctx;
-  if (!observed || acceptance !== "conflict-free" || p.mergeInProgress || run.retryOfRunId || !await behindCleanly(repositoryPath, p.mainSha, p.headSha)) return;
+  if (!observed || acceptance !== "conflict_free" || p.mergeInProgress || run.retryOfRunId || !await behindCleanly(repositoryPath, p.mainSha, p.headSha)) return;
   const { baseBranch } = observed.observation;
   await mergeBase(p.workspace.path, p.mainSha, `Merge ${baseBranch} into ${observed.pullRequest!.head.ref}`, botAuthor());
   p.headSha = await git(p.workspace.path, ["rev-parse", "HEAD"]);
@@ -282,25 +283,25 @@ async function prepareCommands({ run, readOnly, repositoryPath, references, oper
   }
 }
 
-async function agentStage({ task, run, contract, readOnly, operation, stop }: Ctx, observed: Observed | undefined, p: Prepared) {
+async function agentStage({ task, run, manifest, readOnly, operation, stop }: Ctx, observed: Observed | undefined, p: Prepared) {
   const { action } = task;
   const { workspace, environment } = p;
   const configured = getActionConfig(action);
-  const changeContext = contract.context === "change";
+  const changeContext = manifest.context === "change";
   updateRun(run.id, { stage: "agent" });
   const { prompt, contextDir, revisions } = await buildAgentInput({
     run, task, evaluated: p.evaluated!, diffBaseSha: p.diffBaseSha, diffPaths: p.diffPaths, mainSha: p.mainSha, headSha: p.headSha,
     baseRef: p.baseRef, mergeInProgress: p.mergeInProgress, workspace, validationFailure: p.validationFailure,
-    priorReviews: contract.publication === "pr-assessment" && isBotLogin(observed?.pullRequest?.user?.login),
+    priorReviews: manifest.publish.includes("pr_assessment") && isBotLogin(observed?.pullRequest?.user?.login),
     database: p.database ? {
       ...p.database, environment, schemaPrepared: !p.deferred,
       prepare: config.workspace?.prepare, migrate: p.databaseConfig?.migrate,
     } : undefined,
   });
   p.agentInput = { contextDir, revisions };
-  const agentResult = ("agent" in configured ? configured.agent : contract.agent) === "panel"
-    ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { baseSha: p.diffBaseSha, contextDir, revisions, requireGrade: !changeContext, stop })
-    : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, log: operation.log, sessionFile: p.previousSessionFile, environment, contextDir, revisions, baseSha: changeContext ? p.diffBaseSha : undefined, stop });
+  const agentResult = configured.agent === "panel"
+    ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { baseSha: p.diffBaseSha, contextDir, revisions, tools: manifest.tools, requireGrade: !changeContext, stop })
+    : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, tools: manifest.tools, log: operation.log, sessionFile: p.previousSessionFile, environment, contextDir, revisions, baseSha: changeContext ? p.diffBaseSha : undefined, stop });
   p.result = { ...agentResult, paths: [...new Set([...p.diffPaths, ...agentResult.paths])] };
   updateRun(run.id, { result: p.result, stage: "validating" });
 }
@@ -324,7 +325,7 @@ async function validateStage(ctx: Ctx, p: Prepared) {
         if (validationOnly || !p.agentInput || !sessionFile || round > maxValidationCorrections) throw error.cause;
         operation.log.warn({ event: "pi.validation_retry", round });
         updateRun(run.id, { stage: "agent" });
-        const followUp = await executePi({ run, cwd: workspace.path, context: "", readOnly, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });
+        const followUp = await executePi({ run, cwd: workspace.path, context: "", readOnly, tools: ctx.manifest.tools, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });
         result = { ...followUp, text: `${result.text}\n\n**Validation correction ${round}:** ${followUp.text}`, paths: [...new Set([...result.paths, ...followUp.paths])] };
         updateRun(run.id, { result, stage: "validating" });
         assertComplete(result);
@@ -333,8 +334,8 @@ async function validateStage(ctx: Ctx, p: Prepared) {
   }
 }
 
-async function publishStage({ task, run, subject, references, readOnly, contract, repositoryPath }: Ctx, observed: Observed | undefined) {
-  if (!observed) return publishCommit(subject, run);
+async function publishStage({ task, run, subject, references, readOnly, manifest, repositoryPath }: Ctx, observed: Observed | undefined) {
+  if (!observed) return publishCommit(subject, task, run);
   const { repository, github, context, item, observation, mainSha } = observed;
   const evaluatedRun = getRun(run.id)!;
   const publicationContext = run.stage !== "publishing"
@@ -350,7 +351,7 @@ async function publishStage({ task, run, subject, references, readOnly, contract
   const current = observe(repository, publicationContext, headOverride);
   const currentMainSha = readOnly ? async () => run.stage === "publishing" ? mainSha
     : await fetchRepository(repositoryPath, observation.remote, current.baseBranch, await github.getGitEnvironment()) : undefined;
-  if (contract.publication === "pr-assessment") await currentMainSha?.();
+  if (manifest.publish.includes("pr_assessment")) await currentMainSha?.();
   else {
     const state = await freshness(savedEvaluation(evaluatedRun), { ...current, mainSha: currentMainSha }, "relevant-paths", { unknownBase: "current" });
     if (state.kind === "stale") throw new Error(state.reason === "context"

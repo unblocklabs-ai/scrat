@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, count, desc, eq, isNotNull, isNull, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
-import { type Action, actionContracts, actionIds } from "./actions.ts";
+import { type Action, getManifest, manifests } from "./actions.ts";
 import { config, getActionConfig, isActionEnabled, thinkingLevels } from "./config.ts";
 import { itemsInRepository, sameRepository } from "./repository.ts";
 import { db } from "./db.ts";
@@ -20,13 +20,13 @@ export function latestTask(subjectId: string, action: Action) {
     .orderBy(desc(tasks.createdAt), desc(tasks.id)).limit(1).get();
 }
 
-const isKnownAction = (action: string): action is Action => (actionIds as readonly string[]).includes(action);
+const isKnownAction = (action: string) => getManifest(action) !== undefined;
 
 function checkClaimable({ task, subject }: { task: Task; subject: Subject }, database: Pick<typeof db, "select">) {
   if (!isKnownAction(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   if (!isActionEnabled(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   const actionConfig = config.actions[task.action];
-  const invalid = [actionConfig, ...("reviewers" in actionConfig ? actionConfig.reviewers : [])]
+  const invalid = [actionConfig, ...actionConfig.reviewers ?? []]
     .find(({ thinkingLevel }) => !(thinkingLevels as readonly string[]).includes(thinkingLevel));
   if (invalid) return { ok: false as const, reason: `Invalid thinking level for ${task.action}: ${invalid.thinkingLevel}` };
   let trigger;
@@ -42,6 +42,7 @@ function checkClaimable({ task, subject }: { task: Task; subject: Subject }, dat
 
 export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | "action" | "priority" | "reason"> & { input: TriggerInput }) {
   return withOperationSync("task.enqueue", { subjectId: task.subjectId, action: task.action }, (operation) => {
+    if (!isKnownAction(task.action)) throw new Error(`Unknown action: ${task.action}`);
     const queued = db.transaction((transaction) => {
       const previous = transaction.select().from(tasks).where(and(
         eq(tasks.subjectId, task.subjectId), eq(tasks.action, task.action), eq(tasks.status, "queued"),
@@ -86,7 +87,7 @@ const issueActions: ReadonlySet<string> = new Set(["review_issue", "implement"])
 type ManualEnqueueResult = { target: string; number?: number; itemId?: string; taskId?: string; error?: string };
 
 export function enqueueManualTasks(action: string, targets: string[], priority?: number): ManualEnqueueResult[] {
-  if (!isKnownAction(action)) throw new Error(`Unknown action: ${action}; expected one of ${actionIds.join(", ")}`);
+  if (!isKnownAction(action)) throw new Error(`Unknown action: ${action}; expected one of ${manifests().map((manifest) => manifest.name).join(", ")}`);
   if (action === "address_review") throw new Error("address_review needs a review assessment and is queued automatically by sync");
   const candidates = itemsInRepository(config.github.repository);
   return targets.map((target): ManualEnqueueResult => {
@@ -181,7 +182,7 @@ export function retryTask(taskId: string, mode: Task["retryMode"] = "repair") {
       if (queued) throw new Error(`A queued task already exists for this subject/action: ${queued.id}`);
       if (mode === "validation") {
         const previous = latestRunOfTask(taskId, transaction);
-        if (!isKnownAction(failed.action) || actionContracts[failed.action].mode !== "change" || !hasValidationCheckpoint(previous)
+        if (getManifest(failed.action)?.mode !== "change" || !hasValidationCheckpoint(previous)
           || !isDeepStrictEqual(previous.input, failed.input)) {
           throw new Error("Validation-only retry requires an unchanged task input and a complete agent checkpoint from a failed validation; use normal retry to repair");
         }

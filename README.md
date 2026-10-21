@@ -172,8 +172,7 @@ Each `providers.<name>` entry registers an endpoint and models with Pi. Actions 
 
 ### Actions
 
-`actions` defines `review_issue`, `review_pr`, `implement`, `resolve_conflicts`, `address_pr_feedback`, and `address_review`.
-Execution mode, acceptance rules, and publication behavior live in `src/actions.ts`; configuration selects prompts, models, and priorities without changing those safety contracts.
+Each action is one manifest, `actions/<name>.yaml`, validated at startup (`src/manifests.ts`): `review_issue`, `review_pr`, `implement`, `resolve_conflicts`, `address_pr_feedback`, `address_review`, and `review_base_change`. A manifest fixes the trigger, mode, acceptance rule, `tools` the agent session gets, context `files`, and publish effects, all from closed lists; an unknown key or value stops startup with the file and path. `scrat.config.json` no longer has an `actions` block: the settings below are the manifest's deployment-level keys, and `scrat.local.json` overrides them by action name.
 
 | Setting under `actions.<action>` | Purpose |
 | --- | --- |
@@ -189,7 +188,7 @@ The checked-in configuration currently uses six task slots and three validation 
 
 ### Optional actions
 
-An action with an `enabled` key runs only when the key is not `false`. The six actions above have no `enabled` key and are always on. `review_base_change` defaults to `false` in `scrat.config.json`; a deployment turns it on in `scrat.local.json`:
+An action runs unless its `enabled` is `false`. Only `review_base_change` ships with `enabled: false` (in `actions/review_base_change.yaml`); a deployment turns it on in `scrat.local.json`:
 
 ```json
 { "actions": { "review_base_change": { "enabled": true, "channel": "C0123456789" } } }
@@ -244,14 +243,14 @@ When the action is enabled, startup calls Slack's `auth.test` with the token, an
 - `src/github-tasks.ts` — GitHub observations, queue effects, and closure cleanup.
 - `src/github.ts`, `src/github-types.ts` — repository client, scoped authentication, and narrow issue/PR views; the newest 48 raw sync snapshots per repository remain in SQLite, and the latest in `tmp/responses/github/`, for diagnostics.
 - `src/github-context.ts` — pure shared comment filtering and context revisions for routing, execution, and freshness checks.
-- `src/actions.ts` — typed execution, acceptance, and publication contracts; workspace lifetime follows action mode.
+- `src/manifests.ts`, `src/actions.ts` — the manifest schema and loader, and the registry of loaded actions; workspace lifetime follows action mode.
 - `src/github-routing.ts` — pure issue-selection, PR-maintenance, and review-routing decisions.
 - `src/tasks.ts`, `src/runner.ts` — atomic claims and task/run lifecycle.
 - `src/pi.ts`, `src/pr-review.ts` — Pi sessions and dual-model reviews.
 - `src/pr-assessment.ts`, `src/pr-review-publication.ts` — assessment authority, freshness, and canonical delivery.
 - `src/workspaces.ts`, `src/databases.ts` — Git and database resource lifecycles.
 - `src/secrets.ts` — child-process environment and credential checks before publication.
-- `skills/` — action prompts; `scrat.config.json` selects their models and settings.
+- `actions/` — one YAML manifest per action; `skills/` — action prompts.
 - `data/` — SQLite queue, run history, event journal, workspaces, and Pi sessions. Back it up alongside credentials before deployment.
 
 `deploy/install.sh` installs a staged release on the existing worker: it drains the service, backs up SQLite, applies schema updates, and switches to the selected release. It contains host-specific paths, so review it before reuse.

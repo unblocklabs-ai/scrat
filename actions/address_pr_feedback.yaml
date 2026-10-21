@@ -1,0 +1,12 @@
+name: address_pr_feedback
+trigger: { source: github_items, kind: pr_feedback, item: pr, author: bot }
+mode: change
+agent: single
+context: feedback
+tools: [read, grep, find, ls, bash, edit, write]
+files: [discussion]
+acceptance: complete
+publish: [push, comment]
+skill: skills/address_pr_feedback/SKILL.md
+model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }
+priority: 60

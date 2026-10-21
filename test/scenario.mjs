@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1505,7 +1505,7 @@ try {
     const created = () => f.writes.filter((write) => write.type === "issue");
     const apply = async (saved, receipts = {}) => {
       let publication = { status: "pending", ...receipts };
-      await applyEffects("issue-report", { references: {}, publication: () => publication, saveReceipt: (patch) => { publication = { ...publication, ...patch }; }, github, run: saved });
+      await applyEffects(["issue"], { references: {}, publication: () => publication, saveReceipt: (patch) => { publication = { ...publication, ...patch }; }, github, run: saved });
       return publication;
     };
     const reporting = (saved, ...issues) => ({ ...saved, result: { ...saved.result, issues: issues.map(([fingerprint, title]) => ({ title, fingerprint, body: `Body of ${title}` })) } });
@@ -2025,6 +2025,37 @@ try {
     assert.deepEqual(labels(3), []);
     assert.equal(f.prs.length, 1); assert.match(f.prs[0].head.ref, /^mocha-agent\/[0-9a-f-]{36}$/);
     assert.deepEqual(labels(1), ["scrat"]);
+  } else if (scenario === "manifests") {
+    const { readManifests } = await f.app("manifests.ts");
+    const { config: live, isActionEnabled } = await f.app("config.ts");
+    const shipped = readManifests(resolve("app"));
+    assert.deepEqual(shipped.map((m) => m.name), ["address_pr_feedback", "address_review", "implement", "resolve_conflicts", "review_base_change", "review_issue", "review_pr"]);
+    const byName = Object.fromEntries(shipped.map((m) => [m.name, m]));
+    assert.deepEqual(byName.review_issue.tools, ["read", "grep", "find", "ls", "git"]);
+    assert.deepEqual(byName.review_pr.files, ["discussion", "previous_assessment", "previous_repair"]);
+    assert.deepEqual(byName.review_base_change.files, ["discussion", "history"]);
+    assert.equal(byName.address_review.acceptance, "complete"); assert.equal(byName.resolve_conflicts.acceptance, "conflict_free");
+    assert.deepEqual(byName.address_review.trigger.grades, ["C", "D", "F"]);
+    let count = 0;
+    const broken = (file, change, message) => {
+      const root = resolve("broken-" + ++count); mkdirSync(root);
+      cpSync(resolve("app/actions"), resolve(root, "actions"), { recursive: true });
+      const path = resolve(root, "actions", file + ".yaml");
+      writeFileSync(path, change(readFileSync(path, "utf8")));
+      assert.throws(() => readManifests(root), message);
+    };
+    broken("review_pr", (text) => text + "bogus: 1\n", /actions\/review_pr\.yaml: \/bogus: unknown key/);
+    broken("review_pr", (text) => text.replace("[pr_assessment]", "[teleport]"), /actions\/review_pr\.yaml: \/publish\/0/);
+    broken("implement", (text) => text.replace("nonempty_diff", "sometimes"), /actions\/implement\.yaml: \/acceptance/);
+    broken("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, teleport]"), /actions\/review_issue\.yaml: \/tools\/1/);
+    broken("review_issue", (text) => text.replace("files: [discussion]", "files: [secrets]"), /actions\/review_issue\.yaml: \/files\/0/);
+    broken("review_issue", (text) => text.replace("name: review_issue", "name: Review-Issue"), /actions\/review_issue\.yaml: \/name/);
+    broken("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, bash]"), /mode review forbids the bash, edit and write tools/);
+    f.addIssue(1); f.enqueue(1);
+    assert.equal(isActionEnabled("review_base_change"), false); assert.equal(isActionEnabled("review_issue"), true); assert.equal(isActionEnabled("nope"), false);
+    assert.equal(live.actions.review_pr.provider, "fixture"); assert.equal(live.actions.review_pr.reviewers[1].provider, "fixture");
+    const claimed = tasks.claimTask();
+    assert.equal(claimed.task.priority, 10); assert.equal(claimed.run.provider, "fixture"); assert.equal(claimed.run.model, "gpt-6.1-sol");
   } else if (scenario === "config_overrides") {
     const local = resolve("app/scrat.local.json");
     const probe = (overrides, code) => {
@@ -2033,7 +2064,7 @@ try {
       return execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     };
     const rejected = (overrides, message) => assert.throws(() => probe(overrides, ""), (error) => message.test(error.stderr));
-    const defaults = JSON.parse(readFileSync("app/scrat.config.json", "utf8"));
+    const defaults = { ...JSON.parse(readFileSync("app/scrat.config.json", "utf8")), actions: JSON.parse(probe({}, "console.log(JSON.stringify(config.actions));")) };
     const merged = JSON.parse(probe({
       harness: { maxConcurrency: 8 }, github: { auth: "pat" }, actions: { implement: { model: "other-model" } },
       workspace: { environment: { EXTRA: "1" }, heavyCommands: ["^only$"], database: null },

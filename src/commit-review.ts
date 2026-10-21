@@ -27,7 +27,7 @@ export function commitMetadata({ metadata }: Subject) {
 async function threadRoot(subject: Subject, { sha, branch, commitCount }: CommitInput) {
   const existing = db.select().from(slackThreads).where(eq(slackThreads.subjectId, subject.id)).get();
   if (existing) return existing;
-  const { channel, startMessage } = config.actions.review_base_change;
+  const { channel, startMessage } = config.actions.review_base_change as Required<typeof config.actions[string]>;
   const metadata = commitMetadata(subject);
   const values: Record<string, string> = {
     sha, short_sha: sha.slice(0, 7), author: escapeSlack(metadata.author), title: escapeSlack(metadata.title),

@@ -13,7 +13,7 @@ const action = "review_base_change";
 export async function pollCommits(repository = config.github.repository) {
   return withOperation("commits.poll", { repository }, async (operation) => {
     assertConfiguredRepository(repository);
-    const { enabled, branch, maxRangeCommits } = config.actions[action];
+    const { enabled, branch, maxRangeCommits } = config.actions[action] as Required<typeof config.actions[string]>;
     const key = and(eq(sourceCursors.repository, repository), eq(sourceCursors.action, action), eq(sourceCursors.branch, branch));
     if (enabled === false) {
       db.delete(sourceCursors).where(key).run();

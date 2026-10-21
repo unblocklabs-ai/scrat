@@ -1,0 +1,14 @@
+name: review_pr
+trigger: { source: github_items, kind: item_changed, item: pr }
+mode: review
+agent: panel
+reviewers:
+  - { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }
+  - { provider: codex-lb, model: deepseek/deepseek-v4.1-flash, thinkingLevel: high }
+context: all
+tools: [read, grep, find, ls, git, read_base]
+files: [discussion, previous_assessment, previous_repair]
+publish: [pr_assessment]
+skill: skills/review_pr/SKILL.md
+model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }
+priority: 100

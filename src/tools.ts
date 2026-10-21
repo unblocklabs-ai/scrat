@@ -6,6 +6,7 @@ import type { Logger } from "pino";
 import { Type } from "typebox";
 import { backgroundsWork, heavyCommand, withValidationSlot } from "./commands.ts";
 import { config } from "./config.ts";
+import type { ToolName } from "./manifests.ts";
 import { botName } from "./identity.ts";
 import { errorCode, redactSecrets } from "./errors.ts";
 import { childEnvironment } from "./secrets.ts";
@@ -14,10 +15,10 @@ import { createReviewGitTool, defaultBytes, maxBytes, pageText } from "./review-
 
 const heavyTimeoutSeconds = 45 * 60;
 
-export async function createAgentTools({ cwd, contextDir, readOnly, baseSha, revisions = {}, environment = {}, log, runId }: {
+export async function createAgentTools({ cwd, contextDir, tools, baseSha, revisions = {}, environment = {}, log, runId }: {
   cwd: string;
   contextDir?: string;
-  readOnly: boolean;
+  tools: readonly ToolName[];
   baseSha?: string;
   revisions?: Record<string, string>;
   environment?: NodeJS.ProcessEnv;
@@ -135,10 +136,10 @@ export async function createAgentTools({ cwd, contextDir, readOnly, baseSha, rev
     },
   });
   const quiet = <T extends object>(tool: T) => ({ ...tool, renderCall: undefined, renderResult: undefined });
-  const common = [read, grep, find, ls].map(quiet);
-  const names = readOnly ? ["read", "grep", "find", "ls", "git", ...baseSha ? ["read_base"] : []] : ["read", "grep", "find", "ls", "bash", "edit", "write"];
-  const customTools = readOnly
-    ? [...common, createReviewGitTool(cwd, revisions, gitPaths), ...baseSha ? [readBase] : []]
-    : [...common, quiet(bash), quiet(edit), quiet(write)];
-  return { names, customTools, paths, gitPaths, basePaths };
+  const table = {
+    read: quiet(read), grep: quiet(grep), find: quiet(find), ls: quiet(ls), git: createReviewGitTool(cwd, revisions, gitPaths),
+    read_base: readBase, bash: quiet(bash), edit: quiet(edit), write: quiet(write),
+  } satisfies Record<ToolName, object>;
+  const names = tools.filter((name) => name !== "read_base" || baseSha);
+  return { names, customTools: names.map((name) => table[name]), paths, gitPaths, basePaths };
 }

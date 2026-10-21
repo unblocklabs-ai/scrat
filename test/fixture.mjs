@@ -1,15 +1,16 @@
 import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { createServer } from "node:http";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { parse as parseYaml } from "yaml";
 
 export async function fixture(scenario) {
   const repository = fileURLToPath(new URL("..", import.meta.url));
   const root = mkdtempSync(resolve(tmpdir(), "scrat-integration-"));
-  for (const path of ["src", "skills", "scrat.config.json", "package.json"]) cpSync(resolve(repository, path), resolve(root, "app", path), { recursive: true });
+  for (const path of ["src", "skills", "actions", "scrat.config.json", "package.json"]) cpSync(resolve(repository, path), resolve(root, "app", path), { recursive: true });
   symlinkSync(resolve(repository, "node_modules"), resolve(root, "app/node_modules"));
   process.chdir(root);
   const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -185,7 +186,9 @@ export async function fixture(scenario) {
     { id: "gpt-6.1-sol", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
     { id: "deepseek/deepseek-v4.1-flash", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
   ] } };
-  for (const action of Object.values(config.actions)) { action.provider = "fixture"; for (const reviewer of action.reviewers ?? []) reviewer.provider = "fixture"; }
+  if (scenario === "history_file") writeFileSync("app/actions/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace("files: [discussion]", "files: [discussion, history]"));
+  config.actions = Object.fromEntries(readdirSync("app/actions").map((file) => parseYaml(readFileSync("app/actions/" + file, "utf8")))
+    .map(({ name, reviewers = [] }) => [name, { provider: "fixture", ...reviewers.length && { reviewers: reviewers.map((reviewer) => ({ ...reviewer, provider: "fixture" })) } }]));
   if (scenario === "panel") {
     writeFileSync("prepare.mjs", 'import{mkdirSync,writeFileSync}from"node:fs";mkdirSync("node_modules/pinned-runtime",{recursive:true});writeFileSync("node_modules/pinned-runtime/package.json",JSON.stringify({name:"pinned-runtime",version:"9.8.7"}));');
     config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
@@ -249,8 +252,9 @@ export async function fixture(scenario) {
   if (scenario === "bot_name") config.github.botName = "Mocha";
   if (scenario === "bot_identity_names") config.github.botName = "Mocha Agent";
   if (patMode) { config.github.auth = "pat"; config.github.botLogin = "agent-account"; }
-  writeFileSync("app/scrat.config.json", JSON.stringify(config));
-  writeFileSync("app/scrat.local.json", "{}\n");
+  const { actions, ...fileSettings } = config;
+  writeFileSync("app/scrat.config.json", JSON.stringify(fileSettings));
+  writeFileSync("app/scrat.local.json", JSON.stringify({ actions }));
   mkdirSync("data");
   execFileSync(process.execPath, [resolve(repository, "node_modules/drizzle-kit/bin.cjs"), "push", "--dialect=sqlite", "--schema=./app/src/schema.ts", "--url=./data/scrat.sqlite"], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
   const app = async (path) => import(pathToFileURL(resolve("app/src", path)));

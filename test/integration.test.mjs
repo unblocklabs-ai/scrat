@@ -93,6 +93,7 @@ const scenarios = {
   commit_review_restart: "an interrupted commit review is recovered and retried with exactly one root and one reply",
   commit_review_isolation: "the commit review agent never sees the Slack token, reads base files and diffs against the previous SHA, and nothing is installed",
   subjects_migration: "the subjects migration moves items, tasks, events and Slack threads to subject ids, keeps every row, refuses unmapped tasks and is a no-op the second time",
+  manifests: "every action is loaded from a validated manifest, malformed manifests are rejected with file and path, and local overrides reach the runtime",
   database: "real PostgreSQL runs isolate databases, apply new migrations and remove resources",
 };
 

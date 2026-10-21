@@ -13,7 +13,7 @@ try {
   const active = alias(runs, "active_run");
   const pending = db.selectDistinct({ workspace: workspaces }).from(workspaces)
     .innerJoin(runs, eq(runs.workspaceId, workspaces.id)).innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(isNotNull(runs.finishedAt), isNull(workspaces.removedAt), inArray(tasks.action, temporaryWorkspaceActions),
+    .where(and(isNotNull(runs.finishedAt), isNull(workspaces.removedAt), inArray(tasks.action, temporaryWorkspaceActions()),
       notExists(db.select({ id: active.id }).from(active).where(and(eq(active.workspaceId, workspaces.id), isNull(active.finishedAt)))),
     )).all();
   for (const { workspace } of pending) {

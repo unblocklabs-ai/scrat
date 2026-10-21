@@ -2,12 +2,11 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import settings from "../scrat.config.json" with { type: "json" };
-import type { Action } from "./actions.ts";
+import { deploymentDefaults, readManifests, skillPath, thinkingLevels, type ThinkingLevel } from "./manifests.ts";
 
-export const configUrl = new URL("../scrat.config.json", import.meta.url);
+const configUrl = new URL("../scrat.config.json", import.meta.url);
 const localConfigUrl = new URL("../scrat.local.json", import.meta.url);
-export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-export type ThinkingLevel = (typeof thinkingLevels)[number];
+export { thinkingLevels, type ThinkingLevel };
 
 type WorkspaceConfig = {
   environment?: Record<string, string>;
@@ -15,6 +14,12 @@ type WorkspaceConfig = {
   database?: { image: string; environment: string[]; migrate: string[] } | null;
   validate?: string[][];
   heavyCommands?: string[];
+};
+
+type ModelEntry = { provider: string; model: string; thinkingLevel: string };
+export type ActionSettings = ModelEntry & {
+  enabled?: boolean; priority: number; skill: string; agent: string; reviewers?: ModelEntry[]; branch?: string; channel?: string;
+  maxRangeCommits?: number; startMessage?: string; maxSelfRepairs?: number; exhaustedLabel?: string | null;
 };
 
 type Json = Record<string, unknown>;
@@ -39,22 +44,27 @@ function loadOverrides(): Json {
   return parsed;
 }
 
-export const config: Omit<typeof settings, "workspace"> & { workspace?: WorkspaceConfig } = merge(settings, loadOverrides()) as typeof settings;
+export const loadedManifests = readManifests(fileURLToPath(new URL(".", configUrl)));
+const actionDefaults = Object.fromEntries(loadedManifests.map((manifest) => [manifest.name, deploymentDefaults(manifest)]));
+
+export const config: Omit<typeof settings, "workspace"> & { workspace?: WorkspaceConfig; actions: Record<string, ActionSettings> } =
+  merge({ ...settings, actions: actionDefaults }, loadOverrides()) as never;
 
 export function getRepositoryPath() {
   return resolve(fileURLToPath(new URL(".", configUrl)), process.env.SCRAT_REPOSITORY_PATH ?? config.github.repositoryPath);
 }
 
-export function getActionConfig(action: Action) {
-  const actionConfig = config.actions[action];
+export function getActionConfig(action: string) {
+  const manifest = loadedManifests.find((candidate) => candidate.name === action), actionConfig = config.actions[action];
+  if (!manifest || !actionConfig) throw new Error(`Unknown action: ${action}`);
   return {
     ...actionConfig,
     thinkingLevel: actionConfig.thinkingLevel as ThinkingLevel,
-    skill: fileURLToPath(new URL(actionConfig.skill, configUrl)),
-    reviewers: "reviewers" in actionConfig ? actionConfig.reviewers.map((reviewer) => ({ ...reviewer, thinkingLevel: reviewer.thinkingLevel as ThinkingLevel })) : [],
+    skill: skillPath(manifest, actionConfig.skill),
+    reviewers: (actionConfig.reviewers ?? []).map((reviewer) => ({ ...reviewer, thinkingLevel: reviewer.thinkingLevel as ThinkingLevel })),
   };
 }
 
 export const isBotLogin = (login: string | null | undefined) => login?.toLowerCase() === config.github.botLogin.toLowerCase();
 
-export const isActionEnabled = (action: Action) => (config.actions[action] as { enabled?: boolean }).enabled !== false;
+export const isActionEnabled = (action: string) => config.actions[action] !== undefined && config.actions[action].enabled !== false;

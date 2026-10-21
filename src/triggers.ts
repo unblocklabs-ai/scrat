@@ -33,6 +33,10 @@ export type TriggerInput = Static<typeof itemChanged> | Static<typeof label> | S
   | Static<typeof lowGrade> | Static<typeof manual> | Static<typeof commit>;
 export type KeyedTriggerInput = Extract<TriggerInput, { triggerKey: string }>;
 type Kind = keyof typeof members;
+type ManifestKind = Exclude<Kind, "manual">;
+
+export const triggerKinds = Object.keys(members).filter((kind) => kind !== "manual") as ManifestKind[];
+export const triggerSource = (kind: ManifestKind) => members[kind].source;
 
 function classify(input: Record<string, unknown>): Kind {
   if (input.kind !== undefined) {

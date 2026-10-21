@@ -1,8 +1,8 @@
 import { access } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 import { sql } from "drizzle-orm";
-import { actionIds } from "./actions.ts";
-import { config, configUrl, thinkingLevels } from "./config.ts";
+import { manifests } from "./actions.ts";
+import { type ActionSettings, config, thinkingLevels } from "./config.ts";
+import { deploymentDefaults, skillPath } from "./manifests.ts";
 import { db } from "./db.ts";
 import { slugOf } from "./identity.ts";
 import { logger } from "./logging.ts";
@@ -17,7 +17,7 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 // @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: {
   harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number }; github?: { auth?: string; botLogin?: string; botName?: string; baseBranch?: string }; providers?: Record<string, { apiKey?: string }>; workspace?: { heavyCommands?: string[] };
-  actions: Record<string, Entry & { skill: string; reviewers?: Entry[]; maxSelfRepairs?: number; exhaustedLabel?: string | null; enabled?: boolean; agent?: string; channel?: string; branch?: string; startMessage?: string }>;
+  actions: Record<string, Partial<ActionSettings>>;
 } = config) {
   const modelRuntime = await sharedModelRuntime();
   const problems: string[] = [];
@@ -45,29 +45,31 @@ export async function validateStaticConfig(settings: {
   for (const [name, { apiKey }] of Object.entries(settings.providers ?? {})) {
     if (apiKey && !/\$\{\w+\}/.test(apiKey)) logger.warn({ provider: name }, "Provider apiKey is not a ${VAR} placeholder; it will not be redacted from output");
   }
-  for (const action of actionIds) {
-    const entry = settings.actions[action];
-    if (!entry) { problems.push(`${action}: missing from configuration`); continue; }
+  for (const manifest of manifests()) {
+    const action = manifest.name, entry = { ...deploymentDefaults(manifest), ...settings.actions[action] };
     checkEntry(action, entry);
-    if (action === "address_review" && entry.maxSelfRepairs !== undefined && !(Number.isSafeInteger(entry.maxSelfRepairs) && entry.maxSelfRepairs >= 0)) {
+    if (manifest.trigger.kind === "low_grade" && entry.maxSelfRepairs !== undefined && !(Number.isSafeInteger(entry.maxSelfRepairs) && entry.maxSelfRepairs >= 0)) {
       problems.push(`${action}: maxSelfRepairs must be a non-negative integer`);
     }
-    if (action === "address_review" && entry.exhaustedLabel != null && typeof entry.exhaustedLabel !== "string") {
+    if (manifest.trigger.kind === "low_grade" && entry.exhaustedLabel != null && typeof entry.exhaustedLabel !== "string") {
       problems.push(`${action}: exhaustedLabel must be a string, or null or "" to disable it`);
     }
     entry.reviewers?.forEach((reviewer, index) => checkEntry(`${action} reviewer ${index + 1}`, reviewer));
-    if (action === "review_base_change" && entry.enabled === true) {
-      if (!process.env.SLACK_BOT_TOKEN) problems.push(`${action}: SLACK_BOT_TOKEN is not set`);
-      if (!entry.channel?.trim()) problems.push(`${action}: channel must not be empty`);
-      if (entry.branch !== settings.github?.baseBranch) problems.push(`${action}: branch must equal github.baseBranch`);
-      const unknown = [...(entry.startMessage ?? "").matchAll(/\{\{(.*?)\}\}/g)].map((match) => match[1]).filter((name) => !templateVariables.has(name));
-      if (unknown.length) problems.push(`${action}: unknown startMessage variable ${unknown.map((name) => `{{${name}}}`).join(", ")}`);
+    if (entry.enabled !== false) {
+      const slack = [...manifest.start ?? [], ...manifest.publish].some((effect) => effect.startsWith("slack_"));
+      if (slack) {
+        if (!process.env.SLACK_BOT_TOKEN) problems.push(`${action}: SLACK_BOT_TOKEN is not set`);
+        if (!entry.channel?.trim()) problems.push(`${action}: channel must not be empty`);
+        if (entry.branch !== settings.github?.baseBranch) problems.push(`${action}: branch must equal github.baseBranch`);
+        const unknown = [...(entry.startMessage ?? "").matchAll(/\{\{(.*?)\}\}/g)].map((match) => match[1]).filter((name) => !templateVariables.has(name));
+        if (unknown.length) problems.push(`${action}: unknown startMessage variable ${unknown.map((name) => `{{${name}}}`).join(", ")}`);
+      }
       if (entry.agent !== "single" && entry.agent !== "panel") problems.push(`${action}: agent must be "single" or "panel"`);
       else if (entry.agent === "panel" && entry.reviewers?.length !== 2) problems.push(`${action}: agent "panel" requires exactly two reviewers`);
-      if (process.env.SLACK_BOT_TOKEN) await authTest().catch((error: unknown) => { problems.push(`${action}: Slack auth.test failed: ${error instanceof Error ? error.message : String(error)}`); });
+      if (slack && process.env.SLACK_BOT_TOKEN) await authTest().catch((error: unknown) => { problems.push(`${action}: Slack auth.test failed: ${error instanceof Error ? error.message : String(error)}`); });
+      const skill = skillPath(manifest, entry.skill);
+      if (!await access(skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${skill}`);
     }
-    const skill = fileURLToPath(new URL(entry.skill, configUrl));
-    if (entry.enabled !== false && !await access(skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${skill}`);
   }
   if (problems.length) {
     if (modelRuntime.getError()) dropModelRuntime();

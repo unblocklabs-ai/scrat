@@ -18,7 +18,7 @@ export async function syncGitHub(repository = config.github.repository, queueTas
     operation.stage("repository");
     assertConfiguredRepository(repository);
     operation.stage("fetch");
-    const previousItems = itemsInRepository(repository, "github");
+    const previousItems = itemsInRepository(repository);
     const previous = new Map(previousItems.map((item) => [item.externalId, item]));
     const github = new GitHubRepository(repository);
     const { issues, pullRequests, snapshot } = await github.fetchOpenItems();
@@ -37,7 +37,7 @@ export async function syncGitHub(repository = config.github.repository, queueTas
     if (queueTasks) {
       operation.stage("reconcile_closed");
       const openIds = new Set([...issues, ...pullRequests].map((payload) => payload.node_id));
-      const missing = previousItems.filter((item): item is typeof item & { kind: "issue" | "pr" } => item.kind !== "commit" && item.state === "open" && !openIds.has(item.externalId));
+      const missing = previousItems.filter((item) => item.state === "open" && !openIds.has(item.externalId));
       const reads = new Array<PromiseSettledResult<GithubContext>>(missing.length);
       let next = 0;
       await Promise.all(Array.from({ length: Math.min(4, missing.length) }, async () => {
@@ -59,7 +59,7 @@ export async function syncGitHub(repository = config.github.repository, queueTas
         }
       }
       operation.stage("route_tasks");
-      const current = itemsInRepository(repository, "github");
+      const current = itemsInRepository(repository);
       queued = await routeGithubTasks(github, current, previous, operation.log);
     }
     operation.complete({ issues: issues.length, pullRequests: pullRequests.length, ...(queueTasks ? { queued } : {}) });

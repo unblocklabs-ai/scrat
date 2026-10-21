@@ -5,10 +5,10 @@ import type { ItemObservation } from "./observation.ts";
 import { hasPublicationSnapshot } from "./results.ts";
 import { runs, tasks } from "./schema.ts";
 
-export function prReviewHistory(itemId: string) {
+export function prReviewHistory(subjectId: string) {
   return db.select({ run: runs, task: tasks }).from(runs)
     .innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.itemId, itemId), eq(tasks.action, "review_pr")))
+    .where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, "review_pr")))
     .orderBy(desc(runs.sequence)).all();
 }
 
@@ -40,12 +40,12 @@ function selectAssessment(history: History) {
   return selected;
 }
 
-export function priorReviewTexts(itemId: string) {
-  const assessment = selectAssessment(prReviewHistory(itemId));
+export function priorReviewTexts(subjectId: string) {
+  const assessment = selectAssessment(prReviewHistory(subjectId));
   if (!assessment) return undefined;
   const repair = db.select({ run: runs }).from(runs)
     .innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.itemId, itemId), eq(tasks.action, "address_review")))
+    .where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, "address_review")))
     .orderBy(desc(runs.sequence)).all()
     .find(({ run }) => run.result?.outcome === "complete" && (run.sequence ?? 0) > assessment.run.sequence!)?.run.result?.text;
   return { assessment: assessment.result.text, repair };

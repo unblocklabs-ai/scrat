@@ -1,7 +1,7 @@
 import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { actionContracts, type Action } from "./actions.ts";
 import { buildAgentInput, evaluateContext, readDiffScope } from "./agent-input.ts";
-import { describeCommit, startCommitThread } from "./commit-review.ts";
+import { commitMetadata, describeCommit, startCommitThread } from "./commit-review.ts";
 import { config, getActionConfig, getRepositoryPath, isBotLogin } from "./config.ts";
 import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
@@ -14,13 +14,14 @@ import { freshness, savedEvaluation } from "./freshness.ts";
 import { startOperation } from "./logging.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
 import { observe, type ItemObservation } from "./observation.ts";
-import { assertConfiguredRepository, itemRepository } from "./repository.ts";
+import { assertConfiguredRepository } from "./repository.ts";
 import { executePi } from "./pi.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { reviewPullRequest } from "./pr-review.ts";
 import { publishCommit, publishRun } from "./publication.ts";
 import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint } from "./results.ts";
-import { items, runs, tasks, workspaces } from "./schema.ts";
+import type { Item } from "./items.ts";
+import { runs, subjects, tasks, workspaces } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { claimTask, finishRun } from "./tasks.ts";
 import { parseTriggerInput } from "./triggers.ts";
@@ -29,7 +30,7 @@ import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createW
 type Workspace = Awaited<ReturnType<typeof createWorkspace>>;
 type DatabaseConfig = NonNullable<NonNullable<typeof config.workspace>["database"]>;
 type Environment = Record<string, string | undefined>;
-type References = { itemId: string; taskId: string; runId: string };
+type References = { subjectId: string; taskId: string; runId: string };
 type Acceptance = "conflict-free" | "nonempty-diff" | "complete";
 
 const maxValidationCorrections = 2;
@@ -84,7 +85,7 @@ async function validateAndCommit({ run, references, repositoryPath }: Ctx, p: Pr
 }
 
 type Ctx = {
-  task: typeof tasks.$inferSelect; run: typeof runs.$inferSelect; item: typeof items.$inferSelect;
+  task: typeof tasks.$inferSelect; run: typeof runs.$inferSelect; subject: typeof subjects.$inferSelect; item: Item | undefined;
   references: References; operation: ReturnType<typeof startOperation>;
   contract: typeof actionContracts[Action]; repositoryPath: string;
   readOnly: boolean; acceptance: Acceptance | undefined;
@@ -92,7 +93,7 @@ type Ctx = {
 };
 type Observed = {
   repository: string; github: GitHubRepository; context: GithubContext; pullRequest: GithubPullRequest | undefined;
-  observation: ItemObservation; gitEnvironment: NodeJS.ProcessEnv; mainSha: string;
+  item: Item; observation: ItemObservation; gitEnvironment: NodeJS.ProcessEnv; mainSha: string;
 };
 type Prepared = {
   workspace: Workspace; validationOnly: boolean; mergeInProgress: boolean; mainSha: string; baseRef: string;
@@ -105,21 +106,21 @@ type Prepared = {
   deferred: boolean; previousSessionFile: string | undefined;
 };
 
-function beginRun({ task, run, item }: NonNullable<ReturnType<typeof claimTask>>): Ctx {
-  const references = { itemId: item.id, taskId: task.id, runId: run.id };
+function beginRun({ task, run, subject, item }: NonNullable<ReturnType<typeof claimTask>>): Ctx {
+  const references = { subjectId: subject.id, taskId: task.id, runId: run.id };
   const { action } = task;
   const operation = startOperation("run.execute", { ...references, action });
   const contract = actionContracts[action];
   return {
-    task, run, item, references, operation, contract, repositoryPath: getRepositoryPath(),
+    task, run, subject, item, references, operation, contract, repositoryPath: getRepositoryPath(),
     readOnly: contract.mode === "review", acceptance: contract.mode === "change" ? contract.acceptance : undefined,
     cleanup: { databaseRequested: false },
   };
 }
 
-async function connect({ item, repositoryPath }: Ctx): Promise<Observed | undefined> {
-  if (item.kind === "commit") return;
-  const repository = itemRepository(item) ?? item.payload.html_url;
+async function connect({ subject, item, repositoryPath }: Ctx): Promise<Observed | undefined> {
+  if (!item) return;
+  const { repository } = subject;
   assertConfiguredRepository(repository);
   const github = new GitHubRepository(repository);
   const context = await github.fetchItemContext(item.kind, item.payload.number);
@@ -128,12 +129,12 @@ async function connect({ item, repositoryPath }: Ctx): Promise<Observed | undefi
   const observation = observe(repository, context);
   const gitEnvironment = await github.getGitEnvironment();
   const mainSha = await fetchRepository(repositoryPath, observation.remote, observation.baseBranch, gitEnvironment);
-  return { repository, github, context, pullRequest, observation, gitEnvironment, mainSha };
+  return { repository, github, context, pullRequest, item, observation, gitEnvironment, mainSha };
 }
 
 async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
-  const { task, run, item, references, readOnly, repositoryPath, cleanup } = ctx;
-  const { repository, context, pullRequest, observation, gitEnvironment, mainSha } = observed;
+  const { task, run, references, readOnly, repositoryPath, cleanup } = ctx;
+  const { repository, context, pullRequest, item, observation, gitEnvironment, mainSha } = observed;
   const trigger = parseTriggerInput(task.input);
   if (trigger.kind === "low_grade") {
     const state = await resolvePrReview(prReviewHistory(item.id), observation, mainSha);
@@ -167,7 +168,7 @@ async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
       branch: !readOnly && pullRequest ? pullRequest.head.ref : undefined,
     }, references);
     if (readOnly) cleanup.reviewWorkspace = workspace;
-    else db.update(items).set({ workspaceId: workspace.id }).where(eq(items.id, item.id)).run();
+    else db.update(subjects).set({ workspaceId: workspace.id }).where(eq(subjects.id, item.id)).run();
   }
   const mergeInProgress = !readOnly && await hasPendingMerge(workspace.path);
   if (!readOnly && !mergeInProgress && !validationOnly) {
@@ -187,11 +188,11 @@ async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
   return { workspace, validationOnly, mergeInProgress, mainSha, baseRef, preparedHead, startHeadSha, title: context.item.title };
 }
 
-async function acquireCommitWorkspace({ item, run, references, repositoryPath, operation, cleanup }: Ctx) {
-  const { sha } = await startCommitThread(item, run.input, operation.log);
+async function acquireCommitWorkspace({ subject, run, references, repositoryPath, operation, cleanup }: Ctx) {
+  const { sha } = await startCommitThread(subject, run.input, operation.log);
   const workspace = await createWorkspace({ repositoryPath, baseRef: sha }, references);
   cleanup.reviewWorkspace = workspace;
-  return { workspace, validationOnly: false, mergeInProgress: false, mainSha: sha, baseRef: sha, preparedHead: sha, startHeadSha: sha, title: item.payload.title };
+  return { workspace, validationOnly: false, mergeInProgress: false, mainSha: sha, baseRef: sha, preparedHead: sha, startHeadSha: sha, title: commitMetadata(subject).title };
 }
 
 async function acquireWorkspace(ctx: Ctx, observed: Observed | undefined): Promise<Prepared> {
@@ -216,13 +217,13 @@ async function acquireWorkspace(ctx: Ctx, observed: Observed | undefined): Promi
   };
 }
 
-async function planAgent({ task, run, item, readOnly, acceptance, repositoryPath }: Ctx, observed: Observed | undefined, p: Prepared) {
+async function planAgent({ task, run, subject, readOnly, acceptance, repositoryPath }: Ctx, observed: Observed | undefined, p: Prepared) {
   const previous = !readOnly ? db.select().from(runs).where(and(
     eq(runs.workspaceId, p.workspace.id), ne(runs.id, run.id), isNotNull(runs.piSessionFile),
   )).orderBy(desc(runs.sequence)).limit(1).get() : undefined;
   const { evaluated, diffPaths, diffBaseSha } = observed
     ? { evaluated: evaluateContext(run, task, observed.observation), ...await readDiffScope(repositoryPath, p.mainSha, p.preparedHead, Boolean(observed.pullRequest)) }
-    : await describeCommit(repositoryPath, item, run.input);
+    : await describeCommit(repositoryPath, subject, run.input);
   db.update(runs).set({ context: evaluated }).where(eq(runs.id, run.id)).run();
   Object.assign(p, {
     evaluated, diffPaths, diffBaseSha, previousSessionFile: previous?.piSessionFile ?? undefined,
@@ -327,9 +328,9 @@ async function validateStage(ctx: Ctx, p: Prepared) {
   }
 }
 
-async function publishStage({ task, run, item, references, readOnly, contract, repositoryPath }: Ctx, observed: Observed | undefined) {
-  if (!observed) return publishCommit(item, run);
-  const { repository, github, context, observation, mainSha } = observed;
+async function publishStage({ task, run, subject, references, readOnly, contract, repositoryPath }: Ctx, observed: Observed | undefined) {
+  if (!observed) return publishCommit(subject, run);
+  const { repository, github, context, item, observation, mainSha } = observed;
   const evaluatedRun = db.select().from(runs).where(eq(runs.id, run.id)).get()!;
   const publicationContext = run.stage !== "publishing"
     ? await github.fetchItemContext(observation.kind, item.payload.number) : context;

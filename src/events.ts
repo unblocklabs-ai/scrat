@@ -3,7 +3,7 @@ import type { ErrorDetails } from "./errors.ts";
 import { events, type tasks } from "./schema.ts";
 
 type TaskDetails = Pick<typeof tasks.$inferSelect, "action" | "priority" | "reason">;
-export type EventReferences = { itemId?: string; taskId?: string; runId?: string };
+export type EventReferences = { subjectId?: string; taskId?: string; runId?: string };
 
 export type JournalEvent = (
   | { type: "database.created"; data: { container: string; image: string } }

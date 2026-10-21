@@ -1,7 +1,9 @@
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { fixture } from "./fixture.mjs";
 
 const scenario = process.argv[2];
@@ -34,8 +36,8 @@ try {
     await fetchRepository(f.config.github.repositoryPath, "https://github.com/fixture/project.git", "main");
     const w = await createWorkspace({ repositoryPath: f.config.github.repositoryPath, baseRef: "origin/main" });
     const { eq } = await import("drizzle-orm");
-    db.update(s.items).set({ workspaceId: w.id }).where(eq(s.items.id, "issue-8")).run();
-    db.update(s.items).set({ workspaceId: w.id }).where(eq(s.items.id, "issue-9")).run();
+    db.update(s.subjects).set({ workspaceId: w.id }).where(eq(s.subjects.id, "issue-8")).run();
+    db.update(s.subjects).set({ workspaceId: w.id }).where(eq(s.subjects.id, "issue-9")).run();
     const claimed = []; let next; while ((next = tasks.claimTask())) claimed.push(next);
     assert.equal(claimed.filter((c) => ["issue-8", "issue-9"].includes(c.item.id)).length, 1);
   } else if (scenario === "repository_sync") {
@@ -108,7 +110,7 @@ try {
     assert.deepEqual(queued().map((t) => t.action).sort(), ["implement", "review_issue"]);
     await route(); assert.equal(queued().length, 2);
     f.issues.get(1).labels.push({ name: "scrat" }); f.issues.get(2).labels = []; await route();
-    assert.deepEqual(queued().map((t) => [t.itemId, t.action]).sort(), [["issue-1", "implement"], ["issue-2", "review_issue"]]);
+    assert.deepEqual(queued().map((t) => [t.subjectId, t.action]).sort(), [["issue-1", "implement"], ["issue-2", "review_issue"]]);
     git(resolve("seed"), "switch", "-c", "scrat/routing");
     writeFileSync("seed/src/app.ts", "export const value = 2;\n"); git(resolve("seed"), "add", "."); commit(resolve("seed"), "PR branch");
     git(resolve("seed"), "push", resolve("remote.git"), "scrat/routing"); git(resolve("seed"), "switch", "main");
@@ -121,8 +123,8 @@ try {
     const external = { id: 9001, body: "Please explain this change", user: { login: "human" }, updated_at: "2026-10-19T01:00:00Z", html_url: "https://github.com/fixture/project/pull/201#comment" };
     f.comments.set(201, [external, { ...external, id: 9002, body: "My own review", user: { login: f.config.github.botLogin } }]);
     await route();
-    assert.ok(!queued().some((t) => t.itemId === "issue-1"));
-    const prTasks = () => queued().filter((t) => f.row(s.items, t.itemId).kind === "pr");
+    assert.ok(!queued().some((t) => t.subjectId === "issue-1"));
+    const prTasks = () => queued().filter((t) => f.row(s.items, t.subjectId).kind === "pr");
     assert.deepEqual(prTasks().map((t) => t.action).sort(), ["address_pr_feedback", "resolve_conflicts", "review_pr"]);
     const conflict = prTasks().find((t) => t.action === "resolve_conflicts"), feedback = prTasks().find((t) => t.action === "address_pr_feedback");
     assert.deepEqual(feedback.input.commentRevisions, ["issue:9001@2026-10-19T01:00:00Z"]);
@@ -141,9 +143,9 @@ try {
     changeMain("src/app.ts", "export const value = 2;\n"); await route();
     const { eq } = await import("drizzle-orm");
     db.update(s.runs).set({ mainSha: "f".repeat(40) }).where(eq(s.runs.id, completed.id)).run();
-    const isQueued = (id) => all(s.tasks).some((t) => t.itemId === id && t.status === "queued");
+    const isQueued = (id) => all(s.tasks).some((t) => t.subjectId === id && t.status === "queued");
     f.addIssue(2); await route(); assert.ok(isQueued("issue-2"));
-    const claim = tasks.claimTask(); assert.equal(claim.task.itemId, "issue-1");
+    const claim = tasks.claimTask(); assert.equal(claim.task.subjectId, "issue-1");
     tasks.finishRun(claim.run.id, { status: "failed", error: new Error("Interrupted before inference") });
     f.addIssue(3); await route(); assert.ok(isQueued("issue-3")); assert.ok(!isQueued("issue-1"));
     for (const id of ["issue-2", "issue-3"]) tasks.cancelQueuedTasks(id, "Isolate manual review attempt");
@@ -166,7 +168,7 @@ try {
     calls = f.requests.length; tasks.retryTask(unresolved.taskId, "validation");
     const stillConflicted = await run(); assert.match(stillConflicted.error.message, /still conflicts/); assert.equal(f.requests.length, calls);
     assert.ok(!f.row(s.workspaces, implemented.workspaceId).removedAt);
-    tasks.enqueueTask({ itemId: prItem.id, action: "address_pr_feedback", reason: "Reply without code changes", input: {} });
+    tasks.enqueueTask({ subjectId: prItem.id, action: "address_pr_feedback", reason: "Reply without code changes", input: {} });
     f.reset(202, "no-change"); const replied = await success();
     assert.equal(replied.publication.publishedCommitSha, head); assert.equal(f.prs.length, 1);
     assert.equal(f.comments.get(202).length, 1); assert.equal(replied.workspaceId, implemented.workspaceId);
@@ -241,10 +243,10 @@ try {
     assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
     assert.equal(f.writes.filter((w) => w.type === "comment_update").length, 1);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["A · Strong", "human-label"]);
-    const itemId = f.row(s.tasks, review.taskId).itemId;
-    f.reset(201, "normal"); tasks.enqueueTask({ itemId, action: "review_pr", reason: "Manual review", input: {} });
+    const itemId = f.row(s.tasks, review.taskId).subjectId;
+    f.reset(201, "normal"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "Manual review", input: {} });
     f.faults.label.add(201); const older = await run(); assert.ok(older.error);
-    f.reset(201, "grade-A"); tasks.enqueueTask({ itemId, action: "review_pr", reason: "Newer manual review", input: {} });
+    f.reset(201, "grade-A"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "Newer manual review", input: {} });
     await success(); const writes = f.writes.length, inferences = f.requests.length;
     tasks.retryTask(older.taskId); const superseded = await success();
     assert.equal(superseded.publication.status, "not_needed");
@@ -285,7 +287,7 @@ try {
     const calls = f.requests.length; tasks.retryTask(lost.taskId); const recovered = await success();
     assert.equal(f.requests.length, calls); assert.equal(recovered.publication.commentId, original.id);
     f.reset(201, "grade-A");
-    tasks.enqueueTask({ itemId: f.row(s.tasks, lost.taskId).itemId, action: "review_pr", reason: "New assessment", input: {} });
+    tasks.enqueueTask({ subjectId: f.row(s.tasks, lost.taskId).subjectId, action: "review_pr", reason: "New assessment", input: {} });
     f.faults.comment.add(201); const lostUpdate = await run(); assert.ok(lostUpdate.error);
     assert.deepEqual(f.prs[0].labels, [], "A lost report-write response must not leave the old report's grade");
     const updateCalls = f.requests.length; tasks.retryTask(lostUpdate.taskId); const updated = await success();
@@ -295,8 +297,8 @@ try {
   } else if (scenario === "deleted_review" || scenario === "unreceipted_review") {
     await implement(1); await route(); f.faults.label.add(201);
     const older = await run(); assert.ok(older.error); assert.ok(older.publication.commentId);
-    const itemId = f.row(s.tasks, older.taskId).itemId;
-    f.reset(201, "grade-A"); tasks.enqueueTask({ itemId, action: "review_pr", reason: "New assessment", input: {} });
+    const itemId = f.row(s.tasks, older.taskId).subjectId;
+    f.reset(201, "grade-A"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "New assessment", input: {} });
     if (scenario === "unreceipted_review") f.faults.comment.add(201);
     const newer = await run();
     if (scenario === "deleted_review") {
@@ -329,9 +331,9 @@ try {
     changeMain("src/helper.ts", "export const helper = 1;\n");
     await implement(1); await route(); f.faults.label.add(201);
     const older = await run(); assert.ok(older.error);
-    const itemId = f.row(s.tasks, older.taskId).itemId;
+    const itemId = f.row(s.tasks, older.taskId).subjectId;
     f.reset(201, "helper-grade-A");
-    tasks.enqueueTask({ itemId, action: "review_pr", reason: "Broader fresh review", input: {} });
+    tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "Broader fresh review", input: {} });
     const newer = await success();
     assert.ok(newer.result.paths.includes("src/helper.ts"));
     const report = f.comments.get(201)[0].body;
@@ -339,7 +341,7 @@ try {
     const calls = f.requests.length; await route();
     assert.deepEqual(f.prs[0].labels, [], "No historical grade may replace a stale newer grade");
     assert.equal(f.comments.get(201)[0].body, report);
-    assert.ok(all(s.tasks).some((t) => t.itemId === itemId && t.action === "review_pr" && t.status === "queued"));
+    assert.ok(all(s.tasks).some((t) => t.subjectId === itemId && t.action === "review_pr" && t.status === "queued"));
     tasks.cancelQueuedTasks(itemId, "Exercise an explicitly requested old publication retry", "review_pr");
     tasks.retryTask(older.taskId); const stale = await run();
     assert.match(stale.error.message, /fresh review/);
@@ -348,8 +350,8 @@ try {
   } else if (scenario === "assessment_order") {
     await implement(1); await route(); f.modes.set(201, "incomplete");
     const failed = await run(); assert.ok(failed.error); assert.notEqual(failed.stage, "publishing");
-    const itemId = f.row(s.tasks, failed.taskId).itemId;
-    f.reset(201, "normal"); tasks.enqueueTask({ itemId, action: "review_pr", reason: "New task", input: {} });
+    const itemId = f.row(s.tasks, failed.taskId).subjectId;
+    f.reset(201, "normal"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "New task", input: {} });
     const middle = await success();
     const { eq } = await import("drizzle-orm");
     db.update(s.runs).set({ startedAt: "2099-01-01T00:00:00Z" }).where(eq(s.runs.id, middle.id)).run();
@@ -363,7 +365,7 @@ try {
   } else if (scenario === "manual_queue") {
     await implement(1); await route(); await success();
     const prItem = all(s.items).find((i) => i.kind === "pr"), itemId = prItem.id;
-    const reviewTasks = () => all(s.tasks).filter((t) => t.itemId === itemId && t.action === "review_pr");
+    const reviewTasks = () => all(s.tasks).filter((t) => t.subjectId === itemId && t.action === "review_pr");
     await route(); assert.equal(reviewTasks().filter((t) => t.status === "queued").length, 0, "review is current");
     const [ok, missing] = [tasks.enqueueManualTasks("review_pr", ["201", String(prItem.payload.number)], 77), tasks.enqueueManualTasks("review_pr", ["999", "Nope"])];
     assert.equal(ok[0].error, undefined); assert.equal(ok[0].itemId, itemId); assert.equal(ok[0].number, 201);
@@ -374,7 +376,7 @@ try {
     assert.equal(manual.input.manual, true); assert.equal(manual.priority, 77);
     await route();
     assert.equal(f.row(s.tasks, manual.id).status, "queued", "routing must not cancel a manual task");
-    tasks.enqueueTask({ itemId, action: "review_pr", reason: "Routing", input: { triggerKey: "k", changedPaths: [] } });
+    tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "Routing", input: { triggerKey: "k", changedPaths: [] } });
     const merged = f.row(s.tasks, manual.id);
     assert.equal(merged.status, "queued"); assert.deepEqual(merged.input, { triggerKey: "k", changedPaths: [], manual: true });
     await route(); assert.equal(f.row(s.tasks, manual.id).status, "queued");
@@ -391,7 +393,7 @@ try {
     assert.equal(mixed[0].taskId, mixed[2].taskId);
     await implement(2); await route();
     const item2 = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 202).id;
-    const reviews2 = () => all(s.tasks).filter((t) => t.itemId === item2 && t.action === "review_pr");
+    const reviews2 = () => all(s.tasks).filter((t) => t.subjectId === item2 && t.action === "review_pr");
     const routed = reviews2().find((t) => t.status === "queued"); assert.ok(routed.input.triggerKey);
     const merge = tasks.enqueueManualTasks("review_pr", ["202"])[0];
     assert.equal(merge.taskId, routed.id);
@@ -402,7 +404,7 @@ try {
     assert.match(tasks.enqueueManualTasks("implement", ["202"])[0].error, /needs an issue/);
     assert.match(tasks.enqueueManualTasks("resolve_conflicts", ["5"])[0].error, /needs a PR/);
     assert.match(tasks.enqueueManualTasks("address_pr_feedback", ["5"])[0].error, /needs a PR/);
-    assert.ok(!all(s.tasks).some((t) => t.itemId === "issue-5" && t.action === "review_pr"));
+    assert.ok(!all(s.tasks).some((t) => t.subjectId === "issue-5" && t.action === "review_pr"));
     f.prs.find((pr) => pr.number === 202).title = "Retitled after the review";
     const running = tasks.enqueueManualTasks("review_pr", ["202"])[0];
     const claimed = tasks.claimTask(); assert.equal(claimed.task.id, running.taskId);
@@ -463,7 +465,7 @@ try {
     assert.ok(all(s.tasks).some((t) => t.action === "review_issue" && t.status === "queued"), "The latest claimed review is the baseline");
     f.addIssue(2, ["scrat"]); f.enqueue(2, "implement"); const implemented = await success();
     const prItem = all(s.items).find((i) => i.kind === "pr");
-    const feedback = async () => { tasks.enqueueTask({ itemId: prItem.id, action: "address_pr_feedback", reason: "Reply", input: {} }); f.reset(202, "no-change"); return success(); };
+    const feedback = async () => { tasks.enqueueTask({ subjectId: prItem.id, action: "address_pr_feedback", reason: "Reply", input: {} }); f.reset(202, "no-change"); return success(); };
     const older = await feedback(); assert.equal(older.workspaceId, implemented.workspaceId);
     assert.equal(older.piSessionFile, implemented.piSessionFile);
     const copy = implemented.piSessionFile.replace(/\.jsonl$/, "-copy.jsonl");
@@ -494,7 +496,7 @@ try {
     assert.ok(all(s.tasks).some((t) => t.action === "review_pr" && t.status === "queued"));
   } else if (scenario === "grade_race") {
     await implement(1); await route(); const reviewed = await success();
-    tasks.enqueueTask({ itemId: f.row(s.tasks, reviewed.taskId).itemId, action: "review_pr", reason: "Fresh review", input: {} });
+    tasks.enqueueTask({ subjectId: f.row(s.tasks, reviewed.taskId).subjectId, action: "review_pr", reason: "Fresh review", input: {} });
     f.reset(201, "normal"); changeMain("src/app.ts", "export const value = 99;\n");
     let unblock, sawRemoval, sawPublicationContext;
     const blocked = new Promise((resolve) => { unblock = resolve; });
@@ -522,7 +524,7 @@ try {
     await implement(1); await implement(2); await route(); await success(); await success();
     changeMain("src/app.ts", "export const value = 99;\n");
     f.faults.label.add(201); await route();
-    for (const number of [201, 202]) assert.ok(all(s.tasks).some((t) => t.status === "queued" && f.row(s.items, t.itemId).payload.number === number));
+    for (const number of [201, 202]) assert.ok(all(s.tasks).some((t) => t.status === "queued" && f.row(s.items, t.subjectId).payload.number === number));
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["B · Solid"]);
     await route(); assert.deepEqual(f.prs[0].labels, []);
   } else if (scenario === "absent_labels") {
@@ -588,14 +590,14 @@ try {
     const pr = all(s.items).find((item) => item.kind === "pr");
     changeMain("other.txt", "other\n");
     let mark = trace.length, pushed = pushes();
-    tasks.enqueueTask({ itemId: pr.id, action: "resolve_conflicts", reason: "Exercise comment publication", input: {} });
+    tasks.enqueueTask({ subjectId: pr.id, action: "resolve_conflicts", reason: "Exercise comment publication", input: {} });
     const merged = await success();
     assert.deepEqual(types(mark), ["comment"]);
     assert.ok(trace[mark].pushes > pushed, "the merge is pushed before the comment is posted");
     assert.equal(merged.publication.status, "published");
     changeMain("another.txt", "another\n");
     f.faults.comment.add(201); mark = trace.length;
-    tasks.enqueueTask({ itemId: pr.id, action: "resolve_conflicts", reason: "Exercise comment receipt", input: {} });
+    tasks.enqueueTask({ subjectId: pr.id, action: "resolve_conflicts", reason: "Exercise comment receipt", input: {} });
     const lost = await run(); assert.ok(lost.error); assert.equal(lost.stage, "publishing");
     assert.deepEqual(types(mark), ["comment"]);
     assert.equal(lost.publication.publishedCommitSha, lost.publication.commitSha);
@@ -637,7 +639,7 @@ try {
     assert.match(f.comments.get(201)[0].body, /```\nSCRAT_GRADE: F\nSCRAT_READY\n```/);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
     f.reset(201, "quoted-only");
-    tasks.enqueueTask({ itemId: f.row(s.tasks, reviewed.taskId).itemId, action: "review_pr", reason: "Review again", input: {} });
+    tasks.enqueueTask({ subjectId: f.row(s.tasks, reviewed.taskId).subjectId, action: "review_pr", reason: "Review again", input: {} });
     const invalid = await run(); assert.match(invalid.error.message, /grade/i);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
     f.addIssue(2); f.modes.set(2, "quoted-only"); f.enqueue(2);
@@ -667,7 +669,7 @@ try {
     assert.equal(Object.keys(normal).length, 3);
     for (const [mode, target] of [["reviewer-grade-once", "deepseek/deepseek-v4.1-flash/false"], ["consolidation-grade-once", "gpt-6.1-sol/true"]]) {
       const start = reviewCounts(); f.reset(201, mode);
-      tasks.enqueueTask({ itemId: f.row(s.tasks, first.taskId).itemId, action: "review_pr", reason: "Review again", input: {} });
+      tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Review again", input: {} });
       const reviewed = await success(); const end = reviewCounts();
       for (const k of Object.keys(normal)) assert.equal(end[k] - (start[k] ?? 0), normal[k] + (k === target ? 1 : 0), `${mode} ${k}`);
       assert.equal(reviewed.result.grade, "B");
@@ -762,7 +764,7 @@ try {
       (w) => git(w.path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "Changed HEAD"),
       (_w, n) => { f.issues.get(n).body = "Different requirements"; },
       () => changeMain("notes.md", "Base changed\n"),
-      (_w, n) => db.update(s.items).set({ workspaceId: null }).where(eq(s.items.id, "issue-" + n)).run(),
+      (_w, n) => db.update(s.subjects).set({ workspaceId: null }).where(eq(s.subjects.id, "issue-" + n)).run(),
     ];
     for (const [index, change] of changes.entries()) {
       const n = index + 1; f.addIssue(n); f.enqueue(n, "implement"); const failed = await run();
@@ -903,11 +905,11 @@ try {
       (text) => text + "unknownSetting: changed\n",
     ]) {
       lock = update(lock); changeMain("pnpm-lock.yaml", lock); await route();
-      assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"), lock);
+      assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"), lock);
       f.reset(1, "grep"); await success();
     }
     changeMain("pnpm-lock.yaml", lock.replace("unrelated@5.0.0", "unrelated@6.0.0")); await route();
-    assert.ok(!all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
+    assert.ok(!all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
   } else if (scenario === "importer_scope") {
     f.addIssue(1); f.modes.set(1, "grep"); await route(); await success();
     const lock = JSON.parse(readFileSync("seed/pnpm-lock.yaml", "utf8"));
@@ -921,7 +923,7 @@ try {
     bump("unrelated", "2.0.0");
     changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "2.0.0" } }));
     changeMain("pnpm-lock.yaml", JSON.stringify(lock)); await route();
-    assert.ok(!all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
+    assert.ok(!all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
     for (const update of [
       () => bump("wrangler", "2.0.0"),
       () => { lock.importers["."].devDependencies.alternate = { specifier: "npm:wrangler@2.0.0", version: "wrangler@2.0.0" }; },
@@ -931,14 +933,14 @@ try {
       () => { lock.importers["packages/new"] = {}; },
     ]) {
       update(); changeMain("pnpm-lock.yaml", JSON.stringify(lock)); await route();
-      assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
+      assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
       f.reset(1, "grep"); await success();
     }
   } else if (scenario === "unicode_scope") {
     f.addIssue(1); await route(); await success();
     assert.ok(f.requests.some((r) => r.request.messages.some((m) => m.role === "tool" && JSON.stringify(m.content).includes("export const special = 1;"))));
     changeMain("src/a b.ts", "export const special = 2;\n"); await route();
-    assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
+    assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
     f.reset(1, "normal");
     let changed = false;
     f.onModel = (_context, step) => { if (step === 1 && !changed) { changed = true; changeMain("src/a b.ts", "export const special = 3;\n"); } };
@@ -950,7 +952,7 @@ try {
     const { eq } = await import("drizzle-orm");
     db.update(s.runs).set({ result: { ...reviewed.result, paths: ["src/cafe\u0301.ts"] } }).where(eq(s.runs.id, reviewed.id)).run();
     changeMain("src/caf\u00e9.ts", "export const unicode = 2;\n"); await route();
-    assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
+    assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
     f.reset(1, "normal"); let changed = false;
     f.onModel = (_context, step) => { if (step === 1 && !changed) { changed = true; changeMain("src/caf\u00e9.ts", "export const unicode = 3;\n"); } };
     const stale = await run(); assert.match(stale.error.message, /Reviewed code changed/);
@@ -960,14 +962,14 @@ try {
     for (const paths of [[".", "src/app.ts"], ["."], ["src"]]) {
       db.update(s.runs).set({ result: { ...reviewed.result, paths } }).where(eq(s.runs.id, reviewed.id)).run();
       changeMain(paths[0] === "src" ? "src/helper.ts" : "notes.md", JSON.stringify(paths)); await route();
-      assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
+      assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
       reviewed = await success();
     }
   } else if (scenario === "review_scope") {
     f.addIssue(1); f.modes.set(1, "at"); await route();
     const reviewed = await success(); assert.ok(reviewed.result.paths.includes("src/app.ts"));
     changeMain("src/app.ts", "export const value = 9;\n"); await route();
-    assert.ok(all(s.tasks).some((t) => t.itemId === "issue-1" && t.status === "queued"));
+    assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
     changeMain("src/helper.ts", "export const helper = 1;\n");
     await implement(2); await route(); f.modes.set(202, "helper");
     let changed = false;
@@ -1002,7 +1004,7 @@ try {
       html_url: `https://github.com/fixture/project/pull/${number}`, labels: [], updated_at: "2026-10-19T00:00:00Z", user: { login },
       head: { ref: branch, sha: remoteGit("rev-parse", branch), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } } });
     const prItem = (n) => all(s.items).find((i) => i.kind === "pr" && i.payload.number === n);
-    const queuedFor = (n) => all(s.tasks).filter((t) => t.itemId === prItem(n).id && t.status === "queued").map((t) => t.action).sort();
+    const queuedFor = (n) => all(s.tasks).filter((t) => t.subjectId === prItem(n).id && t.status === "queued").map((t) => t.action).sort();
     const drainExcept = (n) => { for (const item of all(s.items)) if (item.id !== prItem(n).id) tasks.cancelQueuedTasks(item.id, "Isolate"); };
     const parents = (cwd, rev) => git(cwd, "show", "-s", "--format=%P", rev).split(" ");
     const checkout = f.config.github.repositoryPath;
@@ -1066,7 +1068,7 @@ try {
       assert.equal(all(s.tasks).filter((t) => t.action === "resolve_conflicts").length, 1);
       await implement(2); drainExcept(202);
       changeMain("bad.txt", "bad\n"); writeFileSync("require-validation", "");
-      const fallback = tasks.enqueueTask({ itemId: prItem(202).id, action: "resolve_conflicts", reason: "Exercise fallback", input: {} });
+      const fallback = tasks.enqueueTask({ subjectId: prItem(202).id, action: "resolve_conflicts", reason: "Exercise fallback", input: {} });
       f.reset(202, "remove-bad");
       const repaired = await success(); assert.equal(repaired.taskId, fallback.id);
       const request = f.requests.findLast((r) => r.context.action === "resolve_conflicts" && r.context.item.number === 202);
@@ -1079,7 +1081,7 @@ try {
       unlinkSync("require-validation");
       await implement(3); drainExcept(203);
       needs("needed2.txt"); changeMain("needed2.txt", "ok\n"); changeMain("src/app.ts", "export const value = 99;\n");
-      tasks.enqueueTask({ itemId: prItem(203).id, action: "resolve_conflicts", reason: "Exercise bug fix", input: {} });
+      tasks.enqueueTask({ subjectId: prItem(203).id, action: "resolve_conflicts", reason: "Exercise bug fix", input: {} });
       f.reset(203, "resolve"); const resolved = await success();
       assert.ok(f.requests.some((r) => r.context.action === "resolve_conflicts" && r.context.item.number === 203));
       const head3 = remoteGit("rev-parse", f.prs[2].head.ref);
@@ -1088,7 +1090,7 @@ try {
       assert.equal(remoteGit("log", "-1", "--format=%s", head3), f.prs[2].title, "A PR's commit keeps its title's single conventional prefix");
       await implement(4); drainExcept(204);
       needs("needed3.txt"); changeMain("needed3.txt", "ok\n");
-      tasks.enqueueTask({ itemId: prItem(204).id, action: "address_pr_feedback", reason: "Exercise self-heal", input: {} });
+      tasks.enqueueTask({ subjectId: prItem(204).id, action: "address_pr_feedback", reason: "Exercise self-heal", input: {} });
       f.reset(204, "normal"); const healed = await success();
       const head4 = remoteGit("rev-parse", f.prs[3].head.ref);
       remoteGit("merge-base", "--is-ancestor", mainHead(), head4);
@@ -1099,17 +1101,17 @@ try {
     const original = await implement(1); await route();
     f.prs[0].state = "closed"; await route(); assert.ok(f.row(s.workspaces, original.workspaceId).removedAt);
     f.prs[0].state = "open"; await (await f.app("github-sync.ts")).syncGitHub(undefined, false); await route();
-    const pr = all(s.items).find((i) => i.kind === "pr"); assert.equal(pr.workspaceId, null);
-    assert.ok(all(s.tasks).some((t) => t.itemId === pr.id && t.status === "queued"));
+    const pr = all(s.items).find((i) => i.kind === "pr"); assert.equal(f.row(s.subjects, pr.id).workspaceId, null);
+    assert.ok(all(s.tasks).some((t) => t.subjectId === pr.id && t.status === "queued"));
   } else if (scenario === "sync_missing_item") {
     f.addIssue(1); f.addIssue(2); await route();
     f.issues.delete(1); f.addIssue(3); await route();
-    assert.equal(f.row(s.items, "issue-1").state, "closed"); assert.equal(f.row(s.items, "issue-2").state, "open");
-    assert.ok(all(s.tasks).some((t) => t.itemId === "issue-3" && t.status === "queued"));
+    assert.equal(f.row(s.subjects, "issue-1").state, "closed"); assert.equal(f.row(s.subjects, "issue-2").state, "open");
+    assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-3" && t.status === "queued"));
   } else if (scenario === "existing_pr") {
     await implement(1); f.addIssue(2, ["scrat"]); f.prs[0].body += "\nFixes #2";
     f.enqueue(2, "implement"); await route();
-    assert.ok(!all(s.tasks).some((t) => t.itemId === "issue-2" && t.status === "queued"));
+    assert.ok(!all(s.tasks).some((t) => t.subjectId === "issue-2" && t.status === "queued"));
     assert.ok(all(s.tasks).some((t) => t.action === "review_pr" && t.status === "queued"));
   } else if (scenario === "trigger_inputs") {
     const { parseTriggerInput } = await f.app("triggers.ts");
@@ -1141,9 +1143,9 @@ try {
     assert.throws(() => parseTriggerInput({ triggerKey: "k", commentRevisions: "c@1" }), /Invalid github_items\/pr_feedback trigger input at \/commentRevisions/);
     assert.throws(() => parseTriggerInput({ kind: "commit", sha: "s" }), /Invalid github_commits\/commit trigger input/);
     for (let n = 1; n <= 2; n++) f.addIssue(n);
-    db.$client.prepare("INSERT INTO tasks (id, item_id, action, priority, reason, input, created_at) VALUES ('malformed', 'issue-1', 'review_issue', 1000, 'Integration', '{\"triggerKey\":\"k\",\"commentRevisions\":7}', '2026-01-01')").run();
+    db.$client.prepare("INSERT INTO tasks (id, subject_id, action, priority, reason, input, created_at) VALUES ('malformed', 'issue-1', 'review_issue', 1000, 'Integration', '{\"triggerKey\":\"k\",\"commentRevisions\":7}', '2026-01-01')").run();
     f.enqueue(2);
-    assert.equal(tasks.claimTask().task.itemId, "issue-2");
+    assert.equal(tasks.claimTask().task.subjectId, "issue-2");
     assert.equal(f.row(s.tasks, "malformed").status, "failed");
     const rejected = all(s.events).filter((e) => e.type === "task.rejected");
     assert.equal(rejected.length, 1); assert.match(rejected[0].data.reason, /^Invalid trigger input for review_issue: .*commentRevisions/);
@@ -1151,10 +1153,10 @@ try {
     const { eq } = await import("drizzle-orm");
     const rejections = () => all(s.events).filter((e) => e.type === "task.rejected");
     for (let n = 1; n <= 4; n++) f.addIssue(n);
-    db.$client.prepare("INSERT INTO tasks (id, item_id, action, priority, reason, input, created_at) VALUES ('bogus', 'issue-1', 'ship_it', 1000, 'Integration', '{}', '2026-01-01')").run();
+    db.$client.prepare("INSERT INTO tasks (id, subject_id, action, priority, reason, input, created_at) VALUES ('bogus', 'issue-1', 'ship_it', 1000, 'Integration', '{}', '2026-01-01')").run();
     f.enqueue(2);
     const claim = tasks.claimTask();
-    assert.equal(claim.task.itemId, "issue-2");
+    assert.equal(claim.task.subjectId, "issue-2");
     assert.equal(f.row(s.tasks, "bogus").status, "failed");
     assert.equal(rejections().length, 1);
     assert.deepEqual({ ...rejections()[0].data, taskId: rejections()[0].taskId }, { action: "ship_it", reason: "Unknown action: ship_it", taskId: "bogus" });
@@ -1169,7 +1171,7 @@ try {
     assert.throws(() => tasks.retryTask(damaged.task.id, "validation"), /Validation-only retry requires/);
     assert.throws(() => tasks.retryTask("bogus", "validation"), /Validation-only retry requires/);
     tasks.retryTask(damaged.task.id); f.enqueue(4);
-    assert.equal(tasks.claimTask().task.itemId, "issue-4");
+    assert.equal(tasks.claimTask().task.subjectId, "issue-4");
     assert.equal(f.row(s.tasks, damaged.task.id).status, "failed");
     assert.match(rejections().at(-1).data.reason, /Missing run sequence/);
     assert.equal(rejections().at(-1).taskId, damaged.task.id);
@@ -1177,8 +1179,8 @@ try {
 
     const { config: live } = await f.app("config.ts"); live.actions.review_pr.thinkingLevel = "turbo";
     f.addIssue(5); f.addIssue(6); f.enqueue(5, "review_pr"); f.enqueue(6);
-    assert.equal(tasks.claimTask().task.itemId, "issue-6");
-    assert.equal(f.row(s.tasks, all(s.tasks).find((t) => t.itemId === "issue-5").id).status, "failed");
+    assert.equal(tasks.claimTask().task.subjectId, "issue-6");
+    assert.equal(f.row(s.tasks, all(s.tasks).find((t) => t.subjectId === "issue-5").id).status, "failed");
     assert.match(rejections().at(-1).data.reason, /Invalid thinking level for review_pr: turbo/);
     live.actions.review_pr.thinkingLevel = "high";
 
@@ -1257,7 +1259,7 @@ try {
     assert.equal(isActionEnabled("review_base_change"), false);
     assert.equal(isActionEnabled("review_issue"), true);
     f.addIssue(1); f.enqueue(1, "review_base_change"); f.addIssue(2); f.enqueue(2);
-    assert.equal(tasks.claimTask().task.itemId, "issue-2");
+    assert.equal(tasks.claimTask().task.subjectId, "issue-2");
     const rejected = all(s.events).filter((e) => e.type === "task.rejected");
     assert.equal(rejected.length, 1); assert.equal(rejected[0].data.reason, "Unknown action: review_base_change");
     assert.equal(f.row(s.tasks, rejected[0].taskId).status, "failed");
@@ -1304,21 +1306,21 @@ try {
     await syncGitHub(undefined, false); assert.ok(calls.length > 0);
 
     f.addIssue(1); f.addIssue(2);
-    db.update(s.items).set({ payload: { ...f.issues.get(1), html_url: "https://github.com/other/repo/issues/1" } }).where(eq(s.items.id, "issue-1")).run();
+    db.update(s.subjects).set({ repository: "other/repo" }).where(eq(s.subjects.id, "issue-1")).run();
     f.enqueue(1, "review_issue"); f.enqueue(2, "review_issue");
-    db.update(s.tasks).set({ priority: 1000 }).where(eq(s.tasks.itemId, "issue-1")).run();
-    assert.equal(tasks.claimTask().task.itemId, "issue-2");
+    db.update(s.tasks).set({ priority: 1000 }).where(eq(s.tasks.subjectId, "issue-1")).run();
+    assert.equal(tasks.claimTask().task.subjectId, "issue-2");
     const rejected = all(s.events).filter((e) => e.type === "task.rejected");
     assert.equal(rejected.length, 1);
-    assert.match(rejected[0].data.reason, /Item belongs to other\/repo, not fixture\/project/);
+    assert.match(rejected[0].data.reason, /Subject belongs to other\/repo, not fixture\/project/);
     assert.equal(f.row(s.tasks, rejected[0].taskId).status, "failed");
     f.addIssue(3); f.addIssue(4); f.enqueue(3); f.enqueue(4);
-    db.update(s.items).set({ payload: { ...f.issues.get(3), html_url: "not a url" } }).where(eq(s.items.id, "issue-3")).run();
-    db.update(s.items).set({ payload: { ...f.issues.get(4), html_url: "https://example.com/fixture/project/issues/4" } }).where(eq(s.items.id, "issue-4")).run();
+    db.update(s.subjects).set({ repository: "" }).where(eq(s.subjects.id, "issue-3")).run();
+    db.update(s.subjects).set({ repository: "" }).where(eq(s.subjects.id, "issue-4")).run();
     assert.equal(tasks.claimTask(), undefined);
     const bad = all(s.events).filter((e) => e.type === "task.rejected").slice(1);
     assert.equal(bad.length, 2);
-    for (const e of bad) assert.match(e.data.reason, /Unparseable item URL/);
+    for (const e of bad) assert.match(e.data.reason, /Subject has no parseable repository/);
 
     const { fetchRepository } = await f.app("git.ts");
     const checkout = f.config.github.repositoryPath, remote = "https://github.com/fixture/project.git";
@@ -1371,7 +1373,7 @@ try {
     await assert.rejects(removeWorkspace(w.id), /unpublished commits/);
     assert.equal(readFileSync(w.path + "/unpublished.txt", "utf8"), "retain\n");
     f.prs[0].state = "closed"; f.addIssue(2); await route();
-    assert.ok(all(s.tasks).some((t) => t.itemId === "issue-2" && t.status === "queued"));
+    assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-2" && t.status === "queued"));
   } else if (scenario === "feedback") {
     await implement(1); await route(); await success();
     const ignored = { id: 9000, body: "My own follow-up", user: { login: f.config.github.botLogin }, updated_at: "2026-10-19T02:00:00Z", html_url: "https://github.com/fixture/project/pull/201#comment" };
@@ -1389,7 +1391,7 @@ try {
     assert.notEqual(after, before);
   } else if (scenario === "self_repair") {
     const prItem = (n) => all(s.items).find((i) => i.kind === "pr" && i.payload.number === n);
-    const repairs = (n) => all(s.tasks).filter((t) => t.itemId === prItem(n).id && t.action === "address_review");
+    const repairs = (n) => all(s.tasks).filter((t) => t.subjectId === prItem(n).id && t.action === "address_review");
     const count = (n) => db.$client.prepare("select self_repair_count as c from items where id = ?").get(prItem(n).id).c;
     const review = async (n, mode) => { f.reset(n, mode); await route(); return success(); };
     await implement(1); const graded = await review(201, "grade-C");
@@ -1422,7 +1424,7 @@ try {
     db.$client.prepare("update items set self_repair_count = 1 where id = ?").run(prItem(204).id);
     await route(); assert.equal(repairs(204).length, 1); assert.equal(count(204), 1);
     const queuedRepair = repairs(204)[0], before = count(204);
-    tasks.enqueueTask({ itemId: queuedRepair.itemId, action: "address_review", reason: "Coalesce", input: queuedRepair.input });
+    tasks.enqueueTask({ subjectId: queuedRepair.subjectId, action: "address_review", reason: "Coalesce", input: queuedRepair.input });
     assert.equal(count(204), before, "A coalesced repair does not spend a cap slot");
     assert.throws(() => tasks.enqueueManualTasks("address_review", ["204"]), /queued automatically/);
     f.prs.find((pr) => pr.number === 204).title = "Retitled after the review"; await route();
@@ -1436,7 +1438,7 @@ try {
     await implement(5);
     f.comments.set(205, [{ id: 9100, body: "Please rename it", user: { login: "human" }, updated_at: "2026-10-19T01:00:00Z", html_url: "https://github.com/fixture/project/pull/205#comment" }]);
     assert.equal((await review(205, "grade-C")).result.grade, "C"); await route();
-    assert.ok(all(s.tasks).some((t) => t.itemId === prItem(205).id && t.action === "address_pr_feedback" && t.status === "queued"));
+    assert.ok(all(s.tasks).some((t) => t.subjectId === prItem(205).id && t.action === "address_pr_feedback" && t.status === "queued"));
     assert.equal(repairs(205).length, 0, "Pending human feedback goes first");
     tasks.cancelQueuedTasks(prItem(205).id, "Drain"); await implement(6); await review(206, "grade-C"); await route(); assert.equal(repairs(206)[0].status, "queued");
     f.comments.set(206, [{ id: 9200, body: "Please rename it", user: { login: "human" }, updated_at: "2026-10-19T01:00:00Z", html_url: "https://github.com/fixture/project/pull/206#comment" }]);
@@ -1591,7 +1593,7 @@ try {
     since = f.calls.length; await route();
     assert.equal(reads(since).find((call) => call.path.includes("/issues/202/comments")).status, 200);
     assert.equal(reads(since).find((call) => call.path.includes("/issues/201/comments")).status, 304);
-    assert.ok(all(s.tasks).some((task) => task.action === "address_pr_feedback" && f.row(s.items, task.itemId).payload.number === 202));
+    assert.ok(all(s.tasks).some((task) => task.action === "address_pr_feedback" && f.row(s.items, task.subjectId).payload.number === 202));
     const comment = (id) => ({ id, body: "c" + id, user: { login: "human" }, updated_at: "2026-10-19T02:00:00Z", html_url: "https://github.com/fixture/project/issues/10#c" + id });
     f.comments.set(10, Array.from({ length: 100 }, (_, i) => comment(1000 + i)));
     const github = new GitHubRepository("fixture/project");
@@ -1855,8 +1857,8 @@ try {
   } else if (scenario === "bot_identity_names") {
     const queued = () => all(s.tasks).filter((t) => t.status === "queued");
     f.addIssue(1, ["scrat"]); f.addIssue(2, ["mocha-agent"]); await route();
-    assert.deepEqual(queued().map((t) => [t.itemId, t.action]).sort(), [["issue-1", "review_issue"], ["issue-2", "implement"]]);
-    assert.equal(queued().find((t) => t.itemId === "issue-2").reason, "Issue has the mocha-agent label");
+    assert.deepEqual(queued().map((t) => [t.subjectId, t.action]).sort(), [["issue-1", "review_issue"], ["issue-2", "implement"]]);
+    assert.equal(queued().find((t) => t.subjectId === "issue-2").reason, "Issue has the mocha-agent label");
     await success(); await success();
     const labels = (n) => f.issues.get(n).labels.map((label) => label.name);
     f.addIssue(3); f.modes.set(3, "ready"); f.enqueue(3, "review_issue"); await success();
@@ -1913,16 +1915,16 @@ try {
     const forcePush = () => git(seed, "push", "--force", remote, "main");
     const initial = tip();
     assert.equal(await pollCommits(), 0); assert.deepEqual(cursor(), [initial]); assert.equal(reviews().length, 0);
-    assert.equal(all(s.items).length, 0);
+    assert.equal(all(s.items).length, 0); assert.equal(all(s.subjects).length, 0);
     changeMain("src/one.ts", "export const one = 1;\n");
     assert.equal(await pollCommits(), 1);
     const first = tip(), [task] = reviews();
     assert.deepEqual(task.input, { source: "github_commits", kind: "commit", triggerKey: first, sha: first, previousSha: initial, branch: "main", commitCount: 1, truncated: false });
     assert.equal(task.reason, "main moved to " + first.slice(0, 7)); assert.equal(task.status, "queued"); assert.equal(task.priority, 30);
-    const item = all(s.items).find((row) => row.id === task.itemId);
-    assert.equal(item.source, "git"); assert.equal(item.kind, "commit"); assert.equal(item.state, "open");
-    assert.equal(item.externalId, "commit:main:" + first);
-    assert.deepEqual({ ...item.payload, updated_at: undefined }, { node_id: "commit:main:" + first, number: 0, title: "Change src/one.ts", html_url: `https://github.com/fixture/project/commit/${first}`, state: "open", updated_at: undefined, user: { login: "Fixture" }, labels: [] });
+    const subject = f.row(s.subjects, task.subjectId);
+    assert.equal(subject.kind, "commit"); assert.equal(subject.state, "open"); assert.equal(subject.repository, "fixture/project"); assert.equal(subject.workspaceId, null);
+    assert.equal(subject.key, "main:" + first); assert.equal(all(s.items).length, 0);
+    assert.deepEqual(subject.metadata, { title: "Change src/one.ts", author: "Fixture", url: `https://github.com/fixture/project/commit/${first}` });
     assert.deepEqual(cursor(), [first]);
     assert.equal(await pollCommits(), 0); assert.equal(reviews().length, 1);
     changeMain("src/two.ts", "export const two = 1;\n"); changeMain("src/three.ts", "export const three = 1;\n");
@@ -1944,10 +1946,10 @@ try {
     const last = tip();
     db.update(s.sourceCursors).set({ sha: initial }).run();
     assert.equal(await pollCommits(), 0); assert.equal(reviews().length, 4); assert.deepEqual(cursor(), [last]);
-    const before = JSON.stringify(all(s.items).filter((row) => row.source === "git"));
+    const before = JSON.stringify(all(s.subjects).filter((row) => row.kind === "commit"));
     f.calls.length = 0; await route();
     assert.ok(f.calls.length > 0); assert.ok(!f.calls.some((call) => /\/(issues|pulls)\/0(\/|\?|$)/.test(call.path)), JSON.stringify(f.calls));
-    assert.equal(JSON.stringify(all(s.items).filter((row) => row.source === "git")), before);
+    assert.equal(JSON.stringify(all(s.subjects).filter((row) => row.kind === "commit")), before);
     assert.equal(reviews().length, 4); assert.equal(all(s.tasks).length, 4);
     live.actions.review_base_change.enabled = false;
     assert.equal(await pollCommits(), 0); assert.deepEqual(cursor(), []);
@@ -1992,11 +1994,11 @@ try {
       assert.equal(reply.body.thread_ts, "1700000000.000001"); assert.equal(reply.body.text, "Independent review from gpt-6.1-sol. &lt;!channel&gt;");
       assert.ok(posts().every((call) => call.token === process.env.SLACK_BOT_TOKEN));
       const [thread] = all(s.slackThreads); assert.equal(all(s.slackThreads).length, 1);
-      assert.deepEqual({ itemId: thread.itemId, channel: thread.channel, ts: thread.ts }, { itemId: all(s.tasks)[0].itemId, channel, ts: "1700000000.000001" });
+      assert.deepEqual({ subjectId: thread.subjectId, channel: thread.channel, ts: thread.ts }, { subjectId: all(s.tasks)[0].subjectId, channel, ts: "1700000000.000001" });
       assert.equal(r.publication.slackReplyTs, "1700000000.000002"); assert.equal(r.publication.status, "published");
       assert.equal(r.stage, "publishing"); assert.equal(r.result.text, "Independent review from gpt-6.1-sol. <!channel>"); assert.deepEqual(r.result.paths.filter((path) => path === "src/app.ts"), ["src/app.ts"]);
       assert.equal(r.context.item.number, 0); assert.equal(r.mainSha, head); assert.equal(r.headSha, head);
-      assert.equal(f.row(s.tasks, r.taskId).status, "completed"); assert.equal(all(s.items)[0].state, "open");
+      assert.equal(f.row(s.tasks, r.taskId).status, "completed"); assert.equal(all(s.subjects)[0].state, "open");
       assert.ok(f.row(s.workspaces, r.workspaceId).removedAt);
       const requests = reviewRequests(); assert.equal(requests.length, 4); assert.equal(new Set(requests.map((request) => request.request.model)).size, 1);
       const { context } = requests[0];
@@ -2037,7 +2039,7 @@ try {
       assert.equal(f.requests.length, used); assert.equal(retried.retryOfRunId, failed.id); assert.equal(retried.stage, "publishing");
       const added = f.slack.calls.slice(mark);
       assert.equal(added.length, 3); assert.equal(added.filter((call) => call.body.thread_ts === undefined).length, 1);
-      const second = all(s.slackThreads).find((row) => row.itemId === f.row(s.tasks, failed.taskId).itemId);
+      const second = all(s.slackThreads).find((row) => row.subjectId === f.row(s.tasks, failed.taskId).subjectId);
       assert.equal(added[2].body.thread_ts, second.ts); assert.equal(retried.publication.slackReplyTs, "1700000000.000004");
       assert.equal(all(s.slackThreads).length, 2); assert.equal(f.writes.length, 0);
     } else if (scenario === "commit_review_restart") {
@@ -2045,7 +2047,7 @@ try {
       const claim = tasks.claimTask();
       const { postMessage } = await f.app("slack.ts");
       const ts = await postMessage({ channel, text: "root" });
-      db.insert(s.slackThreads).values({ itemId: claim.item.id, channel, ts }).run();
+      db.insert(s.slackThreads).values({ subjectId: claim.subject.id, channel, ts }).run();
       execFileSync(process.execPath, [resolve("app/src/recover.ts"), claim.run.id], { stdio: "pipe" });
       const interrupted = f.row(s.runs, claim.run.id); assert.equal(interrupted.error.code, "RUN_INTERRUPTED");
       tasks.retryTask(interrupted.taskId);
@@ -2069,6 +2071,86 @@ try {
       assert.equal(existsSync("prepare.log"), false);
       assert.equal(posts().length, 2); assert.equal(f.writes.length, 0);
     }
+  } else if (scenario === "subjects_migration") {
+    const script = fileURLToPath(new URL("../deploy/migrate-subjects.mjs", import.meta.url));
+    const parent = readFileSync(fileURLToPath(new URL("parent-schema.sql", import.meta.url)), "utf8");
+    const migrate = (path) => JSON.parse(execFileSync(process.execPath, [script, path], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim().split("\n").at(-1));
+    assert.equal(migrate("missing.sqlite").result, "no_database"); assert.equal(existsSync("missing.sqlite"), false);
+    const fresh = new DatabaseSync("fresh.sqlite"); fresh.exec("CREATE TABLE unrelated (id text)"); fresh.close();
+    assert.equal(migrate("fresh.sqlite").result, "fresh_database");
+
+    const legacy = new DatabaseSync("legacy.sqlite");
+    legacy.exec("PRAGMA foreign_keys = ON"); legacy.exec(parent);
+    const sha1 = "a".repeat(40), sha2 = "b".repeat(40);
+    const github = (number, path) => JSON.stringify({ node_id: "N" + number, number, title: "Title " + number, html_url: `https://github.com/fixture/project/${path}/${number}`, state: "open", updated_at: "2026-10-19T00:00:00Z", labels: [], user: { login: "human" } });
+    const commitPayload = (sha, title) => JSON.stringify({ node_id: "commit:" + sha, number: 0, title, html_url: `https://github.com/fixture/project/commit/${sha}`, state: "open", updated_at: "2026-10-19T00:00:00Z", user: { login: "Fixture" }, labels: [] });
+    legacy.exec("INSERT INTO workspaces (id, repository_path, branch, path, base_ref, base_sha, created_at) VALUES ('w1', '/r', 'scrat/w1', '/w1', 'origin/main', 'abc', '2026-01-01')");
+    const addItem = legacy.prepare("INSERT INTO items (id, source, external_id, kind, state, workspace_id, self_repair_count, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    addItem.run("issue-a", "github", "N1", "issue", "open", null, 0, github(1, "issues"));
+    addItem.run("pr-b", "github", "N2", "pr", "open", "w1", 2, github(2, "pull"));
+    addItem.run("issue-c", "github", "N3", "issue", "closed", null, 0, github(3, "issues"));
+    addItem.run("commit-d", "git", "commit:main:" + sha1, "commit", "open", null, 0, commitPayload(sha1, "First change"));
+    addItem.run("commit-e", "git", "commit:release/1.0:" + sha2, "commit", "open", null, 0, commitPayload(sha2, "Second change"));
+    const addTask = legacy.prepare("INSERT INTO tasks (id, item_id, action, priority, reason, input, status, created_at) VALUES (?, ?, ?, 10, 'Integration', '{}', ?, '2026-10-19T00:00:00Z')");
+    for (const [id, item, action, status] of [
+      ["t1", "issue-a", "review_issue", "completed"], ["t2", "issue-a", "review_issue", "queued"], ["t3", "pr-b", "review_pr", "running"],
+      ["t4", "pr-b", "address_review", "queued"], ["t5", "issue-c", "review_issue", "cancelled"], ["t6", "commit-d", "review_base_change", "completed"],
+      ["t7", "commit-e", "review_base_change", "queued"],
+    ]) addTask.run(id, item, action, status);
+    const addRun = legacy.prepare("INSERT INTO runs (id, task_id, sequence, skill, provider, model, thinking_level, workspace_id, publication) VALUES (?, ?, ?, 'review', 'p', 'm', 'high', ?, '{\"status\":\"pending\"}')");
+    addRun.run("r1", "t1", 1, null); addRun.run("r3", "t3", 2, "w1"); addRun.run("r6", "t6", 3, null);
+    const addEvent = legacy.prepare("INSERT INTO events (created_at, type, item_id, task_id, run_id, data) VALUES ('2026-10-19T00:00:00Z', ?, ?, ?, ?, '{}')");
+    addEvent.run("task.enqueued", "issue-a", "t1", null); addEvent.run("run.started", "pr-b", "t3", "r3"); addEvent.run("run.started", "commit-d", "t6", "r6"); addEvent.run("database.created", null, null, null);
+    legacy.exec("INSERT INTO slack_threads (item_id, channel, ts, created_at) VALUES ('commit-d', 'C1', '1700000000.000001', '2026-10-19T00:00:00Z')");
+    legacy.exec("INSERT INTO source_cursors (repository, action, branch, sha, updated_at) VALUES ('fixture/project', 'review_base_change', 'main', '" + sha1 + "', '2026-10-19T00:00:00Z')");
+    legacy.close();
+    copyFileSync("legacy.sqlite", "orphan.sqlite");
+
+    const rows = (database, query, ...args) => JSON.parse(JSON.stringify(database.prepare(query).all(...args)));
+    const dump = (database) => JSON.stringify(rows(database, "SELECT type, name, sql FROM sqlite_master ORDER BY name").map((entry) => [entry, entry.type === "table" ? rows(database, `SELECT * FROM "${entry.name}"`) : null]));
+    const before = new DatabaseSync("legacy.sqlite");
+    const oldTasks = rows(before, "SELECT id, item_id AS subject_id FROM tasks ORDER BY id"), oldEvents = rows(before, "SELECT id, item_id AS subject_id FROM events ORDER BY id");
+    const oldRuns = rows(before, "SELECT * FROM runs ORDER BY id"), oldItems = rows(before, "SELECT id, external_id, self_repair_count, payload FROM items WHERE kind != 'commit' ORDER BY id");
+    const oldCursors = rows(before, "SELECT * FROM source_cursors"); before.close();
+
+    const ghost = new DatabaseSync("orphan.sqlite");
+    ghost.exec("PRAGMA foreign_keys = OFF");
+    ghost.exec("INSERT INTO tasks (id, item_id, action, priority, reason, input, status, created_at) VALUES ('t-ghost', 'ghost', 'review_issue', 1, 'x', '{}', 'failed', '2026-10-19')");
+    ghost.close();
+    assert.throws(() => migrate("orphan.sqlite"), (error) => /1 tasks rows reference an item with no subject/.test(error.stderr));
+    const untouched = new DatabaseSync("orphan.sqlite");
+    assert.deepEqual(rows(untouched, "SELECT name FROM sqlite_master WHERE name = 'subjects'"), []);
+    assert.ok(rows(untouched, "PRAGMA table_info(tasks)").some((column) => column.name === "item_id")); assert.equal(rows(untouched, "SELECT count(*) AS n FROM items")[0].n, 5);
+    untouched.close();
+
+    assert.deepEqual(migrate("legacy.sqlite"), { migrate: "subjects", result: "migrated", subjects: 5, commits: 2, tasks: 7, events: 4, slack_threads: 1 });
+    const after = new DatabaseSync("legacy.sqlite");
+    assert.deepEqual(rows(after, "SELECT id, repository, kind, key, state, workspace_id, metadata FROM subjects ORDER BY id"), [
+      { id: "commit-d", repository: "fixture/project", kind: "commit", key: "main:" + sha1, state: "open", workspace_id: null, metadata: JSON.stringify({ title: "First change", author: "Fixture", url: `https://github.com/fixture/project/commit/${sha1}` }) },
+      { id: "commit-e", repository: "fixture/project", kind: "commit", key: "release/1.0:" + sha2, state: "open", workspace_id: null, metadata: JSON.stringify({ title: "Second change", author: "Fixture", url: `https://github.com/fixture/project/commit/${sha2}` }) },
+      { id: "issue-a", repository: "fixture/project", kind: "item", key: "N1", state: "open", workspace_id: null, metadata: null },
+      { id: "issue-c", repository: "fixture/project", kind: "item", key: "N3", state: "closed", workspace_id: null, metadata: null },
+      { id: "pr-b", repository: "fixture/project", kind: "item", key: "N2", state: "open", workspace_id: "w1", metadata: null },
+    ]);
+    assert.ok(rows(after, "SELECT created_at FROM subjects").every((row) => row.created_at));
+    assert.deepEqual(rows(after, "SELECT id, external_id, self_repair_count, payload FROM items ORDER BY id"), oldItems);
+    assert.deepEqual(rows(after, "PRAGMA table_info(items)").map((column) => column.name), ["id", "source", "external_id", "kind", "self_repair_count", "payload"]);
+    assert.deepEqual(rows(after, "SELECT id, subject_id FROM tasks ORDER BY id"), oldTasks);
+    assert.deepEqual(rows(after, "SELECT id, subject_id FROM events ORDER BY id"), oldEvents);
+    assert.deepEqual(rows(after, "SELECT subject_id, channel, ts FROM slack_threads"), [{ subject_id: "commit-d", channel: "C1", ts: "1700000000.000001" }]);
+    assert.deepEqual(rows(after, "SELECT * FROM runs ORDER BY id"), oldRuns); assert.deepEqual(rows(after, "SELECT * FROM source_cursors"), oldCursors);
+    assert.deepEqual(rows(after, "PRAGMA foreign_key_check"), []);
+    assert.deepEqual(rows(after, "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'tasks_queued%'"), [{ name: "tasks_queued_subject_action_unique" }]);
+    assert.throws(() => after.exec("INSERT INTO tasks (id, subject_id, action, priority, reason, input, status, created_at) VALUES ('dup', 'issue-a', 'review_issue', 1, 'x', '{}', 'queued', 'now')"), /UNIQUE/);
+    assert.throws(() => after.exec("INSERT INTO subjects (id, repository, kind, key, created_at) VALUES ('dup', 'fixture/project', 'item', 'N1', 'now')"), /UNIQUE/);
+    const migrated = dump(after); after.close();
+
+    assert.deepEqual(migrate("legacy.sqlite"), { migrate: "subjects", result: "already_migrated" });
+    const again = new DatabaseSync("legacy.sqlite"); assert.equal(dump(again), migrated); again.close();
+
+    const push = execFileSync(process.execPath, [resolve("app/node_modules/drizzle-kit/bin.cjs"), "push", "--dialect=sqlite", "--schema=./app/src/schema.ts", "--url=./legacy.sqlite"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    assert.match(push, /No changes detected/);
+    const pushed = new DatabaseSync("legacy.sqlite"); assert.equal(dump(pushed), migrated); assert.deepEqual(rows(pushed, "PRAGMA foreign_key_check"), []); pushed.close();
   } else throw new Error("Unknown scenario " + scenario);
   console.log("SCENARIO_PASSED " + scenario);
 } finally { await f.close(); }

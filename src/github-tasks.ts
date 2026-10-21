@@ -4,6 +4,7 @@ import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import { botSlug } from "./identity.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { acknowledgedTaskIds, commentKey } from "./markers.ts";
+import type { Item } from "./items.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { remoteUrl } from "./repository.ts";
 import { labelName, reconcileLabels } from "./labels.ts";
@@ -11,14 +12,13 @@ import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts, isAncestor } from "./git.ts";
 import { rateLimitLow, rateLimitState, type GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
-import { items, runs, tasks } from "./schema.ts";
+import { items, runs, subjects, tasks } from "./schema.ts";
 import { cancelQueuedTasks, enqueueTask, latestTask } from "./tasks.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { reconcileObserved, serializePr } from "./pr-review-publication.ts";
 import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
 import { planIssueTasks, planPrMaintenance, planReview, planSelfRepair, lowGrades, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
 
-type Item = typeof items.$inferSelect;
 type SyncContext = {
   github: GitHubRepository; repository: string; repositoryPath: string; remote: string;
   env: Awaited<ReturnType<GitHubRepository["getGitEnvironment"]>>; log: Logger;
@@ -29,11 +29,11 @@ function hasScratLabel(item: Item) {
   return item.payload.labels?.some((label) => labelName(label) === botSlug);
 }
 
-function applyDecisions(itemId: string, decisions: RoutingDecision[]) {
+function applyDecisions(subjectId: string, decisions: RoutingDecision[]) {
   let queued = 0;
   for (const decision of decisions) {
-    if (decision.type === "cancel") cancelQueuedTasks(itemId, decision.reason, decision.action, true);
-    else { enqueueTask({ itemId, action: decision.action, reason: decision.reason, input: decision.input }); queued++; }
+    if (decision.type === "cancel") cancelQueuedTasks(subjectId, decision.reason, decision.action, true);
+    else { enqueueTask({ subjectId, action: decision.action, reason: decision.reason, input: decision.input }); queued++; }
   }
   return queued;
 }
@@ -47,9 +47,9 @@ async function cleanupClosedItem(item: Item) {
   const active = db.select().from(runs).where(and(eq(runs.workspaceId, item.workspaceId), isNull(runs.finishedAt))).get();
   const workspace = getWorkspace(item.workspaceId);
   if (active || !workspace || workspace.removedAt) return;
-  const related = db.select().from(items).where(eq(items.workspaceId, workspace.id)).all();
+  const related = db.select().from(subjects).where(eq(subjects.workspaceId, workspace.id)).all();
   for (const linked of related) cancelQueuedTasks(linked.id, "PR merged or closed");
-  try { await removeWorkspace(workspace.id, { itemId: item.id }); }
+  try { await removeWorkspace(workspace.id, { subjectId: item.id }); }
   catch { }
 }
 
@@ -59,12 +59,12 @@ async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observatio
   const headSha = await git(repositoryPath, ["rev-parse", headRef]);
   const conflicts = await hasConflicts(repositoryPath, mainSha, headSha);
   const lastRun = db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.itemId, item.id), isNotNull(runs.finishedAt))).orderBy(desc(runs.sequence)).limit(1).get()?.run;
+    .where(and(eq(tasks.subjectId, item.id), isNotNull(runs.finishedAt))).orderBy(desc(runs.sequence)).limit(1).get()?.run;
   const stale = !conflicts && Boolean(lastRun?.error) && lastRun?.stage === "preparing" && lastRun.headSha === headSha
     && !await isAncestor(repositoryPath, mainSha, headSha);
   const acknowledged = new Set(observation.own.flatMap((comment) => acknowledgedTaskIds(comment.body)));
   const handled = db.select({ run: runs, task: tasks }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.itemId, item.id), eq(tasks.action, "address_pr_feedback"))).all()
+    .where(and(eq(tasks.subjectId, item.id), eq(tasks.action, "address_pr_feedback"))).all()
     .filter(({ run, task }) => (!run.finishedAt && task.status === "running") || (run.finishedAt && !run.error)
       || run.publication.commentId || acknowledged.has(task.id));
   const consumed = new Set(handled.flatMap(({ run }) => {
@@ -86,8 +86,8 @@ async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation
   if (!exhaustedLabel || !owned || state.kind !== "current" || repairActive) return;
   const exhausted = lowGrades.includes(state.assessment.result.grade) && count >= maxSelfRepairs;
   try {
-    await reconcileLabels(ctx.github, item.payload.number, { current: observation.labels, desired: exhausted ? [exhaustedLabel] : [], managed: [exhaustedLabel] }, { itemId: item.id });
-  } catch (error) { ctx.log.warn({ event: "self_repair.label_pending", itemId: item.id, err: error }); }
+    await reconcileLabels(ctx.github, item.payload.number, { current: observation.labels, desired: exhausted ? [exhaustedLabel] : [], managed: [exhaustedLabel] }, { subjectId: item.id });
+  } catch (error) { ctx.log.warn({ event: "self_repair.label_pending", subjectId: item.id, err: error }); }
 }
 
 async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObservation, mainSha: string, owned: boolean) {
@@ -104,7 +104,7 @@ async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObse
   });
   if (repair.limited && state.kind === "current" && !limitLogged.has(state.assessment.originId)) {
     limitLogged.add(state.assessment.originId);
-    ctx.log.info({ event: "self_repair.limit_reached", itemId: item.id, limit: maxSelfRepairs }, "Self-repair limit reached");
+    ctx.log.info({ event: "self_repair.limit_reached", subjectId: item.id, limit: maxSelfRepairs }, "Self-repair limit reached");
   }
   added += applyDecisions(item.id, repair.decisions);
   await reconcileExhaustedLabel(ctx, item, observation, owned, state, count);
@@ -118,7 +118,7 @@ async function routeIssueReview(item: Item, observation: ItemObservation, mainSh
   const { revision } = observation;
   if (reviewTrigger({ latest, attempt, revision, mainSha }).covered) return 0;
   const completed = db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.itemId, item.id), eq(tasks.action, "review_issue"), eq(tasks.status, "completed"), isNull(runs.error)))
+    .where(and(eq(tasks.subjectId, item.id), eq(tasks.action, "review_issue"), eq(tasks.status, "completed"), isNull(runs.error)))
     .orderBy(desc(runs.sequence)).limit(1).get()?.run;
   const state = completed ? await freshness(savedEvaluation(completed), { ...observation, mainSha }, "relevant-paths") : undefined;
   return applyDecisions(item.id, planReview({ kind: "issue", completed, freshness: state, latest, attempt, revision, mainSha }));
@@ -140,8 +140,8 @@ async function routeObserved(ctx: SyncContext, item: Item, context: GithubContex
     added += item.kind === "pr" ? await routePrReview(ctx, item, observation, mainSha, owned) : await routeIssueReview(item, observation, mainSha);
   } finally {
     if (item.kind === "pr") {
-      try { await reconcileObserved(github, item.id, item.payload.number, { itemId: item.id }, context); }
-      catch (error) { log.warn({ event: "github.review_reconciliation_pending", itemId: item.id, err: error }); }
+      try { await reconcileObserved(github, item.id, item.payload.number, { subjectId: item.id }, context); }
+      catch (error) { log.warn({ event: "github.review_reconciliation_pending", subjectId: item.id, err: error }); }
     }
   }
   return added;
@@ -169,7 +169,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       continue;
     }
     if (item.workspaceId && getWorkspace(item.workspaceId)?.removedAt) {
-      db.update(items).set({ workspaceId: null }).where(eq(items.id, item.id)).run();
+      db.update(subjects).set({ workspaceId: null }).where(eq(subjects.id, item.id)).run();
       item.workspaceId = null;
     }
     if (item.kind === "issue") {

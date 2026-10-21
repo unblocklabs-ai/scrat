@@ -3,7 +3,8 @@
   "entry": [
     "src/{fetch,sync,enqueue,run-next,work,retry,cleanup,recover,recover-active,serve}.ts",
     "test/{integration.test,scenario,database-command}.mjs",
-    "deploy/prepare-tools.mjs"
+    "deploy/prepare-tools.mjs",
+    "deploy/migrate-subjects.mjs"
   ],
   "project": ["src/**/*.ts", "test/**/*.mjs", "deploy/**/*.mjs"]
 }

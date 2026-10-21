@@ -66,7 +66,7 @@ export async function buildAgentInput(options: {
   const report = repair ? db.select().from(runs).where(eq(runs.id, repair.assessmentRunId)).get()?.result?.text : undefined;
   if (repair && !report) throw new Error("Missing review report for self-repair");
   const failure = run.retryOfRunId ? db.select().from(runs).where(eq(runs.id, run.retryOfRunId)).get()?.error : undefined;
-  const prior = options.priorReviews ? priorReviewTexts(task.itemId) : undefined;
+  const prior = options.priorReviews ? priorReviewTexts(task.subjectId) : undefined;
   await Promise.all([
     writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),
     report && writeContext("review", "review.md", report),

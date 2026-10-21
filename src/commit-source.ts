@@ -3,10 +3,9 @@ import { config, getRepositoryPath } from "./config.ts";
 import { db } from "./db.ts";
 import { fetchRepository, git, isAncestor } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
-import { upsertItem } from "./items.ts";
 import { withOperation } from "./logging.ts";
 import { assertConfiguredRepository, remoteUrl } from "./repository.ts";
-import { sourceCursors } from "./schema.ts";
+import { sourceCursors, subjects } from "./schema.ts";
 import { enqueueTask, latestTask } from "./tasks.ts";
 
 const action = "review_base_change";
@@ -52,19 +51,16 @@ export async function pollCommits(repository = config.github.repository) {
       operation.log.warn({ event: "commits.cursor_rewound", branch, from: cursor.sha, to: base });
     }
     const commitCount = Number(await git(repositoryPath, ["rev-list", "--first-parent", "--count", `${previousSha}..${tip}`]));
-    const [author, subject] = (await git(repositoryPath, ["log", "-1", "--format=%an%x00%s", tip])).split("\0");
+    const [author, title] = (await git(repositoryPath, ["log", "-1", "--format=%an%x00%s", tip])).split("\0");
     operation.stage("enqueue");
-    const item = upsertItem({
-      source: "git", externalId: `commit:${branch}:${tip}`, kind: "commit",
-      payload: {
-        node_id: `commit:${branch}:${tip}`, number: 0, title: subject ?? "", html_url: `https://github.com/${repository}/commit/${tip}`,
-        state: "open", updated_at: new Date().toISOString(), user: { login: author ?? "" }, labels: [],
-      },
-    });
-    const existing = latestTask(item.id, action);
+    const subject = db.insert(subjects).values({
+      repository, kind: "commit", key: `${branch}:${tip}`,
+      metadata: { title: title ?? "", author: author ?? "", url: `https://github.com/${repository}/commit/${tip}` },
+    }).onConflictDoUpdate({ target: [subjects.repository, subjects.kind, subjects.key], set: { state: "open" } }).returning().get()!;
+    const existing = latestTask(subject.id, action);
     if (!existing) {
       enqueueTask({
-        itemId: item.id, action, reason: `${branch} moved to ${tip.slice(0, 7)}`,
+        subjectId: subject.id, action, reason: `${branch} moved to ${tip.slice(0, 7)}`,
         input: { source: "github_commits", kind: "commit", triggerKey: tip, sha: tip, previousSha, branch, commitCount, truncated: commitCount > maxRangeCommits },
       });
     }

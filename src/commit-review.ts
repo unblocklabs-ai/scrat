@@ -5,7 +5,7 @@ import { db } from "./db.ts";
 import { git } from "./git.ts";
 import { botName } from "./identity.ts";
 import type { startOperation } from "./logging.ts";
-import { items, runs, slackThreads } from "./schema.ts";
+import { runs, slackThreads, subjects } from "./schema.ts";
 import { escapeSlack, postMessage } from "./slack.ts";
 import { parseTriggerInput } from "./triggers.ts";
 
@@ -18,40 +18,46 @@ function commitInput(raw: Record<string, unknown>): CommitInput {
   return { sha, previousSha, branch, commitCount };
 }
 
-async function threadRoot(item: typeof items.$inferSelect, { sha, branch, commitCount }: CommitInput) {
-  const existing = db.select().from(slackThreads).where(eq(slackThreads.itemId, item.id)).get();
+export function commitMetadata({ metadata }: typeof subjects.$inferSelect) {
+  if (!metadata) throw new Error("Commit subject has no metadata");
+  return metadata;
+}
+
+async function threadRoot(subject: typeof subjects.$inferSelect, { sha, branch, commitCount }: CommitInput) {
+  const existing = db.select().from(slackThreads).where(eq(slackThreads.subjectId, subject.id)).get();
   if (existing) return existing;
   const { channel, startMessage } = config.actions.review_base_change;
+  const metadata = commitMetadata(subject);
   const values: Record<string, string> = {
-    sha, short_sha: sha.slice(0, 7), author: escapeSlack(item.payload.user?.login ?? ""), title: escapeSlack(item.payload.title),
-    url: item.payload.html_url, branch, count: String(commitCount), bot: botName,
+    sha, short_sha: sha.slice(0, 7), author: escapeSlack(metadata.author), title: escapeSlack(metadata.title),
+    url: metadata.url, branch, count: String(commitCount), bot: botName,
   };
   const text = startMessage.replaceAll(/\{\{(\w+)\}\}/g, (match, name: string) => Object.hasOwn(values, name) ? values[name]! : match);
   const ts = await postMessage({ channel, text });
-  return db.insert(slackThreads).values({ itemId: item.id, channel, ts }).returning().get();
+  return db.insert(slackThreads).values({ subjectId: subject.id, channel, ts }).returning().get();
 }
 
-export async function startCommitThread(item: typeof items.$inferSelect, rawInput: Record<string, unknown>, log: ReturnType<typeof startOperation>["log"]) {
+export async function startCommitThread(subject: typeof subjects.$inferSelect, rawInput: Record<string, unknown>, log: ReturnType<typeof startOperation>["log"]) {
   const input = commitInput(rawInput);
-  await threadRoot(item, input).catch((error: unknown) => { log.warn({ event: "slack.post_failed", err: error }); });
+  await threadRoot(subject, input).catch((error: unknown) => { log.warn({ event: "slack.post_failed", err: error }); });
   return input;
 }
 
-export async function describeCommit(repositoryPath: string, item: typeof items.$inferSelect, rawInput: Record<string, unknown>) {
+export async function describeCommit(repositoryPath: string, subject: typeof subjects.$inferSelect, rawInput: Record<string, unknown>) {
   const { sha, previousSha, branch } = commitInput(rawInput);
-  const [subject = "", body = ""] = (await git(repositoryPath, ["log", "-1", "--format=%s%x00%b", sha])).split("\0");
+  const [commitSubject = "", body = ""] = (await git(repositoryPath, ["log", "-1", "--format=%s%x00%b", sha])).split("\0");
   const diffPaths = (await git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", `${previousSha}..${sha}`])).split("\0").filter(Boolean);
   const evaluated: ReturnType<typeof evaluateContext> = {
     revision: sha, baseBranch: branch, headSha: undefined,
-    item: { number: 0, title: subject, body, url: item.payload.html_url }, comments: [], commentRevisions: [],
+    item: { number: 0, title: commitSubject, body, url: commitMetadata(subject).url }, comments: [], commentRevisions: [],
   };
   return { evaluated, diffPaths, diffBaseSha: previousSha };
 }
 
-export async function postCommitReply(item: typeof items.$inferSelect, run: typeof runs.$inferSelect) {
+export async function postCommitReply(subject: typeof subjects.$inferSelect, run: typeof runs.$inferSelect) {
   const input = commitInput(run.input);
   const saved = db.select().from(runs).where(eq(runs.id, run.id)).get()!;
   if (!saved.result) throw new Error("Run has no saved result to publish");
-  const thread = await threadRoot(item, input);
+  const thread = await threadRoot(subject, input);
   return postMessage({ channel: thread.channel, text: escapeSlack(saved.result.text), threadTs: thread.ts });
 }

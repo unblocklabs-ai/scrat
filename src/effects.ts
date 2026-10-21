@@ -14,7 +14,7 @@ import { isIssueComment, taskMarker } from "./markers.ts";
 import { observe } from "./observation.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
 import { remoteUrl } from "./repository.ts";
-import { items, runs, tasks } from "./schema.ts";
+import { runs, subjects, tasks } from "./schema.ts";
 import { getWorkspace, pushWorkspace } from "./workspaces.ts";
 
 type Run = typeof runs.$inferSelect;
@@ -37,7 +37,7 @@ type GithubEffectContext = EffectContext & {
 };
 
 type SlackEffectContext = EffectContext & {
-  item: typeof items.$inferSelect;
+  subject: typeof subjects.$inferSelect;
   run: Run;
 };
 
@@ -82,7 +82,7 @@ const pullRequest = {
     const publishedPr = pr;
     db.transaction((transaction) => {
       const created = upsertItem({ source: "github", externalId: publishedPr.node_id, kind: "pr", payload: publishedPr }, transaction);
-      transaction.update(items).set({ workspaceId: workspace.id }).where(eq(items.id, created.id)).run();
+      transaction.update(subjects).set({ workspaceId: workspace.id }).where(eq(subjects.id, created.id)).run();
       context.saveReceipt({ pullRequestNumber: publishedPr.number }, transaction);
     });
   },
@@ -112,13 +112,13 @@ const labels = {
 const prAssessment = {
   settlesRun: true,
   apply: ({ github, task, run, references }) =>
-    reconcilePrReview(github, task.itemId, run.context.item.number, references, { task, run }),
+    reconcilePrReview(github, task.subjectId, run.context.item.number, references, { task, run }),
 } satisfies Effect<GithubEffectContext>;
 
 const slackReply = {
   receipted: (publication) => Boolean(publication.slackReplyTs),
-  async apply({ item, run, saveReceipt }) {
-    saveReceipt({ slackReplyTs: await postCommitReply(item, run) });
+  async apply({ subject, run, saveReceipt }) {
+    saveReceipt({ slackReplyTs: await postCommitReply(subject, run) });
   },
 } satisfies Effect<SlackEffectContext>;
 

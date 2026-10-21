@@ -88,6 +88,7 @@ const scenarios = {
   commit_review_slack_down: "a failed root post still reviews and the reply creates the root, while a failed reply fails at publishing and retries without a new session or second root",
   commit_review_restart: "an interrupted commit review is recovered and retried with exactly one root and one reply",
   commit_review_isolation: "the commit review agent never sees the Slack token, reads base files and diffs against the previous SHA, and nothing is installed",
+  subjects_migration: "the subjects migration moves items, tasks, events and Slack threads to subject ids, keeps every row, refuses unmapped tasks and is a no-op the second time",
   database: "real PostgreSQL runs isolate databases, apply new migrations and remove resources",
 };
 

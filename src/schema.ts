@@ -14,13 +14,22 @@ export const githubSnapshots = sqliteTable("github_snapshots", {
   pullRequests: text("pull_requests", { mode: "json" }).$type<unknown[]>().notNull(),
 });
 
-export const items = sqliteTable("items", {
+export const subjects = sqliteTable("subjects", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
-  source: text("source", { enum: ["github", "git"] }).notNull(),
-  externalId: text("external_id").notNull(),
-  kind: text("kind", { enum: ["issue", "pr", "commit"] }).notNull(),
+  repository: text("repository").notNull(),
+  kind: text("kind", { enum: ["item", "commit"] }).notNull(),
+  key: text("key").notNull(),
   state: text("state", { enum: ["open", "closed"] }).notNull().default("open"),
   workspaceId: text("workspace_id").references(() => workspaces.id),
+  metadata: text("metadata", { mode: "json" }).$type<{ title: string; author: string; url: string }>(),
+  createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
+}, (table) => [unique().on(table.repository, table.kind, table.key)]);
+
+export const items = sqliteTable("items", {
+  id: text("id").primaryKey().references(() => subjects.id),
+  source: text("source", { enum: ["github"] }).notNull(),
+  externalId: text("external_id").notNull(),
+  kind: text("kind", { enum: ["issue", "pr"] }).notNull(),
   selfRepairCount: integer("self_repair_count").notNull().default(0),
   payload: text("payload", { mode: "json" })
     .$type<GithubItem>().notNull(),
@@ -28,7 +37,7 @@ export const items = sqliteTable("items", {
 
 export const tasks = sqliteTable("tasks", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
-  itemId: text("item_id").notNull().references(() => items.id),
+  subjectId: text("subject_id").notNull().references(() => subjects.id),
   action: text("action", { enum: actionIds }).notNull(),
   priority: integer("priority").notNull().default(0),
   reason: text("reason").notNull(),
@@ -39,8 +48,8 @@ export const tasks = sqliteTable("tasks", {
   }).notNull().default("queued"),
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
 }, (table) => [
-  uniqueIndex("tasks_queued_item_action_unique")
-    .on(table.itemId, table.action)
+  uniqueIndex("tasks_queued_subject_action_unique")
+    .on(table.subjectId, table.action)
     .where(sql`${table.status} = 'queued'`),
 ]);
 
@@ -114,7 +123,7 @@ export const sourceCursors = sqliteTable("source_cursors", {
 }, (table) => [primaryKey({ columns: [table.repository, table.action, table.branch] })]);
 
 export const slackThreads = sqliteTable("slack_threads", {
-  itemId: text("item_id").notNull().references(() => items.id).unique(),
+  subjectId: text("subject_id").notNull().references(() => subjects.id).unique(),
   channel: text("channel").notNull(),
   ts: text("ts").notNull(),
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
@@ -125,7 +134,7 @@ export const events = sqliteTable("events", {
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
   type: text("type").notNull(),
   operationId: text("operation_id"),
-  itemId: text("item_id").references(() => items.id),
+  subjectId: text("subject_id").references(() => subjects.id),
   taskId: text("task_id").references(() => tasks.id),
   runId: text("run_id").references(() => runs.id),
   data: text("data", { mode: "json" }).$type<Record<string, unknown>>().notNull(),

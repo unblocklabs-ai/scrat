@@ -30,15 +30,15 @@ function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeo
   }
 }
 
-async function reconcile(github: GitHubRepository, itemId: string, number: number, references: EventReferences, publication?: { task: Task; run: Run }, observed?: GithubContext) {
+async function reconcile(github: GitHubRepository, subjectId: string, number: number, references: EventReferences, publication?: { task: Task; run: Run }, observed?: GithubContext) {
   const current = observed ?? await github.fetchItemContext("pr", number);
-  const reviews = prReviewHistory(itemId);
+  const reviews = prReviewHistory(subjectId);
   const observation = observe(github.repository, current);
   const existing = canonicalComment(observation.own, reviews);
   const mainSha = await git(getRepositoryPath(), ["rev-parse", `refs/remotes/origin/${observation.baseBranch}`]);
   const state = await resolvePrReview(reviews, observation, mainSha);
   const desired = state.kind === "current" ? state.assessment : undefined;
-  const deliveryReferences = desired ? { ...references, itemId, taskId: desired.task.id, runId: desired.run.id } : references;
+  const deliveryReferences = desired ? { ...references, subjectId, taskId: desired.task.id, runId: desired.run.id } : references;
   let labels = observation.labels;
   const body = desired ? reviewBody(desired.result.text, desired.task.id) : undefined;
   const replacing = desired && existing?.body !== body;
@@ -69,8 +69,8 @@ async function reconcile(github: GitHubRepository, itemId: string, number: numbe
 export const serializePr = <T>(github: GitHubRepository, number: number, work: () => Promise<T>) =>
   serialized(pendingReviews, `${github.repository}#${number}`, work);
 
-export const reconcilePrReview = (github: GitHubRepository, itemId: string, number: number, references: EventReferences = {}, publication?: { task: Task; run: Run }) =>
-  serializePr(github, number, () => reconcile(github, itemId, number, references, publication));
+export const reconcilePrReview = (github: GitHubRepository, subjectId: string, number: number, references: EventReferences = {}, publication?: { task: Task; run: Run }) =>
+  serializePr(github, number, () => reconcile(github, subjectId, number, references, publication));
 
-export const reconcileObserved = (github: GitHubRepository, itemId: string, number: number, references: EventReferences, current: GithubContext) =>
-  reconcile(github, itemId, number, references, undefined, current);
+export const reconcileObserved = (github: GitHubRepository, subjectId: string, number: number, references: EventReferences, current: GithubContext) =>
+  reconcile(github, subjectId, number, references, undefined, current);

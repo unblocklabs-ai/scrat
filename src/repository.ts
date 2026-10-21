@@ -1,7 +1,8 @@
 import { eq } from "drizzle-orm";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
-import { items } from "./schema.ts";
+import { asItem } from "./items.ts";
+import { items, subjects } from "./schema.ts";
 
 export const remoteUrl = (repository: string) => `https://github.com/${repository}.git`;
 export const sameRepository = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -14,7 +15,8 @@ export function itemRepository(item: { payload: { html_url: string } }) {
 export function assertConfiguredRepository(repository: string) {
   if (!sameRepository(repository, config.github.repository)) throw new Error(`Scrat serves only ${config.github.repository}, not ${repository}`);
 }
-export function itemsInRepository(repository: string, source?: typeof items.$inferSelect.source) {
-  const rows = source ? db.select().from(items).where(eq(items.source, source)).all() : db.select().from(items).all();
-  return rows.filter((item) => sameRepository(itemRepository(item) ?? "", repository));
+export function itemsInRepository(repository: string) {
+  return db.select({ item: items, subject: subjects }).from(items).innerJoin(subjects, eq(items.id, subjects.id)).all()
+    .filter(({ subject }) => sameRepository(subject.repository, repository))
+    .map(({ item, subject }) => asItem(item, subject));
 }

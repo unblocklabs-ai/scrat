@@ -5,7 +5,7 @@ import { applyEffects, type EffectContext } from "./effects.ts";
 import type { EventReferences } from "./events.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
-import { items, runs, tasks } from "./schema.ts";
+import { runs, subjects, tasks } from "./schema.ts";
 import { getWorkspace } from "./workspaces.ts";
 
 function receiptContext(run: typeof runs.$inferSelect, references: EventReferences): EffectContext {
@@ -36,7 +36,7 @@ export async function publishRun(github: GitHubRepository, task: typeof tasks.$i
   return applyEffects(contract.publication, effectContext);
 }
 
-export function publishCommit(item: typeof items.$inferSelect, run: typeof runs.$inferSelect) {
+export function publishCommit(subject: typeof subjects.$inferSelect, run: typeof runs.$inferSelect) {
   const saved = db.select().from(runs).where(eq(runs.id, run.id)).get()!;
-  return applyEffects("slack-thread", { ...receiptContext(saved, {}), item, run });
+  return applyEffects("slack-thread", { ...receiptContext(saved, {}), subject, run });
 }

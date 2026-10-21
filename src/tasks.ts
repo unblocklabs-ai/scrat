@@ -3,7 +3,7 @@ import { and, asc, count, desc, eq, isNotNull, isNull, notExists, or, sql } from
 import { alias } from "drizzle-orm/sqlite-core";
 import { type Action, actionContracts, actionIds } from "./actions.ts";
 import { config, getActionConfig, isActionEnabled, thinkingLevels } from "./config.ts";
-import { itemRepository, sameRepository } from "./observation.ts";
+import { itemRepository, itemsInRepository, sameRepository } from "./repository.ts";
 import { db } from "./db.ts";
 import { describeError } from "./errors.ts";
 import { recordEvent } from "./events.ts";
@@ -84,10 +84,7 @@ type ManualEnqueueResult = { target: string; number?: number; itemId?: string; t
 export function enqueueManualTasks(action: string, targets: string[], priority?: number): ManualEnqueueResult[] {
   if (!isKnownAction(action)) throw new Error(`Unknown action: ${action}; expected one of ${actionIds.join(", ")}`);
   if (action === "address_review") throw new Error("address_review needs a review assessment and is queued automatically by sync");
-  const candidates = db.select().from(items).all().filter((item) => {
-    const repository = itemRepository(item);
-    return repository && sameRepository(repository, config.github.repository);
-  });
+  const candidates = itemsInRepository(config.github.repository);
   return targets.map((target): ManualEnqueueResult => {
     const item = /^\d+$/.test(target) ? candidates.find((candidate) => candidate.payload.number === Number(target))
       : candidates.find((candidate) => candidate.id === target);

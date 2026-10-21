@@ -8,7 +8,7 @@ import { logger, withOperation } from "./logging.ts";
 import { inlineCommentId, issueCommentId, reviewCommentId } from "./markers.ts";
 import type { GithubComment, GithubContext, GithubIssue, GithubItem, GithubPullRequest } from "./github-types.ts";
 import { errorStatus } from "./errors.ts";
-import { assertConfiguredRepository } from "./observation.ts";
+import { assertConfiguredRepository } from "./repository.ts";
 import { assertPublishable, basicCredential, childEnvironment } from "./secrets.ts";
 
 const permissions = {

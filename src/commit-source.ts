@@ -1,12 +1,13 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { config, getRepositoryPath } from "./config.ts";
 import { db } from "./db.ts";
 import { fetchRepository, git, isAncestor } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { upsertItem } from "./items.ts";
 import { withOperation } from "./logging.ts";
-import { assertConfiguredRepository, remoteUrl } from "./observation.ts";
-import { sourceCursors, tasks } from "./schema.ts";
+import { assertConfiguredRepository, remoteUrl } from "./repository.ts";
+import { sourceCursors } from "./schema.ts";
+import { latestTask } from "./github-tasks.ts";
 import { enqueueTask } from "./tasks.ts";
 
 const action = "review_base_change";
@@ -61,8 +62,7 @@ export async function pollCommits(repository = config.github.repository) {
         state: "open", updated_at: new Date().toISOString(), user: { login: author ?? "" }, labels: [],
       },
     });
-    const existing = db.select().from(tasks).where(and(eq(tasks.itemId, item.id), eq(tasks.action, action)))
-      .orderBy(desc(tasks.createdAt), desc(tasks.id)).limit(1).get();
+    const existing = latestTask(item.id, action);
     if (!existing) {
       enqueueTask({
         itemId: item.id, action, reason: `${branch} moved to ${tip.slice(0, 7)}`,

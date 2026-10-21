@@ -12,7 +12,8 @@ import { behindCleanly, createMergeCommit, fetchPullRequestHead, fetchRepository
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { startOperation } from "./logging.ts";
-import { assertConfiguredRepository, itemRepository, observe } from "./observation.ts";
+import { observe } from "./observation.ts";
+import { assertConfiguredRepository, itemRepository } from "./repository.ts";
 import { executePi } from "./pi.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { reviewPullRequest } from "./pr-review.ts";

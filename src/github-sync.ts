@@ -1,14 +1,14 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { config } from "./config.ts";
 import { errorStatus } from "./errors.ts";
 import { db } from "./db.ts";
 import { GitHubRepository } from "./github.ts";
 import { routeGithubTasks } from "./github-tasks.ts";
 import { upsertItem } from "./items.ts";
-import { assertConfiguredRepository, itemRepository, sameRepository } from "./observation.ts";
+import { assertConfiguredRepository, itemsInRepository } from "./repository.ts";
 import { withOperation } from "./logging.ts";
-import { githubSnapshots, items } from "./schema.ts";
+import { githubSnapshots } from "./schema.ts";
 import type { GithubContext } from "./github-types.ts";
 
 const snapshotsKept = 48;
@@ -18,8 +18,7 @@ export async function syncGitHub(repository = config.github.repository, queueTas
     operation.stage("repository");
     assertConfiguredRepository(repository);
     operation.stage("fetch");
-    const previousItems = db.select().from(items).where(eq(items.source, "github")).all()
-      .filter((item) => sameRepository(itemRepository(item) ?? "", repository));
+    const previousItems = itemsInRepository(repository, "github");
     const previous = new Map(previousItems.map((item) => [item.externalId, item]));
     const github = new GitHubRepository(repository);
     const { issues, pullRequests, snapshot } = await github.fetchOpenItems();
@@ -60,8 +59,7 @@ export async function syncGitHub(repository = config.github.repository, queueTas
         }
       }
       operation.stage("route_tasks");
-      const current = db.select().from(items).where(eq(items.source, "github")).all()
-        .filter((item) => sameRepository(itemRepository(item) ?? "", repository));
+      const current = itemsInRepository(repository, "github");
       queued = await routeGithubTasks(github, current, previous, operation.log);
     }
     operation.complete({ issues: issues.length, pullRequests: pullRequests.length, ...(queueTasks ? { queued } : {}) });

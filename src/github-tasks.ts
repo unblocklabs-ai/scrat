@@ -4,23 +4,29 @@ import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import { botSlug } from "./identity.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { acknowledgedTaskIds, commentKey } from "./markers.ts";
-import { observe, remoteUrl } from "./observation.ts";
+import { observe, type ItemObservation } from "./observation.ts";
+import { remoteUrl } from "./repository.ts";
 import { labelName, reconcileLabels } from "./labels.ts";
 import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts, isAncestor } from "./git.ts";
 import { rateLimitLow, rateLimitState, type GitHubRepository } from "./github.ts";
-import type { GithubContext } from "./github-types.ts";
+import type { GithubContext, GithubPullRequest } from "./github-types.ts";
 import { items, runs, tasks } from "./schema.ts";
 import { cancelQueuedTasks, enqueueTask } from "./tasks.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { reconcileObserved, serializePr } from "./pr-review-publication.ts";
-import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
+import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
 import { planIssueTasks, planPrMaintenance, planReview, planSelfRepair, lowGrades, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
 
 type Item = typeof items.$inferSelect;
 type Action = typeof tasks.$inferSelect.action;
+type SyncContext = {
+  github: GitHubRepository; repository: string; repositoryPath: string; remote: string;
+  env: Awaited<ReturnType<GitHubRepository["getGitEnvironment"]>>; log: Logger;
+};
+type PrMaintenanceFacts = Parameters<typeof planPrMaintenance>[0];
 
-function latestTask(itemId: string, action: Action) {
+export function latestTask(itemId: string, action: Action) {
   return db.select().from(tasks).where(and(eq(tasks.itemId, itemId), eq(tasks.action, action)))
     .orderBy(desc(tasks.createdAt), desc(tasks.id)).limit(1).get();
 }
@@ -46,11 +52,114 @@ function applyDecisions(itemId: string, decisions: RoutingDecision[]) {
 let syncRound = 0;
 const limitLogged = new Set<string>();
 
+async function cleanupClosedItem(item: Item) {
+  cancelQueuedTasks(item.id, "GitHub item closed");
+  if (item.kind !== "pr" || !item.workspaceId) return;
+  const active = db.select().from(runs).where(and(eq(runs.workspaceId, item.workspaceId), isNull(runs.finishedAt))).get();
+  const workspace = getWorkspace(item.workspaceId);
+  if (active || !workspace || workspace.removedAt) return;
+  const related = db.select().from(items).where(eq(items.workspaceId, workspace.id)).all();
+  for (const linked of related) cancelQueuedTasks(linked.id, "PR merged or closed");
+  try { await removeWorkspace(workspace.id, { itemId: item.id }); }
+  catch { }
+}
+
+async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observation: ItemObservation, pr: GithubPullRequest, mainSha: string): Promise<PrMaintenanceFacts> {
+  const { repositoryPath, remote, env } = ctx;
+  const headRef = await fetchPullRequestHead(repositoryPath, remote, pr.number, env);
+  const headSha = await git(repositoryPath, ["rev-parse", headRef]);
+  const conflicts = await hasConflicts(repositoryPath, mainSha, headSha);
+  const lastRun = db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
+    .where(and(eq(tasks.itemId, item.id), isNotNull(runs.finishedAt))).orderBy(desc(runs.sequence)).limit(1).get()?.run;
+  const stale = !conflicts && Boolean(lastRun?.error) && lastRun?.stage === "preparing" && lastRun.headSha === headSha
+    && !await isAncestor(repositoryPath, mainSha, headSha);
+  const acknowledged = new Set(observation.own.flatMap((comment) => acknowledgedTaskIds(comment.body)));
+  const handled = db.select({ run: runs, task: tasks }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
+    .where(and(eq(tasks.itemId, item.id), eq(tasks.action, "address_pr_feedback"))).all()
+    .filter(({ run, task }) => (!run.finishedAt && task.status === "running") || (run.finishedAt && !run.error)
+      || run.publication.commentId || acknowledged.has(task.id));
+  const consumed = new Set(handled.flatMap(({ run }) => run.context?.commentRevisions ?? strings(run.input.commentRevisions)));
+  const pending = observation.external.filter((comment) => !consumed.has(commentKey(comment)));
+  return {
+    conflicts, stale, mainSha, headSha, pendingComments: pending.map((comment) => commentKey(comment)),
+    conflictTask: latestTask(item.id, "resolve_conflicts"), feedbackTask: latestTask(item.id, "address_pr_feedback"),
+  };
+}
+
+async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation: ItemObservation, owned: boolean, state: PrReviewState, count: number) {
+  const { exhaustedLabel, maxSelfRepairs } = config.actions.address_review;
+  const latestRepair = latestTask(item.id, "address_review");
+  const repairActive = latestRepair?.status === "queued" || latestRepair?.status === "running";
+  if (!exhaustedLabel || !owned || state.kind !== "current" || repairActive) return;
+  const exhausted = lowGrades.includes(state.assessment.result.grade) && count >= maxSelfRepairs;
+  try {
+    await reconcileLabels(ctx.github, item.payload.number, { current: observation.labels, desired: exhausted ? [exhaustedLabel] : [], managed: [exhaustedLabel] }, { itemId: item.id });
+  } catch (error) { ctx.log.warn({ event: "self_repair.label_pending", itemId: item.id, err: error }); }
+}
+
+async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObservation, mainSha: string, owned: boolean) {
+  const latest = latestTask(item.id, "review_pr");
+  const reviews = prReviewHistory(item.id);
+  const attempt = reviews.find(({ task }) => task.id === latest?.id)?.run;
+  const state = await resolvePrReview(reviews, observation, mainSha);
+  let added = applyDecisions(item.id, planReview({ kind: "pr", state, latest, attempt, revision: observation.revision, mainSha }));
+  const { maxSelfRepairs } = config.actions.address_review;
+  const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
+  const repair = planSelfRepair({
+    owned, state, feedbackTask: latestTask(item.id, "address_pr_feedback"),
+    reviewTask: latestTask(item.id, "review_pr"), repairTask: latestTask(item.id, "address_review"), count, limit: maxSelfRepairs,
+  });
+  if (repair.limited && state.kind === "current" && !limitLogged.has(state.assessment.originId)) {
+    limitLogged.add(state.assessment.originId);
+    ctx.log.info({ event: "self_repair.limit_reached", itemId: item.id, limit: maxSelfRepairs }, "Self-repair limit reached");
+  }
+  added += applyDecisions(item.id, repair.decisions);
+  await reconcileExhaustedLabel(ctx, item, observation, owned, state, count);
+  return added;
+}
+
+async function routeIssueReview(item: Item, observation: ItemObservation, mainSha: string) {
+  const latest = latestTask(item.id, "review_issue");
+  const attempt = latest ? db.select().from(runs).where(eq(runs.taskId, latest.id))
+    .orderBy(desc(runs.sequence)).limit(1).get() : undefined;
+  const { revision } = observation;
+  if (reviewTrigger({ latest, attempt, revision, mainSha }).covered) return 0;
+  const completed = db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
+    .where(and(eq(tasks.itemId, item.id), eq(tasks.action, "review_issue"), eq(tasks.status, "completed"), isNull(runs.error)))
+    .orderBy(desc(runs.sequence)).limit(1).get()?.run;
+  const state = completed ? await freshness(savedEvaluation(completed), { ...observation, mainSha }, "relevant-paths") : undefined;
+  return applyDecisions(item.id, planReview({ kind: "issue", completed, freshness: state, latest, attempt, revision, mainSha }));
+}
+
+async function routeObserved(ctx: SyncContext, item: Item, context: GithubContext, defaultBaseSha: string) {
+  if (context.item.state !== "open") return 0;
+  const { github, repository, repositoryPath, remote, env, log } = ctx;
+  const observation = observe(repository, context);
+  const mainSha = observation.kind === "pr" && observation.baseBranch !== config.github.baseBranch
+    ? await fetchRepository(repositoryPath, remote, observation.baseBranch, env) : defaultBaseSha;
+  const owned = item.kind === "pr" && isBotLogin(context.item.user?.login);
+  let added = 0;
+  if (owned && "head" in context.item) {
+    if (context.item.head.repo?.full_name !== repository) return added;
+    added += applyDecisions(item.id, planPrMaintenance(await gatherPrMaintenanceFacts(ctx, item, observation, context.item, mainSha)));
+  }
+  try {
+    added += item.kind === "pr" ? await routePrReview(ctx, item, observation, mainSha, owned) : await routeIssueReview(item, observation, mainSha);
+  } finally {
+    if (item.kind === "pr") {
+      try { await reconcileObserved(github, item.id, item.payload.number, { itemId: item.id }, context); }
+      catch (error) { log.warn({ event: "github.review_reconciliation_pending", itemId: item.id, err: error }); }
+    }
+  }
+  return added;
+}
+
 export async function routeGithubTasks(github: GitHubRepository, current: Item[], previous: Map<string, Item>, log: Logger) {
   const { repository } = github;
   const repositoryPath = getRepositoryPath();
   const remote = remoteUrl(repository);
   const env = await github.getGitEnvironment();
+  const ctx: SyncContext = { github, repository, repositoryPath, remote, env, log };
   const defaultBaseSha = await fetchRepository(repositoryPath, remote, config.github.baseBranch, env);
   const implemented = new Set(current.filter((item) => item.kind === "pr" && item.state === "open")
     .flatMap((item) => [...(item.payload.body ?? "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi)]
@@ -61,97 +170,9 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
   const reviewable = ordered.filter((item) => item.state === "open" && item.kind === "issue" && !hasScratLabel(item));
   const contexts = await github.fetchItemContexts(reviewable.map((item) => ({ kind: "issue", number: item.payload.number, item: item.payload })), { defer: true });
   const issueContexts = new Map(reviewable.map((item, index) => [item.id, contexts[index]]));
-  const routeObserved = async (item: Item, context: GithubContext) => {
-    let mainSha = defaultBaseSha, added = 0;
-    if (context.item.state !== "open") return added;
-    const observation = observe(repository, context);
-    if (observation.kind === "pr" && observation.baseBranch !== config.github.baseBranch) {
-      mainSha = await fetchRepository(repositoryPath, remote, observation.baseBranch, env);
-    }
-    const { external: comments, revision } = observation;
-    const owned = item.kind === "pr" && isBotLogin(context.item.user?.login);
-    if (owned && "head" in context.item) {
-      const pr = context.item;
-      if (pr.head.repo?.full_name !== repository) return added;
-      const headRef = await fetchPullRequestHead(repositoryPath, remote, pr.number, env);
-      const headSha = await git(repositoryPath, ["rev-parse", headRef]);
-      const conflicts = await hasConflicts(repositoryPath, mainSha, headSha);
-      const lastRun = db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-        .where(and(eq(tasks.itemId, item.id), isNotNull(runs.finishedAt))).orderBy(desc(runs.sequence)).limit(1).get()?.run;
-      const stale = !conflicts && Boolean(lastRun?.error) && lastRun?.stage === "preparing" && lastRun.headSha === headSha
-        && !await isAncestor(repositoryPath, mainSha, headSha);
-      const acknowledged = new Set(observation.own.flatMap((comment) => acknowledgedTaskIds(comment.body)));
-      const handled = db.select({ run: runs, task: tasks }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-        .where(and(eq(tasks.itemId, item.id), eq(tasks.action, "address_pr_feedback"))).all()
-        .filter(({ run, task }) => (!run.finishedAt && task.status === "running") || (run.finishedAt && !run.error)
-          || run.publication.commentId || acknowledged.has(task.id));
-      const consumed = new Set(handled.flatMap(({ run }) => run.context?.commentRevisions ?? strings(run.input.commentRevisions)));
-      const pending = comments.filter((comment) => !consumed.has(commentKey(comment)));
-      added += applyDecisions(item.id, planPrMaintenance({
-        conflicts, stale, mainSha, headSha, pendingComments: pending.map((comment) => commentKey(comment)),
-        conflictTask: latestTask(item.id, "resolve_conflicts"), feedbackTask: latestTask(item.id, "address_pr_feedback"),
-      }));
-    }
-    try {
-      const action = item.kind === "issue" ? "review_issue" : "review_pr";
-      const latest = latestTask(item.id, action);
-      const reviews = item.kind === "pr" ? prReviewHistory(item.id) : undefined;
-      const attempt = reviews ? reviews.find(({ task }) => task.id === latest?.id)?.run
-        : latest ? db.select().from(runs).where(eq(runs.taskId, latest.id))
-          .orderBy(desc(runs.sequence)).limit(1).get() : undefined;
-      if (reviews) {
-        const state = await resolvePrReview(reviews, observation, mainSha);
-        added += applyDecisions(item.id, planReview({ kind: "pr", state, latest, attempt, revision, mainSha }));
-        const { maxSelfRepairs } = config.actions.address_review;
-        const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
-        const repairTask = latestTask(item.id, "address_review");
-        const repair = planSelfRepair({
-          owned, state, feedbackTask: latestTask(item.id, "address_pr_feedback"),
-          reviewTask: latestTask(item.id, "review_pr"), repairTask, count, limit: maxSelfRepairs,
-        });
-        if (repair.limited && state.kind === "current" && !limitLogged.has(state.assessment.originId)) {
-          limitLogged.add(state.assessment.originId);
-          log.info({ event: "self_repair.limit_reached", itemId: item.id, limit: maxSelfRepairs }, "Self-repair limit reached");
-        }
-        added += applyDecisions(item.id, repair.decisions);
-        const { exhaustedLabel } = config.actions.address_review;
-        const latestRepair = latestTask(item.id, "address_review");
-        const repairActive = latestRepair?.status === "queued" || latestRepair?.status === "running";
-        if (exhaustedLabel && owned && state.kind === "current" && !repairActive) {
-          const exhausted = lowGrades.includes(state.assessment.result.grade) && count >= maxSelfRepairs;
-          try {
-            await reconcileLabels(github, item.payload.number, { current: observation.labels, desired: exhausted ? [exhaustedLabel] : [], managed: [exhaustedLabel] }, { itemId: item.id });
-          } catch (error) { log.warn({ event: "self_repair.label_pending", itemId: item.id, err: error }); }
-        }
-      } else {
-        if (reviewTrigger({ latest, attempt, revision, mainSha }).covered) return added;
-        const completed = db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-          .where(and(eq(tasks.itemId, item.id), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
-          .orderBy(desc(runs.sequence)).limit(1).get()?.run;
-        const state = completed ? await freshness(savedEvaluation(completed), { ...observation, mainSha }, "relevant-paths") : undefined;
-        added += applyDecisions(item.id, planReview({ kind: "issue", completed, freshness: state, latest, attempt, revision, mainSha }));
-      }
-    } finally {
-      if (item.kind === "pr") {
-        try { await reconcileObserved(github, item.id, item.payload.number, { itemId: item.id }, context); }
-        catch (error) { log.warn({ event: "github.review_reconciliation_pending", itemId: item.id, err: error }); }
-      }
-    }
-    return added;
-  };
   for (const item of ordered) {
     if (item.state === "closed") {
-      cancelQueuedTasks(item.id, "GitHub item closed");
-      if (item.kind === "pr" && item.workspaceId) {
-        const active = db.select().from(runs).where(and(eq(runs.workspaceId, item.workspaceId), isNull(runs.finishedAt))).get();
-        const workspace = getWorkspace(item.workspaceId);
-        if (!active && workspace && !workspace.removedAt) {
-          const related = db.select().from(items).where(eq(items.workspaceId, workspace.id)).all();
-          for (const linked of related) cancelQueuedTasks(linked.id, "PR merged or closed");
-          try { await removeWorkspace(workspace.id, { itemId: item.id }); }
-          catch { }
-        }
-      }
+      await cleanupClosedItem(item);
       continue;
     }
     if (item.workspaceId && getWorkspace(item.workspaceId)?.removedAt) {
@@ -167,15 +188,13 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       });
       queued += applyDecisions(item.id, plan.decisions);
       if (!plan.review) continue;
-    }
-    if (item.kind === "issue") {
       const context = issueContexts.get(item.id);
-      if (context) queued += await routeObserved(item, context);
+      if (context) queued += await routeObserved(ctx, item, context, defaultBaseSha);
       else deferred++;
     } else {
       queued += await serializePr(github, item.payload.number, async () => {
         if (rateLimitLow()) { deferred++; return 0; }
-        return routeObserved(item, await github.fetchItemContext("pr", item.payload.number));
+        return routeObserved(ctx, item, await github.fetchItemContext("pr", item.payload.number), defaultBaseSha);
       });
     }
   }

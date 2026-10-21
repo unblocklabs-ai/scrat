@@ -30,7 +30,7 @@ Requires Node.js **22.19+**, Git, and the tools used by the target repository's 
 
 1. Run `npm ci`.
 2. Edit `scrat.config.json`: GitHub repository/App installation, model provider, action skills, concurrency, and workspace preparation/validation commands.
-3. Create an untracked `.env` containing `CODEX_LB_API_KEY` and the GitHub credential for the chosen `github.auth` mode: `GITHUB_APP_PRIVATE_KEY` (default `"app"`; install the GitHub App on the target repository with the necessary contents, issues, and pull-request permissions) or `GITHUB_PAT` (`"pat"`; see GitHub authentication below).
+3. Create an untracked `.env` containing `CODEX_LB_API_KEY` and the GitHub credential for the chosen `github.auth` mode: `GITHUB_APP_PRIVATE_KEY` (default `"app"`; install the GitHub App on the target repository with the necessary contents, issues, and pull-request permissions) or `GITHUB_PAT` (`"pat"`; see GitHub authentication below). Add `SLACK_BOT_TOKEN` when `review_base_change` is enabled (see Slack bot below).
 4. Initialize the local schema and start the service:
 
    ```sh
@@ -183,6 +183,58 @@ Execution mode, acceptance rules, and publication behavior live in `src/actions.
 | `exhaustedLabel` | `address_review` only, optional: label added to a Scrat PR whose current review is graded C or lower once `maxSelfRepairs` is reached, and removed when its current review grades better. `null` or `""` (e.g. in `scrat.local.json`) disables it; GitHub creates the label if it is missing. A queued repair counts toward `maxSelfRepairs` even if it is cancelled before it runs, so the label can appear before two repairs actually ran. |
 
 The checked-in configuration currently uses six task slots and three validation slots (sized for a 24 GB host, with the service capped at `MemoryMax=20G`), priorities **PR 100 > implementation/maintenance 60 > issue 10**, and a Sol-high/DeepSeek-high review panel with Sol-high consolidation. These are configurable values, not built-in limits or model choices.
+
+### Optional actions
+
+An action with an `enabled` key runs only when the key is not `false`. The six actions above have no `enabled` key and are always on. `review_base_change` defaults to `false` in `scrat.config.json`; a deployment turns it on in `scrat.local.json`:
+
+```json
+{ "actions": { "review_base_change": { "enabled": true, "channel": "C0123456789" } } }
+```
+
+Disabling an action stops its queued tasks from being claimed. For a disabled action, startup skips the skill file check and the settings checks.
+
+### Base branch review
+
+`review_base_change` reviews each update to `github.baseBranch` and reports the review in Slack. It runs on the `github.fetchIntervalSeconds` interval, and at startup, and queues one review per push range: from the last seen tip to the new tip, not one per commit. Scrat's own merged commits are reviewed too; there is no author filter.
+
+For each review, Scrat posts `startMessage` to the channel as the opening message, then replies in that thread with the review: at most two short paragraphs, and at most 3,000 characters.
+
+The agent receives the commit messages, the changed paths and the diff for the range. It has read-only tools, including `read_base` for the commit before the range. It does not install dependencies, run validation, open a PR or post to Slack, and it never sees the Slack token.
+
+| Setting under `actions.review_base_change` | Purpose |
+| --- | --- |
+| `enabled` | `false` by default. Set `true` in `scrat.local.json` to turn the action on. |
+| `agent` | `single` (default) runs one review session. `panel` runs the two `reviewers` as in PR review, and `provider` and `model` consolidate them into one reply. |
+| `reviewers` | Empty by default. Required with exactly two entries when `agent` is `panel`; each takes `provider`, `model` and `thinkingLevel`. |
+| `branch` | Must equal `github.baseBranch`; checked at startup. |
+| `channel` | Slack channel ID to post in. Required when enabled, and the bot must be a member of it. |
+| `maxRangeCommits` | Default 50. A range with more first-parent commits is recorded on its task as `truncated`. The review still covers the whole range. |
+| `startMessage` | Opening message template. Variables: `{{sha}}` (tip commit), `{{short_sha}}`, `{{author}}` (commit author name), `{{title}}` (commit subject), `{{url}}`, `{{branch}}`, `{{count}}` (commits in the range) and `{{bot}}` (`github.botName`). Any other `{{name}}` stops startup. |
+| `priority`, `skill`, `provider`, `model`, `thinkingLevel` | As in the table above. Priority defaults to 30, below implementation and maintenance tasks. |
+
+Author and title are escaped for Slack. Messages do not unfurl links or ping users by name.
+
+On the first run after enabling, Scrat records the current tip and reviews nothing. Disabling deletes that record, so enabling again starts from the new tip and does not review the commits pushed while the action was off.
+
+If the recorded tip is no longer an ancestor of the new tip (a force-push), Scrat reviews from the merge base of the two when the old tip is still in the clone. A new tip behind the recorded one, or one with no merge base, starts again from the new tip without a review. These cases are logged as `commits.cursor_rewound` and `commits.cursor_reset`.
+
+Failures:
+
+- Slack is unreachable when the run starts: Scrat logs `slack.post_failed` and runs the review anyway. The opening message is posted with the reply.
+- Slack is unreachable when the reply is posted: the run fails at publishing. `npm run retry -- <task-id>` reuses the saved review and posts only the reply to the thread, without running the agent again.
+- Slack has no idempotency key. A crash after Slack accepts a message but before Scrat records its timestamp can post that message again on retry, either the opening message or the reply.
+
+### Slack bot
+
+`review_base_change` posts through a Slack bot:
+
+1. Create a Slack app in the workspace, from scratch.
+2. Under OAuth & Permissions, add the bot token scope `chat:write`, then install the app to the workspace.
+3. Copy the Bot User OAuth Token (`xoxb-...`) into `.env` as `SLACK_BOT_TOKEN=xoxb-...`.
+4. Invite the bot to the channel (`/invite @<bot name>`) and set `actions.review_base_change.channel` to the channel's ID.
+
+When the action is enabled, startup calls Slack's `auth.test` with the token, and a failure stops startup. The token comes only from the environment, never from `scrat.config.json`. Scrat redacts it from logs and errors, refuses to publish text that contains it, and does not pass it to agents or workspace commands.
 
 ## Project layout
 

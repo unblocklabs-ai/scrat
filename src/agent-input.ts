@@ -1,20 +1,17 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { eq } from "drizzle-orm";
 import { actionContracts } from "./actions.ts";
-import { db } from "./db.ts";
 import type { ErrorDetails } from "./errors.ts";
 import { git } from "./git.ts";
 import { commentKey, parseCommentKey } from "./markers.ts";
 import type { ItemObservation } from "./observation.ts";
 import { priorReviewTexts } from "./pr-assessment.ts";
-import { runs, tasks } from "./schema.ts";
+import { getRun } from "./run-history.ts";
+import type { Run, Task } from "./schema.ts";
 import { parseTriggerInput } from "./triggers.ts";
 
 const inlineDiffPaths = 200;
 
-type Run = typeof runs.$inferSelect;
-type Task = typeof tasks.$inferSelect;
 
 export async function readDiffScope(repositoryPath: string, mainSha: string, preparedHead: string, isPullRequest: boolean) {
   const [diffBaseSha, diffPaths] = await Promise.all([
@@ -63,9 +60,9 @@ export async function buildAgentInput(options: {
     await writeFile(files[key], content);
   };
   const repair = trigger.kind === "low_grade" ? trigger : undefined;
-  const report = repair ? db.select().from(runs).where(eq(runs.id, repair.assessmentRunId)).get()?.result?.text : undefined;
+  const report = repair ? getRun(repair.assessmentRunId)?.result?.text : undefined;
   if (repair && !report) throw new Error("Missing review report for self-repair");
-  const failure = run.retryOfRunId ? db.select().from(runs).where(eq(runs.id, run.retryOfRunId)).get()?.error : undefined;
+  const failure = run.retryOfRunId ? getRun(run.retryOfRunId)?.error : undefined;
   const prior = options.priorReviews ? priorReviewTexts(task.subjectId) : undefined;
   await Promise.all([
     writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),

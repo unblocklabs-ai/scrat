@@ -1,4 +1,4 @@
-import { and, desc, eq, isNotNull, isNull } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
 import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import { botSlug } from "./identity.ts";
@@ -12,11 +12,12 @@ import { db } from "./db.ts";
 import { fetchPullRequestHead, fetchRepository, git, hasConflicts, isAncestor } from "./git.ts";
 import { rateLimitLow, rateLimitState, type GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
-import { items, runs, subjects, tasks } from "./schema.ts";
+import { items, runs, subjects } from "./schema.ts";
 import { cancelQueuedTasks, enqueueTask, latestTask } from "./tasks.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { reconcileObserved, serializePr } from "./pr-review-publication.ts";
-import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
+import { completedRunsOfAction, latestFinishedRun, latestRunOfTask, runHistory } from "./run-history.ts";
+import { resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
 import { planIssueTasks, planPrMaintenance, planReview, planSelfRepair, lowGrades, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
 
 type SyncContext = {
@@ -58,13 +59,11 @@ async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observatio
   const headRef = await fetchPullRequestHead(repositoryPath, remote, pr.number, env);
   const headSha = await git(repositoryPath, ["rev-parse", headRef]);
   const conflicts = await hasConflicts(repositoryPath, mainSha, headSha);
-  const lastRun = db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.subjectId, item.id), isNotNull(runs.finishedAt))).orderBy(desc(runs.sequence)).limit(1).get()?.run;
+  const lastRun = latestFinishedRun(item.id);
   const stale = !conflicts && Boolean(lastRun?.error) && lastRun?.stage === "preparing" && lastRun.headSha === headSha
     && !await isAncestor(repositoryPath, mainSha, headSha);
   const acknowledged = new Set(observation.own.flatMap((comment) => acknowledgedTaskIds(comment.body)));
-  const handled = db.select({ run: runs, task: tasks }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.subjectId, item.id), eq(tasks.action, "address_pr_feedback"))).all()
+  const handled = runHistory(item.id, "address_pr_feedback")
     .filter(({ run, task }) => (!run.finishedAt && task.status === "running") || (run.finishedAt && !run.error)
       || run.publication.commentId || acknowledged.has(task.id));
   const consumed = new Set(handled.flatMap(({ run }) => {
@@ -92,7 +91,7 @@ async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation
 
 async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObservation, mainSha: string, owned: boolean) {
   const latest = latestTask(item.id, "review_pr");
-  const reviews = prReviewHistory(item.id);
+  const reviews = runHistory(item.id, "review_pr");
   const attempt = reviews.find(({ task }) => task.id === latest?.id)?.run;
   const state = await resolvePrReview(reviews, observation, mainSha);
   let added = applyDecisions(item.id, planReview({ kind: "pr", state, latest, attempt, revision: observation.revision, mainSha }));
@@ -113,13 +112,10 @@ async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObse
 
 async function routeIssueReview(item: Item, observation: ItemObservation, mainSha: string) {
   const latest = latestTask(item.id, "review_issue");
-  const attempt = latest ? db.select().from(runs).where(eq(runs.taskId, latest.id))
-    .orderBy(desc(runs.sequence)).limit(1).get() : undefined;
+  const attempt = latest ? latestRunOfTask(latest.id) : undefined;
   const { revision } = observation;
   if (reviewTrigger({ latest, attempt, revision, mainSha }).covered) return 0;
-  const completed = db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.subjectId, item.id), eq(tasks.action, "review_issue"), eq(tasks.status, "completed"), isNull(runs.error)))
-    .orderBy(desc(runs.sequence)).limit(1).get()?.run;
+  const completed = completedRunsOfAction(item.id, "review_issue")[0];
   const state = completed ? await freshness(savedEvaluation(completed), { ...observation, mainSha }, "relevant-paths") : undefined;
   return applyDecisions(item.id, planReview({ kind: "issue", completed, freshness: state, latest, attempt, revision, mainSha }));
 }

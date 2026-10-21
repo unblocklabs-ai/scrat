@@ -8,9 +8,10 @@ import { db } from "./db.ts";
 import { describeError } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { withOperationSync } from "./logging.ts";
-import { hasPublicationSnapshot, hasValidationCheckpoint } from "./results.ts";
+import { entryStage, hasPublicationSnapshot, hasValidationCheckpoint } from "./results.ts";
+import { latestRunOfTask } from "./run-history.ts";
 import { asItem } from "./items.ts";
-import { items, runs, subjects, tasks } from "./schema.ts";
+import { items, runs, subjects, tasks, type Task, type Subject } from "./schema.ts";
 import { isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
 import { signalWork } from "./work-signal.ts";
 
@@ -19,14 +20,9 @@ export function latestTask(subjectId: string, action: Action) {
     .orderBy(desc(tasks.createdAt), desc(tasks.id)).limit(1).get();
 }
 
-function latestRun(taskId: string, database: Pick<typeof db, "select">) {
-  return database.select().from(runs).where(eq(runs.taskId, taskId))
-    .orderBy(sql`${runs.sequence} is null desc`, desc(runs.sequence)).limit(1).get();
-}
-
 const isKnownAction = (action: string): action is Action => (actionIds as readonly string[]).includes(action);
 
-function checkClaimable({ task, subject }: { task: typeof tasks.$inferSelect; subject: typeof subjects.$inferSelect }, database: Pick<typeof db, "select">) {
+function checkClaimable({ task, subject }: { task: Task; subject: Subject }, database: Pick<typeof db, "select">) {
   if (!isKnownAction(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   if (!isActionEnabled(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   const actionConfig = config.actions[task.action];
@@ -39,7 +35,7 @@ function checkClaimable({ task, subject }: { task: typeof tasks.$inferSelect; su
   const { repository } = subject;
   if (!repository) return { ok: false as const, reason: "Subject has no parseable repository" };
   if (!sameRepository(repository, config.github.repository)) return { ok: false as const, reason: `Subject belongs to ${repository}, not ${config.github.repository}` };
-  const previousRun = latestRun(task.id, database);
+  const previousRun = latestRunOfTask(task.id, database);
   if (previousRun && previousRun.sequence === null) return { ok: false as const, reason: `Missing run sequence: ${previousRun.id}` };
   return { ok: true as const, previousRun, trigger };
 }
@@ -152,7 +148,7 @@ export function claimTask() {
       reviewers: resume ? resume.reviewers : (retry?.reviewers ?? actionSettings.reviewers)
         .map(({ provider, model, thinkingLevel }) => ({ provider, model, thinkingLevel })),
       workspaceId: resume?.workspaceId ?? next.subject.workspaceId,
-      stage: validationOnly ? "validating" : publicationResume ? "publishing" : "preparing",
+      stage: entryStage(retry, next.task.retryMode),
       ...(resume ? {
         context: resume.context, result: resume.result, mainSha: resume.mainSha, headSha: resume.headSha,
         piSessionId: resume.piSessionId, piSessionFile: resume.piSessionFile,
@@ -173,7 +169,7 @@ export function claimTask() {
   }, { behavior: "immediate" });
 }
 
-export function retryTask(taskId: string, mode: typeof tasks.$inferSelect.retryMode = "repair") {
+export function retryTask(taskId: string, mode: Task["retryMode"] = "repair") {
   return withOperationSync("task.retry", { taskId }, (operation) => {
     const task = db.transaction((transaction) => {
       const failed = transaction.select().from(tasks).where(and(eq(tasks.id, taskId), eq(tasks.status, "failed"))).get();
@@ -183,7 +179,7 @@ export function retryTask(taskId: string, mode: typeof tasks.$inferSelect.retryM
       )).get();
       if (queued) throw new Error(`A queued task already exists for this subject/action: ${queued.id}`);
       if (mode === "validation") {
-        const previous = latestRun(taskId, transaction);
+        const previous = latestRunOfTask(taskId, transaction);
         if (!isKnownAction(failed.action) || actionContracts[failed.action].mode !== "change" || !hasValidationCheckpoint(previous)
           || !isDeepStrictEqual(previous.input, failed.input)) {
           throw new Error("Validation-only retry requires an unchanged task input and a complete agent checkpoint from a failed validation; use normal retry to repair");
@@ -220,7 +216,7 @@ export function finishRun(runId: string, outcome: { status: "completed" } | { st
   return finished;
 }
 
-export function cancelQueuedTasks(subjectId: string, reason: string, action?: typeof tasks.$inferSelect.action, keepManual = false) {
+export function cancelQueuedTasks(subjectId: string, reason: string, action?: Task["action"], keepManual = false) {
   return db.transaction((transaction) => {
     const cancelled = transaction.update(tasks).set({ status: "cancelled" }).where(and(
       eq(tasks.subjectId, subjectId), eq(tasks.status, "queued"), action ? eq(tasks.action, action) : undefined,

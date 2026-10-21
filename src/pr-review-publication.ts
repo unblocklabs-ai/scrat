@@ -1,7 +1,5 @@
-import { eq } from "drizzle-orm";
 import { upsertComment } from "./comments.ts";
 import { getRepositoryPath } from "./config.ts";
-import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
 import { git } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
@@ -9,19 +7,18 @@ import type { GithubContext } from "./github-types.ts";
 import { gradeLabels, reconcileLabels } from "./labels.ts";
 import { isIssueComment, issueCommentId, reviewMarker, taskMarker } from "./markers.ts";
 import { observe, type ItemObservation } from "./observation.ts";
-import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
-import { runs, tasks } from "./schema.ts";
+import { resolvePrReview } from "./pr-assessment.ts";
+import { runHistory, updateRun } from "./run-history.ts";
+import type { Run, Task } from "./schema.ts";
 import { serialized } from "./single-flight.ts";
 
-type Run = typeof runs.$inferSelect;
-type Task = typeof tasks.$inferSelect;
 const pendingReviews = new Map<string, Promise<unknown>>();
 
 function reviewBody(text: string, taskId: string) {
   return `${text}\n\n${reviewMarker}\n${taskMarker(taskId)}`;
 }
 
-function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeof prReviewHistory>) {
+function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeof runHistory>) {
   const issueComments = own.filter(isIssueComment);
   for (const { run, task } of reviews) {
     const existing = issueComments.findLast((comment) => comment.id === issueCommentId(run.publication.commentId)
@@ -32,7 +29,7 @@ function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeo
 
 async function reconcile(github: GitHubRepository, subjectId: string, number: number, references: EventReferences, publication?: { task: Task; run: Run }, observed?: GithubContext) {
   const current = observed ?? await github.fetchItemContext("pr", number);
-  const reviews = prReviewHistory(subjectId);
+  const reviews = runHistory(subjectId, "review_pr");
   const observation = observe(github.repository, current);
   const existing = canonicalComment(observation.own, reviews);
   const mainSha = await git(getRepositoryPath(), ["rev-parse", `refs/remotes/origin/${observation.baseBranch}`]);
@@ -53,17 +50,15 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
     const { run } = desired;
     const commentId = await upsertComment(github, number, existing, body, deliveryReferences);
     run.publication = { ...run.publication, commentId };
-    db.update(runs).set({ publication: run.publication }).where(eq(runs.id, run.id)).run();
+    updateRun(run.id, { publication: run.publication });
   }
 
   const grade = desired?.result.grade;
   await reconcileLabels(github, number, {
     current: labels, desired: grade ? [gradeLabels[grade]] : [], managed: Object.values(gradeLabels),
   }, deliveryReferences);
-  if (desired) db.update(runs).set({ publication: { ...desired.run.publication, status: "published" } })
-    .where(eq(runs.id, desired.run.id)).run();
-  if (publication && publication.run.id !== desired?.run.id) db.update(runs).set({ publication: { ...publication.run.publication, status: "not_needed" } })
-    .where(eq(runs.id, publication.run.id)).run();
+  if (desired) updateRun(desired.run.id, { publication: { ...desired.run.publication, status: "published" } });
+  if (publication && publication.run.id !== desired?.run.id) updateRun(publication.run.id, { publication: { ...publication.run.publication, status: "not_needed" } });
 }
 
 export const serializePr = <T>(github: GitHubRepository, number: number, work: () => Promise<T>) =>

@@ -1,22 +1,14 @@
-import { and, desc, eq } from "drizzle-orm";
-import { db } from "./db.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import type { ItemObservation } from "./observation.ts";
 import { hasPublicationSnapshot } from "./results.ts";
-import { runs, tasks } from "./schema.ts";
+import { runHistory } from "./run-history.ts";
+import type { Run } from "./schema.ts";
 
-export function prReviewHistory(subjectId: string) {
-  return db.select({ run: runs, task: tasks }).from(runs)
-    .innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, "review_pr")))
-    .orderBy(desc(runs.sequence)).all();
-}
-
-type History = ReturnType<typeof prReviewHistory>;
+type History = ReturnType<typeof runHistory>;
 
 function selectAssessment(history: History) {
   const byId = new Map(history.map((entry) => [entry.run.id, entry]));
-  let selected: (History[number] & { result: NonNullable<typeof runs.$inferSelect.result>; originSequence: number; originId: string }) | undefined;
+  let selected: (History[number] & { result: NonNullable<Run["result"]>; originSequence: number; originId: string }) | undefined;
   for (const entry of history) {
     const { run } = entry;
     if (!hasPublicationSnapshot(run) || run.result.outcome !== "complete" || run.publication.status === "not_needed") continue;
@@ -41,12 +33,9 @@ function selectAssessment(history: History) {
 }
 
 export function priorReviewTexts(subjectId: string) {
-  const assessment = selectAssessment(prReviewHistory(subjectId));
+  const assessment = selectAssessment(runHistory(subjectId, "review_pr"));
   if (!assessment) return undefined;
-  const repair = db.select({ run: runs }).from(runs)
-    .innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, "address_review")))
-    .orderBy(desc(runs.sequence)).all()
+  const repair = runHistory(subjectId, "address_review")
     .find(({ run }) => run.result?.outcome === "complete" && (run.sequence ?? 0) > assessment.run.sequence!)?.run.result?.text;
   return { assessment: assessment.result.text, repair };
 }

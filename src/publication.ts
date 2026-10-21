@@ -1,26 +1,26 @@
-import { eq } from "drizzle-orm";
 import { actionContracts } from "./actions.ts";
 import { db } from "./db.ts";
 import { applyEffects, type EffectContext } from "./effects.ts";
 import type { EventReferences } from "./events.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
-import { runs, subjects, tasks } from "./schema.ts";
+import { getRun, updateRun } from "./run-history.ts";
+import type { Run, Task, Subject } from "./schema.ts";
 import { getWorkspace } from "./workspaces.ts";
 
-function receiptContext(run: typeof runs.$inferSelect, references: EventReferences): EffectContext {
+function receiptContext(run: Run, references: EventReferences): EffectContext {
   let publication = run.publication;
   return {
     references,
     publication: () => publication,
     saveReceipt(patch, database = db) {
       publication = { ...publication, ...patch };
-      database.update(runs).set({ publication }).where(eq(runs.id, run.id)).run();
+      updateRun(run.id, { publication }, database);
     },
   };
 }
 
-export async function publishRun(github: GitHubRepository, task: typeof tasks.$inferSelect, run: typeof runs.$inferSelect, current: GithubContext, references: EventReferences) {
+export async function publishRun(github: GitHubRepository, task: Task, run: Run, current: GithubContext, references: EventReferences) {
   const { result, context } = run;
   if (!result || !context) throw new Error("Run has no evaluated result to publish");
   if (result.outcome !== "complete") throw new Error("Incomplete agent work cannot be published");
@@ -36,7 +36,7 @@ export async function publishRun(github: GitHubRepository, task: typeof tasks.$i
   return applyEffects(contract.publication, effectContext);
 }
 
-export function publishCommit(subject: typeof subjects.$inferSelect, run: typeof runs.$inferSelect) {
-  const saved = db.select().from(runs).where(eq(runs.id, run.id)).get()!;
+export function publishCommit(subject: Subject, run: Run) {
+  const saved = getRun(run.id)!;
   return applyEffects("slack-thread", { ...receiptContext(saved, {}), subject, run });
 }

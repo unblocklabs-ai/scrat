@@ -139,3 +139,9 @@ export const events = sqliteTable("events", {
   runId: text("run_id").references(() => runs.id),
   data: text("data", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
 });
+
+export type Run = typeof runs.$inferSelect;
+export type Task = typeof tasks.$inferSelect;
+export type Subject = typeof subjects.$inferSelect;
+export type Item = typeof items.$inferSelect;
+export type Workspace = typeof workspaces.$inferSelect;

@@ -7,7 +7,7 @@ import { recordEvent, type EventReferences } from "./events.ts";
 import { git, hasPendingMerge } from "./git.ts";
 import { botSlug } from "./identity.ts";
 import { withOperation } from "./logging.ts";
-import { runs, workspaces } from "./schema.ts";
+import { runs, workspaces, type Run, type Workspace } from "./schema.ts";
 import { errorCode } from "./errors.ts";
 import { SecretLeakError } from "./results.ts";
 import { containsSecret } from "./secrets.ts";
@@ -16,7 +16,7 @@ export function getWorkspace(workspaceId: string) {
   return db.select().from(workspaces).where(eq(workspaces.id, workspaceId)).get();
 }
 
-export async function validateWorkspace(workspace: typeof workspaces.$inferSelect) {
+export async function validateWorkspace(workspace: Workspace) {
   if (!(await lstat(workspace.path)).isDirectory()) throw new Error("Workspace path is not its original directory");
   const path = await realpath(workspace.path);
   const top = await git(path, ["rev-parse", "--show-toplevel"]);
@@ -28,7 +28,7 @@ export async function validateWorkspace(workspace: typeof workspaces.$inferSelec
     || !registered.split("\0").includes(`worktree ${path}`)) throw new Error("Workspace Git identity changed");
 }
 
-export async function checkpointWorkspace(workspace: typeof workspaces.$inferSelect) {
+export async function checkpointWorkspace(workspace: Workspace) {
   await git(workspace.path, ["add", "--all"]);
   return {
     headSha: await git(workspace.path, ["rev-parse", "HEAD"]),
@@ -37,7 +37,7 @@ export async function checkpointWorkspace(workspace: typeof workspaces.$inferSel
   };
 }
 
-export async function validateCheckpoint(workspace: typeof workspaces.$inferSelect, checkpoint: NonNullable<typeof runs.$inferSelect.agentCheckpoint>) {
+export async function validateCheckpoint(workspace: Workspace, checkpoint: NonNullable<Run["agentCheckpoint"]>) {
   const headSha = await git(workspace.path, ["rev-parse", "HEAD"]);
   const mergeHead = await hasPendingMerge(workspace.path) ? await git(workspace.path, ["rev-parse", "MERGE_HEAD"]) : null;
   const changed = await git(workspace.path, ["diff", "--name-only", "-z", checkpoint.treeSha, "--"]);
@@ -47,7 +47,7 @@ export async function validateCheckpoint(workspace: typeof workspaces.$inferSele
   }
 }
 
-export async function assertNoCommittedSecrets(workspace: typeof workspaces.$inferSelect, base: string, tree: string) {
+export async function assertNoCommittedSecrets(workspace: Workspace, base: string, tree: string) {
   const changed = (await git(workspace.path, ["diff", "--name-only", "--no-renames", "-z", base, tree])).split("\0").filter(Boolean);
   for (const path of changed) {
     const file = resolve(workspace.path, path);
@@ -141,7 +141,7 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
   });
 }
 
-export async function commitWorkspace(workspace: typeof workspaces.$inferSelect, message: string, author: { name: string; email: string }, references: EventReferences = {}) {
+export async function commitWorkspace(workspace: Workspace, message: string, author: { name: string; email: string }, references: EventReferences = {}) {
   await git(workspace.path, ["add", "--all"]);
   const staged = await git(workspace.path, ["diff", "--cached", "--name-only"]);
   if (staged || await hasPendingMerge(workspace.path)) {
@@ -153,7 +153,7 @@ export async function commitWorkspace(workspace: typeof workspaces.$inferSelect,
   return git(workspace.path, ["rev-parse", "HEAD"]);
 }
 
-export async function pushWorkspace(workspace: typeof workspaces.$inferSelect, remote: string, commitSha: string, env: NodeJS.ProcessEnv, references: EventReferences = {}) {
+export async function pushWorkspace(workspace: Workspace, remote: string, commitSha: string, env: NodeJS.ProcessEnv, references: EventReferences = {}) {
   await git(workspace.repositoryPath, ["push", "--", remote, `${commitSha}:refs/heads/${workspace.branch}`], env);
   recordEvent({ ...references, type: "workspace.pushed", data: { workspaceId: workspace.id, commitSha } });
   return commitSha;

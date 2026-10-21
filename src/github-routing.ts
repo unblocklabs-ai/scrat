@@ -2,11 +2,10 @@ import type { Action } from "./actions.ts";
 import type { Freshness } from "./freshness.ts";
 import { botName, botSlug } from "./identity.ts";
 import type { PrReviewState } from "./pr-assessment.ts";
-import type { runs, tasks } from "./schema.ts";
+import { type Run, type Task } from "./schema.ts";
 import { isManual, triggerKeyOf, type KeyedTriggerInput } from "./triggers.ts";
 
-type TaskFacts = Pick<typeof tasks.$inferSelect, "status" | "input">;
-type Run = typeof runs.$inferSelect;
+type TaskFacts = Pick<Task, "status" | "input">;
 type ReviewAttempt = Pick<Run, "mainSha"> & {
   context: Pick<NonNullable<Run["context"]>, "revision"> | null;
 };

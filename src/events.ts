@@ -1,8 +1,8 @@
 import { db } from "./db.ts";
 import type { ErrorDetails } from "./errors.ts";
-import { events, type tasks } from "./schema.ts";
+import { events, type Task } from "./schema.ts";
 
-type TaskDetails = Pick<typeof tasks.$inferSelect, "action" | "priority" | "reason">;
+type TaskDetails = Pick<Task, "action" | "priority" | "reason">;
 export type EventReferences = { subjectId?: string; taskId?: string; runId?: string };
 
 export type JournalEvent = (

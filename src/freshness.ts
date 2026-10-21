@@ -1,7 +1,7 @@
 import { getRepositoryPath } from "./config.ts";
 import type { ItemObservation } from "./observation.ts";
 import { reviewChanges } from "./relevance.ts";
-import type { runs } from "./schema.ts";
+import { type Run } from "./schema.ts";
 
 type SavedEvaluation = { revision?: string; baseBranch?: string; mainSha?: string | null; paths: string[] };
 export type Freshness =
@@ -11,7 +11,7 @@ type Current = Pick<ItemObservation, "revision" | "baseBranch"> & {
   mainSha?: string | (() => Promise<string>);
 };
 
-export const savedEvaluation = (run: typeof runs.$inferSelect): SavedEvaluation => ({
+export const savedEvaluation = (run: Run): SavedEvaluation => ({
   revision: run.context?.revision, baseBranch: run.context?.baseBranch, mainSha: run.mainSha, paths: run.result?.paths ?? [],
 });
 

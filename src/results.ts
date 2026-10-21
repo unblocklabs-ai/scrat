@@ -1,18 +1,22 @@
 import type { ErrorDetails } from "./errors.ts";
-import type { runs } from "./schema.ts";
+import { type Run } from "./schema.ts";
 
-export function hasPublicationSnapshot(run: typeof runs.$inferSelect | undefined): run is typeof runs.$inferSelect & {
-  result: AgentResult; context: NonNullable<typeof runs.$inferSelect.context>;
+export function hasPublicationSnapshot(run: Run | undefined): run is Run & {
+  result: AgentResult; context: NonNullable<Run["context"]>;
 } {
   return run?.stage === "publishing" && Boolean(run.result && run.context);
 }
 
-export function hasValidationCheckpoint(run: typeof runs.$inferSelect | undefined): run is typeof runs.$inferSelect & {
-  result: AgentResult; context: NonNullable<typeof runs.$inferSelect.context>;
-  agentCheckpoint: NonNullable<typeof runs.$inferSelect.agentCheckpoint>; workspaceId: string; mainSha: string;
+export function hasValidationCheckpoint(run: Run | undefined): run is Run & {
+  result: AgentResult; context: NonNullable<Run["context"]>;
+  agentCheckpoint: NonNullable<Run["agentCheckpoint"]>; workspaceId: string; mainSha: string;
 } {
   return run?.stage === "validating" && run.result?.outcome === "complete"
     && Boolean(run.context && run.agentCheckpoint && run.workspaceId && run.mainSha);
+}
+
+export function entryStage(previousRun: Run | undefined, retryMode: "repair" | "validation"): Run["stage"] {
+  return retryMode === "validation" ? "validating" : hasPublicationSnapshot(previousRun) ? "publishing" : "preparing";
 }
 
 const prGrades = ["S", "A", "B", "C", "D", "F"] as const;

@@ -14,10 +14,9 @@ import { isIssueComment, taskMarker } from "./markers.ts";
 import { observe } from "./observation.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
 import { remoteUrl } from "./repository.ts";
-import { runs, subjects, tasks } from "./schema.ts";
+import { subjects, type Run, type Task, type Subject } from "./schema.ts";
 import { getWorkspace, pushWorkspace } from "./workspaces.ts";
 
-type Run = typeof runs.$inferSelect;
 type Receipts = Run["publication"];
 type Evaluated = Run & { result: NonNullable<Run["result"]>; context: NonNullable<Run["context"]> };
 
@@ -29,7 +28,7 @@ export type EffectContext = {
 
 type GithubEffectContext = EffectContext & {
   github: GitHubRepository;
-  task: typeof tasks.$inferSelect;
+  task: Task;
   run: Evaluated;
   current: GithubContext;
   workspace?: NonNullable<ReturnType<typeof getWorkspace>>;
@@ -37,7 +36,7 @@ type GithubEffectContext = EffectContext & {
 };
 
 type SlackEffectContext = EffectContext & {
-  subject: typeof subjects.$inferSelect;
+  subject: Subject;
   run: Run;
 };
 

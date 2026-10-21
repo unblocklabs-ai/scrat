@@ -3,9 +3,9 @@ import { resolve } from "node:path";
 import type { Logger } from "pino";
 import { describeError } from "./errors.ts";
 import { executePi, saveReviewer } from "./pi.ts";
-import { runs } from "./schema.ts";
+import { type Run } from "./schema.ts";
 
-export async function reviewPullRequest(run: typeof runs.$inferSelect, cwd: string, context: string, log: Logger, { baseSha, contextDir, revisions, requireGrade = true }: { baseSha: string; contextDir: string; revisions: Record<string, string>; requireGrade?: boolean }) {
+export async function reviewPullRequest(run: Run, cwd: string, context: string, log: Logger, { baseSha, contextDir, revisions, requireGrade = true }: { baseSha: string; contextDir: string; revisions: Record<string, string>; requireGrade?: boolean }) {
   if (run.reviewers.length !== 2) throw new Error("PR review requires two configured reviewers");
   const reviewContext = "The prompt is a manifest, not a patch. diffPaths (or files.diffPaths when only diffPathCount is given) is the authoritative complete file inventory for diffBaseSha to workspace.headSha. Enumerate the change with the git tool (diff_stat from base to head), then read targeted diffs per path (operation diff) and current files with read. When `previous` is present, diff previousMain to main and previousHead to head to see what moved since the last review; base-branch commits are not part of the feature diff. Use read_base or git show for original file contents. The discussion and any previous failure are files under files.directory; read them as needed.\n\n" + context;
   const settled = await Promise.allSettled(run.reviewers.map(async (reviewer, index) => {

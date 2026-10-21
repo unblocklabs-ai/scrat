@@ -1,12 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
 import { config, type ThinkingLevel } from "./config.ts";
 import { db } from "./db.ts";
 import { botName, withBotName } from "./identity.ts";
-import { runs } from "./schema.ts";
+import { getRun, updateRun } from "./run-history.ts";
+import type { Run } from "./schema.ts";
 import { parseResult, ResultFormatError, type Reviewer } from "./results.ts";
 import { git } from "./git.ts";
 import { createAgentTools } from "./tools.ts";
@@ -22,14 +22,13 @@ function correctionMessage(error: string, requireGrade: boolean) {
 
 export function saveReviewer(runId: string, index: number, patch: Partial<Reviewer>) {
   db.transaction((transaction) => {
-    const current = transaction.select().from(runs).where(eq(runs.id, runId)).get()!;
-    transaction.update(runs).set({ reviewers: current.reviewers.map((reviewer, i) => i === index ? { ...reviewer, ...patch } : reviewer) })
-      .where(eq(runs.id, runId)).run();
+    const current = getRun(runId, transaction)!;
+    updateRun(runId, { reviewers: current.reviewers.map((reviewer, i) => i === index ? { ...reviewer, ...patch } : reviewer) }, transaction);
   });
 }
 
 export async function executePi({ run, cwd, context, readOnly, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {}, requireGrade = false, followUp }: {
-  run: typeof runs.$inferSelect;
+  run: Run;
   cwd: string;
   context: string;
   readOnly: boolean;
@@ -75,7 +74,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
       piSessionId: session.sessionId, piSessionFile: session.sessionFile,
       thinkingLevel: session.thinkingLevel,
     };
-    if (reviewerIndex === undefined) db.update(runs).set(sessionDetails).where(eq(runs.id, run.id)).run();
+    if (reviewerIndex === undefined) updateRun(run.id, sessionDetails);
     else saveReviewer(run.id, reviewerIndex, sessionDetails);
     const brief = (value: unknown) => typeof value === "string" ? redactSecrets(value).slice(0, 200) : undefined;
     const targets = new Map<string, Record<string, unknown>>();

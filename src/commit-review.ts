@@ -5,7 +5,8 @@ import { db } from "./db.ts";
 import { git } from "./git.ts";
 import { botName } from "./identity.ts";
 import type { startOperation } from "./logging.ts";
-import { runs, slackThreads, subjects } from "./schema.ts";
+import { getRun } from "./run-history.ts";
+import { slackThreads, type Run, type Subject } from "./schema.ts";
 import { escapeSlack, postMessage } from "./slack.ts";
 import { parseTriggerInput } from "./triggers.ts";
 
@@ -18,12 +19,12 @@ function commitInput(raw: Record<string, unknown>): CommitInput {
   return { sha, previousSha, branch, commitCount };
 }
 
-export function commitMetadata({ metadata }: typeof subjects.$inferSelect) {
+export function commitMetadata({ metadata }: Subject) {
   if (!metadata) throw new Error("Commit subject has no metadata");
   return metadata;
 }
 
-async function threadRoot(subject: typeof subjects.$inferSelect, { sha, branch, commitCount }: CommitInput) {
+async function threadRoot(subject: Subject, { sha, branch, commitCount }: CommitInput) {
   const existing = db.select().from(slackThreads).where(eq(slackThreads.subjectId, subject.id)).get();
   if (existing) return existing;
   const { channel, startMessage } = config.actions.review_base_change;
@@ -37,13 +38,13 @@ async function threadRoot(subject: typeof subjects.$inferSelect, { sha, branch, 
   return db.insert(slackThreads).values({ subjectId: subject.id, channel, ts }).returning().get();
 }
 
-export async function startCommitThread(subject: typeof subjects.$inferSelect, rawInput: Record<string, unknown>, log: ReturnType<typeof startOperation>["log"]) {
+export async function startCommitThread(subject: Subject, rawInput: Record<string, unknown>, log: ReturnType<typeof startOperation>["log"]) {
   const input = commitInput(rawInput);
   await threadRoot(subject, input).catch((error: unknown) => { log.warn({ event: "slack.post_failed", err: error }); });
   return input;
 }
 
-export async function describeCommit(repositoryPath: string, subject: typeof subjects.$inferSelect, rawInput: Record<string, unknown>) {
+export async function describeCommit(repositoryPath: string, subject: Subject, rawInput: Record<string, unknown>) {
   const { sha, previousSha, branch } = commitInput(rawInput);
   const [commitSubject = "", body = ""] = (await git(repositoryPath, ["log", "-1", "--format=%s%x00%b", sha])).split("\0");
   const diffPaths = (await git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", `${previousSha}..${sha}`])).split("\0").filter(Boolean);
@@ -54,9 +55,9 @@ export async function describeCommit(repositoryPath: string, subject: typeof sub
   return { evaluated, diffPaths, diffBaseSha: previousSha };
 }
 
-export async function postCommitReply(subject: typeof subjects.$inferSelect, run: typeof runs.$inferSelect) {
+export async function postCommitReply(subject: Subject, run: Run) {
   const input = commitInput(run.input);
-  const saved = db.select().from(runs).where(eq(runs.id, run.id)).get()!;
+  const saved = getRun(run.id)!;
   if (!saved.result) throw new Error("Run has no saved result to publish");
   const thread = await threadRoot(subject, input);
   return postMessage({ channel: thread.channel, text: escapeSlack(saved.result.text), threadTs: thread.ts });

@@ -5,7 +5,6 @@ const apiUrl = "https://slack.com/api/";
 const maxTextLength = 3000;
 const maxRetryAfterSeconds = 30;
 
-// @public: used by the Slack runner in a later change and exercised by the slack_client scenario.
 export const escapeSlack = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
 async function call(method: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -32,7 +31,6 @@ async function call(method: string, body: Record<string, unknown>): Promise<Reco
   }
 }
 
-// @public: used by the Slack runner in a later change and exercised by the slack_client scenario.
 export function postMessage({ channel, text, threadTs }: { channel: string; text: string; threadTs?: string }): Promise<string> {
   return withOperation("slack.post_message", { channel, threadTs }, async (operation) => {
     operation.stage("inspection");

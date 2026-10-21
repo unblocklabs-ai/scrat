@@ -1753,6 +1753,119 @@ try {
     live.actions.review_base_change.enabled = true;
     assert.equal(await pollCommits(), 0); assert.deepEqual(cursor(), [tip()]); assert.equal(reviews().length, 4);
     assert.equal(db.select().from(s.sourceCursors).where(eq(s.sourceCursors.branch, "main")).all().length, 1);
+    live.actions.review_base_change.maxRangeCommits = 1; const beforeCap = tip();
+    changeMain("src/six.ts", "export const six = 1;\n"); changeMain("src/seven.ts", "export const seven = 1;\n");
+    assert.equal(await pollCommits(), 1); assert.equal(reviews().length, 5);
+    const capped = tip();
+    assert.deepEqual(reviews().find((t) => t.input.sha === capped).input, { kind: "commit", triggerKey: capped, sha: capped, previousSha: beforeCap, branch: "main", commitCount: 2, truncated: true });
+    assert.deepEqual(cursor(), [capped]);
+    db.update(s.sourceCursors).set({ sha: "0".repeat(40) }).run();
+    assert.equal(await pollCommits(), 0); assert.equal(reviews().length, 5); assert.deepEqual(cursor(), [capped]);
+    changeMain("src/eight.ts", "export const eight = 1;\n");
+    assert.equal(await pollCommits(), 1); assert.equal(reviews().length, 6);
+  } else if (scenario.startsWith("commit_review_")) {
+    const { pollCommits } = await f.app("commit-source.ts");
+    const seed = resolve("seed"), remote = resolve("remote.git"), channel = "C0123456789";
+    const tip = () => git(remote, "rev-parse", "main");
+    const posts = () => f.slack.calls.filter((call) => call.method === "chat.postMessage");
+    const roots = () => posts().filter((call) => call.body.thread_ts === undefined);
+    const push = async (message, value = 2) => {
+      writeFileSync(resolve(seed, "src/app.ts"), `export const value = ${value};\n`); git(seed, "add", "."); commit(seed, message);
+      git(seed, "push", remote, "main"); return pollCommits();
+    };
+    const reviewRequests = () => f.requests.filter((request) => request.context.action === "review_base_change");
+    const bot = f.config.github.botName;
+    assert.equal(await pollCommits(), 0); assert.equal(f.slack.calls.length, 0);
+    const previous = tip();
+    if (scenario === "commit_review_e2e") {
+      assert.equal(await push("Fix a<b & c>d"), 1);
+      const head = tip(); assert.equal(f.slack.calls.length, 0);
+      const r = await success();
+      assert.equal(posts().length, 2); const [root, reply] = posts();
+      assert.deepEqual(root.body, {
+        channel, unfurl_links: false, unfurl_media: false, link_names: false,
+        text: `${bot}: \`main\` moved to <https://github.com/fixture/project/commit/${head}|${head.slice(0, 7)}> by Fixture (1 commit(s)): Fix a&lt;b &amp; c&gt;d. Reviewing the change.`,
+      });
+      assert.equal(reply.body.thread_ts, "1700000000.000001"); assert.equal(reply.body.text, "Independent review from gpt-6.1-sol. &lt;!channel&gt;");
+      assert.ok(posts().every((call) => call.token === process.env.SLACK_BOT_TOKEN));
+      const [thread] = all(s.slackThreads); assert.equal(all(s.slackThreads).length, 1);
+      assert.deepEqual({ itemId: thread.itemId, channel: thread.channel, ts: thread.ts }, { itemId: all(s.tasks)[0].itemId, channel, ts: "1700000000.000001" });
+      assert.equal(r.publication.slackReplyTs, "1700000000.000002"); assert.equal(r.publication.status, "published");
+      assert.equal(r.stage, "publishing"); assert.equal(r.result.text, "Independent review from gpt-6.1-sol. <!channel>"); assert.deepEqual(r.result.paths.filter((path) => path === "src/app.ts"), ["src/app.ts"]);
+      assert.equal(r.context.item.number, 0); assert.equal(r.mainSha, head); assert.equal(r.headSha, head);
+      assert.equal(f.row(s.tasks, r.taskId).status, "completed"); assert.equal(all(s.items)[0].state, "open");
+      assert.ok(f.row(s.workspaces, r.workspaceId).removedAt);
+      const requests = reviewRequests(); assert.equal(requests.length, 4); assert.equal(new Set(requests.map((request) => request.request.model)).size, 1);
+      const { context } = requests[0];
+      assert.deepEqual(context.diffPaths, ["src/app.ts"]); assert.equal(context.diffBaseSha, previous);
+      assert.equal(context.workspace.baseRef, head); assert.equal(context.workspace.headSha, head); assert.equal(context.workspace.mainSha, head);
+      assert.deepEqual(context.item, { number: 0, title: "Fix a<b & c>d", body: "", url: `https://github.com/fixture/project/commit/${head}` });
+      assert.equal(context.input.previousSha, previous); assert.equal(context.input.sha, head); assert.equal(context.input.commitCount, 1);
+      assert.equal(context.commentRevisions.length, 0);
+      assert.equal(f.writes.length, 0); assert.equal(all(s.runs).length, 1);
+    } else if (scenario === "commit_review_panel") {
+      assert.equal(await push("Panel change"), 1);
+      const r = await success();
+      assert.equal(r.reviewers.length, 2); assert.ok(r.reviewers.every((reviewer) => reviewer.result?.outcome === "complete"));
+      assert.equal(new Set([...r.reviewers.map((reviewer) => reviewer.piSessionId), r.piSessionId]).size, 3);
+      const requests = reviewRequests(), consolidation = requests.filter((request) => request.consolidating);
+      assert.equal(new Set(requests.filter((request) => !request.consolidating).map((request) => request.request.model)).size, 2);
+      assert.ok(consolidation.length > 0); assert.ok(consolidation.every((request) => !request.text.includes("Grade only from findings") && !request.text.includes("include SCRAT_GRADE")));
+      assert.ok(requests.every((request) => request.context.diffBaseSha === previous));
+      assert.equal(r.result.grade, undefined); assert.equal(r.result.text, "Consolidated source-verified review.");
+      assert.equal(posts().length, 2); assert.equal(posts()[1].body.text, "Consolidated source-verified review."); assert.equal(posts()[1].body.thread_ts, "1700000000.000001");
+      assert.equal(f.writes.length, 0);
+    } else if (scenario === "commit_review_slack_down") {
+      assert.equal(await push("Root down"), 1);
+      f.slack.down = true; f.onModel = () => { f.slack.down = false; };
+      const first = await success(); f.onModel = undefined;
+      assert.equal(posts().length, 3); assert.equal(roots().length, 2);
+      assert.equal(posts()[1].body.thread_ts, undefined); assert.equal(posts()[2].body.thread_ts, "1700000000.000001");
+      assert.deepEqual(all(s.slackThreads).map((row) => row.ts), ["1700000000.000001"]);
+      assert.equal(first.publication.slackReplyTs, "1700000000.000002");
+      assert.equal(await push("Reply down", 3), 1);
+      const mark = f.slack.calls.length; f.onModel = () => { f.slack.down = true; };
+      const failed = await run(); f.onModel = undefined; f.slack.down = false;
+      assert.ok(failed.error); assert.equal(failed.stage, "publishing"); assert.equal(failed.publication.slackReplyTs, undefined);
+      assert.equal(f.row(s.tasks, failed.taskId).status, "failed"); assert.ok(f.row(s.runs, failed.id).result);
+      assert.equal(f.slack.calls.length - mark, 2); assert.equal(all(s.slackThreads).length, 2);
+      const used = f.requests.length; tasks.retryTask(failed.taskId);
+      const retried = await success();
+      assert.equal(f.requests.length, used); assert.equal(retried.retryOfRunId, failed.id); assert.equal(retried.stage, "publishing");
+      const added = f.slack.calls.slice(mark);
+      assert.equal(added.length, 3); assert.equal(added.filter((call) => call.body.thread_ts === undefined).length, 1);
+      const second = all(s.slackThreads).find((row) => row.itemId === f.row(s.tasks, failed.taskId).itemId);
+      assert.equal(added[2].body.thread_ts, second.ts); assert.equal(retried.publication.slackReplyTs, "1700000000.000004");
+      assert.equal(all(s.slackThreads).length, 2); assert.equal(f.writes.length, 0);
+    } else if (scenario === "commit_review_restart") {
+      assert.equal(await push("Restart"), 1);
+      const claim = tasks.claimTask();
+      const { postMessage } = await f.app("slack.ts");
+      const ts = await postMessage({ channel, text: "root" });
+      db.insert(s.slackThreads).values({ itemId: claim.item.id, channel, ts }).run();
+      execFileSync(process.execPath, [resolve("app/src/recover.ts"), claim.run.id], { stdio: "pipe" });
+      const interrupted = f.row(s.runs, claim.run.id); assert.equal(interrupted.error.code, "RUN_INTERRUPTED");
+      tasks.retryTask(interrupted.taskId);
+      const done = await success();
+      assert.equal(done.retryOfRunId, interrupted.id); assert.equal(roots().length, 1); assert.equal(posts().length, 2);
+      assert.equal(posts()[1].body.thread_ts, ts); assert.equal(all(s.slackThreads).length, 1); assert.equal(done.publication.slackReplyTs, "1700000000.000002");
+      assert.equal(reviewRequests().length, 4);
+    } else if (scenario === "commit_review_isolation") {
+      const token = process.env.SLACK_BOT_TOKEN, { childEnvironment } = await f.app("secrets.ts");
+      assert.equal("SLACK_BOT_TOKEN" in childEnvironment(), false);
+      assert.equal(await push("Isolation"), 1);
+      const r = await success();
+      const requests = reviewRequests(); assert.equal(requests.length, 4);
+      assert.ok(requests.every((request) => !JSON.stringify(request.request).includes(token) && !request.text.includes(token)));
+      const results = requests.at(-1).request.messages.filter((message) => message.role === "tool").map((message) => JSON.stringify(message.content));
+      assert.equal(results.length, 3);
+      assert.ok(results[0].includes("export const value = 2;"));
+      assert.ok(results[1].includes("export const value = 1;") && !results[1].includes("value = 2"));
+      assert.ok(results[2].includes("src/app.ts | 2"));
+      assert.ok(r.result.paths.includes("src/app.ts"));
+      assert.equal(existsSync("prepare.log"), false);
+      assert.equal(posts().length, 2); assert.equal(f.writes.length, 0);
+    }
   } else throw new Error("Unknown scenario " + scenario);
   console.log("SCENARIO_PASSED " + scenario);
 } finally { await f.close(); }

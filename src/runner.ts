@@ -1,6 +1,7 @@
 import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { actionContracts } from "./actions.ts";
 import { buildAgentInput, evaluateContext, readDiffScope } from "./agent-input.ts";
+import { runCommitTask } from "./commit-review.ts";
 import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
@@ -16,7 +17,7 @@ import { executePi } from "./pi.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { reviewPullRequest } from "./pr-review.ts";
 import { publishRun } from "./publication.ts";
-import { CheckFailure, hasValidationCheckpoint, type AgentResult } from "./results.ts";
+import { assertComplete, CheckFailure, hasValidationCheckpoint } from "./results.ts";
 import { items, runs, workspaces } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { claimTask, finishRun } from "./tasks.ts";
@@ -51,12 +52,6 @@ function validationMessage(error: CheckFailure, round: number) {
   const { message, exitCode, stdout, stderr } = describeError(error.cause);
   const tail = (label: string, text?: string) => text?.trim() ? `\n${label} (last 6000 characters):\n${text.trim().slice(-6000)}\n` : "";
   return `${botName}'s validation failed after your changes (round ${round} of ${maxValidationCorrections}).\n\nCommand: ${message.split("\n")[0].replace(/^Command failed: /, "")}\nExit code: ${exitCode ?? "unknown"}\n${tail("stdout", stdout)}${tail("stderr", stderr)}\nFix only what is reported. ${botName} re-validates after your turn, so a full rerun of the failing check is not needed. Then end your turn with one or two sentences on what you changed to fix this (it is appended to your earlier handoff), and the usual SCRAT_STATUS footer (add SCRAT_READY if the change is still ready).`;
-}
-
-function assertComplete(result: AgentResult) {
-  if (result.outcome !== "complete") {
-    throw Object.assign(new Error(`Agent returned ${result.outcome}: ${result.text}`), { code: "AGENT_INCOMPLETE" });
-  }
 }
 
 const unresolvedConflict = "PR still conflicts with its base branch after resolution";
@@ -94,12 +89,12 @@ export async function runNextTask() {
   const { task, run, item } = claimed;
   const references = { itemId: item.id, taskId: task.id, runId: run.id };
   const operation = startOperation("run.execute", { ...references, action: task.action });
+  if (item.kind === "commit") return runCommitTask({ task, run, item }, references, operation);
   const contract = actionContracts[task.action];
   const readOnly = contract.mode === "review";
   let reviewWorkspace: Awaited<ReturnType<typeof createWorkspace>> | undefined;
   let databaseRequested = false;
   try {
-    if (item.kind === "commit") throw new Error("Commit tasks are not runnable yet");
     const repository = itemRepository(item) ?? item.payload.html_url;
     assertConfiguredRepository(repository);
     const repositoryPath = getRepositoryPath();

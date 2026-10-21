@@ -59,6 +59,7 @@ export async function fixture(scenario) {
   if (patMode) delete process.env.GITHUB_APP_PRIVATE_KEY;
   else process.env.GITHUB_APP_PRIVATE_KEY = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
   if (patMode || scenario === "isolation") process.env.GITHUB_PAT = pat;
+  if (scenario.startsWith("commit_review")) process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
   const modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set() };
@@ -87,6 +88,8 @@ export async function fixture(scenario) {
     if (review && mode === "grep" && step === 1) tool = { name: "read", args: { path: "src/app.ts" } };
     if (review && ["relevance", "lockfile_scope", "importer_scope"].includes(scenario) && step >= 2 && step <= 4) tool = { name: "read", args: { path: ["package.json", "pnpm-lock.yaml", "node_modules/wrangler/package.json"][step - 2] } };
     if (review && scenario === "lockfile_scope" && step === 5) tool = { name: "read", args: { path: "node_modules/string-width-cjs/package.json" } };
+    if (review && scenario.startsWith("commit_review") && step === 1) tool = { name: "read_base", args: { path: "src/app.ts" } };
+    if (review && scenario.startsWith("commit_review") && step === 2) tool = { name: "git", args: { operation: "diff_stat", from: "base", to: "head" } };
     if (review && scenario === "panel" && step === 1) tool = { name: "read_base", args: { path: "src/app.ts" } };
     if (review && scenario === "panel" && step >= 2) {
       const dir = context.files.directory;
@@ -147,6 +150,7 @@ export async function fixture(scenario) {
       || (mode === "consolidation-grade-once" && consolidating));
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : "complete";
     const output = (review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : feedback ? "Fixed the validation failure." : "Implemented the change.")
+      + (scenario === "commit_review_e2e" ? " <!channel>" : "")
       + (mode === "leak-report" ? "\n" + process.env.GITHUB_APP_PRIVATE_KEY : "")
       + (mode.startsWith("quoted-") ? "\n```\nSCRAT_GRADE: F\nSCRAT_READY\n```" : "")
       + (mode === "ready" ? "\nSCRAT_READY" : "")
@@ -215,7 +219,12 @@ export async function fixture(scenario) {
     const helper = fileURLToPath(new URL("database-command.mjs", import.meta.url)); cpSync(helper, "database-command.mjs");
     config.workspace = { ...config.workspace, environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), scenario === "validation_resume" ? "validate-resume" : "validate", resolve("database-receipts.jsonl")]] };
   }
-  if (scenario === "commits_source") Object.assign(config.actions.review_base_change, { enabled: true, channel: "C0123456789" });
+  if (scenario === "commits_source" || scenario.startsWith("commit_review")) Object.assign(config.actions.review_base_change, { enabled: true, channel: "C0123456789" });
+  if (scenario === "commit_review_panel") Object.assign(config.actions.review_base_change, { agent: "panel", reviewers: structuredClone(config.actions.review_pr.reviewers) });
+  if (scenario === "commit_review_isolation") {
+    writeFileSync("prepare.mjs", 'import{appendFileSync}from"node:fs";appendFileSync(' + JSON.stringify(resolve("prepare.log")) + ',"prepare\\n");');
+    config.workspace = { prepare: [[process.execPath, resolve("prepare.mjs")]], validate: [[process.execPath, resolve("prepare.mjs")]] };
+  }
   if (scenario === "bot_name") config.github.botName = "Mocha";
   if (scenario === "bot_identity_names") config.github.botName = "Mocha Agent";
   if (patMode) { config.github.auth = "pat"; config.github.botLogin = "agent-account"; }

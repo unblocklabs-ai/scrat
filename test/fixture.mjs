@@ -224,10 +224,20 @@ export async function fixture(scenario) {
   execFileSync(process.execPath, [resolve(repository, "node_modules/drizzle-kit/bin.cjs"), "push", "--dialect=sqlite", "--schema=./app/src/schema.ts", "--url=./data/scrat.sqlite"], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
   const app = async (path) => import(pathToFileURL(resolve("app/src", path)));
   const { db } = await app("db.ts"), schema = await app("schema.ts"), tasks = await app("tasks.ts"), { runNextTask } = await app("runner.ts");
+  const slack = { calls: [], down: false, rateLimitOnce: false, fail: null, sequence: 0 };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, options = {}) => {
     const url = new URL(typeof input === "string" ? input : input.url);
     if (url.hostname === "127.0.0.1") return originalFetch(input, options);
+    if (url.hostname === "slack.com") {
+      const slackBody = options.body ? JSON.parse(options.body) : {};
+      slack.calls.push({ method: url.pathname.replace("/api/", ""), body: slackBody, token: new Headers(options.headers).get("authorization")?.replace(/^bearer /i, "") });
+      const json = (data, status = 200, headers = {}) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...headers } });
+      if (slack.down) return json({ ok: false, error: "service_unavailable" }, 503);
+      if (slack.rateLimitOnce) { slack.rateLimitOnce = false; return json({ ok: false, error: "ratelimited" }, 429, { "retry-after": "0" }); }
+      if (slack.fail) return json({ ok: false, error: slack.fail });
+      return url.pathname.endsWith("/auth.test") ? json({ ok: true, team: "Fixture", user: "scrat" }) : json({ ok: true, channel: slackBody.channel, ts: `1700000000.${String(++slack.sequence).padStart(6, "0")}` });
+    }
     if (url.hostname !== "api.github.com") throw new Error("External network disabled");
     const path = url.pathname, method = options.method ?? "GET", body = options.body ? JSON.parse(options.body) : {};
     for (const pr of prs) {
@@ -320,7 +330,7 @@ export async function fixture(scenario) {
   };
   const enqueue = (number, action = "review_issue", input = {}) => tasks.enqueueTask({ itemId: "issue-" + number, action, reason: "Integration", input });
   const row = (table, id) => db.select().from(table).all().find((entry) => entry.id === id);
-  return { app, db, schema, tasks, runNextTask, git, commit, config, pat, user, modes, requests, calls, rate, issues, prs, comments, reviews, writes, faults, addIssue, enqueue, row,
+  return { app, db, schema, tasks, runNextTask, git, commit, config, pat, user, modes, requests, calls, slack, rate, issues, prs, comments, reviews, writes, faults, addIssue, enqueue, row,
     set onModel(value) { onModel = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },
     async close() { globalThis.fetch = originalFetch; db.$client.close(); server.closeAllConnections(); await new Promise((done) => server.close(done)); },

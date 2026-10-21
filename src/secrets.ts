@@ -12,7 +12,7 @@ export function childEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJ
   return Object.fromEntries(Object.entries(source).filter(([name]) => inheritedVariables.has(name) || name.startsWith("LC_")));
 }
 
-const secretVariables = ["GITHUB_APP_PRIVATE_KEY", "GITHUB_PAT", ...Object.values(config.providers)
+const secretVariables = ["GITHUB_APP_PRIVATE_KEY", "GITHUB_PAT", "SLACK_BOT_TOKEN", ...Object.values(config.providers)
   .flatMap((provider) => [...(provider.apiKey ?? "").matchAll(/\$\{(\w+)\}/g)].map((match) => match[1]))];
 
 export const basicCredential = (token: string) => Buffer.from(`x-access-token:${token}`).toString("base64");
@@ -23,7 +23,7 @@ export function secretValues() {
 }
 
 export function containsSecret(text: string) {
-  if (/\b(?:gh[oprsu]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})/.test(text)) return true;
+  if (/\b(?:gh[oprsu]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,}|xox[bp]-[A-Za-z0-9-]{20,})/.test(text)) return true;
   const compact = text.replace(/\s+/g, "");
   return secretValues().some((secret) => {
     const value = secret.replace(/-----(?:BEGIN|END) [^-]*-----/g, "").replace(/\s+/g, "");

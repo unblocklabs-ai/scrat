@@ -1057,6 +1057,97 @@ try {
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_issue.model = "missing-model"; })), /review_issue: no Pi model fixture\/missing-model/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.reviewers[0].provider = "nowhere"; })), /review_pr reviewer 1: no Pi model nowhere/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.resolve_conflicts.skill = "skills/missing/SKILL.md"; })), /resolve_conflicts: skill file not found/);
+  } else if (scenario === "slack_client") {
+    const token = ["xoxb", "1111", "2222", "fixturetoken"].join("-");
+    process.env.SLACK_BOT_TOKEN = token;
+    const { postMessage, authTest, escapeSlack } = await f.app("slack.ts");
+    const root = await postMessage({ channel: "C1", text: "root" });
+    const rootCall = f.slack.calls.at(-1);
+    assert.equal(rootCall.method, "chat.postMessage"); assert.equal(rootCall.token, token);
+    assert.deepEqual({ ...rootCall.body }, { channel: "C1", text: "root", unfurl_links: false, unfurl_media: false, link_names: false });
+    const reply = await postMessage({ channel: "C1", text: "reply", threadTs: root });
+    assert.notEqual(reply, root); assert.equal(f.slack.calls.at(-1).body.thread_ts, root);
+    assert.equal((await authTest()).ok, true); assert.equal(f.slack.calls.at(-1).method, "auth.test");
+    const before = f.slack.calls.length; f.slack.rateLimitOnce = true;
+    assert.ok(await postMessage({ channel: "C1", text: "after limit" }));
+    assert.equal(f.slack.calls.length, before + 2);
+    f.slack.down = true;
+    await assert.rejects(postMessage({ channel: "C1", text: "outage" }), /HTTP 503/);
+    f.slack.down = false; f.slack.fail = "channel_not_found";
+    await assert.rejects(postMessage({ channel: "C9", text: "missing" }), /channel_not_found/);
+    f.slack.fail = null;
+    await postMessage({ channel: "C1", text: "a".repeat(5000) });
+    assert.equal(f.slack.calls.at(-1).body.text.length, 3000);
+    assert.equal(escapeSlack("a & <b> c"), "a &amp; &lt;b&gt; c");
+    const count = f.slack.calls.length;
+    await assert.rejects(postMessage({ channel: "C1", text: "leak " + token }), /credential material/);
+    assert.equal(f.slack.calls.length, count);
+    delete process.env.SLACK_BOT_TOKEN;
+    await assert.rejects(postMessage({ channel: "C1", text: "no token" }), /SLACK_BOT_TOKEN is not set/);
+    assert.equal(f.slack.calls.length, count);
+  } else if (scenario === "slack_startup") {
+    const { validateStaticConfig } = await f.app("startup.ts");
+    const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
+    const enabled = (change = () => {}) => variant((c) => {
+      Object.assign(c.actions.review_base_change, { enabled: true, channel: "C0123456789", skill: "skills/review_issue/SKILL.md" }); change(c.actions.review_base_change);
+    });
+    await validateStaticConfig(f.config);
+    assert.equal(f.slack.calls.length, 0);
+    delete process.env.SLACK_BOT_TOKEN;
+    await assert.rejects(validateStaticConfig(enabled()), /review_base_change: SLACK_BOT_TOKEN is not set/);
+    process.env.SLACK_BOT_TOKEN = ["xoxb", "1111", "2222", "fixturetoken"].join("-");
+    await validateStaticConfig(enabled());
+    assert.deepEqual(f.slack.calls.map((call) => call.method), ["auth.test"]);
+    await validateStaticConfig(enabled((a) => { a.agent = "panel"; a.reviewers = structuredClone(f.config.actions.review_pr.reviewers); }));
+    await assert.rejects(validateStaticConfig(enabled((a) => { a.channel = " "; })), /channel must not be empty/);
+    await assert.rejects(validateStaticConfig(enabled((a) => { a.branch = "develop"; })), /branch must equal github\.baseBranch/);
+    await assert.rejects(validateStaticConfig(enabled((a) => { a.startMessage = "{{bot}} saw {{commit}}"; })), /unknown startMessage variable \{\{commit\}\}/);
+    await assert.rejects(validateStaticConfig(enabled((a) => { a.agent = "panel"; })), /requires exactly two reviewers/);
+    await assert.rejects(validateStaticConfig(enabled((a) => { a.agent = "solo"; })), /agent must be "single" or "panel"/);
+    f.slack.fail = "invalid_auth";
+    await assert.rejects(validateStaticConfig(enabled()), /Slack auth\.test failed: .*invalid_auth/);
+    f.slack.fail = null;
+    delete process.env.SLACK_BOT_TOKEN;
+    const calls = f.slack.calls.length;
+    await validateStaticConfig(variant((c) => { c.actions.review_base_change.channel = ""; c.actions.review_base_change.startMessage = "{{nope}}"; }));
+    assert.equal(f.slack.calls.length, calls);
+    const { config: live, isActionEnabled } = await f.app("config.ts");
+    assert.equal(isActionEnabled("review_base_change"), false);
+    assert.equal(isActionEnabled("review_issue"), true);
+    f.addIssue(1); f.enqueue(1, "review_base_change"); f.addIssue(2); f.enqueue(2);
+    assert.equal(tasks.claimTask().task.itemId, "issue-2");
+    const rejected = all(s.events).filter((e) => e.type === "task.rejected");
+    assert.equal(rejected.length, 1); assert.equal(rejected[0].data.reason, "Unknown action: review_base_change");
+    assert.equal(f.row(s.tasks, rejected[0].taskId).status, "failed");
+    live.actions.review_base_change.enabled = true;
+    f.addIssue(3); f.enqueue(3, "review_base_change");
+    assert.equal(tasks.claimTask().task.action, "review_base_change");
+    assert.equal(f.slack.calls.length, calls);
+  } else if (scenario === "slack_redaction") {
+    const token = ["xoxb", "1234567890", "abcdefABCDEF"].join("-"), appToken = ["xoxp", "9876", "zzzz", "fixture", "secondary", "token"].join("-");
+    process.env.SLACK_BOT_TOKEN = token;
+    const { childEnvironment, containsSecret } = await f.app("secrets.ts"), { redactSecrets, describeError } = await f.app("errors.ts");
+    const { postMessage } = await f.app("slack.ts"), { default: fs } = await import("node:fs"), lines = [], write = fs.writeSync;
+    assert.equal("SLACK_BOT_TOKEN" in childEnvironment(), false);
+    assert.equal(Object.values(childEnvironment()).some((value) => value.includes(token)), false);
+    assert.equal(containsSecret("token " + token), true);
+    delete process.env.SLACK_BOT_TOKEN;
+    assert.equal(containsSecret("token " + token), true); assert.equal(containsSecret(appToken), true);
+    for (const benign of ["the xoxb-123 token", "foo-xoxb-1", "xoxbox", "a xox-like word"]) {
+      assert.equal(containsSecret(benign), false); assert.equal(redactSecrets(benign), benign);
+    }
+    process.env.SLACK_BOT_TOKEN = token;
+    assert.ok(!redactSecrets(`failed with ${token} and ${appToken}`).includes("xox"));
+    fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string") { lines.push(data); return data.length; } return write(fd, data, ...rest); };
+    try {
+      await postMessage({ channel: "C1", text: "journal check" });
+      f.slack.fail = "invalid_auth";
+      await assert.rejects(postMessage({ channel: "C1", text: "journal failure" }), /invalid_auth/);
+      await assert.rejects(postMessage({ channel: "C1", text: "leak " + token }), /credential material/);
+    } finally { fs.writeSync = write; }
+    assert.ok(lines.some((line) => line.includes("slack.post_message")));
+    assert.ok(!lines.join("").includes(token)); assert.ok(!JSON.stringify(all(s.events)).includes(token));
+    assert.ok(!JSON.stringify(describeError(new Error("boom " + token))).includes(token));
   } else if (scenario === "single_repository") {
     const { eq } = await import("drizzle-orm");
     const { syncGitHub } = await f.app("github-sync.ts");

@@ -20,6 +20,7 @@ export function redactSecrets(value: string) {
   return value
     .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, "[redacted]")
     .replace(/\b(?:gh[oprsu]_|github_pat_)[A-Za-z0-9_]+\b/g, "[redacted]")
+    .replace(/\bxox[bp]-[A-Za-z0-9-]{20,}/g, "[redacted]")
     .replace(/\b(Bearer|token)\s+\S+/gi, "$1 [redacted]");
 }
 

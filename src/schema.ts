@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
-import { type AnySQLiteColumn, integer, sqliteTable, text, unique, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { type AnySQLiteColumn, integer, primaryKey, sqliteTable, text, unique, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { actionIds } from "./actions.ts";
 import type { ErrorDetails } from "./errors.ts";
 import type { AgentResult, Reviewer } from "./results.ts";
@@ -101,8 +101,24 @@ export const runs = sqliteTable("runs", {
     publishedCommitSha?: string;
     scratLabel?: boolean;
     pullRequestNumber?: number;
+    slackReplyTs?: string;
   }>().notNull().$defaultFn(() => ({ status: "pending" })),
 }, (table) => [uniqueIndex("runs_sequence_unique").on(table.sequence)]);
+
+export const sourceCursors = sqliteTable("source_cursors", {
+  repository: text("repository").notNull(),
+  action: text("action", { enum: actionIds }).notNull(),
+  branch: text("branch").notNull(),
+  sha: text("sha").notNull(),
+  updatedAt: text("updated_at").notNull().$defaultFn(() => new Date().toISOString()),
+}, (table) => [primaryKey({ columns: [table.repository, table.action, table.branch] })]);
+
+export const slackThreads = sqliteTable("slack_threads", {
+  itemId: text("item_id").notNull().references(() => items.id).unique(),
+  channel: text("channel").notNull(),
+  ts: text("ts").notNull(),
+  createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
+});
 
 export const events = sqliteTable("events", {
   id: integer("id").primaryKey(),

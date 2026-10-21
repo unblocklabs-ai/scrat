@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { and, asc, count, desc, eq, isNotNull, isNull, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import { type Action, actionContracts, actionIds } from "./actions.ts";
-import { config, getActionConfig, thinkingLevels } from "./config.ts";
+import { config, getActionConfig, isActionEnabled, thinkingLevels } from "./config.ts";
 import { itemRepository, sameRepository } from "./observation.ts";
 import { db } from "./db.ts";
 import { describeError } from "./errors.ts";
@@ -21,6 +21,7 @@ const isKnownAction = (action: string): action is Action => (actionIds as readon
 
 function checkClaimable({ task, item }: { task: typeof tasks.$inferSelect; item: typeof items.$inferSelect }, database: Pick<typeof db, "select">) {
   if (!isKnownAction(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
+  if (!isActionEnabled(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   const actionConfig = config.actions[task.action];
   const invalid = [actionConfig, ...("reviewers" in actionConfig ? actionConfig.reviewers : [])]
     .find(({ thinkingLevel }) => !(thinkingLevels as readonly string[]).includes(thinkingLevel));

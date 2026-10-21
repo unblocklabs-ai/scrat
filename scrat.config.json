@@ -121,6 +121,20 @@
       "thinkingLevel": "high",
       "maxSelfRepairs": 2,
       "exhaustedLabel": "Scrat repair exhausted"
+    },
+    "review_base_change": {
+      "enabled": false,
+      "agent": "single",
+      "priority": 30,
+      "skill": "skills/review_change/SKILL.md",
+      "provider": "codex-lb",
+      "model": "gpt-6.1-sol",
+      "thinkingLevel": "high",
+      "reviewers": [],
+      "branch": "main",
+      "channel": "",
+      "maxRangeCommits": 50,
+      "startMessage": "{{bot}}: `{{branch}}` moved to <{{url}}|{{short_sha}}> by {{author}} ({{count}} commit(s)): {{title}}. Reviewing the change."
     }
   }
 }

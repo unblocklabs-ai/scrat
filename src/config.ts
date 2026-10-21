@@ -56,3 +56,5 @@ export function getActionConfig(action: Action) {
 }
 
 export const isBotLogin = (login: string | null | undefined) => login?.toLowerCase() === config.github.botLogin.toLowerCase();
+
+export const isActionEnabled = (action: Action) => (config.actions[action] as { enabled?: boolean }).enabled !== false;

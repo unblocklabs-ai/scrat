@@ -73,6 +73,9 @@ const scenarios = {
   pat_auth: "a personal access token authenticates every GitHub call and git credential without the App, is redacted, and must belong to botLogin case-insensitively",
   bot_name: "a configured bot name replaces every prose mention of Scrat in model requests across all actions while protocol markers stay",
   bot_identity_names: "the selection label, its routing reason and the new branch prefix follow the bot name while the default scrat label stops selecting",
+  slack_client: "the Slack client posts and replies in threads, retries one 429, surfaces outages and Slack errors, caps and escapes text",
+  slack_startup: "an enabled Slack action blocks startup on missing token, channel, template variables, panel reviewers or a failed auth.test, while a disabled one makes no Slack call and queued tasks for it are rejected",
+  slack_redaction: "the Slack token never reaches child environments, is caught as a secret, redacted from errors and absent from the journal",
   database: "real PostgreSQL runs isolate databases, apply new migrations and remove resources",
 };
 

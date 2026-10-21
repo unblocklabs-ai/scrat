@@ -5,6 +5,11 @@ const taskMarkerParts = ["<!-- scrat-task:", " -->"] as const;
 export const taskMarker = (taskId: string) => `${taskMarkerParts[0]}${taskId}${taskMarkerParts[1]}`;
 const issuePrefix = "issue:";
 
+export const fingerprintPattern = /^[A-Za-z0-9._:-]{1,128}$/;
+export function fingerprintMarker(fingerprint: string) {
+  if (!fingerprintPattern.test(fingerprint)) throw new Error("Issue fingerprint must match [A-Za-z0-9._:-]{1,128}");
+  return `<!-- scrat-fingerprint:${fingerprint} -->`;
+}
 export const issueCommentId = (id: number | undefined) => `${issuePrefix}${id}`;
 export const isIssueComment = (comment: Pick<GithubComment, "id">) => comment.id.startsWith(issuePrefix);
 export const parseIssueCommentId = (id: string) => Number(id.slice(issuePrefix.length));

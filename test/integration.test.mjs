@@ -71,6 +71,8 @@ const scenarios = {
   git_paging: "git and read_base page bounded output from files and diffs larger than the 16 MiB buffer without loading them",
   self_repair: "low grades on Scrat PRs queue one capped address_review repair per assessment that receives the report; good grades, human PRs and pending feedback do not",
   review_prior_assessment: "a re-review of a Scrat PR after a pushed repair gives both panel reviewers and the consolidator the previous assessment and repair summary; first reviews and human PRs get neither",
+  issue_effect: "SCRAT_ISSUE footer blocks parse only at the end of the report, and the issue effect creates each fingerprint once, skips receipted and marker-matched issues, and creates nothing when any block leaks a secret",
+  history_file: "a subject with earlier completed runs of an action gets a bounded newest-first history file; first runs and other subjects get none",
   commit_hook: "commit hooks cannot attach verification receipts to an unverified tree",
   isolation: "workspace commands, hooks and agent tools cannot reach Scrat credentials, and credential material is never published",
   wakeup: "idle workers wake on enqueue, keep signals sent while busy, fall back on timeout and release on abort",

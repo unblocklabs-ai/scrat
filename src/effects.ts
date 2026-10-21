@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import { actionContracts } from "./actions.ts";
+import type { Publication } from "./actions.ts";
 import { postCommitReply } from "./commit-review.ts";
 import { upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
@@ -7,13 +7,15 @@ import type { EventReferences } from "./events.ts";
 import { branchContainsCommit } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
+import { isBotLogin } from "./config.ts";
 import { botSlug } from "./identity.ts";
 import { upsertItem } from "./items.ts";
 import { reconcileLabels } from "./labels.ts";
-import { isIssueComment, taskMarker } from "./markers.ts";
+import { fingerprintMarker, isIssueComment, taskMarker } from "./markers.ts";
 import { observe } from "./observation.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
 import { remoteUrl } from "./repository.ts";
+import { assertPublishable } from "./secrets.ts";
 import { subjects, type Run, type Task, type Subject } from "./schema.ts";
 import { getWorkspace, pushWorkspace } from "./workspaces.ts";
 
@@ -114,6 +116,23 @@ const prAssessment = {
     reconcilePrReview(github, task.subjectId, run.context.item.number, references, { task, run }),
 } satisfies Effect<GithubEffectContext>;
 
+const issue = {
+  async apply({ github, run, references, publication, saveReceipt }) {
+    const reported = run.result.issues ?? [];
+    for (const { title, body, fingerprint } of reported) assertPublishable(title, body, fingerprintMarker(fingerprint));
+    const missing = reported.filter(({ fingerprint }) => publication().issues?.[fingerprint] === undefined);
+    if (!missing.length) return;
+    const { issues: open } = await github.fetchOpenItems();
+    for (const { title, body, fingerprint } of missing) {
+      if (publication().issues?.[fingerprint] !== undefined) continue;
+      const marker = fingerprintMarker(fingerprint);
+      const existing = open.find((candidate) => isBotLogin(candidate.user?.login) && candidate.body?.trimEnd().endsWith(marker));
+      const number = existing?.number ?? (await github.createIssue({ title, body, fingerprint }, references)).number;
+      saveReceipt({ issues: { ...publication().issues, [fingerprint]: number } });
+    }
+  },
+} satisfies Effect<GithubEffectContext>;
+
 const slackReply = {
   receipted: (publication) => Boolean(publication.slackReplyTs),
   async apply({ subject, run, saveReceipt }) {
@@ -121,15 +140,16 @@ const slackReply = {
   },
 } satisfies Effect<SlackEffectContext>;
 
-const effects = { push, pull_request: pullRequest, comment, labels, pr_assessment: prAssessment, slack_reply: slackReply };
+const effects = { push, pull_request: pullRequest, comment, labels, pr_assessment: prAssessment, issue, slack_reply: slackReply };
 
 const publicationEffects = {
   "pull-request": [effects.push, effects.pull_request],
   comment: [effects.push, effects.comment],
   "issue-assessment": [effects.comment, effects.labels],
   "pr-assessment": [effects.pr_assessment],
+  "issue-report": [effects.issue],
   "slack-thread": [effects.slack_reply],
-} as const satisfies Record<typeof actionContracts[keyof typeof actionContracts]["publication"], readonly Effect<never>[]>;
+} as const satisfies Record<Publication, readonly Effect<never>[]>;
 
 export type PublicationKind = keyof typeof publicationEffects;
 

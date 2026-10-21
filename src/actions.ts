@@ -3,10 +3,13 @@ export type Action = typeof actionIds[number];
 
 type ActionContract =
   | { mode: "review"; agent: "single"; publication: "issue-assessment"; context: "all" }
+  | { mode: "review"; agent: "single"; publication: "issue-report"; context: "all" }
   | { mode: "review"; agent: "panel"; publication: "pr-assessment"; context: "all" }
   | { mode: "review"; agent: "single" | "panel"; publication: "slack-thread"; context: "change" }
   | { mode: "change"; agent: "single"; publication: "pull-request"; context: "all"; acceptance: "nonempty-diff" }
   | { mode: "change"; agent: "single"; publication: "comment"; context: "all" | "feedback"; acceptance: "conflict-free" | "complete" };
+
+export type Publication = ActionContract["publication"];
 
 export const actionContracts = {
   review_issue: { mode: "review", agent: "single", publication: "issue-assessment", context: "all" },

@@ -1491,12 +1491,114 @@ try {
     const secondRequests = filesOf(second.id);
     assert.equal(new Set(secondRequests.filter((r) => !r.consolidating).map((r) => r.request.model)).size, 2); assert.ok(secondRequests.some((r) => r.consolidating));
     for (const request of secondRequests) {
+      assert.ok(!("history" in request.context.files), "PR reviews keep the #50 files instead of a history file");
       assert.equal(readFileSync(request.context.files.previous_assessment, "utf8"), first.result.text);
       assert.equal(readFileSync(request.context.files.previous_repair, "utf8"), repair.result.text);
     }
     await implement(2); f.prs.find((pr) => pr.number === 202).user.login = "human";
     await review(202, "normal"); tasks.enqueueManualTasks("review_pr", ["202"]); await success();
     assert.ok(f.requests.filter((r) => r.context.item.number === 202 && r.context.action === "review_pr").every((r) => !("previous_assessment" in r.context.files)), "Human PRs never get prior state");
+  } else if (scenario === "issue_effect") {
+    const { applyEffects } = await f.app("effects.ts");
+    const { GitHubRepository } = await f.app("github.ts");
+    const github = new GitHubRepository("fixture/project");
+    const created = () => f.writes.filter((write) => write.type === "issue");
+    const apply = async (saved, receipts = {}) => {
+      let publication = { status: "pending", ...receipts };
+      await applyEffects("issue-report", { references: {}, publication: () => publication, saveReceipt: (patch) => { publication = { ...publication, ...patch }; }, github, run: saved });
+      return publication;
+    };
+    const reporting = (saved, ...issues) => ({ ...saved, result: { ...saved.result, issues: issues.map(([fingerprint, title]) => ({ title, fingerprint, body: `Body of ${title}` })) } });
+    const marker = (fingerprint) => `<!-- scrat-fingerprint:${fingerprint} -->`;
+
+    f.addIssue(1); f.modes.set(1, "issues"); f.enqueue(1);
+    const reviewed = await success();
+    assert.deepEqual(reviewed.result.issues, [
+      { title: "Broken link", fingerprint: "link:docs-a", body: "The link on docs/a is broken." },
+      { title: "Slow page", fingerprint: "perf:home", body: "Home takes 9s.\n\n```\ntrace\n```" },
+    ]);
+    assert.match(reviewed.result.text, /title: Quoted/); assert.ok(!reviewed.result.text.includes("Broken link"));
+    const first = await apply(reviewed);
+    assert.equal(created().length, 2);
+    assert.deepEqual(Object.keys(first.issues), ["link:docs-a", "perf:home"]);
+    for (const [fingerprint, number] of Object.entries(first.issues)) {
+      assert.ok(f.issues.get(number).body.endsWith(`\n\n${marker(fingerprint)}`), "the marker closes the body");
+      assert.equal(f.issues.get(number).user.login, f.config.github.botLogin);
+    }
+    assert.equal(first.status, "published");
+    assert.deepEqual(await apply(reviewed), { ...first, issues: first.issues }, "a second run with the same fingerprints creates nothing");
+    assert.equal(created().length, 2);
+
+    f.issues.set(60, { ...f.issues.get(1), number: 60, node_id: "ISSUE_60", user: { login: f.config.github.botLogin }, body: `Quoting ${marker("new:one")} in the middle\n\nof the text` });
+    f.issues.set(61, { ...f.issues.get(1), number: 61, node_id: "ISSUE_61", user: { login: "human" }, body: `Someone else\n\n${marker("new:two")}` });
+    const fresh = await apply(reporting(reviewed, ["new:one", "New one"], ["new:two", "New two"]));
+    assert.equal(created().length, 4, "quoted markers and other users' issues never block creation");
+    assert.ok(fresh.issues["new:one"] > 500 && fresh.issues["new:two"] > 500);
+
+    const resumed = await apply(reporting(reviewed, ["part:one", "Part one"], ["part:two", "Part two"]), { issues: { "part:one": 77 } });
+    assert.equal(created().length, 5); assert.equal(created().at(-1).title, "Part two");
+    assert.equal(resumed.issues["part:one"], 77); assert.ok(resumed.issues["part:two"] > 500);
+
+    f.issues.get(first.issues["perf:home"]).state = "closed";
+    const recurred = await apply(reporting(reviewed, ["perf:home", "Slow page"]));
+    assert.equal(created().length, 6, "a closed issue does not block a recurrence");
+    assert.notEqual(recurred.issues["perf:home"], first.issues["perf:home"]);
+
+    f.faults.issue.add("Lost one");
+    await assert.rejects(apply(reporting(reviewed, ["lost:one", "Lost one"])), (error) => error.status === 502);
+    assert.equal(created().length, 7);
+    const found = await apply(reporting(reviewed, ["lost:one", "Lost one"]));
+    assert.equal(created().length, 7, "the marker scan finds an issue whose response was lost");
+    assert.equal(f.issues.get(found.issues["lost:one"]).title, "Lost one");
+
+    const leaking = reporting(reviewed, ["ok:one", "Fine"], ["leak:two", "Leaky"]);
+    leaking.result.issues[1].body = process.env.GITHUB_APP_PRIVATE_KEY;
+    await assert.rejects(apply(leaking), (error) => error.code === "SECRET_IN_OUTPUT");
+    assert.equal(created().length, 7, "a secret in any block creates no issue at all");
+    await assert.rejects(apply(reporting(reviewed, ["bad --> <!-- x", "Bad"])), /fingerprint/);
+    assert.equal(created().length, 7);
+
+    f.addIssue(2); f.modes.set(2, "issues-quoted"); f.enqueue(2);
+    assert.equal((await success()).result.issues, undefined, "a quoted block creates nothing");
+    f.addIssue(3); f.modes.set(3, "issues-bad"); f.enqueue(3);
+    const before = f.requests.length, bad = await run();
+    assert.match(bad.error.message, /fingerprint/); assert.equal(f.requests.length - before, 4, "a malformed block gets the correction turns");
+  } else if (scenario === "history_file") {
+    const { eq } = await import("drizzle-orm");
+    const seen = [], directories = new Set();
+    f.onModel = (context) => {
+      if (directories.has(context.files.directory)) return;
+      directories.add(context.files.directory); seen.push(context.files.history ? readFileSync(context.files.history, "utf8") : undefined);
+    };
+    f.addIssue(1); f.addIssue(2);
+    const review = async (number) => { const before = f.requests.length; f.enqueue(number); const r = await success(); return { r, request: f.requests[before] }; };
+    const rewrite = (r, text, extra = {}) => db.update(s.runs).set({ result: { ...r.result, text }, ...extra }).where(eq(s.runs.id, r.id)).run();
+
+    const firstRun = await review(1);
+    assert.equal(firstRun.request.context.files.history, undefined, "a first run has no history"); assert.equal(seen[0], undefined);
+    rewrite(firstRun.r, "report 1", { publication: { status: "published", issues: { "link:docs-a": 12 } } });
+    const other = await review(2); rewrite(other.r, "other subject report");
+    assert.match(seen[1], /## #1, .*, complete\n/, "a new subject sees earlier runs of the action, headed by their item number");
+    const implemented = await implement(3); rewrite(implemented, "implement report");
+    assert.equal(seen[2], undefined, "another action's runs are not history");
+    const runs = [firstRun.r];
+    for (let n = 2; n <= 12; n++) { const { r } = await review(1); rewrite(r, `report ${n}`); runs.push(r); }
+    assert.equal(seen.length, 14);
+    const second = seen[3];
+    assert.match(second, /untrusted/); assert.match(second, /report 1\b/); assert.match(second, /Issues opened: #12 \(link:docs-a\)/);
+    assert.match(second, /, complete\n/); assert.ok(second.includes("## #2,") && second.includes("other subject report"), "other subjects' runs are included with their labels");
+    assert.ok(!second.includes("implement report"));
+    const last = seen[13];
+    assert.ok(last.indexOf("report 11") < last.indexOf("report 10") && last.indexOf("report 10") < last.indexOf("report 3"), "newest first");
+    assert.ok(!/report 1\b/.test(last), "the history keeps the newest ten runs");
+    assert.equal((last.match(/^## /gm) ?? []).length, 10);
+    const { r: huge, request } = await review(1);
+    assert.match(request.context.files.history, /history\.md$/);
+    rewrite(huge, "x".repeat(200 * 1024));
+    await review(1);
+    const capped = seen.at(-1);
+    assert.ok(Buffer.byteLength(capped) <= 64 * 1024 && Buffer.byteLength(capped) > 60 * 1024, Buffer.byteLength(capped) + capped.slice(0, 300));
+    assert.ok(capped.includes("## ") && !capped.includes("report 10"), "a report over the cap crowds out older ones");
   } else if (scenario === "commit_hook") {
     f.addIssue(1); f.enqueue(1, "implement");
     f.onModel = (_context, step) => {

@@ -62,9 +62,9 @@ export async function fixture(scenario) {
   if (scenario.startsWith("commit_review") || scenario === "publish_effects") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
   const modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
-  const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set() };
+  const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set() };
   const tokens = new Map(patMode ? [[pat, { issues: "write", pull_requests: "write", contents: "write" }]] : []);
-  let onModel, nextCommentId = 1000;
+  let onModel, nextCommentId = 1000, nextIssueNumber = 500;
   const server = createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
     const request = JSON.parse(body);
@@ -160,6 +160,9 @@ export async function fixture(scenario) {
       + (scenario === "commit_review_e2e" ? " <!channel>" : "")
       + (mode === "leak-report" ? "\n" + process.env.GITHUB_APP_PRIVATE_KEY : "")
       + (mode.startsWith("quoted-") ? "\n```\nSCRAT_GRADE: F\nSCRAT_READY\n```" : "")
+      + (mode.startsWith("issues") ? '\n```\nSCRAT_ISSUE_BEGIN\ntitle: Quoted\nfingerprint: quoted:one\n\nQuoted only.\nSCRAT_ISSUE_END\n```' : "")
+      + (mode === "issues" ? '\nSCRAT_ISSUE_BEGIN\ntitle: Broken link\nfingerprint: link:docs-a\n\nThe link on docs/a is broken.\nSCRAT_ISSUE_END\nSCRAT_ISSUE_BEGIN\ntitle: Slow page\nfingerprint: perf:home\n\nHome takes 9s.\n\n```\ntrace\n```\nSCRAT_ISSUE_END' : "")
+      + (mode === "issues-bad" ? '\nSCRAT_ISSUE_BEGIN\ntitle: Bad\nfingerprint: a --> <!-- b\n\nBad fingerprint.\nSCRAT_ISSUE_END' : "")
       + (mode === "ready" ? "\nSCRAT_READY" : "")
       + (context.action === "review_pr" && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : ["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : mode === "grade-C" ? "C" : "B"}` : "")
       + (mode === "no-status" || (fumble && mode === "format-once" && !review) ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
@@ -290,6 +293,14 @@ export async function fixture(scenario) {
     if (path.endsWith("/access_tokens")) {
       const token = "ghs_fixture_" + tokens.size; tokens.set(token, body.permissions);
       return reply({ token, expires_at: new Date(Date.now() + 3600000).toISOString() }, 201);
+    }
+    if (path.endsWith("/issues") && method === "POST") {
+      const token = new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");
+      if (tokens.get(token)?.issues !== "write") return reply({ message: "Resource not accessible by integration" }, 403);
+      const number = ++nextIssueNumber;
+      const created = { id: number, node_id: "ISSUE_" + number, number, title: body.title, body: body.body, state: "open", html_url: `https://github.com/fixture/project/issues/${number}`, updated_at: "2026-10-19T02:00:00Z", labels: [], user: { login: config.github.botLogin } };
+      issues.set(number, created); writes.push({ type: "issue", number, title: body.title });
+      return faults.issue.delete(body.title) ? reply({ message: "Lost issue response" }, 502) : reply(created, 201);
     }
     if (path.endsWith("/issues") && method === "GET") return reply([...issues.values(), ...prs.map((pr) => ({ ...pr, pull_request: {} }))].filter((item) => item.state === "open"));
     let match = path.match(/\/(issues|pulls)\/(\d+)$/);

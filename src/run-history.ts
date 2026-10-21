@@ -1,7 +1,7 @@
 import { and, desc, eq, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import type { Action } from "./actions.ts";
 import { db } from "./db.ts";
-import { type Run, runs, tasks } from "./schema.ts";
+import { items, type Run, runs, type Subject, subjects, tasks } from "./schema.ts";
 
 type Database = Pick<typeof db, "select">;
 
@@ -25,6 +25,12 @@ export const completedRunsOfAction = (subjectId: string, action: Action, limit =
   db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
     .where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
     .orderBy(desc(runs.sequence)).limit(limit).all().map(({ run }) => run);
+
+export const completedRunsOfActionInRepository = (repository: string, action: Action, limit: number): { run: Run; subject: Subject; number?: number }[] =>
+  db.select({ run: runs, subject: subjects, payload: items.payload }).from(runs)
+    .innerJoin(tasks, eq(runs.taskId, tasks.id)).innerJoin(subjects, eq(tasks.subjectId, subjects.id)).leftJoin(items, eq(items.id, subjects.id))
+    .where(and(eq(subjects.repository, repository), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
+    .orderBy(desc(runs.sequence)).limit(limit).all().map(({ run, subject, payload }) => ({ run, subject, number: payload?.number }));
 
 export const latestFinishedRun = (subjectId: string) =>
   db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))

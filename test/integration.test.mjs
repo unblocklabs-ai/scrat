@@ -60,6 +60,7 @@ const scenarios = {
   existing_pr: "existing implementation PRs suppress duplicate implementation tasks",
   rejection: "invalid queued tasks are rejected with a journal reason while later work still runs, and bad static config blocks startup",
   recovery: "recover releases an abandoned claim without rewriting the saved result",
+  crash_before_publishing: "validated artifacts and the publishing stage are written together, so a run failed after validation resumes at publishing without validating again",
   cleanup: "cleanup failure cannot turn a published review into a failed task",
   sync_missing_item: "a deleted open item is marked closed and its failed read does not stop routing for the others",
   single_repository: "sync, fetch, claims and clone refs refuse any repository other than the configured one",

@@ -73,13 +73,13 @@ async function validateAndCommit({ run, references, repositoryPath }: Ctx, p: Pr
   const message = /^[a-z]+(\([^)]*\))?!?: /.test(p.title) ? p.title : `fix: ${p.title}`;
   const commitSha = await commitWorkspace(workspace, message, botAuthor(), references);
   if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
-  db.update(runs).set({ headSha: commitSha, publication: { status: "pending", commitSha }, verification: { headSha: commitSha, commands } }).where(eq(runs.id, run.id)).run();
   if (kind === "conflict-free" && await hasConflicts(repositoryPath, p.mainSha, commitSha)) {
     throw new Error(unresolvedConflict);
   }
   if (kind === "nonempty-diff" && !await git(workspace.path, ["diff", "--name-only", `${p.baseRef}...HEAD`])) {
     throw new Error("Implementation produced no changes against the base branch");
   }
+  db.update(runs).set({ headSha: commitSha, publication: { status: "pending", commitSha }, verification: { headSha: commitSha, commands }, stage: "publishing" }).where(eq(runs.id, run.id)).run();
 }
 
 type Ctx = {
@@ -306,7 +306,7 @@ async function validateStage(ctx: Ctx, p: Prepared) {
   const unchanged = acceptance === "complete" && !p.validated && !validationOnly
     && p.startHeadSha === p.preparedHead && !p.mergeInProgress && await git(workspace.path, ["rev-parse", "HEAD"]) === p.startHeadSha
     && !await git(workspace.path, ["status", "--porcelain"]);
-  if (unchanged) db.update(runs).set({ publication: { status: "pending", commitSha: p.startHeadSha } }).where(eq(runs.id, run.id)).run();
+  if (unchanged) db.update(runs).set({ publication: { status: "pending", commitSha: p.startHeadSha }, stage: "publishing" }).where(eq(runs.id, run.id)).run();
   else if (acceptance && !p.validated) {
     for (let round = 1; ; round++) {
       try { await validateAndCommit(ctx, p, acceptance); break; }
@@ -370,7 +370,7 @@ export async function runNextTask() {
         }
       }
       await validateStage(ctx, prepared);
-      db.update(runs).set({ stage: "publishing" }).where(eq(runs.id, run.id)).run();
+      if (!ctx.acceptance) db.update(runs).set({ stage: "publishing" }).where(eq(runs.id, run.id)).run();
     }
     await publishStage(ctx, observed);
     finishRun(run.id, { status: "completed" });

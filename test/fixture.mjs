@@ -210,7 +210,7 @@ export async function fixture(scenario) {
     writeFileSync("check.mjs", scenario === "validation_mutation" ? 'import{writeFileSync}from"node:fs";writeFileSync("src/app.ts","unexpected verification change\\n");' : 'import{existsSync}from"node:fs";if(existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed");process.exit(7);}console.log("checked actual source");');
     config.workspace.validate = [[process.execPath, resolve("check.mjs")]];
   }
-  if (["validation_feedback", "validation_feedback_cap", "validation_slots", "self_repair", "bot_name"].includes(scenario)) {
+  if (["validation_feedback", "validation_feedback_cap", "validation_slots", "self_repair", "bot_name", "crash_before_publishing"].includes(scenario)) {
     const flag = (name) => JSON.stringify(resolve(name));
     writeFileSync("validate.mjs", 'import{appendFileSync,existsSync}from"node:fs";const s=Date.now();await new Promise((r)=>setTimeout(r,existsSync(' + flag("slow") + ')?300:0));'
       + 'appendFileSync(' + flag("validations.log") + ',JSON.stringify({s,e:Date.now()})+"\\n");if(existsSync(' + flag("kill-validation") + '))process.kill(process.pid,"SIGKILL");if(existsSync(' + flag("exit-137") + '))process.exit(137);'

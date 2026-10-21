@@ -744,6 +744,25 @@ try {
     const failed = await run(); assert.ok(failed.error); assert.equal(f.prs.length, 1); const calls = f.requests.length;
     tasks.retryTask(failed.taskId); const completed = await success();
     assert.equal(completed.publication.pullRequestNumber, 201); assert.equal(f.prs.length, 1); assert.equal(f.requests.length, calls);
+  } else if (scenario === "crash_before_publishing") {
+    const updates = [], update = db.update.bind(db);
+    db.update = (table) => {
+      const builder = update(table);
+      if (table !== s.runs) return builder;
+      const set = builder.set.bind(builder);
+      builder.set = (values) => { updates.push(values); return set(values); };
+      return builder;
+    };
+    const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
+    f.addIssue(1, ["scrat"]); f.enqueue(1, "implement"); f.faults.pr.add(1);
+    const lost = await run(); assert.ok(lost.error); assert.equal(validations(), 1);
+    const artifacts = updates.filter((values) => values.verification);
+    assert.equal(artifacts.length, 1); assert.equal(artifacts[0].stage, "publishing", "validated artifacts and the publishing stage are one write");
+    const saved = f.row(s.runs, lost.id);
+    assert.equal(saved.stage, "publishing"); assert.equal(saved.publication.commitSha, saved.headSha); assert.equal(saved.verification.headSha, saved.headSha);
+    tasks.retryTask(lost.taskId); const completed = await success();
+    assert.equal(validations(), 1); assert.equal(f.prs.length, 1); assert.equal(completed.publication.pullRequestNumber, 201);
+    assert.equal(completed.inferenceFromRunId, lost.id);
   } else if (scenario === "freshness") {
     f.addIssue(1); await route(); f.modes.set(1, "ready");
     f.onModel = () => { f.issues.get(1).body = "New requirements"; };

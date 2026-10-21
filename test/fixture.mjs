@@ -30,7 +30,7 @@ export async function fixture(scenario) {
     writeFileSync("seed/src/renamed.ts", "export const renamed = 1;\n");
     writeFileSync("seed/ leading.ts", "export const leading = 1;\n");
   }
-  if (scenario === "isolation") { writeFileSync("outside-secret.txt", "outside-secret-content\n"); symlinkSync(resolve("outside-secret.txt"), "seed/src/link.txt"); }
+  if (scenario === "isolation") { writeFileSync("outside-secret.txt", "outside-secret-content\n"); symlinkSync(resolve("outside-secret.txt"), "seed/src/link.txt"); mkdirSync("outside-dir"); symlinkSync(resolve("outside-dir"), "seed/linkdir"); }
   if (scenario === "git_paging") {
     writeFileSync("seed/src/mid.txt", Array.from({ length: 200_000 }, (_, n) => `line ${n}`).join("\n") + "\n");
     writeFileSync("seed/src/utf.txt", "é".repeat(3000));
@@ -143,6 +143,13 @@ export async function fixture(scenario) {
       { name: "grep", args: { pattern: "outside", path: resolve(".") } }, { name: "ls", args: { path: ".." } }][step];
     if (!review && mode === "probe") tool = [{ name: "bash", args: { command: `${process.execPath} ${resolve("probe.mjs")} bash` } },
       { name: "write", args: { path: "src/app.ts", content: "export const value = 3;\n" } }][step];
+    if (!review && mode === "outside-write") tool = [{ name: "write", args: { path: "../outside.txt", content: "escaped\n" } },
+      { name: "write", args: { path: resolve("outside-new.txt"), content: "escaped\n" } },
+      { name: "edit", args: { path: resolve("outside-secret.txt"), edits: [{ oldText: "outside-secret-content", newText: "escaped" }] } },
+      { name: "write", args: { path: "linkdir/new/x.txt", content: "escaped\n" } },
+      { name: "edit", args: { path: "linkdir/secret.txt", edits: [{ oldText: "a", newText: "b" }] } },
+      { name: "write", args: { path: "src/new/file.ts", content: "export const added = 1;\n" } },
+      { name: "edit", args: { path: "src/app.ts", edits: [{ oldText: "export const value = 1;", newText: "export const value = 9;" }] } }][step];
     if (!review && mode === "notes") tool = [{ name: "write", args: { path: ".scrat/notes.md", content: "Plan: change value\n" } },
       { name: "write", args: { path: "src/app.ts", content: "export const value = 5;\n" } }][step];
     if (!review && mode === "leak-file") tool = step === 0 ? { name: "write", args: { path: "src/app.ts", content: process.env.GITHUB_APP_PRIVATE_KEY } } : undefined;

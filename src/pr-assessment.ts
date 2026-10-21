@@ -40,6 +40,17 @@ function selectAssessment(history: History) {
   return selected;
 }
 
+export function priorReviewTexts(itemId: string) {
+  const assessment = selectAssessment(prReviewHistory(itemId));
+  if (!assessment) return undefined;
+  const repair = db.select({ run: runs }).from(runs)
+    .innerJoin(tasks, eq(runs.taskId, tasks.id))
+    .where(and(eq(tasks.itemId, itemId), eq(tasks.action, "address_review")))
+    .orderBy(desc(runs.sequence)).all()
+    .find(({ run }) => run.result?.outcome === "complete" && (run.sequence ?? 0) > assessment.run.sequence!)?.run.result?.text;
+  return { assessment: assessment.result.text, repair };
+}
+
 type Assessment = NonNullable<ReturnType<typeof selectAssessment>>;
 export type PrReviewState =
   | { kind: "missing" }

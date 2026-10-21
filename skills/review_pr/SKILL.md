@@ -40,6 +40,10 @@ Pre-existing problems the PR did not introduce or worsen are follow-ups and do n
 
 For a complete review, include exactly one machine-readable `SCRAT_GRADE: <grade>` line immediately before the final `SCRAT_STATUS` line, where `<grade>` is S, A, B, C, D, or F. Keep the grade and its reason in the Markdown assessment too. This is a quality assessment, not merge authorization.
 
+## Previous assessment
+
+When `files.previous_assessment` is present, first state for each of its findings whether it is fixed, unfixed or no longer applicable, with evidence from the current source. When `files.previous_repair` is present, it is the repair agent's summary of what it changed. Then report new findings only if verified against the current diff. Do not re-raise a finding the evidence shows fixed. Grade by the rubric on what remains.
+
 ## Follow-ups and output
 
 Reconcile prior coverage with the current full diff and recheck affected conclusions against current source. When `previous` is present, use the `git` tool to diff `previousMain` to `main` and `previousHead` to `head`, together with the discussion, to focus new investigation; reuse applicable evidence without repeating unchanged work. Hints are not a complete dependency map.

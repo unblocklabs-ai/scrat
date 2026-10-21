@@ -7,6 +7,7 @@ import type { ErrorDetails } from "./errors.ts";
 import { git } from "./git.ts";
 import { commentKey, parseCommentKey } from "./markers.ts";
 import type { ItemObservation } from "./observation.ts";
+import { priorReviewTexts } from "./pr-assessment.ts";
 import { runs, tasks } from "./schema.ts";
 
 const inlineDiffPaths = 200;
@@ -42,6 +43,7 @@ export async function buildAgentInput(options: {
   workspace: { path: string; branch: string | null };
   database?: Record<string, unknown>;
   validationFailure?: ErrorDetails;
+  scratAuthored?: boolean;
 }) {
   const { run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha } = options;
   const input = { ...run.input };
@@ -58,9 +60,12 @@ export async function buildAgentInput(options: {
   const report = task.action === "address_review" ? db.select().from(runs).where(eq(runs.id, String(task.input.assessmentRunId))).get()?.result?.text : undefined;
   if (task.action === "address_review" && !report) throw new Error("Missing review report for self-repair");
   const failure = run.retryOfRunId ? db.select().from(runs).where(eq(runs.id, run.retryOfRunId)).get()?.error : undefined;
+  const prior = task.action === "review_pr" && options.scratAuthored ? priorReviewTexts(task.itemId) : undefined;
   await Promise.all([
     writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),
     report && writeContext("review", "review.md", report),
+    prior && writeContext("previous_assessment", "previous-assessment.md", prior.assessment),
+    prior?.repair && writeContext("previous_repair", "previous-repair.md", prior.repair),
     failure && writeContext("previousFailure", "previous-failure.json", JSON.stringify(failure, null, 2)),
     options.validationFailure && writeContext("validationFailure", "validation-failure.json", JSON.stringify(options.validationFailure, null, 2)),
     diffPaths.length > inlineDiffPaths && writeContext("diffPaths", "diff-paths.txt", diffPaths.join("\n") + "\n"),

@@ -229,6 +229,7 @@ export async function runNextTask() {
           db.update(runs).set({ stage: "agent" }).where(eq(runs.id, run.id)).run();
           const { prompt, contextDir, revisions } = await buildAgentInput({
             run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha, baseRef, mergeInProgress, workspace, validationFailure,
+            scratAuthored: isBotLogin(pullRequest?.user?.login),
             database: database ? {
               ...database, environment, schemaPrepared: !preparationDeferred,
               prepare: config.workspace?.prepare, migrate: databaseConfig?.migrate,

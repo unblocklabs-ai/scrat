@@ -1323,6 +1323,26 @@ try {
     const calls9 = f.requests.length, head9 = git(resolve("remote.git"), "rev-parse", branch9); f.reset(209, "no-change");
     const moved = await run(); assert.equal(moved.taskId, repair9.id); assert.equal(moved.error.message, guarded);
     assert.equal(f.requests.length, calls9); assert.equal(git(resolve("remote.git"), "rev-parse", branch9), head9);
+  } else if (scenario === "review_prior_assessment") {
+    const review = async (n, mode) => { f.reset(n, mode); await route(); return success(); };
+    const filesOf = (assessmentId) => f.requests.filter((r) => r.context.action === "review_pr" && r.context.item.number === 201 && r.context.files.directory.includes(assessmentId));
+    await implement(1); const first = await review(201, "grade-C");
+    const firstRequests = f.requests.filter((r) => r.context.action === "review_pr");
+    assert.ok(firstRequests.some((r) => r.consolidating));
+    for (const request of firstRequests) assert.ok(!("previous_assessment" in request.context.files) && !("previous_repair" in request.context.files), "A first review has no prior state");
+    await route(); f.reset(201, "normal"); const repair = await success();
+    assert.equal(repair.taskId, all(s.tasks).find((t) => t.action === "address_review").id); assert.ok(repair.result.text.includes("Implemented the change"));
+    await route(); f.reset(201, "normal"); const second = await success();
+    assert.notEqual(second.id, first.id);
+    const secondRequests = filesOf(second.id);
+    assert.equal(new Set(secondRequests.filter((r) => !r.consolidating).map((r) => r.request.model)).size, 2); assert.ok(secondRequests.some((r) => r.consolidating));
+    for (const request of secondRequests) {
+      assert.equal(readFileSync(request.context.files.previous_assessment, "utf8"), first.result.text);
+      assert.equal(readFileSync(request.context.files.previous_repair, "utf8"), repair.result.text);
+    }
+    await implement(2); f.prs.find((pr) => pr.number === 202).user.login = "human";
+    await review(202, "normal"); tasks.enqueueManualTasks("review_pr", ["202"]); await success();
+    assert.ok(f.requests.filter((r) => r.context.item.number === 202 && r.context.action === "review_pr").every((r) => !("previous_assessment" in r.context.files)), "Human PRs never get prior state");
   } else if (scenario === "commit_hook") {
     f.addIssue(1); f.enqueue(1, "implement");
     f.onModel = (_context, step) => {

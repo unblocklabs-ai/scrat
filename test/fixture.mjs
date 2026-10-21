@@ -215,6 +215,7 @@ export async function fixture(scenario) {
     const helper = fileURLToPath(new URL("database-command.mjs", import.meta.url)); cpSync(helper, "database-command.mjs");
     config.workspace = { ...config.workspace, environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), scenario === "validation_resume" ? "validate-resume" : "validate", resolve("database-receipts.jsonl")]] };
   }
+  if (scenario === "commits_source") Object.assign(config.actions.review_base_change, { enabled: true, channel: "C0123456789" });
   if (scenario === "bot_name") config.github.botName = "Mocha";
   if (scenario === "bot_identity_names") config.github.botName = "Mocha Agent";
   if (patMode) { config.github.auth = "pat"; config.github.botLogin = "agent-account"; }

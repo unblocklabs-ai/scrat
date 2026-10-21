@@ -99,6 +99,7 @@ export async function runNextTask() {
   let reviewWorkspace: Awaited<ReturnType<typeof createWorkspace>> | undefined;
   let databaseRequested = false;
   try {
+    if (item.kind === "commit") throw new Error("Commit tasks are not runnable yet");
     const repository = itemRepository(item) ?? item.payload.html_url;
     assertConfiguredRepository(repository);
     const repositoryPath = getRepositoryPath();

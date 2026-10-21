@@ -38,7 +38,7 @@ export async function syncGitHub(repository = config.github.repository, queueTas
     if (queueTasks) {
       operation.stage("reconcile_closed");
       const openIds = new Set([...issues, ...pullRequests].map((payload) => payload.node_id));
-      const missing = previousItems.filter((item) => item.state === "open" && !openIds.has(item.externalId));
+      const missing = previousItems.filter((item): item is typeof item & { kind: "issue" | "pr" } => item.kind !== "commit" && item.state === "open" && !openIds.has(item.externalId));
       const reads = new Array<PromiseSettledResult<GithubContext>>(missing.length);
       let next = 0;
       await Promise.all(Array.from({ length: Math.min(4, missing.length) }, async () => {

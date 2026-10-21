@@ -1,4 +1,5 @@
 import { setTimeout } from "node:timers/promises";
+import { pollCommits } from "./commit-source.ts";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { syncGitHub } from "./github-sync.ts";
@@ -22,6 +23,8 @@ async function poll() {
     if (shutdown.signal.aborted) break;
     try { await syncGitHub(); signalWork(); }
     catch { }
+    try { if (await pollCommits()) signalWork(); }
+    catch { }
   }
 }
 async function worker() {
@@ -38,6 +41,8 @@ try {
   await prepareService();
   logger.info({ event: "worker.started", concurrency: config.harness.maxConcurrency });
   try { await syncGitHub(); }
+  catch { }
+  try { if (await pollCommits()) signalWork(); }
   catch { }
   await Promise.all([poll(), ...Array.from({ length: config.harness.maxConcurrency }, worker)]);
 } catch (error) {

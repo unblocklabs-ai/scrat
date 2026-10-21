@@ -16,9 +16,9 @@ export const githubSnapshots = sqliteTable("github_snapshots", {
 
 export const items = sqliteTable("items", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
-  source: text("source", { enum: ["github"] }).notNull(),
+  source: text("source", { enum: ["github", "git"] }).notNull(),
   externalId: text("external_id").notNull(),
-  kind: text("kind", { enum: ["issue", "pr"] }).notNull(),
+  kind: text("kind", { enum: ["issue", "pr", "commit"] }).notNull(),
   state: text("state", { enum: ["open", "closed"] }).notNull().default("open"),
   workspaceId: text("workspace_id").references(() => workspaces.id),
   selfRepairCount: integer("self_repair_count").notNull().default(0),

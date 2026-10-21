@@ -76,6 +76,7 @@ const scenarios = {
   slack_client: "the Slack client posts and replies in threads, retries one 429, surfaces outages and Slack errors, caps and escapes text",
   slack_startup: "an enabled Slack action blocks startup on missing token, channel, template variables, panel reviewers or a failed auth.test, while a disabled one makes no Slack call and queued tasks for it are rejected",
   slack_redaction: "the Slack token never reaches child environments, is caught as a secret, redacted from errors and absent from the journal",
+  commits_source: "the base-branch commit source seeds silently, enqueues one range task per push, survives force-pushes and replays, and stops when disabled",
   database: "real PostgreSQL runs isolate databases, apply new migrations and remove resources",
 };
 

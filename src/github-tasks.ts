@@ -115,7 +115,7 @@ async function routeIssueReview(item: Item, observation: ItemObservation, mainSh
   const attempt = latest ? latestRunOfTask(latest.id) : undefined;
   const { revision } = observation;
   if (reviewTrigger({ latest, attempt, revision, mainSha }).covered) return 0;
-  const completed = completedRunsOfAction(item.id, "review_issue")[0];
+  const completed = completedRunsOfAction(item.id, "review_issue", 1)[0];
   const state = completed ? await freshness(savedEvaluation(completed), { ...observation, mainSha }, "relevant-paths") : undefined;
   return applyDecisions(item.id, planReview({ kind: "issue", completed, freshness: state, latest, attempt, revision, mainSha }));
 }

@@ -21,10 +21,10 @@ export const runHistory = (subjectId: string, action: Action) =>
     .where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action)))
     .orderBy(desc(runs.sequence)).all();
 
-export const completedRunsOfAction = (subjectId: string, action: Action): Run[] =>
+export const completedRunsOfAction = (subjectId: string, action: Action, limit = Number.MAX_SAFE_INTEGER): Run[] =>
   db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
     .where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
-    .orderBy(desc(runs.sequence)).all().map(({ run }) => run);
+    .orderBy(desc(runs.sequence)).limit(limit).all().map(({ run }) => run);
 
 export const latestFinishedRun = (subjectId: string) =>
   db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))

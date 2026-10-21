@@ -12,6 +12,11 @@ import { hasPublicationSnapshot, hasValidationCheckpoint } from "./results.ts";
 import { items, runs, tasks } from "./schema.ts";
 import { signalWork } from "./work-signal.ts";
 
+export function latestTask(itemId: string, action: Action) {
+  return db.select().from(tasks).where(and(eq(tasks.itemId, itemId), eq(tasks.action, action)))
+    .orderBy(desc(tasks.createdAt), desc(tasks.id)).limit(1).get();
+}
+
 function latestRun(taskId: string, database: Pick<typeof db, "select">) {
   return database.select().from(runs).where(eq(runs.taskId, taskId))
     .orderBy(sql`${runs.sequence} is null desc`, desc(runs.sequence)).limit(1).get();
@@ -84,7 +89,7 @@ type ManualEnqueueResult = { target: string; number?: number; itemId?: string; t
 export function enqueueManualTasks(action: string, targets: string[], priority?: number): ManualEnqueueResult[] {
   if (!isKnownAction(action)) throw new Error(`Unknown action: ${action}; expected one of ${actionIds.join(", ")}`);
   if (action === "address_review") throw new Error("address_review needs a review assessment and is queued automatically by sync");
-  const candidates = itemsInRepository(config.github.repository);
+  const candidates = itemsInRepository(config.github.repository, "github");
   return targets.map((target): ManualEnqueueResult => {
     const item = /^\d+$/.test(target) ? candidates.find((candidate) => candidate.payload.number === Number(target))
       : candidates.find((candidate) => candidate.id === target);

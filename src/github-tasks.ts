@@ -12,24 +12,18 @@ import { fetchPullRequestHead, fetchRepository, git, hasConflicts, isAncestor } 
 import { rateLimitLow, rateLimitState, type GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
 import { items, runs, tasks } from "./schema.ts";
-import { cancelQueuedTasks, enqueueTask } from "./tasks.ts";
+import { cancelQueuedTasks, enqueueTask, latestTask } from "./tasks.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { reconcileObserved, serializePr } from "./pr-review-publication.ts";
 import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
 import { planIssueTasks, planPrMaintenance, planReview, planSelfRepair, lowGrades, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
 
 type Item = typeof items.$inferSelect;
-type Action = typeof tasks.$inferSelect.action;
 type SyncContext = {
   github: GitHubRepository; repository: string; repositoryPath: string; remote: string;
   env: Awaited<ReturnType<GitHubRepository["getGitEnvironment"]>>; log: Logger;
 };
 type PrMaintenanceFacts = Parameters<typeof planPrMaintenance>[0];
-
-export function latestTask(itemId: string, action: Action) {
-  return db.select().from(tasks).where(and(eq(tasks.itemId, itemId), eq(tasks.action, action)))
-    .orderBy(desc(tasks.createdAt), desc(tasks.id)).limit(1).get();
-}
 
 function strings(value: unknown): string[] {
   if (!Array.isArray(value)) return [];

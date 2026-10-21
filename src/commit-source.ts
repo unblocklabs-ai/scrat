@@ -7,8 +7,7 @@ import { upsertItem } from "./items.ts";
 import { withOperation } from "./logging.ts";
 import { assertConfiguredRepository, remoteUrl } from "./repository.ts";
 import { sourceCursors } from "./schema.ts";
-import { latestTask } from "./github-tasks.ts";
-import { enqueueTask } from "./tasks.ts";
+import { enqueueTask, latestTask } from "./tasks.ts";
 
 const action = "review_base_change";
 

@@ -7,10 +7,20 @@ import { childEnvironment } from "./secrets.ts";
 import { serialized } from "./single-flight.ts";
 
 const executeFile = promisify(execFile);
+const networkOptions = { timeout: 600_000, killSignal: "SIGKILL" } as const;
 const repositoryFetches = new Map<string, Promise<unknown>>();
 
+const networkCommands = new Set(["fetch", "ls-remote", "push"]);
+
+function timedOut(label: string) {
+  return (error: unknown) => {
+    if (error instanceof Error && "killed" in error && error.killed) error.message = `Git ${label} timed out after ${networkOptions.timeout / 1000} seconds`;
+    throw error;
+  };
+}
+
 export async function git(repositoryPath: string, args: string[], env = childEnvironment()) {
-  const { stdout } = await executeFile("git", ["-C", repositoryPath, ...args], { env, maxBuffer: 16 * 1024 * 1024 });
+  const { stdout } = await executeFile("git", ["-C", repositoryPath, ...args], { env, maxBuffer: 16 * 1024 * 1024, ...(networkCommands.has(args[0]!) ? networkOptions : {}) }).catch(timedOut(args[0]!));
   return args.includes("-z") || args[0] === "show" ? stdout : stdout.trim();
 }
 
@@ -70,7 +80,7 @@ export async function fetchRepository(repositoryPath: string, remote: string, ba
   return serialized(repositoryFetches, repositoryPath, async () => {
     if (!existsSync(repositoryPath)) {
       await mkdir(dirname(repositoryPath), { recursive: true });
-      await executeFile("git", ["clone", "--single-branch", "--branch", baseBranch, "--", remote, repositoryPath], { env });
+      await executeFile("git", ["clone", "--single-branch", "--branch", baseBranch, "--", remote, repositoryPath], { env, ...networkOptions }).catch(timedOut("clone"));
     }
     await assertOrigin(repositoryPath, remote);
     await excludeWorkingNotes(repositoryPath);

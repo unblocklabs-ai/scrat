@@ -1562,6 +1562,22 @@ try {
         assert.equal(wrapped.error.exitCode, 137); assert.equal(f.requests.length, calls + 4, "agent turn only"); assert.equal(feedbackRequests().length, 2);
       }
     } finally { fs.writeSync = write; }
+  } else if (scenario === "command_timeout") {
+    f.addIssue(1, ["scrat"]); f.enqueue(1, "implement");
+    const started = Date.now(), failed = await run();
+    assert.ok(Date.now() - started < 20_000);
+    assert.ok(failed.error); assert.equal(failed.error.exitCode, undefined); assert.equal(failed.stage, "validating");
+    assert.match(failed.error.message, /timed out after 1 seconds/);
+    assert.equal(f.requests.length, 2, "agent turn only");
+    assert.equal(f.prs.length, 0);
+    tasks.retryTask(failed.taskId, "validation");
+    assert.equal(f.row(s.tasks, failed.taskId).status, "queued");
+  } else if (scenario === "agent_timeout") {
+    f.addIssue(1, ["scrat"]); f.modes.set(1, "stall"); f.enqueue(1, "implement");
+    const started = Date.now(), failed = await run();
+    assert.ok(Date.now() - started < 20_000);
+    assert.equal(failed.error.code, "AGENT_TIMEOUT"); assert.match(failed.error.message, /exceeded 1 seconds/);
+    assert.equal(f.requests.length, 1); assert.equal(f.prs.length, 0);
   } else if (scenario === "bash_guard") {
     const { heavyCommand, backgroundsWork } = await f.app("commands.ts");
     for (const command of ["pnpm verify &", "nohup pnpm lint", "a & b", "setsid pnpm verify", "pnpm lint; disown", "pnpm verify &   "]) assert.ok(backgroundsWork(command), command);
@@ -1578,6 +1594,8 @@ try {
     await validateStaticConfig(f.config);
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
     await assert.rejects(validateStaticConfig(variant((c) => { c.harness.maxConcurrentValidations = 0; })), /maxConcurrentValidations must be a positive integer/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.harness.commandTimeoutSeconds = 0; })), /commandTimeoutSeconds must be a positive integer/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.harness.agentTimeoutSeconds = 1.5; })), /agentTimeoutSeconds must be a positive integer/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.heavyCommands = ["^(unclosed"]; })), /heavyCommands\[0\] is not a valid regular expression/);
     for (const disabled of [null, ""]) await validateStaticConfig(variant((c) => { c.actions.address_review.exhaustedLabel = disabled; }));
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.address_review.exhaustedLabel = 5; })), /exhaustedLabel must be a string, or null or "" to disable it/);

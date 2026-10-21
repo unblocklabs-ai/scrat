@@ -51,6 +51,8 @@ const scenarios = {
   stale_branch_scrat: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting",
   validation_feedback: "a failed validation is sent back into the same Pi session, fixed there and published as one commit",
   validation_feedback_cap: "validation feedback stops after two rounds and never applies to signal-killed commands",
+  command_timeout: "a validation command that outlives harness.commandTimeoutSeconds is killed, fails the run as infrastructure without re-prompting the agent and accepts validation-only retry",
+  agent_timeout: "an agent turn that outlives harness.agentTimeoutSeconds is aborted and fails the run with AGENT_TIMEOUT",
   bash_guard: "heavy commands are refused in the agent's bash tool and bad guard or slot settings block startup",
   validation_slots: "validation waits for a configured number of slots, which a failing validation releases",
   merge: "retry resumes an unfinished merge and preserves partial work",

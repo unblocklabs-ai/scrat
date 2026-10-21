@@ -11,7 +11,10 @@ export async function runCommands(commands: string[][], cwd: string, environment
   for (const [file, ...args] of commands) {
     await withOperation("workspace.command", { ...references, command: [file, ...args], cwd }, async (operation) => {
       const started = performance.now();
-      const { stdout, stderr } = await executeFile(file, args, { cwd, env: environment, maxBuffer: 16 * 1024 * 1024 });
+      const { stdout, stderr } = await executeFile(file, args, { cwd, env: environment, maxBuffer: 16 * 1024 * 1024, timeout: config.harness.commandTimeoutSeconds * 1000, killSignal: "SIGKILL" }).catch((error) => {
+        if (error instanceof Error && "killed" in error && error.killed) error.message = `Command timed out after ${config.harness.commandTimeoutSeconds} seconds: ${[file, ...args].join(" ")}`;
+        throw error;
+      });
       operation.complete();
       receipts.push({ command: [file, ...args], durationMs: Math.round(performance.now() - started), stdout, stderr });
     });

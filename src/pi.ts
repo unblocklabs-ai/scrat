@@ -183,7 +183,16 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
         }
       }
     });
-    await session.prompt(followUp ?? `${withBotName(await readFile(run.skill, "utf8"))}\n\n${context}`, { expandPromptTemplates: false });
+    const prompt = async (text: string) => {
+      const started = performance.now();
+      let timedOut = false;
+      const timer = setTimeout(() => { timedOut = true; void session.abort(); }, config.harness.agentTimeoutSeconds * 1000);
+      try { await session.prompt(text, { expandPromptTemplates: false }); }
+      catch (error) { if (!timedOut) throw error; }
+      finally { clearTimeout(timer); }
+      if (timedOut) throw Object.assign(new Error(`Agent turn exceeded ${config.harness.agentTimeoutSeconds} seconds and was aborted after ${Math.round((performance.now() - started) / 1000)} seconds`), { code: "AGENT_TIMEOUT" });
+    };
+    await prompt(followUp ?? `${withBotName(await readFile(run.skill, "utf8"))}\n\n${context}`);
     for (let corrections = 0; ; corrections++) {
       const last = session.messages.findLast((message) => message.role === "assistant");
       if (!last || last.role !== "assistant" || last.stopReason !== "stop") {
@@ -203,7 +212,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
       } catch (error) {
         if (!(error instanceof ResultFormatError) || corrections >= maxFormatCorrections) throw error;
         log.warn({ event: "pi.format_retry", attempt: corrections + 1, error: error.message });
-        await session.prompt(correctionMessage(error.message, requireGrade), { expandPromptTemplates: false });
+        await prompt(correctionMessage(error.message, requireGrade));
       }
     }
   } finally {

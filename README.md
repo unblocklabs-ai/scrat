@@ -85,6 +85,8 @@ For project review, run `typecheck`, `knip`, and the integration/E2E tests after
 | Setting | Purpose |
 | --- | --- |
 | `harness.maxConcurrency` | Maximum simultaneous tasks, not model sessions or test subprocesses. Each PR review starts two reviewer sessions within one task. Change-mode tasks run a database container and, at the end, the validation suite (bounded by `maxConcurrentValidations`), so size this to the host's memory. |
+| `harness.commandTimeoutSeconds` | Longest a `workspace.prepare`, database migrate or `workspace.validate` command may run (default 3600, a positive integer). It is killed with SIGKILL and the run fails as infrastructure, eligible for validation-only retry, without re-prompting the agent. Clone, fetch and push are bounded separately at 600 seconds. |
+| `harness.agentTimeoutSeconds` | Longest one agent turn may run (default 3600, a positive integer). The session is aborted and the run fails with `AGENT_TIMEOUT`. |
 | `harness.maxConcurrentValidations` | Maximum `workspace.validate` runs at once (default 3, a positive integer). Further runs wait in a FIFO queue; preparation does not take a slot. |
 | `harness.logLevel` | Pino log verbosity, such as `info` or `debug`. |
 | `github.repository` | Target GitHub repository as `owner/repo`. |

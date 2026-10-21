@@ -157,6 +157,10 @@ export async function fixture(scenario) {
       + (context.action === "review_pr" && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : ["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : mode === "grade-C" ? "C" : "B"}` : "")
       + (mode === "no-status" || (fumble && mode === "format-once" && !review) ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
     const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] } : { role: "assistant", content: output };
+    if (mode === "stall") {
+      await new Promise((done) => { const timer = setTimeout(done, 60_000); res.on("close", () => { clearTimeout(timer); done(); }); });
+      if (res.destroyed) return;
+    }
     res.writeHead(200, { "content-type": "text/event-stream" });
     res.end("data: " + JSON.stringify({ id: "local_" + requests.length, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: request.model,
       choices: [{ index: 0, delta, finish_reason: tool ? "tool_calls" : (mode === "reviewer-failure" && request.model.includes("deepseek")) || mode === "merge-failure" ? "length" : "stop" }],
@@ -206,6 +210,12 @@ export async function fixture(scenario) {
       + 'if(existsSync(' + flag("slot-fail") + ')||existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed: marker present");process.exit(7);}');
     config.workspace.validate = [[process.execPath, resolve("validate.mjs")]];
   }
+  if (scenario === "command_timeout") {
+    writeFileSync("validate.mjs", 'await new Promise((r)=>setTimeout(r,30000));');
+    config.workspace.validate = [[process.execPath, resolve("validate.mjs")]];
+    config.harness.commandTimeoutSeconds = 1;
+  }
+  if (scenario === "agent_timeout") config.harness.agentTimeoutSeconds = 1;
   if (["validation_resume", "validation_guards", "resume_migration"].includes(scenario)) {
     writeFileSync("prepare.mjs", 'import{appendFileSync,mkdirSync,writeFileSync}from"node:fs";appendFileSync(' + JSON.stringify(resolve("prepare.log")) + ',"prepare\\n");mkdirSync("node_modules",{recursive:true});writeFileSync("node_modules/prepared","ready");');
     config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];

@@ -2,6 +2,8 @@
   "harness": {
     "maxConcurrency": 6,
     "maxConcurrentValidations": 3,
+    "commandTimeoutSeconds": 3600,
+    "agentTimeoutSeconds": 3600,
     "logLevel": "info"
   },
   "github": {

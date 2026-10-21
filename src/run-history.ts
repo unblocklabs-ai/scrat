@@ -1,4 +1,4 @@
-import { and, desc, eq, isNotNull, isNull, ne, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import type { Action } from "./actions.ts";
 import { db } from "./db.ts";
 import { items, type Run, runs, type Subject, subjects, tasks } from "./schema.ts";
@@ -15,10 +15,10 @@ export const latestRunOfTask = (taskId: string, database: Database = db) =>
   database.select().from(runs).where(eq(runs.taskId, taskId))
     .orderBy(sql`${runs.sequence} is null desc`, desc(runs.sequence)).limit(1).get();
 
-export const runHistory = (subjectId: string, action: Action) =>
+export const runHistory = (subjectId: string, actions: Action | readonly Action[]) =>
   db.select({ run: runs, task: tasks }).from(runs)
     .innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action)))
+    .where(and(eq(tasks.subjectId, subjectId), inArray(tasks.action, typeof actions === "string" ? [actions] : [...actions])))
     .orderBy(desc(runs.sequence)).all();
 
 export const completedRunsOfAction = (subjectId: string, action: Action, limit = Number.MAX_SAFE_INTEGER): Run[] =>

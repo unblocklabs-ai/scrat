@@ -82,13 +82,14 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | 
   });
 }
 
-const issueActions: ReadonlySet<string> = new Set(["review_issue", "implement"]);
-
 type ManualEnqueueResult = { target: string; number?: number; itemId?: string; taskId?: string; error?: string };
 
 export function enqueueManualTasks(action: string, targets: string[], priority?: number): ManualEnqueueResult[] {
-  if (!isKnownAction(action)) throw new Error(`Unknown action: ${action}; expected one of ${manifests().map((manifest) => manifest.name).join(", ")}`);
-  if (action === "address_review") throw new Error("address_review needs a review assessment and is queued automatically by sync");
+  const manifest = getManifest(action);
+  if (!manifest) throw new Error(`Unknown action: ${action}; expected one of ${manifests().map(({ name }) => name).join(", ")}`);
+  if (manifest.trigger.manual === false) throw new Error(`${action} is queued automatically by sync and cannot be enqueued by hand`);
+  const needs = manifest.trigger.item;
+  if (!needs) throw new Error(`${action} is not triggered by an issue or PR`);
   const candidates = itemsInRepository(config.github.repository);
   return targets.map((target): ManualEnqueueResult => {
     const item = /^\d+$/.test(target) ? candidates.find((candidate) => candidate.payload.number === Number(target))
@@ -96,7 +97,6 @@ export function enqueueManualTasks(action: string, targets: string[], priority?:
     if (!item) return { target, error: `No item ${target} in ${config.github.repository}` };
     const base = { target, number: item.payload.number, itemId: item.id };
     if (item.state !== "open") return { ...base, error: "Item is closed" };
-    const needs = issueActions.has(action) ? "issue" : "pr";
     if (item.kind !== needs) return { ...base, error: `${action} needs ${needs === "pr" ? "a PR" : "an issue"}, but ${target} is ${item.kind === "pr" ? "a PR" : "an issue"}` };
     try { return { ...base, taskId: enqueueTask({ subjectId: item.id, action, priority, reason: "Manually enqueued", input: { source: "github_items", kind: "manual", manual: true } }).id }; }
     catch (error) { return { ...base, error: error instanceof Error ? error.message : String(error) }; }

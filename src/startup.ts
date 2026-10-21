@@ -2,7 +2,7 @@ import { access } from "node:fs/promises";
 import { sql } from "drizzle-orm";
 import { manifests } from "./actions.ts";
 import { type ActionSettings, config, thinkingLevels } from "./config.ts";
-import { deploymentDefaults, skillPath } from "./manifests.ts";
+import { deploymentDefaults, findTriggerConflicts, skillPath } from "./manifests.ts";
 import { db } from "./db.ts";
 import { slugOf } from "./identity.ts";
 import { logger } from "./logging.ts";
@@ -60,6 +60,7 @@ export async function validateStaticConfig(settings: {
       if (slack) {
         if (!process.env.SLACK_BOT_TOKEN) problems.push(`${action}: SLACK_BOT_TOKEN is not set`);
         if (!entry.channel?.trim()) problems.push(`${action}: channel must not be empty`);
+        if (!entry.startMessage?.trim()) problems.push(`${action}: startMessage must not be empty`);
         if (entry.branch !== settings.github?.baseBranch) problems.push(`${action}: branch must equal github.baseBranch`);
         const unknown = [...(entry.startMessage ?? "").matchAll(/\{\{(.*?)\}\}/g)].map((match) => match[1]).filter((name) => !templateVariables.has(name));
         if (unknown.length) problems.push(`${action}: unknown startMessage variable ${unknown.map((name) => `{{${name}}}`).join(", ")}`);
@@ -71,6 +72,7 @@ export async function validateStaticConfig(settings: {
       if (!await access(skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${skill}`);
     }
   }
+  problems.push(...findTriggerConflicts(manifests(), (manifest) => ({ ...deploymentDefaults(manifest), ...settings.actions[manifest.name] }).enabled !== false));
   if (problems.length) {
     if (modelRuntime.getError()) dropModelRuntime();
     throw new Error(`Invalid Scrat configuration:\n${problems.map((problem) => `- ${problem}`).join("\n")}`);

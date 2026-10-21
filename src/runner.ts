@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
-import { manifestOf } from "./actions.ts";
+import { actionsPublishing, manifestOf } from "./actions.ts";
 import { buildAgentInput, evaluateContext, readDiffScope } from "./agent-input.ts";
-import { commitMetadata, describeCommit, startCommitThread } from "./commit-review.ts";
+import { commitInput, commitMetadata, describeCommit, startCommitThread } from "./commit-review.ts";
 import { config, getActionConfig, getRepositoryPath, isBotLogin } from "./config.ts";
 import type { Manifest } from "./manifests.ts";
 import { botName } from "./identity.ts";
@@ -145,7 +145,7 @@ async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
   const { repository, context, pullRequest, item, observation, gitEnvironment, mainSha } = observed;
   const trigger = parseTriggerInput(task.input);
   if (trigger.kind === "low_grade") {
-    const state = await resolvePrReview(runHistory(item.id, "review_pr"), observation, mainSha);
+    const state = await resolvePrReview(runHistory(item.id, actionsPublishing("pr_assessment")), observation, mainSha);
     if (state.kind !== "current" || state.assessment.originId !== trigger.assessmentRunId) {
       throw new Error("The review this repair addresses is no longer the current assessment");
     }
@@ -196,8 +196,9 @@ async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
   return { workspace, validationOnly, mergeInProgress, mainSha, baseRef, preparedHead, startHeadSha, title: context.item.title };
 }
 
-async function acquireCommitWorkspace({ subject, run, references, repositoryPath, operation, cleanup }: Ctx) {
-  const { sha } = await startCommitThread(subject, run.input, operation.log);
+async function acquireCommitWorkspace({ subject, run, task, manifest, references, repositoryPath, operation, cleanup }: Ctx) {
+  const input = commitInput(run.input), { sha } = input;
+  if (manifest.start?.includes("slack_post")) await startCommitThread(subject, task.action, input, operation.log);
   const workspace = await createWorkspace({ repositoryPath, baseRef: sha }, references);
   cleanup.reviewWorkspace = workspace;
   return { workspace, validationOnly: false, mergeInProgress: false, mainSha: sha, baseRef: sha, preparedHead: sha, startHeadSha: sha, title: commitMetadata(subject).title };

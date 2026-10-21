@@ -1,3 +1,4 @@
+import { actionsPublishing } from "./actions.ts";
 import { upsertComment } from "./comments.ts";
 import { getRepositoryPath } from "./config.ts";
 import type { EventReferences } from "./events.ts";
@@ -29,7 +30,7 @@ function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeo
 
 async function reconcile(github: GitHubRepository, subjectId: string, number: number, references: EventReferences, publication?: { task: Task; run: Run }, observed?: GithubContext) {
   const current = observed ?? await github.fetchItemContext("pr", number);
-  const reviews = runHistory(subjectId, "review_pr");
+  const reviews = runHistory(subjectId, actionsPublishing("pr_assessment"));
   const observation = observe(github.repository, current);
   const existing = canonicalComment(observation.own, reviews);
   const mainSha = await git(getRepositoryPath(), ["rev-parse", `refs/remotes/origin/${observation.baseBranch}`]);

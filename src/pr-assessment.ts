@@ -1,3 +1,4 @@
+import { actionsPublishing, actionsTriggeredBy } from "./actions.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import type { ItemObservation } from "./observation.ts";
 import { hasPublicationSnapshot } from "./results.ts";
@@ -33,9 +34,9 @@ function selectAssessment(history: History) {
 }
 
 export function priorReviewTexts(subjectId: string) {
-  const assessment = selectAssessment(runHistory(subjectId, "review_pr"));
+  const assessment = selectAssessment(runHistory(subjectId, actionsPublishing("pr_assessment")));
   if (!assessment) return undefined;
-  const repair = runHistory(subjectId, "address_review")
+  const repair = runHistory(subjectId, actionsTriggeredBy("low_grade"))
     .find(({ run }) => run.result?.outcome === "complete" && (run.sequence ?? 0) > assessment.run.sequence!)?.run.result?.text;
   return { assessment: assessment.result.text, repair };
 }

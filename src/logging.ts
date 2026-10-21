@@ -38,7 +38,7 @@ export function startOperation(operation: string, context: Record<string, unknow
   };
 }
 
-type OperationScope = {
+export type OperationScope = {
   operationId: string;
   log: typeof logger;
   stage(name: string): void;

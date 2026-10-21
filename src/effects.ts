@@ -39,6 +39,7 @@ type GithubEffectContext = EffectContext & {
 
 type SlackEffectContext = EffectContext & {
   subject: Subject;
+  task: Task;
   run: Run;
 };
 
@@ -135,8 +136,8 @@ const issue = {
 
 const slackReply = {
   receipted: (publication) => Boolean(publication.slackReplyTs),
-  async apply({ subject, run, saveReceipt }) {
-    saveReceipt({ slackReplyTs: await postCommitReply(subject, run) });
+  async apply({ subject, task, run, saveReceipt }) {
+    saveReceipt({ slackReplyTs: await postCommitReply(subject, task.action, run) });
   },
 } satisfies Effect<SlackEffectContext>;
 

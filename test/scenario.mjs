@@ -2056,6 +2056,71 @@ try {
     assert.equal(live.actions.review_pr.provider, "fixture"); assert.equal(live.actions.review_pr.reviewers[1].provider, "fixture");
     const claimed = tasks.claimTask();
     assert.equal(claimed.task.priority, 10); assert.equal(claimed.run.provider, "fixture"); assert.equal(claimed.run.model, "gpt-6.1-sol");
+  } else if (scenario === "manifest_directory") {
+    const { manifests, routeFor } = await f.app("actions.ts");
+    const { validateStaticConfig } = await f.app("startup.ts");
+    assert.deepEqual(manifests().map((m) => m.name).sort(), ["address_pr_feedback", "address_review", "implement", "my_pr_review", "resolve_conflicts", "review_base_change", "review_issue", "review_pr", "review_triage"]);
+    await validateStaticConfig(f.config);
+    const issue = { source: "github_items", kind: "item_changed", item: "issue", author: "other" };
+    assert.equal(routeFor(issue), "review_triage"); assert.equal(routeFor({ ...issue, item: "pr" }), "my_pr_review");
+    assert.equal(routeFor({ ...issue, kind: "pr_conflicts", item: "pr", author: "other" }), undefined);
+    assert.equal(routeFor({ ...issue, kind: "pr_conflicts", item: "pr", author: "bot" }), "resolve_conflicts");
+    f.addIssue(1); await route();
+    assert.deepEqual(all(s.tasks).map((t) => t.action), ["review_triage"]);
+    const done = await success();
+    assert.equal(done.skill, resolve("deployment/skills/review_triage/SKILL.md"));
+    assert.equal(f.requests.at(-1).context.action, "review_triage"); assert.ok(f.writes.some((w) => w.type === "comment" && w.number === 1));
+    assert.throws(() => f.enqueue(1, "nope"), /Unknown action: nope/); assert.throws(() => tasks.enqueueManualTasks("nope", ["1"]), /Unknown action/);
+    const local = resolve("app/scrat.local.json"), directory = resolve("deployment");
+    const probe = (actions, files = {}) => {
+      for (const [name, text] of Object.entries(files)) writeFileSync(resolve(directory, name), text);
+      writeFileSync(local, JSON.stringify({ actions }));
+      try { return execFileSync(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(resolve("app/src/config.ts"))});`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); }
+      catch (error) { return error.stderr; }
+      finally { for (const name of Object.keys(files)) rmSync(resolve(directory, name)); }
+    };
+    const triage = readFileSync(resolve(directory, "review_triage.yaml"), "utf8"), named = (name, key, value) => triage.replace("name: review_triage", "name: " + name).replace(new RegExp(`^${key}: .*$`, "m"), `${key}: ${value}`);
+    const base = { directory, review_issue: { enabled: false }, review_pr: { enabled: false } };
+    assert.doesNotMatch(probe(base), /Error/);
+    assert.match(probe({ directory, review_pr: { enabled: false } }), /actions\/review_issue\.yaml and .*review_triage\.yaml both match \{source: github_items, kind: item_changed, item: issue\}; disable one/);
+    assert.doesNotMatch(probe({ directory, review_pr: { enabled: false }, review_triage: { enabled: false } }), /Error/);
+    assert.match(probe(base, { "bad_tool.yaml": named("bad_tool", "tools", "[teleport]") }), /bad_tool\.yaml: \/tools\/0/);
+    assert.match(probe(base, { "bad_file.yaml": named("bad_file", "files", "[secrets]") }), /bad_file\.yaml: \/files\/0/);
+    assert.match(probe({ ...base, directory: "relative/actions" }), /actions\.directory must be an absolute path/);
+    assert.match(probe({ ...base, directory: resolve("missing-actions") }), /Cannot read manifests in/);
+    await implement(2);
+    f.reset(202, "grade-C"); await route();
+    const queuedFor = (action) => all(s.tasks).filter((t) => t.action === action && t.status === "queued");
+    assert.equal(queuedFor("my_pr_review").length, 1); assert.equal(all(s.tasks).filter((t) => t.action === "review_pr").length, 0);
+    const reviewed = await success();
+    assert.equal(reviewed.result.grade, "C"); assert.ok(f.prs.find((pr) => pr.number === 202).labels.some((label) => label.name === "C \u00b7 Needs work"));
+    await route(); assert.equal(queuedFor("address_review").length, 1);
+    f.reset(202, "no-change"); const repair = await success();
+    assert.equal(repair.error, null); assert.equal(repair.publication.status, "published");
+    assert.match(probe(base, { "mismatch.yaml": named("other_name", "priority", "10") }), /mismatch\.yaml: name other_name must equal the file name/);
+  } else if (scenario === "manifest_tools_files") {
+    const { readManifests } = await f.app("manifests.ts");
+    const toolsOf = (request) => request.request.tools.map((tool) => tool.function.name);
+    f.addIssue(1); f.enqueue(1); await success();
+    const review = f.requests[0];
+    assert.deepEqual(toolsOf(review), ["read", "grep"]); assert.deepEqual(Object.keys(review.context.files), ["directory"]);
+    await implement(3); await implement(4);
+    const changes = f.requests.filter((r) => r.context.action === "implement");
+    assert.deepEqual(toolsOf(changes[0]), ["read", "grep", "find", "ls", "edit", "write"]);
+    assert.ok(changes[0].context.files.discussion); assert.equal(changes[0].context.files.history, undefined, "a first run has no history");
+    assert.match(readFileSync(changes.at(-1).context.files.history, "utf8"), /Previous implement runs/);
+    let count = 0;
+    const rejects = (name, change, message) => {
+      const directory = resolve("rules-" + ++count); mkdirSync(directory);
+      writeFileSync(resolve(directory, "rule_check.yaml"), change(readFileSync(resolve("app/actions", name + ".yaml"), "utf8").replace("name: " + name, "name: rule_check")));
+      assert.throws(() => readManifests(resolve("app"), directory), message);
+    };
+    rejects("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, bash]"), /rule_check\.yaml: mode review forbids the bash, edit and write tools/);
+    rejects("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, git, read_base]"), /read_base requires a review with agent: panel or context: change/);
+    rejects("review_pr", (text) => text.replace("[discussion, previous_assessment, previous_repair]", "[history]"), /files: history is not allowed with the pr_assessment effect/);
+    rejects("review_issue", (text) => text.replace("files: [discussion]", "files: [review]"), /files: review requires trigger.kind low_grade/);
+    rejects("implement", (text) => text.replace("[read, grep, find, ls, bash, edit, write]", "[read, git]"), /mode change forbids the git and read_base tools/);
+    rejects("implement", (text) => text.replace("item: issue", "item: pr"), /trigger.kind label requires item: issue/);
   } else if (scenario === "config_overrides") {
     const local = resolve("app/scrat.local.json");
     const probe = (overrides, code) => {
@@ -2197,7 +2262,14 @@ try {
       assert.equal(context.input.previousSha, previous); assert.equal(context.input.sha, head); assert.equal(context.input.commitCount, 1);
       assert.equal(context.commentRevisions.length, 0);
       assert.equal(f.writes.length, 0); assert.equal(all(s.runs).length, 1);
-    } else if (scenario === "commit_review_panel") {
+    } else if (scenario === "commit_review_no_start") {
+    let before;
+    f.onModel = (_context, step) => { if (step === 0 && before === undefined) before = posts().length; };
+    assert.equal(await push("No start slot"), 1);
+    await success();
+    assert.equal(before, 0, "no root is posted before the agent runs");
+    assert.equal(posts().length, 2); assert.equal(roots().length, 1); assert.equal(all(s.slackThreads).length, 1);
+  } else if (scenario === "commit_review_panel") {
       assert.equal(await push("Panel change"), 1);
       const r = await success();
       assert.equal(r.reviewers.length, 2); assert.ok(r.reviewers.every((reviewer) => reviewer.result?.outcome === "complete"));

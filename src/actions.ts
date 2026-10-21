@@ -1,4 +1,5 @@
-import { loadedManifests } from "./config.ts";
+import { isActionEnabled, loadedManifests } from "./config.ts";
+import { type EffectName, type Manifest, matches, type Signal } from "./manifests.ts";
 
 export type Action = string;
 
@@ -10,3 +11,12 @@ export function manifestOf(action: string) {
   return manifest;
 }
 export const temporaryWorkspaceActions = () => loadedManifests.filter((manifest) => manifest.mode === "review").map((manifest) => manifest.name);
+
+export const actionsPublishing = (effect: EffectName) => loadedManifests.filter((manifest) => manifest.publish.includes(effect)).map((manifest) => manifest.name);
+export const actionsTriggeredBy = (kind: Manifest["trigger"]["kind"]) => loadedManifests.filter((manifest) => manifest.trigger.kind === kind).map((manifest) => manifest.name);
+
+export const matchingActions = (signal: Signal) => loadedManifests.filter((manifest) => matches(manifest, signal)).map((manifest) => manifest.name);
+export const routeFor = (signal: Signal) => {
+  const found = matchingActions(signal);
+  return found.find(isActionEnabled) ?? found[0];
+};

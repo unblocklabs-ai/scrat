@@ -94,6 +94,9 @@ const scenarios = {
   commit_review_isolation: "the commit review agent never sees the Slack token, reads base files and diffs against the previous SHA, and nothing is installed",
   subjects_migration: "the subjects migration moves items, tasks, events and Slack threads to subject ids, keeps every row, refuses unmapped tasks and is a no-op the second time",
   manifests: "every action is loaded from a validated manifest, malformed manifests are rejected with file and path, and local overrides reach the runtime",
+  manifest_directory: "a deployment manifest directory adds an action for a freed trigger, rejects duplicate enabled triggers, unknown tools and files, and bad directories",
+  manifest_tools_files: "manifest tools and files lists decide which tools and context files reach the agent session, and cross-field rules reject unsafe combinations",
+  commit_review_no_start: "a commit manifest without a start slot posts no thread root before the agent and the reply creates the root",
   database: "real PostgreSQL runs isolate databases, apply new migrations and remove resources",
 };
 

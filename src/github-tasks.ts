@@ -1,6 +1,8 @@
 import { and, eq, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
+import { actionsPublishing, matchingActions, routeFor } from "./actions.ts";
 import { config, getRepositoryPath, isBotLogin } from "./config.ts";
+import type { Signal } from "./manifests.ts";
 import { botSlug } from "./identity.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { acknowledgedTaskIds, commentKey } from "./markers.ts";
@@ -18,13 +20,18 @@ import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { reconcileObserved, serializePr } from "./pr-review-publication.ts";
 import { completedRunsOfAction, latestFinishedRun, latestRunOfTask, runHistory } from "./run-history.ts";
 import { resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
-import { planIssueTasks, planPrMaintenance, planReview, planSelfRepair, lowGrades, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
+import { planIssueTasks, planPrMaintenance, planReview, planSelfRepair, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
 
 type SyncContext = {
   github: GitHubRepository; repository: string; repositoryPath: string; remote: string;
   env: Awaited<ReturnType<GitHubRepository["getGitEnvironment"]>>; log: Logger;
 };
 type PrMaintenanceFacts = Parameters<typeof planPrMaintenance>[0];
+type Routes = { review?: string; conflicts?: string; feedback?: string; repairs: string[]; repairFor: (grade: Signal["grade"]) => string | undefined };
+
+const signalFor = (item: Item, login: string | null | undefined, kind: Signal["kind"], grade?: Signal["grade"]): Signal =>
+  ({ source: "github_items", kind, item: item.kind, author: isBotLogin(login) ? "bot" : "other", grade });
+const latestOf = (subjectId: string, action: string | undefined) => action ? latestTask(subjectId, action) : undefined;
 
 function hasScratLabel(item: Item) {
   return item.payload.labels?.some((label) => labelName(label) === botSlug);
@@ -54,7 +61,7 @@ async function cleanupClosedItem(item: Item) {
   catch { }
 }
 
-async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observation: ItemObservation, pr: GithubPullRequest, mainSha: string): Promise<PrMaintenanceFacts> {
+async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observation: ItemObservation, pr: GithubPullRequest, mainSha: string, routes: Routes): Promise<PrMaintenanceFacts> {
   const { repositoryPath, remote, env } = ctx;
   const headRef = await fetchPullRequestHead(repositoryPath, remote, pr.number, env);
   const headSha = await git(repositoryPath, ["rev-parse", headRef]);
@@ -63,7 +70,7 @@ async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observatio
   const stale = !conflicts && Boolean(lastRun?.error) && lastRun?.stage === "preparing" && lastRun.headSha === headSha
     && !await isAncestor(repositoryPath, mainSha, headSha);
   const acknowledged = new Set(observation.own.flatMap((comment) => acknowledgedTaskIds(comment.body)));
-  const handled = runHistory(item.id, "address_pr_feedback")
+  const handled = (routes.feedback ? runHistory(item.id, routes.feedback) : [])
     .filter(({ run, task }) => (!run.finishedAt && task.status === "running") || (run.finishedAt && !run.error)
       || run.publication.commentId || acknowledged.has(task.id));
   const consumed = new Set(handled.flatMap(({ run }) => {
@@ -73,51 +80,57 @@ async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observatio
   }));
   const pending = observation.external.filter((comment) => !consumed.has(commentKey(comment)));
   return {
+    conflictAction: routes.conflicts, feedbackAction: routes.feedback,
     conflicts, stale, mainSha, headSha, pendingComments: pending.map((comment) => commentKey(comment)),
-    conflictTask: latestTask(item.id, "resolve_conflicts"), feedbackTask: latestTask(item.id, "address_pr_feedback"),
+    conflictTask: latestOf(item.id, routes.conflicts), feedbackTask: latestOf(item.id, routes.feedback),
   };
 }
 
-async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation: ItemObservation, owned: boolean, state: PrReviewState, count: number) {
-  const { exhaustedLabel, maxSelfRepairs } = config.actions.address_review as Required<typeof config.actions[string]>;
-  const latestRepair = latestTask(item.id, "address_review");
+async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation: ItemObservation, routes: Routes, repair: string | undefined, state: PrReviewState, count: number) {
+  const settings = config.actions[repair ?? routes.repairs[0] ?? ""];
+  const latestRepair = latestOf(item.id, repair ?? routes.repairs[0]);
   const repairActive = latestRepair?.status === "queued" || latestRepair?.status === "running";
-  if (!exhaustedLabel || !owned || state.kind !== "current" || repairActive) return;
-  const exhausted = lowGrades.includes(state.assessment.result.grade) && count >= maxSelfRepairs;
+  if (!settings?.exhaustedLabel || !routes.repairs.length || state.kind !== "current" || repairActive) return;
+  const { exhaustedLabel } = settings;
+  const exhausted = repair !== undefined && count >= (settings.maxSelfRepairs ?? 2);
   try {
     await reconcileLabels(ctx.github, item.payload.number, { current: observation.labels, desired: exhausted ? [exhaustedLabel] : [], managed: [exhaustedLabel] }, { subjectId: item.id });
   } catch (error) { ctx.log.warn({ event: "self_repair.label_pending", subjectId: item.id, err: error }); }
 }
 
-async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObservation, mainSha: string, owned: boolean) {
-  const latest = latestTask(item.id, "review_pr");
-  const reviews = runHistory(item.id, "review_pr");
+async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObservation, mainSha: string, routes: Routes) {
+  const action = routes.review;
+  if (!action) return 0;
+  const latest = latestTask(item.id, action);
+  const reviews = runHistory(item.id, actionsPublishing("pr_assessment"));
   const attempt = reviews.find(({ task }) => task.id === latest?.id)?.run;
   const state = await resolvePrReview(reviews, observation, mainSha);
-  let added = applyDecisions(item.id, planReview({ kind: "pr", state, latest, attempt, revision: observation.revision, mainSha }));
-  const { maxSelfRepairs } = config.actions.address_review as Required<typeof config.actions[string]>;
+  let added = applyDecisions(item.id, planReview({ kind: "pr", action, state, latest, attempt, revision: observation.revision, mainSha }));
   const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
+  const repairAction = routes.repairFor(state.kind === "current" ? state.assessment.result.grade : undefined);
+  const limit = config.actions[repairAction ?? ""]?.maxSelfRepairs ?? 2;
   const repair = planSelfRepair({
-    owned, state, feedbackTask: latestTask(item.id, "address_pr_feedback"),
-    reviewTask: latestTask(item.id, "review_pr"), repairTask: latestTask(item.id, "address_review"), count, limit: maxSelfRepairs,
+    repairAction, repairActions: routes.repairs, state, feedbackTask: latestOf(item.id, routes.feedback),
+    reviewTask: latest, repairTask: latestOf(item.id, repairAction), count, limit,
   });
   if (repair.limited && state.kind === "current" && !limitLogged.has(state.assessment.originId)) {
     limitLogged.add(state.assessment.originId);
-    ctx.log.info({ event: "self_repair.limit_reached", subjectId: item.id, limit: maxSelfRepairs }, "Self-repair limit reached");
+    ctx.log.info({ event: "self_repair.limit_reached", subjectId: item.id, limit }, "Self-repair limit reached");
   }
   added += applyDecisions(item.id, repair.decisions);
-  await reconcileExhaustedLabel(ctx, item, observation, owned, state, count);
+  await reconcileExhaustedLabel(ctx, item, observation, routes, repairAction, state, count);
   return added;
 }
 
-async function routeIssueReview(item: Item, observation: ItemObservation, mainSha: string) {
-  const latest = latestTask(item.id, "review_issue");
+async function routeIssueReview(item: Item, observation: ItemObservation, mainSha: string, action: string | undefined) {
+  if (!action) return 0;
+  const latest = latestTask(item.id, action);
   const attempt = latest ? latestRunOfTask(latest.id) : undefined;
   const { revision } = observation;
   if (reviewTrigger({ latest, attempt, revision, mainSha }).covered) return 0;
-  const completed = completedRunsOfAction(item.id, "review_issue", 1)[0];
+  const completed = completedRunsOfAction(item.id, action, 1)[0];
   const state = completed ? await freshness(savedEvaluation(completed), { ...observation, mainSha }, "relevant-paths") : undefined;
-  return applyDecisions(item.id, planReview({ kind: "issue", completed, freshness: state, latest, attempt, revision, mainSha }));
+  return applyDecisions(item.id, planReview({ kind: "issue", action, completed, freshness: state, latest, attempt, revision, mainSha }));
 }
 
 async function routeObserved(ctx: SyncContext, item: Item, context: GithubContext, defaultBaseSha: string) {
@@ -126,14 +139,22 @@ async function routeObserved(ctx: SyncContext, item: Item, context: GithubContex
   const observation = observe(repository, context);
   const mainSha = observation.kind === "pr" && observation.baseBranch !== config.github.baseBranch
     ? await fetchRepository(repositoryPath, remote, observation.baseBranch, env) : defaultBaseSha;
-  const owned = item.kind === "pr" && isBotLogin(context.item.user?.login);
+  const login = context.item.user?.login, signal = (kind: Signal["kind"]) => signalFor(item, login, kind);
+  const routes: Routes = {
+    review: routeFor(signal("item_changed")),
+    ...item.kind === "pr" ? {
+      conflicts: routeFor(signal("pr_conflicts")), feedback: routeFor(signal("pr_feedback")),
+    } : {},
+    repairs: item.kind === "pr" ? matchingActions(signal("low_grade")) : [],
+    repairFor: (grade) => grade ? routeFor({ ...signal("low_grade"), grade }) : undefined,
+  };
   let added = 0;
-  if (owned && "head" in context.item) {
+  if ((routes.conflicts || routes.feedback || routes.repairs.length) && "head" in context.item) {
     if (context.item.head.repo?.full_name !== repository) return added;
-    added += applyDecisions(item.id, planPrMaintenance(await gatherPrMaintenanceFacts(ctx, item, observation, context.item, mainSha)));
+    if (routes.conflicts || routes.feedback) added += applyDecisions(item.id, planPrMaintenance(await gatherPrMaintenanceFacts(ctx, item, observation, context.item, mainSha, routes)));
   }
   try {
-    added += item.kind === "pr" ? await routePrReview(ctx, item, observation, mainSha, owned) : await routeIssueReview(item, observation, mainSha);
+    added += item.kind === "pr" ? await routePrReview(ctx, item, observation, mainSha, routes) : await routeIssueReview(item, observation, mainSha, routes.review);
   } finally {
     if (item.kind === "pr") {
       try { await reconcileObserved(github, item.id, item.payload.number, { subjectId: item.id }, context); }
@@ -156,7 +177,9 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
   let queued = 0, deferred = 0;
   const offset = current.length ? syncRound++ % current.length : 0;
   const ordered = [...current.slice(offset), ...current.slice(0, offset)];
-  const reviewable = ordered.filter((item) => item.state === "open" && item.kind === "issue" && !hasScratLabel(item));
+  const issueSignal = (item: Item, kind: Signal["kind"]) => signalFor(item, item.payload.user?.login, kind);
+  const selects = (item: Item) => hasScratLabel(item) && routeFor(issueSignal(item, "label")) !== undefined;
+  const reviewable = ordered.filter((item) => item.state === "open" && item.kind === "issue" && !selects(item));
   const contexts = await github.fetchItemContexts(reviewable.map((item) => ({ kind: "issue", number: item.payload.number, item: item.payload })), { defer: true });
   const issueContexts = new Map(reviewable.map((item, index) => [item.id, contexts[index]]));
   for (const item of ordered) {
@@ -170,10 +193,11 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
     }
     if (item.kind === "issue") {
       const previousItem = previous.get(item.externalId);
+      const labelAction = routeFor(issueSignal(item, "label"));
       const plan = planIssueTasks({
-        labelled: Boolean(hasScratLabel(item)), implemented: implemented.has(item.payload.number), workspaceId: item.workspaceId,
+        labelAction, reviewAction: routeFor(issueSignal(item, "item_changed")), labelled: Boolean(hasScratLabel(item)), implemented: implemented.has(item.payload.number), workspaceId: item.workspaceId,
         previouslyLabelled: previousItem ? Boolean(hasScratLabel(previousItem)) : undefined,
-        latest: latestTask(item.id, "implement"), updatedAt: item.payload.updated_at, mainSha: defaultBaseSha,
+        latest: latestOf(item.id, labelAction), updatedAt: item.payload.updated_at, mainSha: defaultBaseSha,
       });
       queued += applyDecisions(item.id, plan.decisions);
       if (!plan.review) continue;

@@ -78,9 +78,9 @@ function crossChecks(m: Parsed) {
   return problems;
 }
 
-function readManifest(root: string, file: string, label: string): Manifest {
+function readManifest(root: string, path: string, label: string): Manifest {
   let document: unknown;
-  try { document = parse(readFileSync(resolve(root, file), "utf8")); } catch (error) { throw new Error(`${label}: ${(error as Error).message}`); }
+  try { document = parse(readFileSync(path, "utf8")); } catch (error) { throw new Error(`${label}: ${(error as Error).message}`); }
   if (!Value.Check(schema, document)) {
     const errors = [...Value.Errors(schema, document)], unknown = errors.find((error) => error.keyword === "additionalProperties");
     const [error] = errors;
@@ -90,23 +90,60 @@ function readManifest(root: string, file: string, label: string): Manifest {
   }
   const parsed = document as Parsed;
   const problems = crossChecks(parsed);
-  if (basename(file, ".yaml") !== parsed.name) problems.unshift(`name ${parsed.name} must equal the file name`);
+  if (basename(path, ".yaml") !== parsed.name) problems.unshift(`name ${parsed.name} must equal the file name`);
   if (parsed.name === "directory") problems.unshift("directory is not a legal action name");
   if (problems.length) throw new Error(`${label}: ${problems.join("; ")}`);
-  return { ...parsed, tools: parsed.tools ?? defaultTools(parsed), files: parsed.files ?? [], reviewers: parsed.reviewers ?? [], file: label, root };
+  const range = parsed.trigger.source === "github_commits" ? { maxRangeCommits: parsed.maxRangeCommits ?? 50 } : {};
+  return { ...parsed, ...range, tools: parsed.tools ?? defaultTools(parsed), files: parsed.files ?? [], reviewers: parsed.reviewers ?? [], file: label, root };
 }
 
-export function readManifests(root: string) {
-  return readdirSync(resolve(root, "actions")).filter((file) => file.endsWith(".yaml")).sort()
-    .map((file) => readManifest(root, `actions/${file}`, `actions/${file}`));
+export function readManifests(root: string, directory?: string | null) {
+  const listing = (dir: string) => {
+    try { return readdirSync(dir).filter((file) => file.endsWith(".yaml")).sort().map((file) => resolve(dir, file)); }
+    catch (error) { throw new Error(`Cannot read manifests in ${dir}: ${(error as Error).message}`); }
+  };
+  const loaded = new Map<string, Manifest>();
+  for (const path of listing(resolve(root, "actions"))) {
+    const manifest = readManifest(root, path, `actions/${basename(path)}`);
+    loaded.set(manifest.name, manifest);
+  }
+  for (const path of directory ? listing(directory) : []) {
+    const manifest = readManifest(directory!, path, path);
+    loaded.set(manifest.name, manifest);
+  }
+  return [...loaded.values()];
+}
+
+type Grade = NonNullable<Manifest["trigger"]["grades"]>[number];
+export type Signal = {
+  source: Manifest["trigger"]["source"]; kind: Manifest["trigger"]["kind"]; item?: "issue" | "pr"; author?: "bot" | "other"; grade?: Grade; branch?: string;
+};
+
+export function matches({ trigger: t }: Manifest, signal: Signal) {
+  return t.source === signal.source && t.kind === signal.kind && (t.item === undefined || t.item === signal.item)
+    && (t.author === undefined || t.author === signal.author) && (t.grades === undefined || signal.grade === undefined || t.grades.includes(signal.grade))
+    && (t.branch === undefined || t.branch === signal.branch);
+}
+
+export function findTriggerConflicts(manifests: readonly Manifest[], enabled: (manifest: Manifest) => boolean) {
+  const live = manifests.filter(enabled), problems: string[] = [];
+  live.forEach((a, index) => live.slice(index + 1).forEach((b) => {
+    const [x, y] = [a.trigger, b.trigger];
+    const grades = !x.grades || !y.grades || x.grades.some((grade) => y.grades!.includes(grade));
+    if (x.source === y.source && x.kind === y.kind && x.item === y.item && x.branch === y.branch && grades) {
+      const shown = [`source: ${x.source}`, `kind: ${x.kind}`, ...x.item ? [`item: ${x.item}`] : [], ...x.branch ? [`branch: ${x.branch}`] : []].join(", ");
+      problems.push(`${a.file} and ${b.file} both match {${shown}}; disable one`);
+    }
+  }));
+  return problems;
 }
 
 export const skillPath = (manifest: Manifest, skill = manifest.skill) => resolve(manifest.root, skill);
 
 export function deploymentDefaults(m: Manifest) {
-  const optional = { enabled: m.enabled, branch: m.trigger.branch, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel };
+  const optional = { branch: m.trigger.branch, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel };
   return {
-    priority: m.priority, skill: m.skill, ...m.model, agent: m.agent, reviewers: m.reviewers,
+    enabled: m.enabled ?? true, priority: m.priority, skill: m.skill, ...m.model, agent: m.agent, reviewers: m.reviewers,
     ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== undefined)),
   };
 }

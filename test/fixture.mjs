@@ -165,7 +165,7 @@ export async function fixture(scenario) {
       + (mode === "issues" ? '\nSCRAT_ISSUE_BEGIN\ntitle: Broken link\nfingerprint: link:docs-a\n\nThe link on docs/a is broken.\nSCRAT_ISSUE_END\nSCRAT_ISSUE_BEGIN\ntitle: Slow page\nfingerprint: perf:home\n\nHome takes 9s.\n\n```\ntrace\n```\nSCRAT_ISSUE_END' : "")
       + (mode === "issues-bad" ? '\nSCRAT_ISSUE_BEGIN\ntitle: Bad\nfingerprint: a --> <!-- b\n\nBad fingerprint.\nSCRAT_ISSUE_END' : "")
       + (mode === "ready" ? "\nSCRAT_READY" : "")
-      + (context.action === "review_pr" && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : ["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : mode === "grade-C" ? "C" : "B"}` : "")
+      + (["review_pr", "my_pr_review"].includes(context.action) && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : ["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : mode === "grade-C" ? "C" : "B"}` : "")
       + (mode === "no-status" || (fumble && mode === "format-once" && !review) ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
     const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] } : { role: "assistant", content: output };
     if (mode === "stall") {
@@ -186,6 +186,7 @@ export async function fixture(scenario) {
     { id: "gpt-6.1-sol", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
     { id: "deepseek/deepseek-v4.1-flash", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
   ] } };
+  if (scenario === "commit_review_no_start") writeFileSync("app/actions/review_base_change.yaml", readFileSync("app/actions/review_base_change.yaml", "utf8").replace("start: [slack_post]\n", ""));
   if (scenario === "history_file") writeFileSync("app/actions/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace("files: [discussion]", "files: [discussion, history]"));
   config.actions = Object.fromEntries(readdirSync("app/actions").map((file) => parseYaml(readFileSync("app/actions/" + file, "utf8")))
     .map(({ name, reviewers = [] }) => [name, { provider: "fixture", ...reviewers.length && { reviewers: reviewers.map((reviewer) => ({ ...reviewer, provider: "fixture" })) } }]));
@@ -252,6 +253,23 @@ export async function fixture(scenario) {
   if (scenario === "bot_name") config.github.botName = "Mocha";
   if (scenario === "bot_identity_names") config.github.botName = "Mocha Agent";
   if (patMode) { config.github.auth = "pat"; config.github.botLogin = "agent-account"; }
+  if (["manifest_directory", "manifest_tools_files"].includes(scenario)) {
+    const directory = resolve("deployment"), shipped = (name) => readFileSync(`app/actions/${name}.yaml`, "utf8"), field = (text, key, value) => text.replace(new RegExp(`^${key}: .*$`, "m"), `${key}: ${value}`);
+    mkdirSync(directory); config.actions.directory = directory;
+    if (scenario === "manifest_directory") {
+      mkdirSync("deployment/skills/review_triage", { recursive: true }); cpSync("app/skills/review_issue/SKILL.md", "deployment/skills/review_triage/SKILL.md");
+      writeFileSync("deployment/review_triage.yaml", field(field(shipped("review_issue"), "name", "review_triage"), "skill", "skills/review_triage/SKILL.md"));
+      config.actions.review_issue.enabled = false;
+      config.actions.review_triage = { provider: "fixture" };
+      writeFileSync("deployment/my_pr_review.yaml", field(field(shipped("review_pr"), "name", "my_pr_review"), "skill", resolve("app/skills/review_pr/SKILL.md")));
+      config.actions.my_pr_review = { provider: "fixture", reviewers: structuredClone(config.actions.review_pr.reviewers) };
+      config.actions.review_pr.enabled = false;
+    } else {
+      const skill = (name) => resolve("app/skills", name, "SKILL.md");
+      writeFileSync("deployment/review_issue.yaml", field(field(field(shipped("review_issue"), "tools", "[read, grep]"), "files", "[]"), "skill", skill("review_issue")));
+      writeFileSync("deployment/implement.yaml", field(field(field(shipped("implement"), "tools", "[read, grep, find, ls, edit, write]"), "files", "[discussion, history]"), "skill", skill("implement")));
+    }
+  }
   const { actions, ...fileSettings } = config;
   writeFileSync("app/scrat.config.json", JSON.stringify(fileSettings));
   writeFileSync("app/scrat.local.json", JSON.stringify({ actions }));

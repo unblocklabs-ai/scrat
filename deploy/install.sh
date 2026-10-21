@@ -8,14 +8,14 @@ export PATH="/home/bek/.local/share/scrat/runtime/node-v24.17.0-linux-x64/bin:$i
 cd "$release_path"
 npm ci --no-audit --no-fund
 node --env-file="$install_root/.env" deploy/prepare-tools.mjs
-mkdir -p "$install_root/data" "$install_root/bin" "$install_root/backups"
+mkdir -p "$install_root/data" "$install_root/bin" "$install_root/backups" "$install_root/actions"
 corepack enable --install-directory "$install_root/bin" pnpm
 corepack prepare pnpm@11.7.0 --activate
 ln -sfn "$install_root/data" data
 ln -sfn "$install_root/.env" .env
 [ -e "$install_root/scrat.local.json" ] || printf '{}\n' > "$install_root/scrat.local.json"
 ln -sfn "$install_root/scrat.local.json" scrat.local.json
-node src/config.ts # Fail on a bad scrat.local.json while the old release is still running.
+node src/config.ts # Fail on a bad scrat.local.json, an invalid manifest or a trigger clash while the old release is still running.
 
 # Stop/drain the existing sole worker before migrating or moving its release.
 systemctl --user stop scrat.service

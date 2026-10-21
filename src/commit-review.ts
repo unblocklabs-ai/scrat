@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { evaluateContext } from "./agent-input.ts";
-import { config } from "./config.ts";
+import { commitSettings } from "./config.ts";
 import { db } from "./db.ts";
 import { git } from "./git.ts";
 import { botName } from "./identity.ts";
@@ -12,7 +12,7 @@ import { parseTriggerInput } from "./triggers.ts";
 
 type CommitInput = { sha: string; previousSha: string; branch: string; commitCount: number };
 
-function commitInput(raw: Record<string, unknown>): CommitInput {
+export function commitInput(raw: Record<string, unknown>): CommitInput {
   const trigger = parseTriggerInput(raw);
   if (trigger.kind !== "commit") throw new Error("Commit task input is incomplete");
   const { sha, previousSha, branch, commitCount } = trigger;
@@ -24,10 +24,10 @@ export function commitMetadata({ metadata }: Subject) {
   return metadata;
 }
 
-async function threadRoot(subject: Subject, { sha, branch, commitCount }: CommitInput) {
+async function threadRoot(subject: Subject, action: string, { sha, branch, commitCount }: CommitInput) {
   const existing = db.select().from(slackThreads).where(eq(slackThreads.subjectId, subject.id)).get();
   if (existing) return existing;
-  const { channel, startMessage } = config.actions.review_base_change as Required<typeof config.actions[string]>;
+  const { channel, startMessage } = commitSettings(action);
   const metadata = commitMetadata(subject);
   const values: Record<string, string> = {
     sha, short_sha: sha.slice(0, 7), author: escapeSlack(metadata.author), title: escapeSlack(metadata.title),
@@ -38,10 +38,8 @@ async function threadRoot(subject: Subject, { sha, branch, commitCount }: Commit
   return db.insert(slackThreads).values({ subjectId: subject.id, channel, ts }).returning().get();
 }
 
-export async function startCommitThread(subject: Subject, rawInput: Record<string, unknown>, log: ReturnType<typeof startOperation>["log"]) {
-  const input = commitInput(rawInput);
-  await threadRoot(subject, input).catch((error: unknown) => { log.warn({ event: "slack.post_failed", err: error }); });
-  return input;
+export async function startCommitThread(subject: Subject, action: string, input: CommitInput, log: ReturnType<typeof startOperation>["log"]) {
+  await threadRoot(subject, action, input).catch((error: unknown) => { log.warn({ event: "slack.post_failed", err: error }); });
 }
 
 export async function describeCommit(repositoryPath: string, subject: Subject, rawInput: Record<string, unknown>) {
@@ -55,10 +53,10 @@ export async function describeCommit(repositoryPath: string, subject: Subject, r
   return { evaluated, diffPaths, diffBaseSha: previousSha };
 }
 
-export async function postCommitReply(subject: Subject, run: Run) {
+export async function postCommitReply(subject: Subject, action: string, run: Run) {
   const input = commitInput(run.input);
   const saved = getRun(run.id)!;
   if (!saved.result) throw new Error("Run has no saved result to publish");
-  const thread = await threadRoot(subject, input);
+  const thread = await threadRoot(subject, action, input);
   return postMessage({ channel: thread.channel, text: escapeSlack(saved.result.text), threadTs: thread.ts });
 }

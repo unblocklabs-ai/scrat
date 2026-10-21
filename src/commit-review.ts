@@ -47,11 +47,10 @@ export async function describeCommit(repositoryPath: string, item: typeof items.
   return { evaluated, diffPaths, diffBaseSha: previousSha };
 }
 
-export async function publishCommit(item: typeof items.$inferSelect, run: typeof runs.$inferSelect) {
+export async function postCommitReply(item: typeof items.$inferSelect, run: typeof runs.$inferSelect) {
   const input = commitInput(run.input);
   const saved = db.select().from(runs).where(eq(runs.id, run.id)).get()!;
   if (!saved.result) throw new Error("Run has no saved result to publish");
-  const { text } = saved.result;
-  const slackReplyTs = saved.publication.slackReplyTs ?? await threadRoot(item, input).then((thread) => postMessage({ channel: thread.channel, text: escapeSlack(text), threadTs: thread.ts }));
-  db.update(runs).set({ publication: { ...saved.publication, slackReplyTs, status: "published" } }).where(eq(runs.id, run.id)).run();
+  const thread = await threadRoot(item, input);
+  return postMessage({ channel: thread.channel, text: escapeSlack(saved.result.text), threadTs: thread.ts });
 }

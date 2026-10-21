@@ -1,7 +1,7 @@
 import { and, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { actionContracts, type Action } from "./actions.ts";
 import { buildAgentInput, evaluateContext, readDiffScope } from "./agent-input.ts";
-import { describeCommit, publishCommit, startCommitThread } from "./commit-review.ts";
+import { describeCommit, startCommitThread } from "./commit-review.ts";
 import { config, getActionConfig, getRepositoryPath, isBotLogin } from "./config.ts";
 import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
@@ -18,7 +18,7 @@ import { assertConfiguredRepository, itemRepository } from "./repository.ts";
 import { executePi } from "./pi.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { reviewPullRequest } from "./pr-review.ts";
-import { publishRun } from "./publication.ts";
+import { publishCommit, publishRun } from "./publication.ts";
 import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint } from "./results.ts";
 import { items, runs, tasks, workspaces } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";

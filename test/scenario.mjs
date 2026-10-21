@@ -543,6 +543,93 @@ try {
     finally { globalThis.fetch = fetch; }
     f.issues.delete(1);
     await assert.rejects(request(), (error) => error.status === 404);
+  } else if (scenario === "publish_effects") {
+    const { eq } = await import("drizzle-orm");
+    const { pollCommits } = await f.app("commit-source.ts");
+    const seed = resolve("seed"), remote = resolve("remote.git"), pushLog = resolve("pushes.log");
+    writeFileSync(resolve(remote, "hooks/post-receive"), `#!/bin/sh\ncat >> "${pushLog}"\n`, { mode: 0o755 });
+    const pushes = () => existsSync(pushLog) ? readFileSync(pushLog, "utf8").trim().split("\n").filter(Boolean).length : 0;
+    const updates = [], update = db.update.bind(db);
+    db.update = (table) => {
+      const builder = update(table);
+      if (table !== s.runs) return builder;
+      const set = builder.set.bind(builder);
+      builder.set = (values) => { updates.push(values); return set(values); };
+      return builder;
+    };
+    const trace = [], record = f.writes.push.bind(f.writes);
+    f.writes.push = (write) => { trace.push({ type: write.type, pushes: pushes() }); return record(write); };
+    const types = (from) => trace.slice(from).map((entry) => entry.type);
+    const preset = (saved, receipts) => db.update(s.runs).set({ publication: { ...saved.publication, ...receipts } }).where(eq(s.runs.id, saved.id)).run();
+    const posts = () => f.slack.calls.filter((call) => call.method === "chat.postMessage");
+    const pushMain = (message, value) => {
+      writeFileSync(resolve(seed, "src/app.ts"), `export const value = ${value};\n`); git(seed, "add", "."); commit(seed, message);
+      git(seed, "push", remote, "main"); return pollCommits();
+    };
+    assert.equal(await pollCommits(), 0);
+    assert.equal(await pushMain("First", 2), 1);
+    const first = await success();
+    assert.deepEqual(posts().map((call) => call.body.thread_ts === undefined ? "root" : "reply"), ["root", "reply"]);
+    assert.equal(first.publication.slackReplyTs, "1700000000.000002"); assert.equal(first.publication.status, "published");
+    assert.equal(await pushMain("Second", 3), 1);
+    f.onModel = () => { f.slack.down = true; };
+    const slackFailed = await run(); f.onModel = undefined; f.slack.down = false;
+    assert.ok(slackFailed.error); assert.equal(slackFailed.stage, "publishing");
+    preset(slackFailed, { slackReplyTs: "1700000000.000099" });
+    const slackMark = f.slack.calls.length; tasks.retryTask(slackFailed.taskId);
+    const slackRetried = await success();
+    assert.equal(f.slack.calls.length, slackMark, "a receipted Slack reply is not posted again");
+    assert.equal(slackRetried.publication.slackReplyTs, "1700000000.000099"); assert.equal(slackRetried.publication.status, "published");
+
+    f.addIssue(1, ["scrat"]); f.enqueue(1, "implement");
+    const implemented = await success();
+    assert.deepEqual(types(0), ["pr"]); assert.ok(trace[0].pushes > 0, "the branch is pushed before the PR is created");
+    assert.equal(implemented.publication.status, "published");
+    const pr = all(s.items).find((item) => item.kind === "pr");
+    changeMain("other.txt", "other\n");
+    let mark = trace.length, pushed = pushes();
+    tasks.enqueueTask({ itemId: pr.id, action: "resolve_conflicts", reason: "Exercise comment publication", input: {} });
+    const merged = await success();
+    assert.deepEqual(types(mark), ["comment"]);
+    assert.ok(trace[mark].pushes > pushed, "the merge is pushed before the comment is posted");
+    assert.equal(merged.publication.status, "published");
+    changeMain("another.txt", "another\n");
+    f.faults.comment.add(201); mark = trace.length;
+    tasks.enqueueTask({ itemId: pr.id, action: "resolve_conflicts", reason: "Exercise comment receipt", input: {} });
+    const lost = await run(); assert.ok(lost.error); assert.equal(lost.stage, "publishing");
+    assert.deepEqual(types(mark), ["comment"]);
+    assert.equal(lost.publication.publishedCommitSha, lost.publication.commitSha);
+    preset(lost, { commentId: f.comments.get(201).at(-1).id });
+    mark = trace.length; pushed = pushes(); tasks.retryTask(lost.taskId);
+    const recovered = await success();
+    assert.deepEqual(types(mark), [], "a receipted comment is not written again"); assert.equal(pushes(), pushed);
+    assert.equal(recovered.publication.status, "published");
+
+    f.addIssue(2, ["scrat"]); f.enqueue(2, "implement"); f.faults.pr.add(2); mark = trace.length;
+    const prLost = await run(); assert.ok(prLost.error);
+    assert.deepEqual(types(mark), ["pr"]);
+    assert.equal(prLost.publication.publishedCommitSha, prLost.publication.commitSha);
+    preset(prLost, { pullRequestNumber: 202 });
+    mark = trace.length; pushed = pushes(); tasks.retryTask(prLost.taskId);
+    const prRecovered = await success();
+    assert.deepEqual(types(mark), [], "a receipted PR is not created again"); assert.equal(pushes(), pushed);
+    assert.equal(prRecovered.publication.pullRequestNumber, 202); assert.equal(f.prs.length, 2);
+
+    f.addIssue(3, ["human-label"]); f.modes.set(3, "ready"); f.enqueue(3); mark = trace.length;
+    await success();
+    assert.equal(types(mark)[0], "comment"); assert.equal(types(mark).filter((type) => type === "comment").length, 1);
+    assert.ok(types(mark).slice(1).length > 0); assert.ok(types(mark).slice(1).every((type) => type === "label"), "comment first, then labels");
+    f.addIssue(4, ["human-label"]); f.modes.set(4, "ready"); f.enqueue(4); f.faults.label.add(4); mark = trace.length;
+    const labelFailed = await run(); assert.ok(labelFailed.error);
+    assert.equal(types(mark)[0], "comment"); assert.ok(labelFailed.publication.commentId);
+    mark = trace.length; tasks.retryTask(labelFailed.taskId);
+    await success();
+    assert.ok(types(mark).length > 0); assert.ok(types(mark).every((type) => type === "label"), "a receipted comment is skipped and labels still reconcile");
+
+    await route(); const settled = updates.length;
+    const review = await success();
+    assert.equal(f.row(s.tasks, review.taskId).action, "review_pr"); assert.equal(review.publication.status, "published");
+    assert.equal(updates.slice(settled).filter((values) => values.publication?.status === "published").length, 1, "reconcile alone settles the review status");
   } else if (scenario === "footer") {
     await implement(1); f.modes.set(201, "quoted-grade"); await route();
     const reviewed = await success();

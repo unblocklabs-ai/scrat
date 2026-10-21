@@ -27,6 +27,7 @@ const scenarios = {
   grade_race: "sync invalidation and publication reconcile one current PR grade under concurrent execution",
   grade_failure: "grade delivery failures cannot prevent durable review tasks or block other PRs",
   absent_labels: "already absent labels reconcile without false removal events or hidden access failures",
+  publish_effects: "publication kinds apply an ordered list of effect primitives and skip each one whose receipt is already recorded",
   reviewer_failure: "a failed reviewer prevents consolidation and publication",
   footer: "quoted control markers stay report text and cannot supply a PR grade or issue approval",
   format_retry: "malformed final footers are corrected inside the same Pi session up to a cap, while incomplete and undecided outcomes are not",

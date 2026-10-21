@@ -38,6 +38,8 @@ Give a patch grade with one concise reason, graded only on verified defects: sou
 - F: any verified P0 or P1. A security flaw or data loss is F only at P1 or higher; at P2 it is graded as C or D.
 Pre-existing problems the PR did not introduce or worsen are follow-ups and do not affect the grade. Infrastructure failure alone is not a patch defect. If you cannot name a verified defect that requires a code change, the grade is A or B.
 
+For a C, D or F, end the findings with a numbered "To reach B" list: the minimal set of verified findings whose resolution would move the grade to B, each with its file/line location, and nothing else. A, B and S omit it.
+
 For a complete review, include exactly one machine-readable `SCRAT_GRADE: <grade>` line immediately before the final `SCRAT_STATUS` line, where `<grade>` is S, A, B, C, D, or F. Keep the grade and its reason in the Markdown assessment too. This is a quality assessment, not merge authorization.
 
 ## Previous assessment

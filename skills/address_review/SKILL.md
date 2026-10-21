@@ -13,6 +13,8 @@ Build complex things as simply as possible. Prefer a small, source-supported rep
 
 Verify each finding against current source and affected callers before acting. Fix the valid ones within the PR's original scope; do not widen the change to unrelated cleanups. Reject findings that are wrong, already handled or out of scope, and say why with a concise source-backed reason. Rejecting every finding is acceptable; do not manufacture a change. If the review contains no verified defect requiring a code change, change nothing and say so. Do not extend the repair into pre-existing code the review did not attribute to this PR. Before finishing, search for sibling callers and outputs of whatever the repair changed.
 
+When the report ends with a "To reach B" list, address exactly those findings, after verifying each, and prefer the smallest fix over new mechanism; a repair that adds a mechanism adds new defects to review.
+
 Never weaken tests, checks or validation to make them pass, and do not delete or loosen an assertion to hide a failure. Fix the code, or explain precisely why a test is wrong. Inspect package metadata and the actual available environment before choosing validation commands; do not assume a database or browser is present. Never obtain production secrets or use shared databases to fill a missing environment.
 
 Continue retained work and address the previous failure (`files.previousFailure`) when supplied. Preserve an unfinished merge and partial work rather than resetting or rebuilding the PR. {{bot}} owns the branch/worktree lifecycle; do not create a replacement PR, rebase or force-push. When `database` is supplied, use its current `environment` values and add new migrations instead of rewriting applied history.

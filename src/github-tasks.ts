@@ -25,11 +25,6 @@ type SyncContext = {
 };
 type PrMaintenanceFacts = Parameters<typeof planPrMaintenance>[0];
 
-function strings(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((entry: unknown): entry is string => typeof entry === "string");
-}
-
 function hasScratLabel(item: Item) {
   return item.payload.labels?.some((label) => labelName(label) === botSlug);
 }
@@ -72,7 +67,11 @@ async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observatio
     .where(and(eq(tasks.itemId, item.id), eq(tasks.action, "address_pr_feedback"))).all()
     .filter(({ run, task }) => (!run.finishedAt && task.status === "running") || (run.finishedAt && !run.error)
       || run.publication.commentId || acknowledged.has(task.id));
-  const consumed = new Set(handled.flatMap(({ run }) => run.context?.commentRevisions ?? strings(run.input.commentRevisions)));
+  const consumed = new Set(handled.flatMap(({ run }) => {
+    if (run.context) return run.context.commentRevisions;
+    const legacy = run.input.commentRevisions;
+    return Array.isArray(legacy) ? legacy.filter((entry: unknown): entry is string => typeof entry === "string") : [];
+  }));
   const pending = observation.external.filter((comment) => !consumed.has(commentKey(comment)));
   return {
     conflicts, stale, mainSha, headSha, pendingComments: pending.map((comment) => commentKey(comment)),

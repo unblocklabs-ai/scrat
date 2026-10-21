@@ -59,6 +59,7 @@ const scenarios = {
   merge: "retry resumes an unfinished merge and preserves partial work",
   reopen: "fetch-only reopening cannot keep a deleted workspace attached",
   existing_pr: "existing implementation PRs suppress duplicate implementation tasks",
+  trigger_inputs: "every trigger input shape parses to one typed member, legacy rows classify by their fields, unknown shapes are rejected clearly and a malformed queued row is rejected at claim",
   rejection: "invalid queued tasks are rejected with a journal reason while later work still runs, and bad static config blocks startup",
   recovery: "recover releases an abandoned claim without rewriting the saved result",
   crash_before_publishing: "validated artifacts and the publishing stage are written together, so a run failed after validation resumes at publishing without validating again",

@@ -7,13 +7,14 @@ import { botName } from "./identity.ts";
 import type { startOperation } from "./logging.ts";
 import { items, runs, slackThreads } from "./schema.ts";
 import { escapeSlack, postMessage } from "./slack.ts";
+import { parseTriggerInput } from "./triggers.ts";
 
 type CommitInput = { sha: string; previousSha: string; branch: string; commitCount: number };
 
-function commitInput({ sha, previousSha, branch, commitCount }: Record<string, unknown>): CommitInput {
-  if (typeof sha !== "string" || typeof previousSha !== "string" || typeof branch !== "string" || typeof commitCount !== "number") {
-    throw new Error("Commit task input is incomplete");
-  }
+function commitInput(raw: Record<string, unknown>): CommitInput {
+  const trigger = parseTriggerInput(raw);
+  if (trigger.kind !== "commit") throw new Error("Commit task input is incomplete");
+  const { sha, previousSha, branch, commitCount } = trigger;
   return { sha, previousSha, branch, commitCount };
 }
 

@@ -1111,6 +1111,42 @@ try {
     f.enqueue(2, "implement"); await route();
     assert.ok(!all(s.tasks).some((t) => t.itemId === "issue-2" && t.status === "queued"));
     assert.ok(all(s.tasks).some((t) => t.action === "review_pr" && t.status === "queued"));
+  } else if (scenario === "trigger_inputs") {
+    const { parseTriggerInput } = await f.app("triggers.ts");
+    const items = (kind, fields) => ({ source: "github_items", kind, ...fields });
+    const members = [
+      items("item_changed", { triggerKey: "k", revision: "r", mainSha: "m", changedPaths: ["a"], previousMainSha: null, previousHeadSha: "h" }),
+      items("label", { triggerKey: "k", mainSha: "m" }),
+      items("pr_conflicts", { triggerKey: "k", mainSha: "m", headSha: "h" }),
+      items("pr_feedback", { triggerKey: "k", commentRevisions: ["c@1"] }),
+      items("low_grade", { triggerKey: "k", assessmentRunId: "a", grade: "D" }),
+      items("manual", { manual: true }),
+      { source: "github_commits", kind: "commit", triggerKey: "s", sha: "s", previousSha: "p", branch: "main", commitCount: 2, truncated: false },
+    ];
+    for (const member of members) assert.deepEqual(parseTriggerInput(member), member);
+    const legacy = (input, expected) => assert.deepEqual(parseTriggerInput(input), { ...input, ...expected });
+    legacy({ triggerKey: "k", revision: "r", mainSha: "m", changedPaths: [] }, { source: "github_items", kind: "item_changed" });
+    legacy({ triggerKey: "k", mainSha: "m" }, { source: "github_items", kind: "label" });
+    legacy({ triggerKey: "k", mainSha: "m", headSha: "h" }, { source: "github_items", kind: "pr_conflicts" });
+    legacy({ triggerKey: "k", commentRevisions: [] }, { source: "github_items", kind: "pr_feedback" });
+    legacy({ triggerKey: "a", assessmentRunId: "a", grade: "F" }, { source: "github_items", kind: "low_grade" });
+    legacy({ manual: true }, { source: "github_items", kind: "manual" });
+    legacy({}, { source: "github_items", kind: "manual" });
+    legacy({ kind: "commit", triggerKey: "s", sha: "s", previousSha: "p", branch: "main", commitCount: 1, truncated: true }, { source: "github_commits" });
+    legacy({ triggerKey: "k", revision: "r", mainSha: "m", manual: true }, { source: "github_items", kind: "item_changed" });
+    assert.throws(() => parseTriggerInput(null), /must be an object/);
+    assert.throws(() => parseTriggerInput([]), /must be an object/);
+    assert.throws(() => parseTriggerInput({ kind: "schedule" }), /Unknown trigger kind: "schedule"/);
+    assert.throws(() => parseTriggerInput({ source: "schedule", kind: "label", triggerKey: "k", mainSha: "m" }), /Unknown trigger source for label: "schedule"/);
+    assert.throws(() => parseTriggerInput({ triggerKey: "k", commentRevisions: "c@1" }), /Invalid github_items\/pr_feedback trigger input at \/commentRevisions/);
+    assert.throws(() => parseTriggerInput({ kind: "commit", sha: "s" }), /Invalid github_commits\/commit trigger input/);
+    for (let n = 1; n <= 2; n++) f.addIssue(n);
+    db.$client.prepare("INSERT INTO tasks (id, item_id, action, priority, reason, input, created_at) VALUES ('malformed', 'issue-1', 'review_issue', 1000, 'Integration', '{\"triggerKey\":\"k\",\"commentRevisions\":7}', '2026-01-01')").run();
+    f.enqueue(2);
+    assert.equal(tasks.claimTask().task.itemId, "issue-2");
+    assert.equal(f.row(s.tasks, "malformed").status, "failed");
+    const rejected = all(s.events).filter((e) => e.type === "task.rejected");
+    assert.equal(rejected.length, 1); assert.match(rejected[0].data.reason, /^Invalid trigger input for review_issue: .*commentRevisions/);
   } else if (scenario === "rejection") {
     const { eq } = await import("drizzle-orm");
     const rejections = () => all(s.events).filter((e) => e.type === "task.rejected");
@@ -1881,7 +1917,7 @@ try {
     changeMain("src/one.ts", "export const one = 1;\n");
     assert.equal(await pollCommits(), 1);
     const first = tip(), [task] = reviews();
-    assert.deepEqual(task.input, { kind: "commit", triggerKey: first, sha: first, previousSha: initial, branch: "main", commitCount: 1, truncated: false });
+    assert.deepEqual(task.input, { source: "github_commits", kind: "commit", triggerKey: first, sha: first, previousSha: initial, branch: "main", commitCount: 1, truncated: false });
     assert.equal(task.reason, "main moved to " + first.slice(0, 7)); assert.equal(task.status, "queued"); assert.equal(task.priority, 30);
     const item = all(s.items).find((row) => row.id === task.itemId);
     assert.equal(item.source, "git"); assert.equal(item.kind, "commit"); assert.equal(item.state, "open");
@@ -1892,13 +1928,13 @@ try {
     changeMain("src/two.ts", "export const two = 1;\n"); changeMain("src/three.ts", "export const three = 1;\n");
     assert.equal(await pollCommits(), 1);
     const second = tip(), ranged = reviews().find((t) => t.input.sha === second);
-    assert.deepEqual(ranged.input, { kind: "commit", triggerKey: second, sha: second, previousSha: first, branch: "main", commitCount: 2, truncated: false });
+    assert.deepEqual(ranged.input, { source: "github_commits", kind: "commit", triggerKey: second, sha: second, previousSha: first, branch: "main", commitCount: 2, truncated: false });
     assert.equal(await pollCommits(), 0); assert.equal(reviews().length, 2);
     git(seed, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--amend", "-m", "Rewritten"); forcePush();
     const rewritten = tip(), parent = git(seed, "rev-parse", "HEAD~1");
     assert.notEqual(rewritten, second);
     assert.equal(await pollCommits(), 1);
-    assert.deepEqual(reviews().find((t) => t.input.sha === rewritten).input, { kind: "commit", triggerKey: rewritten, sha: rewritten, previousSha: parent, branch: "main", commitCount: 1, truncated: false });
+    assert.deepEqual(reviews().find((t) => t.input.sha === rewritten).input, { source: "github_commits", kind: "commit", triggerKey: rewritten, sha: rewritten, previousSha: parent, branch: "main", commitCount: 1, truncated: false });
     assert.deepEqual(cursor(), [rewritten]);
     git(seed, "reset", "--hard", "HEAD~1"); forcePush();
     assert.equal(tip(), parent);
@@ -1924,7 +1960,7 @@ try {
     changeMain("src/six.ts", "export const six = 1;\n"); changeMain("src/seven.ts", "export const seven = 1;\n");
     assert.equal(await pollCommits(), 1); assert.equal(reviews().length, 5);
     const capped = tip();
-    assert.deepEqual(reviews().find((t) => t.input.sha === capped).input, { kind: "commit", triggerKey: capped, sha: capped, previousSha: beforeCap, branch: "main", commitCount: 2, truncated: true });
+    assert.deepEqual(reviews().find((t) => t.input.sha === capped).input, { source: "github_commits", kind: "commit", triggerKey: capped, sha: capped, previousSha: beforeCap, branch: "main", commitCount: 2, truncated: true });
     assert.deepEqual(cursor(), [capped]);
     db.update(s.sourceCursors).set({ sha: "0".repeat(40) }).run();
     assert.equal(await pollCommits(), 0); assert.equal(reviews().length, 5); assert.deepEqual(cursor(), [capped]);

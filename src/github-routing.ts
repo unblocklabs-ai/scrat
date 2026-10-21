@@ -3,6 +3,7 @@ import type { Freshness } from "./freshness.ts";
 import { botName, botSlug } from "./identity.ts";
 import type { PrReviewState } from "./pr-assessment.ts";
 import type { runs, tasks } from "./schema.ts";
+import { isManual, triggerKeyOf, type KeyedTriggerInput } from "./triggers.ts";
 
 type TaskFacts = Pick<typeof tasks.$inferSelect, "status" | "input">;
 type Run = typeof runs.$inferSelect;
@@ -10,13 +11,12 @@ type ReviewAttempt = Pick<Run, "mainSha"> & {
   context: Pick<NonNullable<Run["context"]>, "revision"> | null;
 };
 type PreviousReview = ReviewAttempt & Pick<Run, "headSha">;
-type QueueInput = Record<string, unknown> & { triggerKey: string };
 export type RoutingDecision =
-  | { type: "enqueue"; action: Action; reason: string; input: QueueInput }
+  | { type: "enqueue"; action: Action; reason: string; input: KeyedTriggerInput }
   | { type: "cancel"; action: Action; reason: string };
 
-function queue(latest: TaskFacts | undefined, action: Action, reason: string, input: QueueInput): RoutingDecision[] {
-  if (latest?.status !== "cancelled" && latest?.input.triggerKey === input.triggerKey) return [];
+function queue(latest: TaskFacts | undefined, action: Action, reason: string, input: KeyedTriggerInput): RoutingDecision[] {
+  if (latest?.status !== "cancelled" && latest && triggerKeyOf(latest.input) === input.triggerKey) return [];
   return [{ type: "enqueue", action, reason, input }];
 }
 
@@ -29,7 +29,7 @@ export function planIssueTasks({ labelled, implemented, workspaceId, previouslyL
   if (implemented) decisions.push({ type: "cancel", action: "implement", reason: "An open PR already implements this issue" });
   else if (!workspaceId && (!latest || latest.status === "queued" || latest.status === "cancelled" || previouslyLabelled === false)) {
     decisions.push(...queue(latest, "implement", `Issue has the ${botSlug} label`, {
-      triggerKey: JSON.stringify({ labelledAt: updatedAt, mainSha }), mainSha,
+      source: "github_items", kind: "label", triggerKey: JSON.stringify({ labelledAt: updatedAt, mainSha }), mainSha,
     }));
   }
   return { review: false, decisions };
@@ -41,11 +41,11 @@ export function planPrMaintenance({ conflicts, stale, mainSha, headSha, pendingC
 }): RoutingDecision[] {
   const decisions: RoutingDecision[] = conflicts || stale
     ? queue(conflictTask, "resolve_conflicts", conflicts ? `${botName} PR conflicts with its base branch` : `${botName} PR is behind its base branch and could not be prepared`, {
-      triggerKey: JSON.stringify({ mainSha, headSha }), mainSha, headSha,
+      source: "github_items", kind: "pr_conflicts", triggerKey: JSON.stringify({ mainSha, headSha }), mainSha, headSha,
     }) : [{ type: "cancel", action: "resolve_conflicts", reason: "PR no longer conflicts" }];
   const commentRevisions = [...pendingComments].sort();
   if (commentRevisions.length) decisions.push(...queue(feedbackTask, "address_pr_feedback", `New feedback on a ${botName} PR`, {
-    triggerKey: JSON.stringify(commentRevisions), commentRevisions,
+    source: "github_items", kind: "pr_feedback", triggerKey: JSON.stringify(commentRevisions), commentRevisions,
   }));
   else decisions.push({ type: "cancel", action: "address_pr_feedback", reason: "Feedback already handled" });
   return decisions;
@@ -62,7 +62,7 @@ export function planSelfRepair({ owned, state, feedbackTask, reviewTask, repairT
     return { decisions: cancel, limited: false };
   }
   const { originId } = state.assessment, grade = state.assessment.result.grade;
-  const decisions = queue(repairTask, "address_review", `Current review graded ${grade}`, { triggerKey: originId, assessmentRunId: originId, grade });
+  const decisions = queue(repairTask, "address_review", `Current review graded ${grade}`, { source: "github_items", kind: "low_grade", triggerKey: originId, assessmentRunId: originId, grade: grade! });
   return decisions.length && count >= limit ? { decisions: cancel, limited: true } : { decisions, limited: false };
 }
 
@@ -72,8 +72,8 @@ type ReviewTriggerFacts = {
 
 export function reviewTrigger({ latest, attempt, revision, mainSha }: ReviewTriggerFacts) {
   const triggerKey = JSON.stringify({ revision, mainSha });
-  const covered = latest?.status !== "cancelled" && (latest?.input.triggerKey === triggerKey
-    || (latest?.status === "running" && latest.input.manual === true)
+  const covered = latest?.status !== "cancelled" && ((latest && triggerKeyOf(latest.input) === triggerKey)
+    || (latest?.status === "running" && isManual(latest.input))
     || (attempt?.context?.revision === revision && attempt.mainSha === mainSha));
   return { triggerKey, covered };
 }
@@ -101,7 +101,7 @@ export function planReview(facts: ReviewFacts): RoutingDecision[] {
     changedPaths = facts.freshness.changedPaths;
   }
   return queue(latest, action, completed ? "Relevant GitHub or base-branch changes" : "Initial GitHub review", {
-    triggerKey, revision, mainSha, changedPaths,
+    source: "github_items", kind: "item_changed", triggerKey, revision, mainSha, changedPaths,
     previousMainSha: completed?.mainSha ?? null, previousHeadSha: completed?.headSha ?? null,
   });
 }

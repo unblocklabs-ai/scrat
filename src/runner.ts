@@ -23,6 +23,7 @@ import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint
 import { items, runs, tasks, workspaces } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { claimTask, finishRun } from "./tasks.ts";
+import { parseTriggerInput } from "./triggers.ts";
 import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
 
 type Workspace = Awaited<ReturnType<typeof createWorkspace>>;
@@ -133,9 +134,10 @@ async function connect({ item, repositoryPath }: Ctx): Promise<Observed | undefi
 async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
   const { task, run, item, references, readOnly, repositoryPath, cleanup } = ctx;
   const { repository, context, pullRequest, observation, gitEnvironment, mainSha } = observed;
-  if (typeof task.input.assessmentRunId === "string") {
+  const trigger = parseTriggerInput(task.input);
+  if (trigger.kind === "low_grade") {
     const state = await resolvePrReview(prReviewHistory(item.id), observation, mainSha);
-    if (state.kind !== "current" || state.assessment.originId !== task.input.assessmentRunId) {
+    if (state.kind !== "current" || state.assessment.originId !== trigger.assessmentRunId) {
       throw new Error("The review this repair addresses is no longer the current assessment");
     }
   }
@@ -283,7 +285,7 @@ async function agentStage({ task, run, contract, readOnly, operation }: Ctx, obs
   const { prompt, contextDir, revisions } = await buildAgentInput({
     run, task, evaluated: p.evaluated!, diffBaseSha: p.diffBaseSha, diffPaths: p.diffPaths, mainSha: p.mainSha, headSha: p.headSha,
     baseRef: p.baseRef, mergeInProgress: p.mergeInProgress, workspace, validationFailure: p.validationFailure,
-    scratAuthored: isBotLogin(observed?.pullRequest?.user?.login),
+    priorReviews: contract.publication === "pr-assessment" && isBotLogin(observed?.pullRequest?.user?.login),
     database: p.database ? {
       ...p.database, environment, schemaPrepared: !p.deferred,
       prepare: config.workspace?.prepare, migrate: p.databaseConfig?.migrate,

@@ -65,7 +65,7 @@ export async function pollCommits(repository = config.github.repository) {
     if (!existing) {
       enqueueTask({
         itemId: item.id, action, reason: `${branch} moved to ${tip.slice(0, 7)}`,
-        input: { kind: "commit", triggerKey: tip, sha: tip, previousSha, branch, commitCount, truncated: commitCount > maxRangeCommits },
+        input: { source: "github_commits", kind: "commit", triggerKey: tip, sha: tip, previousSha, branch, commitCount, truncated: commitCount > maxRangeCommits },
       });
     }
     saveCursor(tip);

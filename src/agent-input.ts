@@ -9,6 +9,7 @@ import { commentKey, parseCommentKey } from "./markers.ts";
 import type { ItemObservation } from "./observation.ts";
 import { priorReviewTexts } from "./pr-assessment.ts";
 import { runs, tasks } from "./schema.ts";
+import { parseTriggerInput } from "./triggers.ts";
 
 const inlineDiffPaths = 200;
 
@@ -24,10 +25,10 @@ export async function readDiffScope(repositoryPath: string, mainSha: string, pre
 }
 
 export function evaluateContext(run: Run, task: Task, observation: ItemObservation) {
-  const requested = run.input.commentRevisions;
-  const ids = new Set(Array.isArray(requested)
-    ? requested.filter((entry: unknown): entry is string => typeof entry === "string").map(parseCommentKey) : []);
-  const comments = actionContracts[task.action].context === "feedback" && ids.size
+  const trigger = parseTriggerInput(run.input);
+  const ids = new Set(trigger.kind === "pr_feedback" ? trigger.commentRevisions.map(parseCommentKey) : []);
+  const { action } = task;
+  const comments = actionContracts[action].context === "feedback" && ids.size
     ? observation.external.filter((comment) => ids.has(comment.id)) : observation.external;
   return {
     revision: observation.revision, baseBranch: observation.baseBranch, headSha: "head" in observation.item ? observation.item.head.sha : undefined,
@@ -43,12 +44,16 @@ export async function buildAgentInput(options: {
   workspace: { path: string; branch: string | null };
   database?: Record<string, unknown>;
   validationFailure?: ErrorDetails;
-  scratAuthored?: boolean;
+  priorReviews?: boolean;
 }) {
   const { run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha } = options;
+  const { action } = task;
+  const trigger = parseTriggerInput(run.input);
   const input = { ...run.input };
   delete input.manual;
-  const changedPaths = Array.isArray(input.changedPaths) ? input.changedPaths.filter((path: unknown) => typeof path === "string") : [];
+  delete input.source;
+  if (trigger.source === "github_items") delete input.kind;
+  const changedPaths = trigger.kind === "item_changed" ? trigger.changedPaths ?? [] : [];
   if (changedPaths.length > inlineDiffPaths) { delete input.changedPaths; input.changedPathCount = changedPaths.length; }
   const contextDir = resolve("data/runs", run.id);
   await mkdir(contextDir, { recursive: true });
@@ -57,10 +62,11 @@ export async function buildAgentInput(options: {
     files[key] = resolve(contextDir, name);
     await writeFile(files[key], content);
   };
-  const report = task.action === "address_review" ? db.select().from(runs).where(eq(runs.id, String(task.input.assessmentRunId))).get()?.result?.text : undefined;
-  if (task.action === "address_review" && !report) throw new Error("Missing review report for self-repair");
+  const repair = trigger.kind === "low_grade" ? trigger : undefined;
+  const report = repair ? db.select().from(runs).where(eq(runs.id, repair.assessmentRunId)).get()?.result?.text : undefined;
+  if (repair && !report) throw new Error("Missing review report for self-repair");
   const failure = run.retryOfRunId ? db.select().from(runs).where(eq(runs.id, run.retryOfRunId)).get()?.error : undefined;
-  const prior = task.action === "review_pr" && options.scratAuthored ? priorReviewTexts(task.itemId) : undefined;
+  const prior = options.priorReviews ? priorReviewTexts(task.itemId) : undefined;
   await Promise.all([
     writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),
     report && writeContext("review", "review.md", report),
@@ -71,11 +77,12 @@ export async function buildAgentInput(options: {
     diffPaths.length > inlineDiffPaths && writeContext("diffPaths", "diff-paths.txt", diffPaths.join("\n") + "\n"),
     changedPaths.length > inlineDiffPaths && writeContext("changedPaths", "changed-paths.txt", changedPaths.join("\n") + "\n"),
   ]);
-  const previousMainSha = typeof task.input.previousMainSha === "string" ? task.input.previousMainSha : undefined;
-  const previousHeadSha = evaluated.headSha && typeof task.input.previousHeadSha === "string" ? task.input.previousHeadSha : undefined;
+  const previous = trigger.kind === "item_changed" ? trigger : undefined;
+  const previousMainSha = previous?.previousMainSha ?? undefined;
+  const previousHeadSha = evaluated.headSha ? previous?.previousHeadSha ?? undefined : undefined;
   const revisions = { head: headSha, base: diffBaseSha, main: mainSha, ...(previousMainSha && { previousMain: previousMainSha }), ...(previousHeadSha && { previousHead: previousHeadSha }) };
   const prompt = JSON.stringify({
-    action: task.action,
+    action,
     reason: task.reason,
     revision: evaluated.revision, baseBranch: evaluated.baseBranch, headSha: evaluated.headSha, item: evaluated.item, commentRevisions: evaluated.commentRevisions,
     input,

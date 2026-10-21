@@ -10,6 +10,7 @@ import { recordEvent } from "./events.ts";
 import { withOperationSync } from "./logging.ts";
 import { hasPublicationSnapshot, hasValidationCheckpoint } from "./results.ts";
 import { items, runs, tasks } from "./schema.ts";
+import { isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
 import { signalWork } from "./work-signal.ts";
 
 export function latestTask(itemId: string, action: Action) {
@@ -31,24 +32,25 @@ function checkClaimable({ task, item }: { task: typeof tasks.$inferSelect; item:
   const invalid = [actionConfig, ...("reviewers" in actionConfig ? actionConfig.reviewers : [])]
     .find(({ thinkingLevel }) => !(thinkingLevels as readonly string[]).includes(thinkingLevel));
   if (invalid) return { ok: false as const, reason: `Invalid thinking level for ${task.action}: ${invalid.thinkingLevel}` };
+  let trigger;
+  try { trigger = parseTriggerInput(task.input); }
+  catch (error) { return { ok: false as const, reason: `Invalid trigger input for ${task.action}: ${error instanceof Error ? error.message : String(error)}` }; }
   const repository = itemRepository(item);
   if (!repository) return { ok: false as const, reason: `Unparseable item URL: ${item.payload.html_url}` };
   if (!sameRepository(repository, config.github.repository)) return { ok: false as const, reason: `Item belongs to ${repository}, not ${config.github.repository}` };
   const previousRun = latestRun(task.id, database);
   if (previousRun && previousRun.sequence === null) return { ok: false as const, reason: `Missing run sequence: ${previousRun.id}` };
-  return { ok: true as const, previousRun };
+  return { ok: true as const, previousRun, trigger };
 }
 
-export function enqueueTask(task: Pick<typeof tasks.$inferInsert,
-  "itemId" | "action" | "priority" | "reason" | "input"
->) {
+export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "itemId" | "action" | "priority" | "reason"> & { input: TriggerInput }) {
   return withOperationSync("task.enqueue", { itemId: task.itemId, action: task.action }, (operation) => {
     const queued = db.transaction((transaction) => {
       const previous = transaction.select().from(tasks).where(and(
         eq(tasks.itemId, task.itemId), eq(tasks.action, task.action), eq(tasks.status, "queued"),
       )).get();
-      const input = task.input.manual === true && previous ? { ...previous.input, ...task.input, manual: true }
-        : previous?.input.manual === true ? { ...task.input, manual: true } : task.input;
+      const input = isManual(task.input) && previous ? { ...previous.input, manual: true }
+        : previous && isManual(previous.input) ? { ...task.input, manual: true } : task.input;
       const queuedTask = transaction.insert(tasks).values({ ...task, input, priority: task.priority ?? config.actions[task.action].priority }).onConflictDoUpdate({
         target: [tasks.itemId, tasks.action],
         targetWhere: sql`${tasks.status} = 'queued'`,
@@ -98,7 +100,7 @@ export function enqueueManualTasks(action: string, targets: string[], priority?:
     if (item.state !== "open") return { ...base, error: "Item is closed" };
     const needs = issueActions.has(action) ? "issue" : "pr";
     if (item.kind !== needs) return { ...base, error: `${action} needs ${needs === "pr" ? "a PR" : "an issue"}, but ${target} is ${item.kind === "pr" ? "a PR" : "an issue"}` };
-    try { return { ...base, taskId: enqueueTask({ itemId: item.id, action, priority, reason: "Manually enqueued", input: { manual: true } }).id }; }
+    try { return { ...base, taskId: enqueueTask({ itemId: item.id, action, priority, reason: "Manually enqueued", input: { source: "github_items", kind: "manual", manual: true } }).id }; }
     catch (error) { return { ...base, error: error instanceof Error ? error.message : String(error) }; }
   });
 }
@@ -159,7 +161,7 @@ export function claimTask() {
       } : {}),
       startedAt: new Date().toISOString(),
     }).returning().get()!;
-    if (!previousRun && typeof task.input.assessmentRunId === "string") {
+    if (!previousRun && claimable.trigger.kind === "low_grade") {
       transaction.update(items).set({ selfRepairCount: sql`${items.selfRepairCount} + 1` }).where(eq(items.id, task.itemId)).run();
     }
     recordEvent({ itemId: task.itemId, taskId: task.id, runId: run.id, type: "run.started", data: {

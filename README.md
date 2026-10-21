@@ -38,7 +38,7 @@ Requires Node.js **22.19+**, Git, and the tools used by the target repository's 
    npm run serve
    ```
 
-**Starting the service enables real GitHub writes and code execution.** Use one service process; do not overlap it with standalone `sync` or `work` processes. Shutdown drains active tasks before exiting.
+**Starting the service enables real GitHub writes and code execution.** Use one service process; do not overlap it with standalone `sync` or `work` processes. On SIGTERM the service stops claiming tasks, and each running task stops at its next stage boundary (a running agent turn gets `harness.drainTimeoutSeconds` to finish, then is aborted) and is requeued to resume from its saved stage after the restart. A validation command already running is not interrupted.
 
 Useful commands:
 
@@ -87,6 +87,7 @@ For project review, run `typecheck`, `knip`, and the integration/E2E tests after
 | `harness.maxConcurrency` | Maximum simultaneous tasks, not model sessions or test subprocesses. Each PR review starts two reviewer sessions within one task. Change-mode tasks run a database container and, at the end, the validation suite (bounded by `maxConcurrentValidations`), so size this to the host's memory. |
 | `harness.commandTimeoutSeconds` | Longest a `workspace.prepare`, database migrate or `workspace.validate` command may run (default 3600, a positive integer). It is killed with SIGKILL and the run fails as infrastructure, eligible for validation-only retry, without re-prompting the agent. Clone, fetch and push are bounded separately at 600 seconds. |
 | `harness.agentTimeoutSeconds` | Longest one agent turn may run (default 3600, a positive integer). The session is aborted and the run fails with `AGENT_TIMEOUT`. |
+| `harness.drainTimeoutSeconds` | How long a running agent turn may continue after the service is told to stop (default 900, a positive integer). Other stages stop at their next boundary; an agent turn still running when this elapses is aborted. Either way the run is recorded as `RUN_INTERRUPTED` and its task is requeued to resume after the restart. |
 | `harness.maxConcurrentValidations` | Maximum `workspace.validate` runs at once (default 3, a positive integer). Further runs wait in a FIFO queue; preparation does not take a slot. |
 | `harness.logLevel` | Pino log verbosity, such as `info` or `debug`. |
 | `github.repository` | Target GitHub repository as `owner/repo`. |

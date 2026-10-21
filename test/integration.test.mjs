@@ -53,6 +53,8 @@ const scenarios = {
   validation_feedback: "a failed validation is sent back into the same Pi session, fixed there and published as one commit",
   validation_feedback_cap: "validation feedback stops after two rounds and never applies to signal-killed commands",
   command_timeout: "a validation command that outlives harness.commandTimeoutSeconds is killed, fails the run as infrastructure without re-prompting the agent and accepts validation-only retry",
+  deploy_stop_boundary: "a stop signal ends a run at the next stage boundary, requeues its task, and the next worker resumes validation or publication without redoing earlier stages",
+  deploy_stop_agent_timeout: "a stop signal during an agent turn aborts the session after harness.drainTimeoutSeconds, publishes nothing and requeues the task",
   agent_timeout: "an agent turn that outlives harness.agentTimeoutSeconds is aborted and fails the run with AGENT_TIMEOUT",
   bash_guard: "heavy commands are refused in the agent's bash tool and bad guard or slot settings block startup",
   validation_slots: "validation waits for a configured number of slots, which a failing validation releases",

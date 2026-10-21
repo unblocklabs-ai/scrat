@@ -30,7 +30,7 @@ async function poll() {
 async function worker() {
   while (!shutdown.signal.aborted) {
     const seen = workGeneration();
-    try { if (!await runNextTask()) await waitForWork(seen, idleWorkerFallbackMs, shutdown.signal); }
+    try { if (!await runNextTask(shutdown.signal)) await waitForWork(seen, idleWorkerFallbackMs, shutdown.signal); }
     catch (error) {
       logger.error({ err: error }, "Worker failed");
       await wait(1000);

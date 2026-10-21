@@ -213,7 +213,7 @@ export async function fixture(scenario) {
     writeFileSync("check.mjs", scenario === "validation_mutation" ? 'import{writeFileSync}from"node:fs";writeFileSync("src/app.ts","unexpected verification change\\n");' : 'import{existsSync}from"node:fs";if(existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed");process.exit(7);}console.log("checked actual source");');
     config.workspace.validate = [[process.execPath, resolve("check.mjs")]];
   }
-  if (["validation_feedback", "validation_feedback_cap", "validation_slots", "self_repair", "bot_name", "crash_before_publishing"].includes(scenario)) {
+  if (["validation_feedback", "validation_feedback_cap", "validation_slots", "self_repair", "bot_name", "crash_before_publishing", "deploy_stop_boundary"].includes(scenario)) {
     const flag = (name) => JSON.stringify(resolve(name));
     writeFileSync("validate.mjs", 'import{appendFileSync,existsSync}from"node:fs";const s=Date.now();await new Promise((r)=>setTimeout(r,existsSync(' + flag("slow") + ')?300:0));'
       + 'appendFileSync(' + flag("validations.log") + ',JSON.stringify({s,e:Date.now()})+"\\n");if(existsSync(' + flag("kill-validation") + '))process.kill(process.pid,"SIGKILL");if(existsSync(' + flag("exit-137") + '))process.exit(137);'
@@ -226,6 +226,7 @@ export async function fixture(scenario) {
     config.harness.commandTimeoutSeconds = 1;
   }
   if (scenario === "agent_timeout") config.harness.agentTimeoutSeconds = 1;
+  if (scenario === "deploy_stop_agent_timeout") config.harness.drainTimeoutSeconds = 1;
   if (["validation_resume", "validation_guards", "resume_migration"].includes(scenario)) {
     writeFileSync("prepare.mjs", 'import{appendFileSync,mkdirSync,writeFileSync}from"node:fs";appendFileSync(' + JSON.stringify(resolve("prepare.log")) + ',"prepare\\n");mkdirSync("node_modules",{recursive:true});writeFileSync("node_modules/prepared","ready");');
     config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];

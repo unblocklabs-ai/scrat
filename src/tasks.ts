@@ -8,7 +8,7 @@ import { db } from "./db.ts";
 import { describeError } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { withOperationSync } from "./logging.ts";
-import { entryStage, hasPublicationSnapshot, hasValidationCheckpoint } from "./results.ts";
+import { entryStage, hasPublicationSnapshot, hasValidationCheckpoint, InterruptedError } from "./results.ts";
 import { latestRunOfTask } from "./run-history.ts";
 import { asItem } from "./items.ts";
 import { items, runs, subjects, tasks, type Task, type Subject } from "./schema.ts";
@@ -130,22 +130,23 @@ export function claimTask() {
     const previousRun = claimable.previousRun;
     const retry = previousRun?.error && isDeepStrictEqual(previousRun.input, next.task.input) ? previousRun : undefined;
     const actionSettings = getActionConfig(next.task.action);
-    const settings = retry ?? actionSettings;
     const validationOnly = next.task.retryMode === "validation";
     const publicationResume = !validationOnly && hasPublicationSnapshot(retry) ? retry : undefined;
     const resume = validationOnly ? (hasValidationCheckpoint(retry) ? retry : undefined) : publicationResume;
+    const prior = retry?.error?.name === "InterruptedError" && !resume ? undefined : retry;
+    const settings = prior ?? actionSettings;
     const task = transaction.update(tasks).set({ status: "running" }).where(eq(tasks.id, next.task.id)).returning().get()!;
     const run = transaction.insert(runs).values({
       taskId: task.id,
       sequence: sql`(select coalesce(max(${runs.sequence}), 0) + 1 from ${runs})`,
-      retryOfRunId: retry?.id,
+      retryOfRunId: prior?.id,
       inferenceFromRunId: resume?.id,
       input: task.input,
       skill: settings.skill,
       provider: settings.provider,
       model: settings.model,
       thinkingLevel: settings.thinkingLevel,
-      reviewers: resume ? resume.reviewers : (retry?.reviewers ?? actionSettings.reviewers)
+      reviewers: resume ? resume.reviewers : (prior?.reviewers ?? actionSettings.reviewers)
         .map(({ provider, model, thinkingLevel }) => ({ provider, model, thinkingLevel })),
       workspaceId: resume?.workspaceId ?? next.subject.workspaceId,
       stage: entryStage(retry, next.task.retryMode),
@@ -214,6 +215,29 @@ export function finishRun(runId: string, outcome: { status: "completed" } | { st
   }, { behavior: "immediate" });
   signalWork();
   return finished;
+}
+
+export function interruptRun(runId: string, error: unknown = new InterruptedError("Worker stopped before finishing this run")) {
+  const details = describeError(error);
+  const interrupted = db.transaction((transaction) => {
+    const run = transaction.update(runs).set({ error: details, finishedAt: new Date().toISOString() })
+      .where(and(eq(runs.id, runId), isNull(runs.finishedAt))).returning().get();
+    if (!run) throw new Error(`Run not active: ${runId}`);
+    const own = transaction.select().from(tasks).where(eq(tasks.id, run.taskId)).get()!;
+    const superseded = transaction.select({ id: tasks.id }).from(tasks).where(and(
+      eq(tasks.subjectId, own.subjectId), eq(tasks.action, own.action), eq(tasks.status, "queued"),
+    )).get();
+    const retryMode = hasValidationCheckpoint(run) ? "validation" : "repair";
+    const task = transaction.update(tasks).set(superseded ? { status: "failed" } : { status: "queued", retryMode })
+      .where(and(eq(tasks.id, run.taskId), eq(tasks.status, "running"))).returning().get();
+    if (!task) throw new Error(`Task not running: ${run.taskId}`);
+    const references = { subjectId: task.subjectId, taskId: task.id, runId };
+    recordEvent(superseded ? { ...references, type: "run.failed", data: { stage: run.stage, error: details } }
+      : { ...references, type: "run.requeued", data: { stage: run.stage, retryMode } }, transaction);
+    return run;
+  }, { behavior: "immediate" });
+  signalWork();
+  return interrupted;
 }
 
 export function cancelQueuedTasks(subjectId: string, reason: string, action?: Task["action"], keepManual = false) {

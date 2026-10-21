@@ -16,7 +16,7 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 
 // @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: {
-  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number }; github?: { auth?: string; botLogin?: string; botName?: string; baseBranch?: string }; providers?: Record<string, { apiKey?: string }>; workspace?: { heavyCommands?: string[] };
+  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number }; github?: { auth?: string; botLogin?: string; botName?: string; baseBranch?: string }; providers?: Record<string, { apiKey?: string }>; workspace?: { heavyCommands?: string[] };
   actions: Record<string, Entry & { skill: string; reviewers?: Entry[]; maxSelfRepairs?: number; exhaustedLabel?: string | null; enabled?: boolean; agent?: string; channel?: string; branch?: string; startMessage?: string }>;
 } = config) {
   const modelRuntime = await sharedModelRuntime();
@@ -35,7 +35,7 @@ export async function validateStaticConfig(settings: {
   }
   const slots = settings.harness?.maxConcurrentValidations;
   if (slots !== undefined && !(Number.isSafeInteger(slots) && slots > 0)) problems.push("harness.maxConcurrentValidations must be a positive integer");
-  for (const key of ["commandTimeoutSeconds", "agentTimeoutSeconds"] as const) {
+  for (const key of ["commandTimeoutSeconds", "agentTimeoutSeconds", "drainTimeoutSeconds"] as const) {
     const seconds = settings.harness?.[key];
     if (seconds !== undefined && !(Number.isSafeInteger(seconds) && seconds > 0)) problems.push(`harness.${key} must be a positive integer`);
   }

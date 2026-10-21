@@ -4,6 +4,7 @@
     "maxConcurrentValidations": 3,
     "commandTimeoutSeconds": 3600,
     "agentTimeoutSeconds": 3600,
+    "drainTimeoutSeconds": 900,
     "logLevel": "info"
   },
   "github": {

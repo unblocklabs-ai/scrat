@@ -52,6 +52,11 @@ export class CheckFailure extends Error {
   readonly code = "CHECK_FAILED";
 }
 
+export class InterruptedError extends Error {
+  override readonly name = "InterruptedError";
+  readonly code = "RUN_INTERRUPTED";
+}
+
 export class SecretLeakError extends Error {
   readonly code = "SECRET_IN_OUTPUT";
 }

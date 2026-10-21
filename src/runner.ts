@@ -20,11 +20,12 @@ import { resolvePrReview } from "./pr-assessment.ts";
 import { getRun, latestSessionRun, runHistory, updateRun } from "./run-history.ts";
 import { reviewPullRequest } from "./pr-review.ts";
 import { publishCommit, publishRun } from "./publication.ts";
-import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint } from "./results.ts";
+import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint, InterruptedError } from "./results.ts";
 import type { Item } from "./items.ts";
 import { subjects, workspaces, type Run, type Task, type Subject, type Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
-import { claimTask, finishRun } from "./tasks.ts";
+import { recordEvent } from "./events.ts";
+import { claimTask, finishRun, interruptRun } from "./tasks.ts";
 import { parseTriggerInput } from "./triggers.ts";
 import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
 
@@ -59,16 +60,22 @@ function validationMessage(error: CheckFailure, round: number) {
   return `${botName}'s validation failed after your changes (round ${round} of ${maxValidationCorrections}).\n\nCommand: ${message.split("\n")[0].replace(/^Command failed: /, "")}\nExit code: ${exitCode ?? "unknown"}\n${tail("stdout", stdout)}${tail("stderr", stderr)}\nFix only what is reported. ${botName} re-validates after your turn, so a full rerun of the failing check is not needed. Then end your turn with one or two sentences on what you changed to fix this (it is appended to your earlier handoff), and the usual SCRAT_STATUS footer (add SCRAT_READY if the change is still ready).`;
 }
 
+function stopBefore(stop: AbortSignal | undefined, next: string) {
+  if (stop?.aborted) throw new InterruptedError(`Worker is stopping; run left at the stage boundary before ${next}`);
+}
+
 const unresolvedConflict = "PR still conflicts with its base branch after resolution";
 
-async function validateAndCommit({ run, references, repositoryPath }: Ctx, p: Prepared, kind: Acceptance) {
+async function validateAndCommit({ run, references, repositoryPath, stop }: Ctx, p: Prepared, kind: Acceptance) {
   const { workspace, commandEnvironment } = p;
   if (!p.validationOnly) updateRun(run.id, { agentCheckpoint: await checkpointWorkspace(workspace) });
   await asCheckFailure(() => prepareWorkspace(workspace, commandEnvironment, p.databaseConfig, references));
   const checkpoint = await checkpointWorkspace(workspace);
   updateRun(run.id, { agentCheckpoint: checkpoint });
   const validationTree = checkpoint.treeSha;
-  const commands = await asCheckFailure(() => withValidationSlot(() => runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references), references));
+  stopBefore(stop, "validation commands");
+  const commands = await asCheckFailure(() => withValidationSlot(() => runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references), references, stop)
+    .catch((error) => { throw stop?.aborted && error === stop.reason ? new InterruptedError("Worker is stopping; run left waiting for a validation slot") : error; }));
   await git(workspace.path, ["add", "--all"]);
   if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
   await assertNoCommittedSecrets(workspace, p.validationOnly ? run.headSha ?? p.baseRef : p.startHeadSha, validationTree);
@@ -88,7 +95,7 @@ type Ctx = {
   task: Task; run: Run; subject: Subject; item: Item | undefined;
   references: References; operation: ReturnType<typeof startOperation>;
   contract: typeof actionContracts[Action]; repositoryPath: string;
-  readOnly: boolean; acceptance: Acceptance | undefined;
+  readOnly: boolean; acceptance: Acceptance | undefined; stop: AbortSignal | undefined;
   cleanup: { reviewWorkspace?: Workspace; databaseRequested: boolean };
 };
 type Observed = {
@@ -106,14 +113,14 @@ type Prepared = {
   deferred: boolean; previousSessionFile: string | undefined;
 };
 
-function beginRun({ task, run, subject, item }: NonNullable<ReturnType<typeof claimTask>>): Ctx {
+function beginRun({ task, run, subject, item }: NonNullable<ReturnType<typeof claimTask>>, stop: AbortSignal | undefined): Ctx {
   const references = { subjectId: subject.id, taskId: task.id, runId: run.id };
   const { action } = task;
   const operation = startOperation("run.execute", { ...references, action });
   const contract = actionContracts[action];
   return {
     task, run, subject, item, references, operation, contract, repositoryPath: getRepositoryPath(),
-    readOnly: contract.mode === "review", acceptance: contract.mode === "change" ? contract.acceptance : undefined,
+    readOnly: contract.mode === "review", acceptance: contract.mode === "change" ? contract.acceptance : undefined, stop,
     cleanup: { databaseRequested: false },
   };
 }
@@ -275,7 +282,7 @@ async function prepareCommands({ run, readOnly, repositoryPath, references, oper
   }
 }
 
-async function agentStage({ task, run, contract, readOnly, operation }: Ctx, observed: Observed | undefined, p: Prepared) {
+async function agentStage({ task, run, contract, readOnly, operation, stop }: Ctx, observed: Observed | undefined, p: Prepared) {
   const { action } = task;
   const { workspace, environment } = p;
   const configured = getActionConfig(action);
@@ -292,14 +299,14 @@ async function agentStage({ task, run, contract, readOnly, operation }: Ctx, obs
   });
   p.agentInput = { contextDir, revisions };
   const agentResult = ("agent" in configured ? configured.agent : contract.agent) === "panel"
-    ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { baseSha: p.diffBaseSha, contextDir, revisions, requireGrade: !changeContext })
-    : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, log: operation.log, sessionFile: p.previousSessionFile, environment, contextDir, revisions, baseSha: changeContext ? p.diffBaseSha : undefined });
+    ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { baseSha: p.diffBaseSha, contextDir, revisions, requireGrade: !changeContext, stop })
+    : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, log: operation.log, sessionFile: p.previousSessionFile, environment, contextDir, revisions, baseSha: changeContext ? p.diffBaseSha : undefined, stop });
   p.result = { ...agentResult, paths: [...new Set([...p.diffPaths, ...agentResult.paths])] };
   updateRun(run.id, { result: p.result, stage: "validating" });
 }
 
 async function validateStage(ctx: Ctx, p: Prepared) {
-  const { run, operation, readOnly, acceptance } = ctx;
+  const { run, operation, readOnly, acceptance, stop } = ctx;
   const { workspace, validationOnly } = p;
   let { result } = p;
   if (!result) throw new Error("No saved agent result to validate");
@@ -317,7 +324,7 @@ async function validateStage(ctx: Ctx, p: Prepared) {
         if (validationOnly || !p.agentInput || !sessionFile || round > maxValidationCorrections) throw error.cause;
         operation.log.warn({ event: "pi.validation_retry", round });
         updateRun(run.id, { stage: "agent" });
-        const followUp = await executePi({ run, cwd: workspace.path, context: "", readOnly, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round) });
+        const followUp = await executePi({ run, cwd: workspace.path, context: "", readOnly, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });
         result = { ...followUp, text: `${result.text}\n\n**Validation correction ${round}:** ${followUp.text}`, paths: [...new Set([...result.paths, ...followUp.paths])] };
         updateRun(run.id, { result, stage: "validating" });
         assertComplete(result);
@@ -353,31 +360,41 @@ async function publishStage({ task, run, subject, references, readOnly, contract
   await publishRun(github, task, evaluatedRun, publicationContext, references);
 }
 
-export async function runNextTask() {
+export async function runNextTask(stop?: AbortSignal) {
   const claimed = claimTask();
   if (!claimed) return;
-  const ctx = beginRun(claimed);
+  const ctx = beginRun(claimed, stop);
   const { run, references, operation, cleanup } = ctx;
   try {
     const observed = await connect(ctx);
     if (run.stage !== "publishing") {
+      stopBefore(stop, "workspace acquisition");
       const prepared = await acquireWorkspace(ctx, observed);
       if (!prepared.validationOnly) {
         await planAgent(ctx, observed, prepared);
         await mergeBehind(ctx, observed, prepared);
         if (!prepared.validated) {
+          stopBefore(stop, "workspace preparation");
           await prepareCommands(ctx, observed, prepared);
+          stopBefore(stop, "the agent");
           await agentStage(ctx, observed, prepared);
         }
       }
       await validateStage(ctx, prepared);
       if (!ctx.acceptance) updateRun(run.id, { stage: "publishing" });
+      stopBefore(stop, "publication");
     }
     await publishStage(ctx, observed);
     finishRun(run.id, { status: "completed" });
     operation.complete();
     return getRun(run.id)!;
   } catch (error) {
+    if (error instanceof InterruptedError) {
+      recordEvent({ ...references, type: "run.interrupting", data: { stage: getRun(run.id)!.stage, reason: error.message } });
+      operation.complete({ interrupted: true });
+      interruptRun(run.id, error);
+      return getRun(run.id)!;
+    }
     const failed = finishRun(run.id, { status: "failed", error });
     operation.fail(error);
     return failed;

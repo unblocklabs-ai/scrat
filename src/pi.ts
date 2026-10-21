@@ -7,7 +7,7 @@ import { db } from "./db.ts";
 import { botName, withBotName } from "./identity.ts";
 import { getRun, updateRun } from "./run-history.ts";
 import type { Run } from "./schema.ts";
-import { parseResult, ResultFormatError, type Reviewer } from "./results.ts";
+import { InterruptedError, parseResult, ResultFormatError, type Reviewer } from "./results.ts";
 import { git } from "./git.ts";
 import { createAgentTools } from "./tools.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
@@ -27,7 +27,7 @@ export function saveReviewer(runId: string, index: number, patch: Partial<Review
   });
 }
 
-export async function executePi({ run, cwd, context, readOnly, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {}, requireGrade = false, followUp }: {
+export async function executePi({ run, cwd, context, readOnly, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {}, requireGrade = false, followUp, stop }: {
   run: Run;
   cwd: string;
   context: string;
@@ -41,6 +41,7 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
   revisions?: Record<string, string>;
   requireGrade?: boolean;
   followUp?: string;
+  stop?: AbortSignal;
 }) {
   const modelRuntime = await sharedModelRuntime();
   const model = modelRuntime.getModel(run.provider, run.model);
@@ -96,12 +97,15 @@ export async function executePi({ run, cwd, context, readOnly, log, sessionFile,
     });
     const prompt = async (text: string) => {
       const started = performance.now();
-      let timedOut = false;
+      let timedOut = false, drained = false, drainTimer: NodeJS.Timeout | undefined;
       const timer = setTimeout(() => { timedOut = true; void session.abort(); }, config.harness.agentTimeoutSeconds * 1000);
+      const onStop = () => { drainTimer = setTimeout(() => { drained = true; void session.abort(); }, config.harness.drainTimeoutSeconds * 1000); };
+      if (stop?.aborted) onStop(); else stop?.addEventListener("abort", onStop, { once: true });
       try { await session.prompt(text, { expandPromptTemplates: false }); }
-      catch (error) { if (!timedOut) throw error; }
-      finally { clearTimeout(timer); }
+      catch (error) { if (!timedOut && !drained) throw error; }
+      finally { clearTimeout(timer); clearTimeout(drainTimer); stop?.removeEventListener("abort", onStop); }
       if (timedOut) throw Object.assign(new Error(`Agent turn exceeded ${config.harness.agentTimeoutSeconds} seconds and was aborted after ${Math.round((performance.now() - started) / 1000)} seconds`), { code: "AGENT_TIMEOUT" });
+      if (drained) throw new InterruptedError(`Agent turn was still running ${config.harness.drainTimeoutSeconds} seconds after the worker was told to stop and was aborted`);
     };
     await prompt(followUp ?? `${withBotName(await readFile(run.skill, "utf8"))}\n\n${context}`);
     for (let corrections = 0; ; corrections++) {

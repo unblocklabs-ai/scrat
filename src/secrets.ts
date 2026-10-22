@@ -13,7 +13,8 @@ export function childEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJ
 }
 
 const secretVariables = ["GITHUB_APP_PRIVATE_KEY", "GITHUB_PAT", "SLACK_BOT_TOKEN", ...Object.values(config.providers)
-  .flatMap((provider) => [...(provider.apiKey ?? "").matchAll(/\$\{(\w+)\}/g)].map((match) => match[1]))];
+  .map((provider) => provider.apiKey ?? "").concat(Object.values(config.bindings).map((binding) => typeof binding?.secret === "string" ? binding.secret : ""))
+  .flatMap((text) => [...text.matchAll(/\$\{(\w+)\}/g)].map((match) => match[1]))];
 
 export const basicCredential = (token: string) => Buffer.from(`x-access-token:${token}`).toString("base64");
 

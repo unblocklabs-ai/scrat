@@ -4,10 +4,11 @@ import { type Static, type TSchema, Type } from "typebox";
 import Value from "typebox/value";
 import { parse } from "yaml";
 import { nextTick, parseCron, parseWindow } from "./cron.ts";
+import { hostProblem } from "./bindings.ts";
 import { triggerKinds, triggerSource } from "./triggers.ts";
 
 export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-const toolNames = ["read", "grep", "find", "ls", "git", "read_base", "bash", "edit", "write"] as const;
+const toolNames = ["read", "grep", "find", "ls", "git", "read_base", "bash", "edit", "write", "http", "browser", "github_search"] as const;
 const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "history"] as const;
 const effectNames = ["push", "pull_request", "comment", "labels", "pr_assessment", "issue", "slack_reply"] as const;
 const startEffectNames = ["slack_post"] as const;
@@ -25,11 +26,13 @@ const trigger = Type.Object({
   manual: Type.Optional(Type.Boolean()), branch: Type.Optional(Type.String()),
   cron: Type.Optional(Type.String()), window: Type.Optional(Type.String()),
 }, strict);
+const httpSettings = Type.Object({ binding: Type.String(), methods: Type.Optional(list(Type.Enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]), 1)) }, strict);
+const browserSettings = Type.Object({ navigationHosts: list(Type.String(), 1), resourceHosts: list(Type.String()), binding: Type.Optional(Type.String()) }, strict);
 const schema = Type.Object({
   name: Type.String({ pattern: "^[a-z][a-z0-9_]{0,63}$" }), enabled: Type.Optional(Type.Boolean()),
   trigger, mode: Type.Enum(["review", "change"]), agent: Type.Enum(["single", "panel"]), reviewers: Type.Optional(Type.Array(model)),
   context: Type.Enum(["all", "feedback", "change"]),
-  tools: Type.Optional(list(Type.Enum(toolNames), 1)), files: Type.Optional(list(Type.Enum(contextFileNames))),
+  tools: Type.Optional(list(Type.Enum(toolNames), 1)), http: Type.Optional(httpSettings), browser: Type.Optional(browserSettings), files: Type.Optional(list(Type.Enum(contextFileNames))),
   acceptance: Type.Optional(Type.Enum(["complete", "nonempty_diff", "conflict_free"])),
   start: Type.Optional(list(Type.Enum(startEffectNames))), publish: list(Type.Enum(effectNames), 1),
   skill: Type.String(), model, priority: Type.Integer(),
@@ -69,6 +72,10 @@ function crossChecks(m: Parsed) {
   need(!publish.includes("pr_assessment") || (t.item === "pr" && agent === "panel"), "pr_assessment requires item: pr and agent: panel");
   need(agent !== "panel" || m.reviewers?.length === 2, "agent: panel requires exactly two reviewers");
   need(tools.includes("read"), "tools must include read");
+  need(tools.includes("http") === (m.http !== undefined), "the http tool and the http setting require each other");
+  need(tools.includes("browser") === (m.browser !== undefined), "the browser tool and the browser setting require each other");
+  for (const host of [...m.browser?.navigationHosts ?? [], ...m.browser?.resourceHosts ?? []]) { const problem = hostProblem(host); if (problem) problems.push(`browser: ${problem}`); }
+  need(!tools.includes("github_search") || mode === "review", "github_search requires mode review");
   need(!tools.includes("read_base") || (mode === "review" && (agent === "panel" || m.context === "change")), "read_base requires a review with agent: panel or context: change");
   if (mode === "change") {
     need(m.acceptance !== undefined, "mode change requires acceptance");

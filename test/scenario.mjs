@@ -2602,6 +2602,217 @@ try {
     const push = execFileSync(process.execPath, [resolve("app/node_modules/drizzle-kit/bin.cjs"), "push", "--dialect=sqlite", "--schema=./app/src/schema.ts", "--url=./legacy.sqlite"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     assert.match(push, /No changes detected/);
     const pushed = new DatabaseSync("legacy.sqlite"); assert.equal(dump(pushed), migrated); assert.deepEqual(rows(pushed, "PRAGMA foreign_key_check"), []); pushed.close();
+  } else if (scenario === "scoped_http") {
+    const secret = process.env.SCOUT_TOKEN;
+    const { default: fs } = await import("node:fs"), lines = [], write = fs.writeSync;
+    fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string") { lines.push(...data.split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } })); return data.length; } return write(fd, data, ...rest); };
+    const get = (url, extra = {}) => ({ name: "http", args: { method: "GET", url, ...extra } });
+    f.script = [
+      get("https://api.example.test/data?token=querysecret&x=1", { headers: { Accept: "application/json" } }), get("https://api.example.test/echo"), get("https://other.example.test/ok"),
+      get("https://evil.example.net/x"), get("https://169.254.169.254/latest/meta-data/"), get("https://127.0.0.1/"), get("https://[::1]/"), get("https://2130706433/"),
+      get("https://api.example.test/redirect-off"), get("https://api.example.test/redirect-on"),
+      { name: "http", args: { method: "POST", url: "https://api.example.test/data", body: "payload-body" } },
+      get("https://api.example.test/data", { headers: { Authorization: "Bearer mine" } }),
+      get("http://api.example.test/data"), get("https://api.example.test:8443/data"), get("https://user:pw@api.example.test/data"),
+      get("https://api.example.test/data", { headers: { "X-HTTP-Method-Override": "DELETE" } }), get("https://api.example.test/big"),
+    ];
+    f.addIssue(1); f.enqueue(1);
+    let result;
+    try { result = await success(); } finally { fs.writeSync = write; }
+    const sent = f.requests.at(-1).request;
+    const textOf = (message) => typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("");
+    const answers = sent.messages.filter((message) => message.role === "tool").map(textOf);
+    assert.equal(answers.length, 17);
+    const reply = (index) => JSON.parse(answers[index]);
+    assert.equal(reply(0).status, 200); assert.match(reply(0).body, /"ok":true/);
+    assert.match(reply(1).body, /you sent Bearer \[redacted\]/); assert.ok(!answers[1].includes(secret));
+    assert.equal(reply(2).status, 200);
+    const refusals = [[3, /Refused: evil\.example\.net is not an allowed host/], [4, /Refused: 169\.254\.169\.254 is an IP address/], [5, /Refused: 127\.0\.0\.1 is an IP address/],
+      [6, /Refused: \[::1\] is an IP address/], [7, /Refused: 127\.0\.0\.1 is an IP address/], [10, /method POST is not allowed; use one of GET/],
+      [11, /header Authorization cannot be set; allowed headers are accept, content-type/], [12, /only https URLs/], [13, /explicit port/], [14, /credentials/], [15, /header X-HTTP-Method-Override cannot be set/]];
+    for (const [index, pattern] of refusals) assert.match(answers[index], pattern, `call ${index}`);
+    assert.equal(reply(8).status, 302); assert.equal(reply(8).headers.location, undefined); assert.ok(!answers[8].includes("evil.example.net"));
+    assert.equal(reply(9).status, 302); assert.equal(reply(9).headers.location, "https://other.example.test/ok");
+    assert.equal(reply(16).truncated, true); assert.equal(reply(16).body.length, 64 * 1024);
+    assert.deepEqual(f.external.map(({ host, path }) => host + path), ["api.example.test/data?token=querysecret&x=1", "api.example.test/echo", "other.example.test/ok",
+      "api.example.test/redirect-off", "api.example.test/redirect-on", "api.example.test/big"]);
+    assert.equal(f.external[0].headers.accept, "application/json");
+    for (const call of f.external) { assert.equal(call.headers.authorization, "Bearer " + secret); assert.equal(call.redirect, "manual"); assert.equal(call.method, "GET"); }
+    assert.ok(!JSON.stringify(sent).includes(secret) && !JSON.stringify(f.requests.map((entry) => entry.request.messages)).includes(secret));
+    assert.deepEqual(sent.tools.map((tool) => tool.function.name), ["read", "grep", "http"]);
+    assert.ok(existsSync(result.piSessionFile)); assert.ok(!readFileSync(result.piSessionFile, "utf8").includes(secret));
+    const operations = lines.filter((line) => line.operation === "agent.http"), done = operations.filter((line) => line.event === "operation.completed"), failed = operations.filter((line) => line.event === "operation.failed");
+    assert.equal(done.length, 6); assert.equal(failed.length, 11);
+    assert.deepEqual(done.map(({ method, host, status }) => [method, host, status]), [["GET", "api.example.test", 200], ["GET", "api.example.test", 200], ["GET", "other.example.test", 200],
+      ["GET", "api.example.test", 302], ["GET", "api.example.test", 302], ["GET", "api.example.test", 200]]);
+    const journal = JSON.stringify(lines);
+    for (const hidden of [secret, "querysecret", "payload-body", "pw@"]) assert.ok(!journal.includes(hidden), hidden);
+    const { containsSecret } = await f.app("secrets.ts"), { redactSecrets } = await f.app("errors.ts"), { childEnvironment } = await f.app("secrets.ts");
+    assert.ok(containsSecret(`x ${secret} x`)); assert.ok(!redactSecrets(`x ${secret}`).includes(secret)); assert.equal(childEnvironment(process.env).SCOUT_TOKEN, undefined);
+    const { readManifests } = await f.app("manifests.ts");
+    for (const manifest of readManifests(resolve("app"))) assert.ok(!manifest.tools.some((tool) => ["http", "browser", "github_search"].includes(tool)) && !manifest.http && !manifest.browser, manifest.name);
+  } else if (scenario === "scoped_github_search") {
+    const search = (query) => ({ name: "github_search", args: { query } });
+    f.script = [search("is:open label:bug"), search("is:open label:bug"), search("repo:other/repo secret"), search("org:evil x"), search("-user:evil x"), search("Repo:other/x y"), search('"timeout"-repo:fixture/project'), search('"x"-repo:fixture/project'), search("\u00a0-repo:fixture/project x"), search("\u200b-repo:fixture/project x")];
+    f.addIssue(1); f.enqueue(1); await success();
+    const sent = f.requests.at(-1).request;
+    const textOf = (message) => typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("");
+    const answers = sent.messages.filter((message) => message.role === "tool").map(textOf);
+    assert.deepEqual(sent.tools.map((tool) => tool.function.name), ["read", "grep", "github_search"]);
+    assert.equal(answers.length, 10);
+    assert.deepEqual(f.searches, [{ q: "repo:fixture/project is:open label:bug", ifNoneMatch: null }, { q: "repo:fixture/project is:open label:bug", ifNoneMatch: null }]);
+    for (const index of [0, 1]) {
+      const found = JSON.parse(answers[index]);
+      assert.equal(found.total, 1); assert.deepEqual(found.items[0], { number: 7, kind: "issue", title: "Known flake", state: "open", url: "https://github.com/fixture/project/issues/7",
+        author: "someone", labels: ["bug"], updatedAt: "2026-10-19T00:00:00Z", excerpt: "Seen before. ".repeat(60).slice(0, 300) });
+    }
+    for (const index of [2, 3, 4, 5, 6, 7, 8, 9]) assert.match(answers[index], /must not contain repo:, org: or user: qualifiers; the search is limited to fixture\/project/);
+  } else if (scenario === "scoped_browser") {
+    const secret = process.env.SCOUT_TOKEN, binding = f.config.bindings.scout;
+    const { createBrowserTool } = await f.app("scoped-tools.ts"), { validateStaticConfig } = await f.app("startup.ts");
+    mkdirSync("ctx");
+    const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+    const fake = () => {
+      const state = { closed: false, handler: undefined, contextOptions: undefined, visited: [] };
+      let current = "about:blank";
+      const page = {
+        async request(url, navigation, headers = { accept: "*/*" }) {
+          let outcome;
+          await state.handler({ request: () => ({ url: () => url, isNavigationRequest: () => navigation, headers: () => headers }),
+            abort: async (code) => { outcome = { aborted: code }; }, continue: async (options) => { outcome = { continued: options?.headers ?? {} }; } });
+          return outcome;
+        },
+        async goto(url) { const outcome = await page.request(url, true); if (outcome.aborted) throw new Error("net::ERR_BLOCKED_BY_CLIENT"); state.visited.push(url); current = url; return { status: () => 200 }; },
+        title: async () => "Shop", url: () => current, innerText: async () => "Cart total 5. token " + secret,
+                screenshot: async ({ path }) => { writeFileSync(path, "png"); },
+      };
+      const browser = { async newContext(options) { state.contextOptions = options; return { route: async (_pattern, handler) => { state.handler = handler; }, newPage: async () => page, close: async () => {} }; }, close: async () => { state.closed = true; } };
+      return { state, page, launch: async () => browser };
+    };
+    const warnings = [], settings = { navigationHosts: ["shop.example.test"], resourceHosts: ["cdn.example.test", "api.example.test"] };
+    const make = (extra = {}) => { const stub = fake(), { tool, close } = createBrowserTool({ settings, contextDir: resolve("ctx"), runId: "run", launch: stub.launch, log: { warn: (details) => warnings.push(details) }, ...extra }); return { ...stub, tool, close }; };
+    const act = (browser, args) => browser.tool.execute("call", args, undefined, undefined, {});
+    const textOf = (result) => result.content[0].text;
+
+    const bound = make({ binding });
+    assert.deepEqual(Object.keys(bound.tool.parameters.properties), ["action", "url"]);
+    await assert.rejects(act(bound, { action: "teleport" }), /action must be one of: goto, text, screenshot/);
+    await assert.rejects(act(bound, { action: "goto", url: "https://evil.example.net/" }), /Refused: evil\.example\.net is not an allowed host/);
+    await assert.rejects(act(bound, { action: "goto", url: "https://cdn.example.test/app.js" }), /Refused: cdn\.example\.test is not an allowed host/);
+    await assert.rejects(act(bound, { action: "goto", url: "https://127.0.0.1/" }), /Refused: 127\.0\.0\.1 is an IP address/);
+    await assert.rejects(act(bound, { action: "goto", url: "http://shop.example.test/" }), /only https URLs/);
+    assert.equal(bound.state.handler, undefined, "refused navigations never start a browser");
+    const visit = JSON.parse(textOf(await act(bound, { action: "goto", url: "https://shop.example.test/cart?x=1" })));
+    assert.deepEqual(visit, { url: "https://shop.example.test/cart?x=1", status: 200, title: "Shop" });
+    assert.deepEqual(bound.state.contextOptions, { acceptDownloads: false, serviceWorkers: "block", viewport: { width: 1280, height: 800 } });
+
+    const verdicts = async (browser) => [
+      await browser.page.request("https://shop.example.test/checkout", true), await browser.page.request("https://cdn.example.test/app.js", false),
+      await browser.page.request("https://shop.example.test/app.js", false), await browser.page.request("https://other.example.test/app.js", false),
+      await browser.page.request("https://evil.example.net/p.gif", false), await browser.page.request("https://cdn.example.test/frame", true),
+      await browser.page.request("http://shop.example.test/x", false), await browser.page.request("https://169.254.169.254/latest", false),
+      await browser.page.request("https://127.0.0.1/", false), await browser.page.request("https://shop.example.test:8443/", false),
+      await browser.page.request("https://user:pw@shop.example.test/", false), await browser.page.request("not a url", false),
+    ];
+    const blocked = { aborted: "blockedbyclient" }, open = { continued: {} }, plain = { continued: { accept: "*/*" } };
+    assert.deepEqual(await verdicts(bound), [plain, plain, plain, blocked, blocked, blocked, blocked, blocked, blocked, blocked, blocked, blocked]);
+    assert.deepEqual(await bound.page.request("https://api.example.test/v1", false), { continued: { accept: "*/*", authorization: "Bearer " + secret } });
+    assert.deepEqual(await bound.page.request("https://api.example.test/v1", false, { accept: "*/*", authorization: "Bearer stolen" }), { continued: { accept: "*/*", authorization: "Bearer " + secret } });
+    assert.deepEqual(await bound.page.request("https://cdn.example.test/x", false, { accept: "*/*", authorization: "Bearer " + secret }), { continued: { accept: "*/*" } });
+    assert.equal(bound.tool.executionMode, "sequential");
+    assert.equal(warnings.length, 9); assert.ok(warnings.every((warning) => warning.event === "browser.request_blocked" && warning.runId === "run"));
+    const anonymous = make();
+    await act(anonymous, { action: "goto", url: "https://shop.example.test/" });
+    assert.deepEqual(await anonymous.page.request("https://api.example.test/v1", false), open);
+    assert.deepEqual(await verdicts(anonymous), [open, open, open, blocked, blocked, blocked, blocked, blocked, blocked, blocked, blocked, blocked]);
+
+    const content = textOf(await act(bound, { action: "text" }));
+    assert.match(content, /Cart total 5/); assert.ok(content.includes("[redacted]") && !content.includes(secret));
+    for (const action of ["click", "fill"]) await assert.rejects(act(bound, { action, selector: "#buy" }), /action must be one of: goto, text, screenshot/);
+    const shot = textOf(await act(bound, { action: "screenshot" }));
+    assert.equal(shot, resolve("ctx/screenshot-1.png")); assert.ok(existsSync(shot));
+    await assert.rejects(act(make({ contextDir: undefined }), { action: "screenshot" }), /no context directory/);
+    await bound.close(); assert.equal(bound.state.closed, true);
+
+    const capped = make({ limits: { steps: 3, milliseconds: 60_000 } });
+    for (let n = 0; n < 3; n++) await act(capped, { action: "goto", url: "https://shop.example.test/" });
+    await assert.rejects(act(capped, { action: "text" }), /Refused: the browser is limited to 3 actions per session/);
+    assert.equal(capped.state.closed, true);
+    const slow = make({ limits: { steps: 10, milliseconds: 1000 } });
+    await act(slow, { action: "goto", url: "https://shop.example.test/" }); await sleep(1100);
+    await assert.rejects(act(slow, { action: "text" }), /limited to 1 seconds per session/);
+    await assert.rejects(act(slow, { action: "goto", url: "https://shop.example.test/" }), /limited to 1 seconds per session/);
+    assert.equal(slow.state.closed, true); assert.equal(slow.state.visited.length, 1);
+
+    const installed = await import("playwright-core").then(() => true, () => false);
+    if (!installed) await assert.rejects(validateStaticConfig(f.config), /review_issue: The browser tool needs the optional playwright-core package, which is not installed/);
+    f.addIssue(1); f.enqueue(1); await success();
+    assert.deepEqual(f.requests.at(-1).request.tools.map((tool) => tool.function.name), ["read", "grep", "browser"]);
+  } else if (scenario === "bindings_startup") {
+    const secret = process.env.SCOUT_TOKEN;
+    const { validateStaticConfig } = await f.app("startup.ts"), { readManifests } = await f.app("manifests.ts");
+    await validateStaticConfig(f.config);
+    const variant = (change) => { const copy = structuredClone(f.config); change(copy.bindings); return copy; };
+    const rejects = (change, message) => assert.rejects(validateStaticConfig(variant(change)), message);
+    await rejects((b) => { b.scout.secret = "${MISSING_SCOUT_VAR}"; }, /bindings\.scout: \$\{MISSING_SCOUT_VAR\} is not set in the environment/);
+    await rejects((b) => { b.scout.secret = "literal-secret-value"; }, /bindings\.scout: secret must be a "\$\{VAR\}" placeholder/);
+    await rejects((b) => { b.scout.hosts = []; }, /bindings\.scout: hosts must be a non-empty list/);
+    await rejects((b) => { delete b.scout.hosts; }, /bindings\.scout: hosts must be a non-empty list/);
+    for (const [host, why] of [["10.0.0.1", "IP address"], ["127.0.0.1", "IP address"], ["169.254.169.254", "IP address"], ["[::1]", "IP address"], ["::1", "IP address"],
+      ["localhost", "local or metadata"], ["metadata.google.internal", "local or metadata"], ["db.internal", "local or metadata"], ["*.example.test", "exact public hostname"],
+      ["example", "exact public hostname"], ["Api.Example.test", "exact public hostname"], ["0x7f.1", "exact public hostname"]]) {
+      await rejects((b) => { b.scout.hosts = ["api.example.test", host]; }, new RegExp(`bindings\\.scout: hosts: .*${why}`));
+    }
+    await rejects((b) => { b.scout.header = "Host"; }, /bindings\.scout: header must be a permitted header name/);
+    await rejects((b) => { b.scout.header = "Bad Header"; }, /header must be a permitted header name/);
+    await rejects((b) => { b.scout.prefix = "Bearer \nX: y"; }, /prefix must be a single-line string/);
+    await rejects((b) => { b.scout.extra = 1; }, /bindings\.scout: unknown key extra/);
+    await rejects((b) => { b.Bad_Name = structuredClone(b.scout); }, /bindings\.Bad_Name: name must be lowercase/);
+    await rejects((b) => { b.scout = "text"; }, /bindings\.scout: must be an object/);
+    await validateStaticConfig(variant((b) => { b.scout.header = "X-Api-Key"; delete b.scout.prefix; }));
+    delete process.env.SCOUT_TOKEN;
+    await assert.rejects(validateStaticConfig(f.config), /bindings\.scout: \$\{SCOUT_TOKEN\} is not set in the environment/);
+    process.env.SCOUT_TOKEN = secret;
+
+    const local = resolve("app/scrat.local.json"), original = readFileSync(local, "utf8"), directory = resolve("deployment");
+    const probe = (overrides) => {
+      writeFileSync(local, JSON.stringify(overrides));
+      try { return execFileSync(process.execPath, ["--input-type=module", "-e", `const { config } = await import(${JSON.stringify(resolve("app/src/config.ts"))}); console.log(JSON.stringify(config.bindings));`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); }
+      catch (error) { return error.stderr; }
+    };
+    const manifestFile = resolve(directory, "review_issue.yaml"), manifest = readFileSync(manifestFile, "utf8");
+    assert.deepEqual(JSON.parse(probe(JSON.parse(original))).scout.hosts, ["api.example.test", "other.example.test"]);
+    const extra = { secret: "${SCOUT_TOKEN}", hosts: ["x.example.test"], header: "X-Api-Key" };
+    assert.deepEqual(Object.keys(JSON.parse(probe({ ...JSON.parse(original), bindings: { extra } }))), ["scout", "extra"]);
+    writeFileSync(manifestFile, manifest.replace("binding: scout", "binding: nope"));
+    assert.match(probe(JSON.parse(original)), /review_issue\.yaml: unknown binding nope; define it under bindings in scrat\.local\.json/);
+    writeFileSync(manifestFile, manifest);
+    assert.equal(JSON.parse(readFileSync("app/scrat.config.json", "utf8")).bindings.scout.secret, "${SCOUT_TOKEN}");
+    assert.deepEqual(JSON.parse(readFileSync(fileURLToPath(new URL("../scrat.config.json", import.meta.url)), "utf8")).bindings, {});
+    writeFileSync(local, original);
+
+    let count = 0;
+    const invalid = (name, change, message) => {
+      const rules = resolve("rules-" + ++count); mkdirSync(rules);
+      writeFileSync(resolve(rules, "rule_check.yaml"), change(readFileSync(resolve("app/actions", name + ".yaml"), "utf8").replace("name: " + name, "name: rule_check")));
+      assert.throws(() => readManifests(resolve("app"), rules), message);
+    };
+    const reviewTools = "[read, grep, find, ls, git]", mutual = (kind) => new RegExp(`the ${kind} tool and the ${kind} setting require each other`);
+    invalid("review_issue", (text) => text.replace(reviewTools, "[read, http]"), mutual("http"));
+    invalid("review_issue", (text) => text + "http: { binding: scout }\n", mutual("http"));
+    invalid("review_issue", (text) => text.replace(reviewTools, "[read, browser]"), mutual("browser"));
+    invalid("review_issue", (text) => text + "browser: { navigationHosts: [shop.example.test], resourceHosts: [] }\n", mutual("browser"));
+    invalid("review_issue", (text) => text.replace(reviewTools, "[read, browser]") + "browser: { navigationHosts: [127.0.0.1], resourceHosts: [] }\n", /browser: 127\.0\.0\.1 is an IP address/);
+    invalid("review_issue", (text) => text.replace(reviewTools, "[read, browser]") + 'browser: { navigationHosts: [shop.example.test], resourceHosts: ["*.example.test"] }\n', /browser: \*\.example\.test is not an exact public hostname/);
+    invalid("review_issue", (text) => text.replace(reviewTools, "[read, http]") + "http: { binding: scout, methods: [TRACE] }\n", /rule_check\.yaml: \/http\/methods\/0/);
+    invalid("review_issue", (text) => text.replace(reviewTools, "[read, http]") + "http: { binding: scout, hosts: [x.example.test] }\n", /rule_check\.yaml: \/http\/hosts: unknown key/);
+    invalid("implement", (text) => text.replace("[read, grep, find, ls, bash, edit, write]", "[read, bash, github_search]"), /github_search requires mode review/);
+    const accepted = resolve("accepted"); mkdirSync(accepted);
+    writeFileSync(resolve(accepted, "scoped_check.yaml"), readFileSync(resolve("app/actions/review_issue.yaml"), "utf8").replace("name: review_issue", "name: scoped_check").replace(reviewTools, "[read, github_search, http]") + "http: { binding: scout, methods: [GET, POST] }\n");
+    assert.deepEqual(readManifests(resolve("app"), accepted).find((entry) => entry.name === "scoped_check").http, { binding: "scout", methods: ["GET", "POST"] });
+
+    const { containsSecret } = await f.app("secrets.ts"), { redactSecrets } = await f.app("errors.ts"), { childEnvironment } = await f.app("secrets.ts");
+    assert.ok(containsSecret(`x ${secret} x`)); assert.ok(!redactSecrets(`x ${secret}`).includes(secret)); assert.equal(childEnvironment(process.env).SCOUT_TOKEN, undefined);
   } else throw new Error("Unknown scenario " + scenario);
   console.log("SCENARIO_PASSED " + scenario);
 } finally { await f.close(); }

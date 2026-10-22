@@ -14,7 +14,7 @@ function forget(key: string) {
 }
 
 export async function conditionalFetch(input: string | URL | Request, init: RequestInit = {}) {
-  const key = typeof input === "string" && (init.method ?? "GET") === "GET" ? input : undefined;
+  const key = typeof input === "string" && (init.method ?? "GET") === "GET" && !new URL(input).pathname.startsWith("/search/") ? input : undefined;
   const hit = key ? etags.get(key) : undefined;
   if (key && hit) { etags.delete(key); etags.set(key, hit); }
   const response = await globalThis.fetch(input, hit

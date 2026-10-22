@@ -6,5 +6,6 @@
     "deploy/prepare-tools.mjs",
     "deploy/migrate-subjects.mjs"
   ],
-  "project": ["src/**/*.ts", "test/**/*.mjs", "deploy/**/*.mjs"]
+  "ignoreDependencies": ["playwright-core"],
+  "project":["src/**/*.ts", "test/**/*.mjs", "deploy/**/*.mjs"]
 }

@@ -191,6 +191,25 @@ export class GitHubRepository {
     return found ? pullRequestView(found) : undefined;
   }
 
+  async searchIssues(query: string) {
+    if (/(repo|org|user|owner):/i.test(query)) throw new Error(`The query must not contain repo:, org: or user: qualifiers; the search is limited to ${this.repository}`);
+    return withOperation("github.search", { repository: this.repository }, async (operation) => {
+      const { github } = await githubForRepository(this.repository, "read");
+      const response = await github.rest.search.issuesAndPullRequests({ q: `repo:${this.repository} ${query}`, per_page: 20 }).catch((error: unknown) => {
+        throw errorStatus(error) === 403 || errorStatus(error) === 429 ? new Error("GitHub search rate limit reached; try again later", { cause: error }) : error;
+      });
+      operation.complete({ status: response.status, total: response.data.total_count });
+      return {
+        total: response.data.total_count,
+        items: response.data.items.map((item) => ({
+          number: item.number, kind: item.pull_request ? "pr" : "issue", title: item.title, state: item.state, url: item.html_url,
+          author: item.user?.login, labels: item.labels.map((label) => typeof label === "string" ? label : label.name),
+          updatedAt: item.updated_at, excerpt: (item.body ?? "").slice(0, 300),
+        })),
+      };
+    });
+  }
+
   private write<R extends { status: number; headers: { "x-github-request-id"?: string } }>(
     name: string,
     context: Record<string, unknown>,

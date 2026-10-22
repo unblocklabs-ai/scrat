@@ -18,6 +18,7 @@
     "installationId": 163420479,
     "fetchIntervalSeconds": 300
   },
+  "bindings": {},
   "workspace": {
     "environment": {
       "VITEST_MAX_WORKERS": "1"

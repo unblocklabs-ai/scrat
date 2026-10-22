@@ -9,7 +9,7 @@ import { getRun, updateRun } from "./run-history.ts";
 import type { Run } from "./schema.ts";
 import { InterruptedError, parseResult, ResultFormatError, type Reviewer } from "./results.ts";
 import { git } from "./git.ts";
-import type { ToolName } from "./manifests.ts";
+import type { Manifest, ToolName } from "./manifests.ts";
 import { createAgentTools } from "./tools.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
 import { redactSecrets } from "./errors.ts";
@@ -28,12 +28,13 @@ export function saveReviewer(runId: string, index: number, patch: Partial<Review
   });
 }
 
-export async function executePi({ run, cwd, context, readOnly, tools, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {}, requireGrade = false, followUp, stop }: {
+export async function executePi({ run, cwd, context, readOnly, tools, scoped, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {}, requireGrade = false, followUp, stop }: {
   run: Run;
   cwd: string;
   context: string;
   readOnly: boolean;
   tools: readonly ToolName[];
+  scoped?: Pick<Manifest, "http" | "browser">;
   log: Logger;
   sessionFile?: string;
   environment?: NodeJS.ProcessEnv;
@@ -67,7 +68,7 @@ export async function executePi({ run, cwd, context, readOnly, tools, log, sessi
   const sessionManager = sessionFile
     ? SessionManager.open(sessionFile, resolve("data/pi-sessions"), cwd)
     : SessionManager.create(cwd, resolve("data/pi-sessions"));
-  const { names, customTools, paths, gitPaths, basePaths } = await createAgentTools({ cwd, contextDir, tools, baseSha, revisions, environment, log, runId: run.id });
+  const { names, customTools, paths, gitPaths, basePaths, close } = await createAgentTools({ cwd, contextDir, tools, scoped, baseSha, revisions, environment, log, runId: run.id });
   const { session } = await createAgentSession({
     cwd, modelRuntime, model, thinkingLevel, settingsManager, sessionManager, resourceLoader,
     tools: names, customTools,
@@ -134,5 +135,6 @@ export async function executePi({ run, cwd, context, readOnly, tools, log, sessi
     }
   } finally {
     session.dispose();
+    await close();
   }
 }

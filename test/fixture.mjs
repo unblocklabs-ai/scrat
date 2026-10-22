@@ -60,12 +60,15 @@ export async function fixture(scenario) {
   if (patMode) delete process.env.GITHUB_APP_PRIVATE_KEY;
   else process.env.GITHUB_APP_PRIVATE_KEY = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
   if (patMode || scenario === "isolation") process.env.GITHUB_PAT = pat;
+  const scoped = ["scoped_http", "scoped_github_search", "scoped_browser", "bindings_startup"].includes(scenario);
+  if (scoped) process.env.SCOUT_TOKEN = "scout-" + "k9Xq2LmPz7".repeat(3);
   if (scenario.startsWith("commit_review") || scenario === "publish_effects") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
   const modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set() };
   const tokens = new Map(patMode ? [[pat, { issues: "write", pull_requests: "write", contents: "write" }]] : []);
-  let onModel, nextCommentId = 1000, nextIssueNumber = 500;
+  let onModel, script, nextCommentId = 1000, nextIssueNumber = 500;
+  const external = [], searches = [];
   const server = createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
     const request = JSON.parse(body);
@@ -154,6 +157,7 @@ export async function fixture(scenario) {
     if (!review && mode === "notes") tool = [{ name: "write", args: { path: ".scrat/notes.md", content: "Plan: change value\n" } },
       { name: "write", args: { path: "src/app.ts", content: "export const value = 5;\n" } }][step];
     if (!review && mode === "leak-file") tool = step === 0 ? { name: "write", args: { path: "src/app.ts", content: process.env.GITHUB_APP_PRIVATE_KEY } } : undefined;
+    if (script && review) tool = script[step];
     const fumble = !corrected && (mode === "format-once" || (mode === "reviewer-grade-once" && review && !consolidating && request.model.includes("deepseek"))
       || (mode === "consolidation-grade-once" && consolidating));
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : "complete";
@@ -252,7 +256,14 @@ export async function fixture(scenario) {
   }
   if (scenario === "bot_name") config.github.botName = "Mocha";
   if (scenario === "bot_identity_names") config.github.botName = "Mocha Agent";
+  if (scoped) config.bindings = { scout: { secret: "${SCOUT_TOKEN}", hosts: ["api.example.test", "other.example.test"], header: "Authorization", prefix: "Bearer " } };
   if (patMode) { config.github.auth = "pat"; config.github.botLogin = "agent-account"; }
+  if (["scoped_http", "scoped_github_search", "scoped_browser", "bindings_startup"].includes(scenario)) {
+    const scopedTools = { scoped_http: ["[read, grep, http]", "http: { binding: scout, methods: [GET] }"], bindings_startup: ["[read, grep, http]", "http: { binding: scout }"], scoped_github_search: ["[read, grep, github_search]", ""],
+      scoped_browser: ["[read, grep, browser]", "browser: { navigationHosts: [shop.example.test], resourceHosts: [cdn.example.test], binding: scout }"] }[scenario];
+    mkdirSync("deployment"); config.actions.directory = resolve("deployment");
+    writeFileSync("deployment/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace(/^tools: .*$/m, "tools: " + scopedTools[0]).replace(/^skill: .*$/m, "skill: " + resolve("app/skills/review_issue/SKILL.md")).trimEnd() + "\n" + scopedTools[1] + "\n");
+  }
   if (["manifest_directory", "manifest_tools_files"].includes(scenario)) {
     const directory = resolve("deployment"), shipped = (name) => readFileSync(`app/actions/${name}.yaml`, "utf8"), field = (text, key, value) => text.replace(new RegExp(`^${key}: .*$`, "m"), `${key}: ${value}`);
     mkdirSync(directory); config.actions.directory = directory;
@@ -302,6 +313,21 @@ export async function fixture(scenario) {
       if (slack.rateLimitOnce) { slack.rateLimitOnce = false; return json({ ok: false, error: "ratelimited" }, 429, { "retry-after": "0" }); }
       if (slack.fail) return json({ ok: false, error: slack.fail });
       return url.pathname.endsWith("/auth.test") ? json({ ok: true, team: "Fixture", user: "scrat" }) : json({ ok: true, channel: slackBody.channel, ts: `1700000000.${String(++slack.sequence).padStart(6, "0")}` });
+    }
+    if (/\.example\.(test|net)$/.test(url.hostname) || url.hostname === "169.254.169.254") {
+      const headers = Object.fromEntries(new Headers(options.headers)), entry = { host: url.hostname, path: url.pathname + url.search, method: options.method ?? "GET", headers, body: options.body, redirect: options.redirect };
+      external.push(entry);
+      const text = (body, status = 200, extra = {}) => new Response(body, { status, headers: { "content-type": "text/plain", ...extra } });
+      if (url.pathname === "/echo") return text(`you sent ${headers.authorization}`);
+      if (url.pathname === "/redirect-off") return text("moved", 302, { location: "https://evil.example.net/steal?code=1" });
+      if (url.pathname === "/redirect-on") return text("moved", 302, { location: "https://other.example.test/ok" });
+      if (url.pathname === "/big") return text("x".repeat(400_000));
+      return text(JSON.stringify({ ok: true, host: url.hostname }));
+    }
+    if (url.hostname === "api.github.com" && url.pathname === "/search/issues") {
+      searches.push({ q: url.searchParams.get("q"), ifNoneMatch: new Headers(options.headers).get("if-none-match") });
+      return new Response(JSON.stringify({ total_count: 1, items: [{ number: 7, node_id: "ISSUE_7", title: "Known flake", body: "Seen before. ".repeat(60), state: "open", html_url: "https://github.com/fixture/project/issues/7", updated_at: "2026-10-19T00:00:00Z", user: { login: "someone" }, labels: [{ name: "bug" }] }] }),
+        { status: 200, headers: { "content-type": "application/json", etag: '"search"', "x-ratelimit-resource": "search", "x-ratelimit-remaining": "29", "x-ratelimit-limit": "30", "x-ratelimit-reset": String(rate.reset) } });
     }
     if (url.hostname !== "api.github.com") throw new Error("External network disabled");
     const path = url.pathname, method = options.method ?? "GET", body = options.body ? JSON.parse(options.body) : {};
@@ -404,8 +430,9 @@ export async function fixture(scenario) {
   };
   const enqueue = (number, action = "review_issue", input = {}) => tasks.enqueueTask({ subjectId: "issue-" + number, action, reason: "Integration", input });
   const row = (table, id) => db.select().from(table).all().find((entry) => entry.id === id);
-  return { app, db, schema, tasks, runNextTask, git, commit, config, pat, user, modes, requests, calls, slack, rate, issues, prs, comments, reviews, writes, faults, addIssue, enqueue, row,
+  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, pat, user, modes, requests, calls, slack, rate, issues, prs, comments, reviews, writes, faults, addIssue, enqueue, row,
     set onModel(value) { onModel = value; },
+    set script(value) { script = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },
     async close() { globalThis.fetch = originalFetch; db.$client.close(); server.closeAllConnections(); await new Promise((done) => server.close(done)); },
   };

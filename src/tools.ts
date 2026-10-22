@@ -6,19 +6,24 @@ import type { Logger } from "pino";
 import { Type } from "typebox";
 import { backgroundsWork, heavyCommand, withValidationSlot } from "./commands.ts";
 import { config } from "./config.ts";
-import type { ToolName } from "./manifests.ts";
+import type { Manifest, ToolName } from "./manifests.ts";
 import { botName } from "./identity.ts";
 import { errorCode, redactSecrets } from "./errors.ts";
 import { childEnvironment } from "./secrets.ts";
 import { blobSize, gitPage } from "./git.ts";
+import { GitHubRepository } from "./github.ts";
+import { createBrowserTool, createGithubSearchTool, createHttpTool } from "./scoped-tools.ts";
 import { createReviewGitTool, defaultBytes, maxBytes, pageText } from "./review-git.ts";
 
 const heavyTimeoutSeconds = 45 * 60;
 
-export async function createAgentTools({ cwd, contextDir, tools, baseSha, revisions = {}, environment = {}, log, runId }: {
+type ScopedToolName = "http" | "browser" | "github_search";
+
+export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, baseSha, revisions = {}, environment = {}, log, runId }: {
   cwd: string;
   contextDir?: string;
   tools: readonly ToolName[];
+  scoped?: Pick<Manifest, "http" | "browser">;
   baseSha?: string;
   revisions?: Record<string, string>;
   environment?: NodeJS.ProcessEnv;
@@ -136,10 +141,19 @@ export async function createAgentTools({ cwd, contextDir, tools, baseSha, revisi
     },
   });
   const quiet = <T extends object>(tool: T) => ({ ...tool, renderCall: undefined, renderResult: undefined });
-  const table = {
+  const core = {
     read: quiet(read), grep: quiet(grep), find: quiet(find), ls: quiet(ls), git: createReviewGitTool(cwd, revisions, gitPaths),
     read_base: readBase, bash: quiet(bash), edit: quiet(edit), write: quiet(write),
-  } satisfies Record<ToolName, object>;
+  } satisfies Record<Exclude<ToolName, ScopedToolName>, object>;
+  const binding = (name?: string) => name === undefined ? undefined : config.bindings[name];
+  const browser = tools.includes("browser") && scoped.browser
+    ? createBrowserTool({ settings: scoped.browser, binding: binding(scoped.browser.binding), contextDir, runId, log }) : undefined;
+  const table = {
+    ...core,
+    ...tools.includes("http") && scoped.http && { http: createHttpTool({ settings: scoped.http, binding: binding(scoped.http.binding)!, runId }) },
+    ...browser && { browser: browser.tool },
+    ...tools.includes("github_search") && { github_search: createGithubSearchTool(new GitHubRepository(config.github.repository)) },
+  };
   const names = tools.filter((name) => name !== "read_base" || baseSha);
-  return { names, customTools: names.map((name) => table[name]), paths, gitPaths, basePaths };
+  return { names, customTools: names.flatMap((name) => { const tool = table[name as keyof typeof table]; return tool ? [tool] : []; }), paths, gitPaths, basePaths, close: async () => { await browser?.close(); } };
 }

@@ -199,7 +199,7 @@ A deployment adds or changes actions without a code release. Set `actions.direct
 - A relative `skill` resolves against the directory the manifest came from, so a deployment keeps `<directory>/skills/<name>/SKILL.md` beside its YAML. Absolute paths work too.
 - Routing picks the action whose `trigger` matches what sync observed: `source` and `kind`, then `item` (`issue` or `pr`), `author: bot` (the item is authored by `github.botLogin`), `grades` (for `low_grade`) and `branch` (the commit branch polled). `manual: false` stops `enqueue` by hand. An enabled match is preferred; a disabled one still queues its task and is refused when claimed.
 - Two enabled manifests may not share a trigger: startup fails naming both files. To give a trigger to a new action, disable the shipped one that owns it (`"review_issue": { "enabled": false }` above). The selection label still decides between the `label` and `item_changed` issue triggers.
-- `tools` is the list of agent tools (`read`, `grep`, `find`, `ls`, `git`, `read_base`, `bash`, `edit`, `write`); `review` manifests get no write tools and `change` manifests no `git` or `read_base`. `files` lists the optional context files written for the run (`discussion`, `review`, `previous_assessment`, `previous_repair`, `history`); `history` is opt-in. `publish` lists effects (`push`, `pull_request`, `comment`, `labels`, `pr_assessment`, `issue`, `slack_reply`). An unknown name or key stops startup with the file and path.
+- `tools` is the list of agent tools (`read`, `grep`, `find`, `ls`, `git`, `read_base`, `bash`, `edit`, `write`) and the scoped tools `http`, `browser` and `github_search` (see Scoped tools below); `review` manifests get no write tools and `change` manifests no `git` or `read_base`. `files` lists the optional context files written for the run (`discussion`, `review`, `previous_assessment`, `previous_repair`, `history`); `history` is opt-in. `publish` lists effects (`push`, `pull_request`, `comment`, `labels`, `pr_assessment`, `issue`, `slack_reply`). An unknown name or key stops startup with the file and path.
 - Manifests are read once at startup: restart the service to apply a change. The supervised repository never contributes manifests.
 
 A `schedule` trigger runs a `review` action on a cron expression instead of on a GitHub event. `error_sweep.yaml` in the actions directory sweeps logs every six hours and opens an issue for each problem it reports (the `http` tool arrives with scoped tools):
@@ -221,6 +221,34 @@ priority: 20
 - `cron` has five UTC fields (minute, hour, day-of-month, month, day-of-week; 0 and 7 are Sunday), each a `*`, a number, a range `a-b`, a step `*/n` or `a-b/n`, or a comma list of those. When both day fields are restricted, either one matching is enough. `window` is a number of minutes, hours or days: `90m`, `6h`, `1d`. A schedule manifest must be `mode: review`, and several may be enabled at once.
 - Each manifest keeps its own cursor: the next tick. The first poll after enabling records the next tick and queues nothing; disabling deletes the cursor. When a tick is due, Scrat queues one task on a `window` subject keyed `<action>:<tick>` with `start` (the tick minus `window`) and `end` (the tick) in its metadata. Ticks missed while the service was down fire once, for the latest one.
 - The agent gets the base branch checked out read-only, the window as `input.start` and `input.end`, and no GitHub issue or PR. List `history` to give it its earlier reports, and `issue` in `publish` to open the problems it finds.
+### Scoped tools
+
+No shipped manifest lists `http`, `browser` or `github_search`; a deployment manifest opts in by naming the tool in `tools` and, for the first two, adding the matching setting. Each tool is built only for a manifest that lists it.
+
+**Bindings** carry credentials and live only in deployment config, never in manifests. Define them under `bindings` in `scrat.local.json` (the default is `{}`):
+
+```json
+{ "bindings": { "logs": { "secret": "${LOGS_API_TOKEN}", "hosts": ["api.logs.example.com"], "header": "Authorization", "prefix": "Bearer " } } }
+```
+
+- `secret` must be a `${VAR}` placeholder naming an environment variable that is set at startup. The value is registered as a secret (redacted from output and logs, caught by the publication scan) and is never passed to child processes.
+- `hosts` is a non-empty list of exact lowercase hostnames. IP literals, `localhost`, `*.local`, `*.internal`, `*.localhost` and cloud metadata hostnames are refused, as are wildcards.
+- `header` is the request header the harness sets (`Authorization`, `X-Api-Key`, ...); `Host`, `Cookie`, `Content-Length` and other transport headers are refused. `prefix` is optional text put before the secret (`"Bearer "`).
+- Startup fails on any violation, and on a manifest naming a binding that is not defined.
+
+**`http`** takes `http: { binding: <name>, methods?: [GET, ...] }` in the manifest (methods default to `GET`; `HEAD`, `POST`, `PUT`, `PATCH` and `DELETE` are the others). The agent calls it with `{ method, url, body?, headers? }`. Only `https` URLs on the binding's `hosts` are allowed, with no credentials in the URL and no explicit port; IP literals (including `2130706433`-style forms), loopback, link-local and metadata addresses are refused. The harness adds the binding header after the model's call; the model may set only `Accept`, `Accept-Language`, `Content-Type`, `If-None-Match` and `If-Modified-Since`, and any other header is refused. Redirects are never followed: a 3xx comes back as is, with `Location` kept only when it points at another host of the binding. Responses are capped at 64 KiB and pass through secret redaction. The journal records method, host and status, never the query string or body.
+
+**`github_search`** needs no setting and is allowed in `review` manifests only. The agent calls it with `{ query }`; the harness prefixes `repo:<github.repository>` and refuses any query containing `repo:`, `org:`, `user:` or `owner:`. It returns up to 20 issues and pull requests with number, kind, title, state, URL, author, labels and a 300-character excerpt, all untrusted text.
+
+**`browser`** takes `browser: { navigationHosts: [..], resourceHosts: [..], binding?: <name> }`. The agent calls it with `{ action, url?, selector?, text? }` where `action` is `goto`, `text` or `screenshot` (a PNG saved in the run's context directory, whose path is returned); there is no way to click or type. A fresh Chromium context with no profile is used per run; every request is routed, and one whose host is not allowed is aborted: navigations (documents and frames) need `navigationHosts`, other requests need `resourceHosts` or `navigationHosts`. A binding, when named, adds its header only to requests for the binding's hosts, and the header is removed from requests to any other host. Calls run one at a time, and each agent session (a panel review's reviewers and consolidator, or a validation follow-up, are separate sessions) gets at most 40 browser actions and 5 minutes. Playwright is an optional peer dependency (`playwright-core`) loaded lazily, so deployments without a browser action pay nothing, and startup fails with a clear message when an enabled manifest lists `browser` and the package or Chromium is missing. One-time install on the host:
+
+```sh
+npm install --no-save playwright-core
+PLAYWRIGHT_BROWSERS_PATH=$HOME/.local/share/scrat-v2/browsers npx playwright-core install chromium
+sudo env PLAYWRIGHT_BROWSERS_PATH=$HOME/.local/share/scrat-v2/browsers npx playwright-core install-deps chromium   # system libraries, once, as root
+```
+
+Run the service with the same `PLAYWRIGHT_BROWSERS_PATH`. `npm ci` removes packages installed with `--no-save`, so repeat the first command after each release until `playwright-core` is added to the release's dependencies. Chromium is launched with its sandbox enabled (`chromiumSandbox: true`); if the host cannot support that unprivileged, fix the host rather than disabling it.
 
 ### Optional actions
 

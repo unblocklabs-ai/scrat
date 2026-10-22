@@ -312,8 +312,8 @@ async function agentStage({ task, run, manifest, readOnly, operation, stop }: Ct
   });
   p.agentInput = { contextDir, revisions };
   const agentResult = configured.agent === "panel"
-    ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { baseSha: p.diffBaseSha, contextDir, revisions, tools: manifest.tools, requireGrade: !changeContext, stop })
-    : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, tools: manifest.tools, log: operation.log, sessionFile: p.previousSessionFile, environment, contextDir, revisions, baseSha: changeContext ? p.diffBaseSha : undefined, stop });
+    ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { baseSha: p.diffBaseSha, contextDir, revisions, tools: manifest.tools, scoped: manifest, requireGrade: !changeContext, stop })
+    : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, tools: manifest.tools, scoped: manifest, log: operation.log, sessionFile: p.previousSessionFile, environment, contextDir, revisions, baseSha: changeContext ? p.diffBaseSha : undefined, stop });
   p.result = { ...agentResult, paths: [...new Set([...p.diffPaths, ...agentResult.paths])] };
   updateRun(run.id, { result: p.result, stage: "validating" });
 }
@@ -337,7 +337,7 @@ async function validateStage(ctx: Ctx, p: Prepared) {
         if (validationOnly || !p.agentInput || !sessionFile || round > maxValidationCorrections) throw error.cause;
         operation.log.warn({ event: "pi.validation_retry", round });
         updateRun(run.id, { stage: "agent" });
-        const followUp = await executePi({ run, cwd: workspace.path, context: "", readOnly, tools: ctx.manifest.tools, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });
+        const followUp = await executePi({ run, cwd: workspace.path, context: "", readOnly, tools: ctx.manifest.tools, scoped: ctx.manifest, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });
         result = { ...followUp, text: `${result.text}\n\n**Validation correction ${round}:** ${followUp.text}`, paths: [...new Set([...result.paths, ...followUp.paths])] };
         updateRun(run.id, { result, stage: "validating" });
         assertComplete(result);

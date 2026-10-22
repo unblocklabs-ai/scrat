@@ -1,7 +1,7 @@
 export type Json = Record<string, unknown>;
 const isObject = (value: unknown): value is Json => typeof value === "object" && value !== null && !Array.isArray(value);
 export function buildConfig(defaults: Json, overrides: Json, path = ""): Json {
-  const merged: Json = { ...defaults }, open = path === "workspace.environment." || path.startsWith("providers.");
+  const merged: Json = { ...defaults }, open = path === "workspace.environment." || path === "bindings." || path.startsWith("providers.");
   for (const [key, value] of Object.entries(overrides)) {
     const where = path + key, base = defaults[key];
     if (key === "__proto__" || (!open && !Object.hasOwn(defaults, key))) throw new Error(`Unknown setting in scrat.local.json: ${where}`);

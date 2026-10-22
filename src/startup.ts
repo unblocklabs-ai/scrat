@@ -1,10 +1,12 @@
 import { access } from "node:fs/promises";
 import { manifests } from "./actions.ts";
+import { validateBindings } from "./bindings.ts";
 import { type ActionSettings, config, thinkingLevels } from "./config.ts";
 import { deploymentDefaults, findTriggerConflicts, skillPath } from "./manifests.ts";
 import { slugOf } from "./identity.ts";
 import { logger } from "./logging.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
+import { loadPlaywright } from "./scoped-tools.ts";
 import { authTest } from "./slack.ts";
 import { ensureRunSequences } from "./tasks.ts";
 
@@ -14,7 +16,7 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 
 // @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: {
-  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number }; github?: { auth?: string; botLogin?: string; botName?: string; baseBranch?: string }; providers?: Record<string, { apiKey?: string }>; workspace?: { heavyCommands?: string[] };
+  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number }; github?: { auth?: string; botLogin?: string; botName?: string; baseBranch?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; workspace?: { heavyCommands?: string[] };
   actions: Record<string, Partial<ActionSettings>>;
 } = config) {
   const modelRuntime = await sharedModelRuntime();
@@ -40,6 +42,7 @@ export async function validateStaticConfig(settings: {
   settings.workspace?.heavyCommands?.forEach((pattern, index) => {
     try { new RegExp(pattern); } catch { problems.push(`workspace.heavyCommands[${index}] is not a valid regular expression`); }
   });
+  problems.push(...validateBindings(settings.bindings));
   for (const [name, { apiKey }] of Object.entries(settings.providers ?? {})) {
     if (apiKey && !/\$\{\w+\}/.test(apiKey)) logger.warn({ provider: name }, "Provider apiKey is not a ${VAR} placeholder; it will not be redacted from output");
   }
@@ -66,6 +69,7 @@ export async function validateStaticConfig(settings: {
       if (entry.agent !== "single" && entry.agent !== "panel") problems.push(`${action}: agent must be "single" or "panel"`);
       else if (entry.agent === "panel" && entry.reviewers?.length !== 2) problems.push(`${action}: agent "panel" requires exactly two reviewers`);
       if (slack && process.env.SLACK_BOT_TOKEN) await authTest().catch((error: unknown) => { problems.push(`${action}: Slack auth.test failed: ${error instanceof Error ? error.message : String(error)}`); });
+      if (manifest.browser) await loadPlaywright().catch((error: unknown) => { problems.push(`${action}: ${error instanceof Error ? error.message : String(error)}`); });
       const skill = skillPath(manifest, entry.skill);
       if (!await access(skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${skill}`);
     }

@@ -9,7 +9,7 @@ import { describeError } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { withOperationSync } from "./logging.ts";
 import { entryStage, hasPublicationSnapshot, hasValidationCheckpoint, InterruptedError } from "./results.ts";
-import { latestRunOfTask } from "./run-history.ts";
+import { latestRunOfTask, updateRun } from "./run-history.ts";
 import { asItem } from "./items.ts";
 import { items, runs, subjects, tasks, type Task, type Subject } from "./schema.ts";
 import { isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
@@ -168,6 +168,19 @@ export function claimTask() {
     } }, transaction);
     const item = transaction.select().from(items).where(eq(items.id, task.subjectId)).get();
     return { task, subject: next.subject, item: item && asItem(item, next.subject), run };
+  }, { behavior: "immediate" });
+}
+
+export function ensureRunSequences(database: typeof db = db) {
+  return database.transaction((transaction) => {
+    const pending = transaction.all<{ id: string }>(sql`
+      select r.id from runs r
+      left join (select run_id, min(id) as event_id from events where type = 'run.started' group by run_id) e on e.run_id = r.id
+      where r.sequence is null
+      order by e.event_id is not null, e.event_id, r.started_at is null, r.started_at, r.rowid`);
+    const { last } = transaction.get<{ last: number }>(sql`select coalesce(max(sequence), 0) as last from runs`);
+    pending.forEach(({ id }, index) => updateRun(id, { sequence: last + index + 1 }, transaction));
+    return pending.length;
   }, { behavior: "immediate" });
 }
 

@@ -1,14 +1,12 @@
 import { access } from "node:fs/promises";
-import { sql } from "drizzle-orm";
 import { manifests } from "./actions.ts";
 import { type ActionSettings, config, thinkingLevels } from "./config.ts";
 import { deploymentDefaults, findTriggerConflicts, skillPath } from "./manifests.ts";
-import { db } from "./db.ts";
 import { slugOf } from "./identity.ts";
 import { logger } from "./logging.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
-import { updateRun } from "./run-history.ts";
 import { authTest } from "./slack.ts";
+import { ensureRunSequences } from "./tasks.ts";
 
 const templateVariables = new Set(["sha", "short_sha", "author", "title", "url", "branch", "count", "bot"]);
 
@@ -82,18 +80,4 @@ export async function validateStaticConfig(settings: {
 export async function prepareService() {
   await validateStaticConfig();
   ensureRunSequences();
-}
-
-// @public: exported for the run_sequence scenario.
-export function ensureRunSequences(database: typeof db = db) {
-  return database.transaction((transaction) => {
-    const pending = transaction.all<{ id: string }>(sql`
-      select r.id from runs r
-      left join (select run_id, min(id) as event_id from events where type = 'run.started' group by run_id) e on e.run_id = r.id
-      where r.sequence is null
-      order by e.event_id is not null, e.event_id, r.started_at is null, r.started_at, r.rowid`);
-    const { last } = transaction.get<{ last: number }>(sql`select coalesce(max(sequence), 0) as last from runs`);
-    pending.forEach(({ id }, index) => updateRun(id, { sequence: last + index + 1 }, transaction));
-    return pending.length;
-  }, { behavior: "immediate" });
 }

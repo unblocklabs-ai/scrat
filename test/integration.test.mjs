@@ -43,6 +43,7 @@ const scenarios = {
   freshness_policy: "one freshness policy distinguishes exact, context, irrelevant and relevant base changes",
   relevance: "root searches and unrelated development dependencies do not trigger re-review",
   lockfile_scope: "mixed lockfile changes cannot hide inspected packages, aliases or importer changes",
+  lockfile_impact: "the pure lockfile differ separates inspected-package, alias, importer and unknown-shape changes from unrelated ones without a repository",
   importer_scope: "real importer bumps skip unrelated packages while aliases and unknown workspace shapes remain relevant",
   review_scope: "Pi path aliases and supplied PR diff files participate in freshness and re-review",
   unicode_scope: "Pi filename normalization cannot hide relevant base changes",

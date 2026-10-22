@@ -442,7 +442,7 @@ try {
     assert.deepEqual(db.$client.prepare("PRAGMA foreign_key_check").all(), []);
     assert.equal(all(s.runs).length, 5); assert.ok(all(s.runs).every((r) => r.sequence === null));
     assert.ok(db.$client.prepare("SELECT 1 FROM sqlite_master WHERE name = 'runs_sequence_unique'").get());
-    const { ensureRunSequences } = await f.app("startup.ts");
+    const { ensureRunSequences } = await f.app("tasks.ts");
     assert.equal(ensureRunSequences(), 5);
     const order = () => all(s.runs).sort((a, b) => a.sequence - b.sequence).map((r) => r.id);
     assert.deepEqual(order(), [r4.id, r5.id, r2.id, r1.id, r3.id]);
@@ -910,6 +910,27 @@ try {
     }
     changeMain("pnpm-lock.yaml", lock.replace("unrelated@5.0.0", "unrelated@6.0.0")); await route();
     assert.ok(!all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
+  } else if (scenario === "lockfile_impact") {
+    const { lockfileChanged, affectsPaths } = await f.app("lockfile-impact.ts");
+    const base = "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: old}\n  unrelated@1.0.0:\n    resolution: {integrity: old}\n"
+      + "  string-width-cjs@npm:string-width@4.2.2:\n    resolution: {integrity: alias}\nsnapshots:\n  wrangler@1.0.0:\n    dependencies: {nested: 1.0.0}\n"
+      + "importers:\n  .:\n    devDependencies:\n      wrangler: {specifier: 1.0.0, version: 1.0.0}\n      unrelated: {specifier: 1.0.0, version: 1.0.0}\n";
+    const inspected = new Set(["wrangler", "string-width-cjs"]);
+    const changed = (update) => lockfileChanged(base, update(base), inspected);
+    assert.equal(lockfileChanged(base, base, inspected), false);
+    assert.equal(changed((text) => text.replaceAll("unrelated@1.0.0", "unrelated@2.0.0").replaceAll("unrelated: {specifier: 1.0.0, version: 1.0.0}", "unrelated: {specifier: 2.0.0, version: 2.0.0}")), false);
+    assert.equal(changed((text) => text.replace("unrelated@1.0.0:\n    resolution: {integrity: old}", "unrelated@1.0.0:\n    resolution: {integrity: new}")), false);
+    assert.equal(changed((text) => text.replace("integrity: old", "integrity: new")), true);
+    assert.equal(changed((text) => text.replace("npm:string-width@4.2.2", "npm:string-width@4.2.3")), true);
+    assert.equal(changed((text) => text.replace("nested: 1.0.0", "nested: 2.0.0")), true);
+    assert.equal(changed((text) => text.replace("wrangler: {specifier: 1.0.0, version: 1.0.0}", "wrangler: {specifier: 2.0.0, version: 2.0.0}")), true);
+    assert.equal(changed((text) => text.replace("unrelated: {specifier: 1.0.0, version: 1.0.0}", "unrelated: {specifier: 1.0.0, version: npm:wrangler@2.0.0}")), true);
+    assert.equal(changed((text) => text.replace("unrelated: {specifier: 1.0.0, version: 1.0.0}", "unrelated: {specifier: workspace:*, version: link:../unrelated}")), true);
+    assert.equal(changed((text) => text.replace("importers:\n", "importers:\n  packages/new: {}\n")), true);
+    assert.equal(changed((text) => text + "unknownSetting: changed\n"), true);
+    assert.throws(() => lockfileChanged(base, "- not\n- a record\n", inspected), /Unrecognized lockfile/);
+    assert.equal(affectsPaths(["src/app.ts"], ["src"]), true); assert.equal(affectsPaths(["srcs/app.ts"], ["src/"]), false);
+    assert.equal(affectsPaths(["a.ts"], ["a.ts"]), true); assert.equal(affectsPaths(["b.ts"], ["a.ts"]), false);
   } else if (scenario === "importer_scope") {
     f.addIssue(1); f.modes.set(1, "grep"); await route(); await success();
     const lock = JSON.parse(readFileSync("seed/pnpm-lock.yaml", "utf8"));
@@ -2163,18 +2184,19 @@ try {
     rejects("implement", (text) => text.replace("[read, grep, find, ls, bash, edit, write]", "[read, git]"), /mode change forbids the git and read_base tools/);
     rejects("implement", (text) => text.replace("item: issue", "item: pr"), /trigger.kind label requires item: issue/);
   } else if (scenario === "config_overrides") {
+    const { buildConfig } = await f.app("config-merge.ts");
     const local = resolve("app/scrat.local.json");
     const probe = (overrides, code) => {
       if (overrides === undefined) rmSync(local, { force: true }); else writeFileSync(local, JSON.stringify(overrides));
       const script = `const { config } = await import(${JSON.stringify(resolve("app/src/config.ts"))}); ${code}`;
       return execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     };
-    const rejected = (overrides, message) => assert.throws(() => probe(overrides, ""), (error) => message.test(error.stderr));
     const defaults = { ...JSON.parse(readFileSync("app/scrat.config.json", "utf8")), actions: JSON.parse(probe({}, "console.log(JSON.stringify(config.actions));")) };
-    const merged = JSON.parse(probe({
+    const rejected = (overrides, message) => assert.throws(() => buildConfig(defaults, overrides), message);
+    const merged = buildConfig(defaults, {
       harness: { maxConcurrency: 8 }, github: { auth: "pat" }, actions: { implement: { model: "other-model" } },
       workspace: { environment: { EXTRA: "1" }, heavyCommands: ["^only$"], database: null },
-    }, "console.log(JSON.stringify(config));"));
+    });
     assert.equal(merged.harness.maxConcurrency, 8); assert.equal(merged.harness.logLevel, defaults.harness.logLevel);
     assert.equal(merged.github.auth, "pat"); assert.equal(defaults.github.auth, "app"); assert.equal(merged.github.botLogin, defaults.github.botLogin);
     assert.equal(merged.actions.implement.model, "other-model");
@@ -2190,6 +2212,7 @@ try {
     rejected({ harness: null }, /must be an object: harness/);
     rejected({ harness: { toString: 1 } }, /Unknown setting in scrat\.local\.json: harness\.toString/);
     rejected(JSON.parse('{"workspace":{"environment":{"__proto__":{"x":"1"}}}}'), /Unknown setting in scrat\.local\.json: workspace\.environment\.__proto__/);
+    assert.throws(() => probe({ harness: { maxConcurency: 8 } }, ""), (error) => /Unknown setting in scrat\.local\.json: harness\.maxConcurency/.test(error.stderr));
 
     const provider = Object.keys(defaults.providers)[0], model = defaults.providers[provider].models[0].id;
     const seen = probe({ providers: { [provider]: { baseUrl: "http://override.invalid/v1" } } }, `

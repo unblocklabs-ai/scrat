@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { isAbsolute, resolve } from "node:path";
 import settings from "../scrat.config.json" with { type: "json" };
+import { buildConfig, type Json } from "./config-merge.ts";
 import { deploymentDefaults, findTriggerConflicts, readManifests, skillPath, thinkingLevels, type ThinkingLevel } from "./manifests.ts";
 
 const configUrl = new URL("../scrat.config.json", import.meta.url);
@@ -22,19 +23,7 @@ export type ActionSettings = ModelEntry & {
   maxRangeCommits?: number; startMessage?: string; maxSelfRepairs?: number; exhaustedLabel?: string | null;
 };
 
-type Json = Record<string, unknown>;
 const isObject = (value: unknown): value is Json => typeof value === "object" && value !== null && !Array.isArray(value);
-function merge(defaults: Json, overrides: Json, path = ""): Json {
-  const merged: Json = { ...defaults }, open = path === "workspace.environment." || path.startsWith("providers.");
-  for (const [key, value] of Object.entries(overrides)) {
-    const where = path + key, base = defaults[key];
-    if (key === "__proto__" || (!open && !Object.hasOwn(defaults, key))) throw new Error(`Unknown setting in scrat.local.json: ${where}`);
-    if (!isObject(base) || (value === null && where.startsWith("workspace"))) merged[key] = value;
-    else if (isObject(value)) merged[key] = merge(base, value, where + ".");
-    else throw new Error(`Setting in scrat.local.json must be an object${where.startsWith("workspace") ? " or null" : ""}: ${where}`);
-  }
-  return merged;
-}
 
 function loadOverrides(): Json {
   try { writeFileSync(localConfigUrl, "{}\n", { flag: "wx" }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
@@ -52,7 +41,7 @@ if (directory !== undefined && directory !== null && (typeof directory !== "stri
 export const loadedManifests = readManifests(fileURLToPath(new URL(".", configUrl)), directory);
 const actionDefaults = { ...Object.fromEntries(loadedManifests.map((manifest) => [manifest.name, deploymentDefaults(manifest)])), directory: null };
 
-const merged = merge({ ...settings, actions: actionDefaults }, overrides);
+const merged = buildConfig({ ...settings, actions: actionDefaults }, overrides);
 delete (merged.actions as Json).directory;
 export const config: Omit<typeof settings, "workspace"> & { workspace?: WorkspaceConfig; actions: Record<string, ActionSettings> } = merged as never;
 

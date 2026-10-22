@@ -520,7 +520,7 @@ export const scenarios = {
         credentials.set(data.token, { ...exchange, expiresAt: Date.parse(data.expires_at) });
         return response;
       }
-      if (url.hostname === "api.github.com") {
+      if (url.hostname === "api.github.com" && url.pathname !== "/app") {
         const token = bearer(options);
         if (!credentials.has(token) || credentials.get(token).expiresAt <= Date.now() || revoked.has(token)) {
           return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401, headers: { "content-type": "application/json" } });
@@ -1715,6 +1715,16 @@ export const scenarios = {
     const { validateStaticConfig } = await f.app("startup.ts");
     await validateStaticConfig(f.config);
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
+    const { GitHubRepository: Verified } = await f.app("github.ts");
+    f.githubApp.slug = "other-app";
+    await assert.rejects(new Verified("fixture/project").fetchOpenItems(), /GitHub App other-app posts as other-app\[bot\], but github\.botLogin is scrat-unblock\[bot\]/);
+    f.githubApp.slug = "Scrat-Unblock";
+    await new Verified("fixture/project").fetchOpenItems();
+    const changeActions = ["implement", "address_review", "address_pr_feedback", "resolve_conflicts"];
+    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.validate = []; })), /workspace\.validate is empty but address_pr_feedback, address_review, implement, resolve_conflicts publish commits.*\[\["true"\]\]/);
+    await assert.rejects(validateStaticConfig(variant((c) => { delete c.workspace.validate; c.actions.address_review.enabled = false; })), /workspace\.validate is empty but address_pr_feedback, implement, resolve_conflicts publish/);
+    await validateStaticConfig(variant((c) => { c.workspace.validate = [["true"]]; }));
+    await validateStaticConfig(variant((c) => { c.workspace.validate = []; for (const name of changeActions) c.actions[name].enabled = false; }));
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.implement.thinkingLevel = "turbo"; })), /implement: invalid thinking level turbo/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.github.auth = "token"; })), /github\.auth must be "app" or "pat"/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.github.botLogin = " "; })), /github\.botLogin must not be empty/);

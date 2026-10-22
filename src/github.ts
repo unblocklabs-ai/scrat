@@ -24,12 +24,21 @@ let authenticate: ReturnType<typeof createAppAuth> | undefined;
 type GithubEvent = Extract<JournalEvent, { type: `github.${string}` }>;
 const clients = new Map<string, { token: string; github: Octokit; invalid: boolean }>();
 
+let appVerified: Promise<void> | undefined;
+
 async function appToken(repo: string, access: keyof typeof permissions, refresh: boolean) {
   authenticate ??= createAppAuth({
     appId: config.github.appId,
     privateKey: process.env.GITHUB_APP_PRIVATE_KEY!,
     log: logger.child({ component: "github.auth" }),
   });
+  const auth = authenticate;
+  appVerified ??= (async () => {
+    const { token: jwt } = await auth({ type: "app" });
+    const { slug } = (await new Octokit({ auth: jwt, retry: { enabled: false }, throttle: { enabled: false } }).request("GET /app")).data as { slug: string };
+    if (!isBotLogin(`${slug}[bot]`)) throw new Error(`GitHub App ${slug} posts as ${slug}[bot], but github.botLogin is ${config.github.botLogin}`);
+  })().catch((error) => { appVerified = undefined; throw error; });
+  await appVerified;
   const { token } = await authenticate({
     type: "installation",
     installationId: config.github.installationId,

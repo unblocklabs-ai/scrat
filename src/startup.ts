@@ -16,7 +16,7 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 
 // @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: {
-  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; resolve?: Resolver; slack?: { enabled?: boolean; channel?: string }; workspace?: { heavyCommands?: string[]; sandbox?: boolean };
+  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; resolve?: Resolver; slack?: { enabled?: boolean; channel?: string }; workspace?: { heavyCommands?: string[]; sandbox?: boolean; validate?: string[][] };
   actions: Record<string, Partial<ActionSettings>>;
 } = config) {
   const modelRuntime = await sharedModelRuntime();
@@ -47,6 +47,10 @@ export async function validateStaticConfig(settings: {
   settings.workspace?.heavyCommands?.forEach((pattern, index) => {
     try { new RegExp(pattern); } catch { problems.push(`workspace.heavyCommands[${index}] is not a valid regular expression`); }
   });
+  const changeActions = manifests().filter((manifest) => manifest.mode === "change" && ({ ...deploymentDefaults(manifest), ...settings.actions[manifest.name] }).enabled !== false).map((manifest) => manifest.name);
+  if (changeActions.length && !settings.workspace?.validate?.length) {
+    problems.push(`workspace.validate is empty but ${changeActions.join(", ")} publish commits; list the target repository's check commands, or use [["true"]] if it has nothing to check`);
+  }
   const bindingProblems = validateBindings(settings.bindings);
   problems.push(...bindingProblems);
   if (!bindingProblems.length) {

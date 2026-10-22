@@ -32,7 +32,7 @@ export async function fixture(scenario, spec) {
   execFileSync("git", ["--git-dir=" + resolve("remote.git"), "symbolic-ref", "HEAD", "refs/heads/main"]);
   writeFileSync("gitconfig", `[url "${resolve("remote.git")}"]\n insteadOf = https://github.com/fixture/project.git\n`);
   process.env.GIT_CONFIG_GLOBAL = resolve("gitconfig");
-  const patMode = scenario === "pat_auth", pat = "ghp_" + "a1B2c3D4e".repeat(4), user = { login: "Agent-Account", status: 200 };
+  const patMode = scenario === "pat_auth", pat = "ghp_" + "a1B2c3D4e".repeat(4), user = { login: "Agent-Account", status: 200 }, githubApp = { slug: "scrat-unblock" };
   if (patMode) delete process.env.GITHUB_APP_PRIVATE_KEY;
   else process.env.GITHUB_APP_PRIVATE_KEY = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
   if (patMode || scenario === "isolation") process.env.GITHUB_PAT = pat;
@@ -160,7 +160,7 @@ export async function fixture(scenario, spec) {
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   const config = JSON.parse(readFileSync("app/scrat.config.json", "utf8"));
   const heavyCommands = config.workspace.heavyCommands;
-  if (scenario !== "config_overrides") config.workspace = scenario === "bash_guard" ? { heavyCommands: [...heavyCommands, "^touch \\.scrat/heavy-"] } : {};
+  if (scenario !== "config_overrides") config.workspace = scenario === "bash_guard" ? { heavyCommands: [...heavyCommands, "^touch \\.scrat/heavy-"], validate: [["true"]] } : { validate: [["true"]] };
   config.harness.maxConcurrency = 6; config.github.repository = "fixture/project"; config.github.repositoryPath = resolve("checkout");
   config.providers = { fixture: { api: "openai-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: "fixture", models: [
     { id: "gpt-6.1-sol", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
@@ -227,6 +227,7 @@ export async function fixture(scenario, spec) {
     };
     if (patMode && credential !== pat) return reply({ message: "Bad credentials" }, 401);
     if (path === "/user") return user.status === 200 ? reply({ login: user.login }) : reply({ message: "Bad credentials" }, user.status);
+    if (path === "/app") return reply({ slug: githubApp.slug });
     if (path.endsWith("/access_tokens")) {
       const token = "ghs_fixture_" + tokens.size; tokens.set(token, body.permissions);
       return reply({ token, expires_at: new Date(Date.now() + 3600000).toISOString() }, 201);
@@ -306,7 +307,7 @@ export async function fixture(scenario, spec) {
   };
   const enqueue = (number, action = "review_issue", input = {}) => tasks.enqueueTask({ subjectId: "issue-" + number, action, reason: "Integration", input });
   const row = (table, id) => db.select().from(table).all().find((entry) => entry.id === id);
-  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, pat, user, modes, requests, calls, slack, rate, issues, prs, comments, reviews, writes, faults, addIssue, enqueue, row,
+  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, pat, user, githubApp, modes, requests, calls, slack, rate, issues, prs, comments, reviews, writes, faults, addIssue, enqueue, row,
     set onModel(value) { onModel = value; },
     set script(value) { script = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },

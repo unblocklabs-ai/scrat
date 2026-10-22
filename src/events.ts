@@ -1,6 +1,8 @@
+import { config } from "./config.ts";
 import { db } from "./db.ts";
 import type { ErrorDetails } from "./errors.ts";
 import { events, type Task } from "./schema.ts";
+import { queueStatus } from "./slack-status.ts";
 
 type TaskDetails = Pick<Task, "action" | "priority" | "reason">;
 export type EventReferences = { subjectId?: string; taskId?: string; runId?: string };
@@ -45,5 +47,7 @@ export type JournalEvent = (
 ) & EventReferences & { operationId?: string };
 
 export function recordEvent(event: JournalEvent, database: Pick<typeof db, "insert"> = db) {
-  return database.insert(events).values(event).returning().get()!;
+  const recorded = database.insert(events).values(event).returning().get()!;
+  if (config.slack.enabled && event.subjectId) queueMicrotask(() => queueStatus(event));
+  return recorded;
 }

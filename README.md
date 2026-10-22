@@ -271,6 +271,20 @@ An action runs unless its `enabled` is `false`. Only `review_base_change` ships 
 
 Disabling an action stops its queued tasks from being claimed. For a disabled action, startup skips the skill file check and the settings checks.
 
+### Slack status
+
+Scrat can post its work to Slack: one thread per issue or pull request, with every later update as a reply. It is off by default, and a disabled Scrat makes no Slack calls.
+
+```json
+{"slack":{"enabled":true,"channel":"C0123456789"}}
+```
+
+Put that in `scrat.local.json`. `channel` is a channel ID, not a name. The token comes only from `SLACK_BOT_TOKEN` in `.env` (an `xoxb-` bot token with the `chat:write` scope; see Slack bot below), and the bot must be invited to the channel. Startup fails when `slack.enabled` is true and the channel or token is missing, or `auth.test` fails. Startup does not test posting, so a bot that was never invited is found by the first post, which fails and is logged.
+
+The first update for an item posts a root message with its kind, number, title and link, and the thread is stored so a restart never opens a second one. Changing `slack.channel` starts a new thread in the new channel. Replies cover: a run starting, completing or failing (with the stage and the redacted error), a repair or validation round queued, comments posted or updated, labels added or removed, commits pushed, and issues or pull requests created. A pull request Scrat opens is announced in the thread of the issue it came from. Queueing, coalescing and cancelling are not posted. Messages contain only titles, links, actions, stages, labels and redacted error messages, never command output.
+
+Posting is best effort. It runs after the database write, one message at a time, at least a second apart, and a 429 is retried once after its `Retry-After`. A failed post is logged as `slack.post_failed` and dropped: it never changes a task's outcome, and a failed root is tried again with the next update.
+
 ### Base branch review
 
 `review_base_change` reviews each update to `github.baseBranch` and reports the review in Slack. It runs on the `github.fetchIntervalSeconds` interval, and at startup, and queues one review per push range: from the last seen tip to the new tip, not one per commit. Scrat's own merged commits are reviewed too; there is no author filter.

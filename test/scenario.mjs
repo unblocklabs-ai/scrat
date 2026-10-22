@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { fixture } from "./fixture.mjs";
 
 const scenario = process.argv[2];
@@ -1323,6 +1323,84 @@ try {
     f.addIssue(3); f.enqueue(3, "review_base_change");
     assert.equal(tasks.claimTask().task.action, "review_base_change");
     assert.equal(f.slack.calls.length, calls);
+  } else if (scenario === "slack_status_startup") {
+    const { validateStaticConfig } = await f.app("startup.ts");
+    const variant = (change) => { const copy = structuredClone(f.config); copy.slack = { enabled: true, channel: "C0123456789" }; change(copy.slack); return copy; };
+    await validateStaticConfig(f.config);
+    assert.equal(f.slack.calls.length, 0);
+    await assert.rejects(validateStaticConfig(variant((slack) => { slack.channel = " "; })), /slack\.channel must not be empty/);
+    f.slack.calls.length = 0;
+    const token = process.env.SLACK_BOT_TOKEN; delete process.env.SLACK_BOT_TOKEN;
+    await assert.rejects(validateStaticConfig(variant(() => {})), /SLACK_BOT_TOKEN is not set/);
+    assert.equal(f.slack.calls.length, 0);
+    process.env.SLACK_BOT_TOKEN = token;
+    f.slack.fail = "invalid_auth";
+    await assert.rejects(validateStaticConfig(variant(() => {})), /slack: auth\.test failed: .*invalid_auth/);
+    f.slack.fail = null; f.slack.calls.length = 0;
+    await validateStaticConfig(variant(() => {}));
+    assert.deepEqual(f.slack.calls.map((call) => call.method), ["auth.test"]);
+  } else if (scenario === "slack_status") {
+    const channel = "C0123456789";
+    const posts = () => f.slack.calls.filter((call) => call.method === "chat.postMessage" && call.body.text !== undefined);
+    const roots = () => posts().filter((call) => call.body.thread_ts === undefined);
+    const until = async (condition) => { for (let n = 0; n < 400 && !condition(); n++) await new Promise((done) => setTimeout(done, 50)); assert.ok(condition(), "timed out waiting for Slack"); };
+    const failures = []; const { default: fs } = await import("node:fs"), write = fs.writeSync;
+    fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string" && data.includes("slack.post_failed")) failures.push(data); return write(fd, data, ...rest); };
+    const { config } = await f.app("config.ts");
+    await implement(1);
+    await new Promise((done) => setTimeout(done, 300));
+    assert.equal(f.slack.calls.length, 0);
+
+    config.slack.enabled = true; config.slack.channel = channel;
+    await implement(2);
+    await until(() => posts().some((call) => /^Completed/.test(call.body.text)));
+    assert.equal(roots().length, 1); assert.equal(all(s.slackThreads).length, 1);
+    const [root, ...replies] = posts(), ts = "1700000000.000001";
+    assert.match(root.body.text, /^\*Issue #2\*: <https:\/\/github\.com\/fixture\/project\/issues\/2\|Issue 2>$/);
+    assert.equal(root.body.channel, channel); assert.equal(all(s.slackThreads)[0].ts, ts);
+    assert.ok(replies.length >= 3); assert.ok(replies.every((call) => call.body.thread_ts === ts && call.body.channel === channel));
+    assert.match(replies[0].body.text, /^Started implement/);
+    assert.ok(replies.some((call) => call.body.text.includes("<https://github.com/fixture/project/pull/202|pull request #202>")));
+    assert.ok(replies.some((call) => /^Pushed <https:\/\/github\.com\/fixture\/project\/commit\/[0-9a-f]{40}\|[0-9a-f]{7}>$/.test(call.body.text)));
+    assert.match(replies.at(-1).body.text, /^Completed/);
+    assert.ok(!posts().some((call) => /enqueued|coalesced|Workspace/i.test(call.body.text)));
+    const order = (type) => all(s.events).findIndex((event) => event.type === type && event.subjectId === "issue-2");
+    assert.ok(order("run.started") < order("github.pull_request_created") && order("github.pull_request_created") < order("run.completed"));
+
+    const restarted = await import(pathToFileURL(resolve("app/src/slack-status.ts")).href + "?restart");
+    let count = posts().length;
+    restarted.queueStatus({ subjectId: "issue-2", type: "run.completed", data: { stage: "after restart" } });
+    await until(() => posts().length === count + 1);
+    assert.equal(roots().length, 1); assert.equal(posts().at(-1).body.thread_ts, ts); assert.equal(posts().at(-1).body.text, "Completed at stage after restart");
+
+    count = f.slack.calls.length; f.slack.rateLimitOnce = true;
+    restarted.queueStatus({ subjectId: "issue-2", type: "run.completed", data: { stage: "after limit" } });
+    await until(() => posts().at(-1).body.text === "Completed at stage after limit");
+    assert.equal(f.slack.calls.length, count + 2); assert.equal(failures.length, 0);
+
+    config.slack.channel = "C9999999999";
+    restarted.queueStatus({ subjectId: "issue-2", type: "run.completed", data: { stage: "moved" } });
+    await until(() => posts().at(-1).body.text === "Completed at stage moved");
+    assert.equal(roots().length, 2); assert.equal(roots().at(-1).body.channel, "C9999999999");
+    assert.equal(all(s.slackThreads).length, 1); assert.equal(posts().at(-1).body.thread_ts, all(s.slackThreads)[0].ts);
+    assert.equal(posts().at(-1).body.channel, "C9999999999");
+    config.slack.channel = channel;
+
+    await route(); while (await f.runNextTask());
+    await until(() => roots().some((call) => /^\*Pull request #202\*: /.test(call.body.text)));
+
+    f.slack.down = true; f.addIssue(3, ["scrat"]); f.enqueue(3, "implement");
+    const outage = await success();
+    assert.equal(outage.publication.pullRequestNumber, 203); assert.equal(f.row(s.tasks, outage.taskId).status, "completed");
+    await until(() => failures.length > 0);
+    assert.equal(all(s.slackThreads).filter((thread) => thread.subjectId === "issue-3").length, 0);
+    f.slack.down = false;
+    restarted.queueStatus({ subjectId: "issue-3", type: "run.completed", data: { stage: "recovered" } });
+    await until(() => posts().some((call) => call.body.text === "Completed at stage recovered"));
+    assert.equal(all(s.slackThreads).filter((thread) => thread.subjectId === "issue-3").length, 1);
+    assert.ok(roots().some((call) => call.body.text.startsWith("*Issue #3*")));
+    for (let seen = -1; seen !== f.slack.calls.length;) { seen = f.slack.calls.length; await new Promise((done) => setTimeout(done, 1500)); }
+    fs.writeSync = write;
   } else if (scenario === "slack_redaction") {
     const token = ["xoxb", "1234567890", "abcdefABCDEF"].join("-"), appToken = ["xoxp", "9876", "zzzz", "fixture", "secondary", "token"].join("-");
     process.env.SLACK_BOT_TOKEN = token;

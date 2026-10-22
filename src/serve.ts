@@ -8,6 +8,7 @@ import { runNextTask } from "./runner.ts";
 import { pollSchedules } from "./schedule-source.ts";
 import { prepareService } from "./startup.ts";
 import { signalWork, waitForWork, workGeneration } from "./work-signal.ts";
+import { drainStatus } from "./slack-status.ts";
 
 const idleWorkerFallbackMs = 30_000;
 const shutdown = new AbortController();
@@ -53,4 +54,7 @@ try {
 } catch (error) {
   logger.error({ err: error, event: "serve.failed" }, "Serve failed");
   process.exitCode = 1;
-} finally { db.$client.close(); }
+} finally {
+  await drainStatus();
+  db.$client.close();
+}

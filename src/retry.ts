@@ -1,6 +1,7 @@
 import { db } from "./db.ts";
 import { logger } from "./logging.ts";
 import { retryTask } from "./tasks.ts";
+import { drainStatus } from "./slack-status.ts";
 
 try {
   const [taskId, ...flags] = process.argv.slice(2);
@@ -12,5 +13,6 @@ try {
   logger.error({ err: error }, "Retry command failed");
   process.exitCode = 1;
 } finally {
+  await drainStatus();
   db.$client.close();
 }

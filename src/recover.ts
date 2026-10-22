@@ -3,6 +3,7 @@ import { config } from "./config.ts";
 import { removeRunDatabase } from "./databases.ts";
 import { logger } from "./logging.ts";
 import { finishRun } from "./tasks.ts";
+import { drainStatus } from "./slack-status.ts";
 
 try {
   const runId = process.argv[2];
@@ -17,5 +18,6 @@ try {
   logger.error({ err: error }, "Run recovery failed");
   process.exitCode = 1;
 } finally {
+  await drainStatus();
   db.$client.close();
 }

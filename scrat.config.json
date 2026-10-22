@@ -19,6 +19,10 @@
     "fetchIntervalSeconds": 300
   },
   "bindings": {},
+  "slack": {
+    "enabled": false,
+    "channel": ""
+  },
   "workspace": {
     "environment": {
       "VITEST_MAX_WORKERS": "1"

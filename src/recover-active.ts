@@ -5,6 +5,7 @@ import { db } from "./db.ts";
 import { logger } from "./logging.ts";
 import { runs } from "./schema.ts";
 import { finishRun } from "./tasks.ts";
+import { drainStatus } from "./slack-status.ts";
 
 try {
   for (const run of db.select().from(runs).where(isNull(runs.finishedAt)).all()) {
@@ -16,4 +17,7 @@ try {
       logger.error({ err: error, event: "run.recovery_failed", runId: run.id, taskId: run.taskId }, "Run recovery failed");
     }
   }
-} finally { db.$client.close(); }
+} finally {
+  await drainStatus();
+  db.$client.close();
+}

@@ -7,7 +7,9 @@ import { createServer } from "node:http";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-export async function fixture(scenario) {
+export const bearer = (options) => new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");
+
+export async function fixture(scenario, spec) {
   const repository = fileURLToPath(new URL("..", import.meta.url));
   const root = mkdtempSync(resolve(tmpdir(), "scrat-integration-"));
   for (const path of ["src", "skills", "actions", "scrat.config.json", "package.json"]) cpSync(resolve(repository, path), resolve(root, "app", path), { recursive: true });
@@ -24,33 +26,7 @@ export async function fixture(scenario) {
   execFileSync("git", ["init", "--bare", "remote.git"], { stdio: "ignore" });
   execFileSync("git", ["init", "-b", "main", "seed"], { stdio: "ignore" });
   mkdirSync("seed/src"); writeFileSync("seed/src/app.ts", "export const value = 1;\n");
-  if (["validation_resume", "validation_guards", "resume_migration"].includes(scenario)) writeFileSync("seed/.gitignore", "node_modules/\n");
-  if (scenario === "scope_snapshots") {
-    writeFileSync("seed/.gitignore", "/src/generated.ts\n");
-    writeFileSync("seed/src/deleted.ts", "export const deleted = 1;\n");
-    writeFileSync("seed/src/renamed.ts", "export const renamed = 1;\n");
-    writeFileSync("seed/ leading.ts", "export const leading = 1;\n");
-  }
-  if (scenario === "isolation") { writeFileSync("outside-secret.txt", "outside-secret-content\n"); symlinkSync(resolve("outside-secret.txt"), "seed/src/link.txt"); mkdirSync("outside-dir"); symlinkSync(resolve("outside-dir"), "seed/linkdir"); }
-  if (scenario === "git_paging") {
-    writeFileSync("seed/src/mid.txt", Array.from({ length: 200_000 }, (_, n) => `line ${n}`).join("\n") + "\n");
-    writeFileSync("seed/src/utf.txt", "é".repeat(3000));
-    writeFileSync("seed/src/huge.txt", ("a".repeat(63) + "\n").repeat(17 * 16384 + 10));
-  }
-  if (scenario === "unicode_scope") writeFileSync("seed/src/a b.ts", "export const special = 1;\n");
-  if (scenario === "unicode_nfd") writeFileSync("seed/src/caf\u00e9.ts", "export const unicode = 1;\n");
-  if (["panel", "relevance", "lockfile_scope", "importer_scope"].includes(scenario)) writeFileSync("seed/.gitignore", "node_modules/\n");
-  if (["relevance", "lockfile_scope", "importer_scope"].includes(scenario)) {
-    writeFileSync("seed/package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "1.0.0" } }));
-    writeFileSync("seed/pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: old}\n  unrelated@1.0.0:\n    resolution: {integrity: old}\n");
-    if (scenario === "lockfile_scope") writeFileSync("seed/pnpm-lock.yaml", readFileSync("seed/pnpm-lock.yaml", "utf8")
-      + "  string-width-cjs@npm:string-width@4.2.2:\n    resolution: {integrity: alias}\nsnapshots:\n  wrangler@1.0.0:\n    dependencies: {nested: 1.0.0}\nimporters:\n  .:\n    devDependencies:\n      wrangler: {specifier: 1.0.0, version: 1.0.0}\n");
-    if (scenario === "importer_scope") writeFileSync("seed/pnpm-lock.yaml", JSON.stringify({ lockfileVersion: "9.0",
-      importers: { ".": { devDependencies: { wrangler: { specifier: "1.0.0", version: "1.0.0" }, unrelated: { specifier: "1.0.0", version: "1.0.0" } } } },
-      packages: { "wrangler@1.0.0": { resolution: { integrity: "wrangler" } }, "unrelated@1.0.0": { resolution: { integrity: "unrelated" } } },
-      snapshots: { "wrangler@1.0.0": {}, "unrelated@1.0.0": {} },
-    }));
-  }
+  spec.seed?.();
   git(resolve("seed"), "add", "."); commit(resolve("seed"), "Initial source");
   git(resolve("seed"), "push", resolve("remote.git"), "main");
   execFileSync("git", ["--git-dir=" + resolve("remote.git"), "symbolic-ref", "HEAD", "refs/heads/main"]);
@@ -190,109 +166,9 @@ export async function fixture(scenario) {
     { id: "gpt-6.1-sol", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
     { id: "deepseek/deepseek-v4.1-flash", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
   ] } };
-  if (scenario === "commit_review_no_start") writeFileSync("app/actions/review_base_change.yaml", readFileSync("app/actions/review_base_change.yaml", "utf8").replace("start: [slack_post]\n", ""));
-  if (scenario === "history_file") writeFileSync("app/actions/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace("files: [discussion]", "files: [discussion, history]"));
   config.actions = Object.fromEntries(readdirSync("app/actions").map((file) => parseYaml(readFileSync("app/actions/" + file, "utf8")))
     .map(({ name, reviewers = [] }) => [name, { provider: "fixture", ...reviewers.length && { reviewers: reviewers.map((reviewer) => ({ ...reviewer, provider: "fixture" })) } }]));
-  if (scenario === "panel") {
-    writeFileSync("prepare.mjs", 'import{mkdirSync,writeFileSync}from"node:fs";mkdirSync("node_modules/pinned-runtime",{recursive:true});writeFileSync("node_modules/pinned-runtime/package.json",JSON.stringify({name:"pinned-runtime",version:"9.8.7"}));');
-    config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
-  }
-  if (scenario === "scope_snapshots") {
-    writeFileSync("prepare.mjs", 'import{writeFileSync}from"node:fs";writeFileSync("src/generated.ts","export const generated = 1;\\n");');
-    config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
-  }
-  if (["relevance", "lockfile_scope", "importer_scope"].includes(scenario)) {
-    writeFileSync("prepare.mjs", 'import{mkdirSync,writeFileSync}from"node:fs";for(const name of ["wrangler","string-width-cjs"]){mkdirSync("node_modules/"+name,{recursive:true});writeFileSync("node_modules/"+name+"/package.json",JSON.stringify({name,version:"1.0.0"}));}');
-    config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
-  }
-  if (scenario.startsWith("stale_branch")) {
-    writeFileSync("prepare.mjs", 'import{existsSync}from"node:fs";for(const name of ["needed.txt","needed2.txt","needed3.txt","needed4.txt"]){if(existsSync(' + JSON.stringify(resolve(".") + "/require-") + '+name)&&!existsSync(name)){console.error("ERR_MISSING "+name);process.exit(1);}}');
-    writeFileSync("validate.mjs", 'import{existsSync}from"node:fs";if(existsSync(' + JSON.stringify(resolve(".") + "/require-validation") + ')&&existsSync("bad.txt")){console.error("bad.txt must not exist");process.exit(7);}');
-    config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
-    config.workspace.validate = [[process.execPath, resolve("validate.mjs")]];
-  }
-  if (scenario === "isolation") {
-    writeFileSync("probe.mjs", 'import{appendFileSync}from"node:fs";const leaked=Object.entries(process.env).filter(([name,value])=>/PRIVATE_KEY|API_KEY|GITHUB_PAT/.test(name)||value.includes("PRIVATE KEY-----")||value.includes("ghp_")).map(([name])=>name);'
-      + 'appendFileSync(' + JSON.stringify(resolve("isolation.jsonl")) + ',JSON.stringify({phase:process.argv[2],leaked,configured:process.env.SCRAT_WORKSPACE_VALUE})+"\\n");');
-    config.workspace = { environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, prepare: [[process.execPath, resolve("probe.mjs"), "prepare"]], validate: [[process.execPath, resolve("probe.mjs"), "validate"]] };
-  }
-  if (["verification", "validation_mutation", "implement_base_moved"].includes(scenario)) {
-    writeFileSync("check.mjs", scenario === "validation_mutation" ? 'import{writeFileSync}from"node:fs";writeFileSync("src/app.ts","unexpected verification change\\n");' : 'import{existsSync}from"node:fs";if(existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed");process.exit(7);}console.log("checked actual source");');
-    config.workspace.validate = [[process.execPath, resolve("check.mjs")]];
-  }
-  if (["validation_feedback", "validation_feedback_cap", "validation_slots", "self_repair", "bot_name", "crash_before_publishing", "deploy_stop_boundary"].includes(scenario)) {
-    const flag = (name) => JSON.stringify(resolve(name));
-    writeFileSync("validate.mjs", 'import{appendFileSync,existsSync}from"node:fs";const s=Date.now();await new Promise((r)=>setTimeout(r,existsSync(' + flag("slow") + ')?300:0));'
-      + 'appendFileSync(' + flag("validations.log") + ',JSON.stringify({s,e:Date.now()})+"\\n");if(existsSync(' + flag("kill-validation") + '))process.kill(process.pid,"SIGKILL");if(existsSync(' + flag("exit-137") + '))process.exit(137);'
-      + 'if(existsSync(' + flag("slot-fail") + ')||existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed: marker present");process.exit(7);}');
-    config.workspace.validate = [[process.execPath, resolve("validate.mjs")]];
-  }
-  if (scenario === "command_timeout") {
-    writeFileSync("validate.mjs", 'await new Promise((r)=>setTimeout(r,30000));');
-    config.workspace.validate = [[process.execPath, resolve("validate.mjs")]];
-    config.harness.commandTimeoutSeconds = 1;
-  }
-  if (scenario === "agent_timeout") config.harness.agentTimeoutSeconds = 1;
-  if (scenario === "deploy_stop_agent_timeout") config.harness.drainTimeoutSeconds = 1;
-  if (["validation_resume", "validation_guards", "resume_migration"].includes(scenario)) {
-    writeFileSync("prepare.mjs", 'import{appendFileSync,mkdirSync,writeFileSync}from"node:fs";appendFileSync(' + JSON.stringify(resolve("prepare.log")) + ',"prepare\\n");mkdirSync("node_modules",{recursive:true});writeFileSync("node_modules/prepared","ready");');
-    config.workspace.prepare = [[process.execPath, resolve("prepare.mjs")]];
-  }
-  if (["validation_guards", "resume_migration"].includes(scenario)) {
-    writeFileSync("block-validation", "transient failure\n");
-    writeFileSync("validate.mjs", 'import{existsSync}from"node:fs";if(existsSync(' + JSON.stringify(resolve("block-validation")) + ')){console.error("transient validation failure");process.exit(7);}console.log("validated saved source");');
-    config.workspace.validate = [[process.execPath, resolve("validate.mjs")]];
-  }
-  if (["database", "validation_resume"].includes(scenario)) {
-    const helper = fileURLToPath(new URL("database-command.mjs", import.meta.url)); cpSync(helper, "database-command.mjs");
-    config.workspace = { ...config.workspace, environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), scenario === "validation_resume" ? "validate-resume" : "validate", resolve("database-receipts.jsonl")]] };
-  }
-  if (scenario === "commits_source" || scenario === "commits_source_modes" || scenario === "publish_effects" || scenario.startsWith("commit_review")) Object.assign(config.actions.review_base_change, { enabled: true, channel: "C0123456789" });
-  if (scenario === "commit_review_panel") Object.assign(config.actions.review_base_change, { agent: "panel", reviewers: structuredClone(config.actions.review_pr.reviewers) });
-  if (scenario === "commit_review_isolation") {
-    writeFileSync("prepare.mjs", 'import{appendFileSync}from"node:fs";appendFileSync(' + JSON.stringify(resolve("prepare.log")) + ',"prepare\\n");');
-    config.workspace = { prepare: [[process.execPath, resolve("prepare.mjs")]], validate: [[process.execPath, resolve("prepare.mjs")]] };
-  }
-  if (scenario === "bot_name") config.github.botName = "Mocha";
-  if (scenario === "bot_identity_names") config.github.botName = "Mocha Agent";
-  if (scoped) config.bindings = { scout: { secret: "${SCOUT_TOKEN}", hosts: ["api.example.test", "other.example.test"], header: "Authorization", prefix: "Bearer " } };
-  if (patMode) { config.github.auth = "pat"; config.github.botLogin = "agent-account"; }
-  if (["scoped_http", "scoped_github_search", "scoped_browser", "bindings_startup"].includes(scenario)) {
-    const scopedTools = { scoped_http: ["[read, grep, http]", "http: { binding: scout, methods: [GET] }"], bindings_startup: ["[read, grep, http]", "http: { binding: scout }"], scoped_github_search: ["[read, grep, github_search]", ""],
-      scoped_browser: ["[read, grep, browser]", "browser: { navigationHosts: [shop.example.test], resourceHosts: [cdn.example.test], binding: scout }"] }[scenario];
-    mkdirSync("deployment"); config.actions.directory = resolve("deployment");
-    writeFileSync("deployment/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace(/^tools: .*$/m, "tools: " + scopedTools[0]).replace(/^skill: .*$/m, "skill: " + resolve("app/skills/review_issue/SKILL.md")).trimEnd() + "\n" + scopedTools[1] + "\n");
-  }
-  if (["manifest_directory", "manifest_tools_files"].includes(scenario)) {
-    const directory = resolve("deployment"), shipped = (name) => readFileSync(`app/actions/${name}.yaml`, "utf8"), field = (text, key, value) => text.replace(new RegExp(`^${key}: .*$`, "m"), `${key}: ${value}`);
-    mkdirSync(directory); config.actions.directory = directory;
-    if (scenario === "manifest_directory") {
-      mkdirSync("deployment/skills/review_triage", { recursive: true }); cpSync("app/skills/review_issue/SKILL.md", "deployment/skills/review_triage/SKILL.md");
-      writeFileSync("deployment/review_triage.yaml", field(field(shipped("review_issue"), "name", "review_triage"), "skill", "skills/review_triage/SKILL.md"));
-      config.actions.review_issue.enabled = false;
-      config.actions.review_triage = { provider: "fixture" };
-      writeFileSync("deployment/my_pr_review.yaml", field(field(shipped("review_pr"), "name", "my_pr_review"), "skill", resolve("app/skills/review_pr/SKILL.md")));
-      config.actions.my_pr_review = { provider: "fixture", reviewers: structuredClone(config.actions.review_pr.reviewers) };
-      config.actions.review_pr.enabled = false;
-    } else {
-      const skill = (name) => resolve("app/skills", name, "SKILL.md");
-      writeFileSync("deployment/review_issue.yaml", field(field(field(shipped("review_issue"), "tools", "[read, grep]"), "files", "[]"), "skill", skill("review_issue")));
-      writeFileSync("deployment/implement.yaml", field(field(field(shipped("implement"), "tools", "[read, grep, find, ls, edit, write]"), "files", "[discussion, history]"), "skill", skill("implement")));
-    }
-  }
-  if (["schedule_source", "window_review"].includes(scenario)) {
-    const directory = resolve("deployment"), skill = resolve("app/skills/review_issue/SKILL.md");
-    mkdirSync(directory); config.actions.directory = directory;
-    const sweep = (name, cron, window, tools) => writeFileSync(`deployment/${name}.yaml`, [
-      `name: ${name}`, `trigger: { source: schedule, kind: tick, cron: "${cron}", window: ${window} }`, "mode: review", "agent: single", "context: all",
-      `tools: [${tools}]`, "files: [history]", "publish: [issue]", `skill: ${skill}`,
-      "model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }", "priority: 20", "",
-    ].join("\n"));
-    sweep("error_sweep", "0 */6 * * *", "6h", "read, grep, find, ls");
-    config.actions.error_sweep = { provider: "fixture" };
-    if (scenario === "schedule_source") { sweep("slow_sweep", "30 3 * * 1", "24h", "read, grep"); config.actions.slow_sweep = { provider: "fixture" }; }
-  }
+  for (const configure of spec.configure ?? []) configure(config);
   const { actions, ...fileSettings } = config;
   writeFileSync("app/scrat.config.json", JSON.stringify(fileSettings));
   writeFileSync("app/scrat.local.json", JSON.stringify({ actions }));
@@ -336,8 +212,8 @@ export async function fixture(scenario) {
       pr.head.sha = sha;
       if (pulled.get(pr.number) !== sha) { pulled.set(pr.number, sha); git(resolve("remote.git"), "update-ref", `refs/pull/${pr.number}/head`, sha); }
     }
-    const bearer = new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");
-    const call = { method, path: path + url.search, token: bearer }; calls.push(call);
+    const credential = bearer(options);
+    const call = { method, path: path + url.search, token: credential }; calls.push(call);
     const reply = (data, status = 200, extra = {}) => {
       const text = JSON.stringify(data), headers = { "content-type": "application/json", "x-ratelimit-limit": String(rate.limit), "x-ratelimit-reset": String(rate.reset), "x-ratelimit-resource": "core", ...extra };
       if (method === "GET" && status === 200) {
@@ -349,14 +225,14 @@ export async function fixture(scenario) {
       call.status = status; if (!path.endsWith("/access_tokens")) rate.remaining--;
       return new Response(text, { status, headers: { ...headers, "x-ratelimit-remaining": String(rate.remaining) } });
     };
-    if (patMode && bearer !== pat) return reply({ message: "Bad credentials" }, 401);
+    if (patMode && credential !== pat) return reply({ message: "Bad credentials" }, 401);
     if (path === "/user") return user.status === 200 ? reply({ login: user.login }) : reply({ message: "Bad credentials" }, user.status);
     if (path.endsWith("/access_tokens")) {
       const token = "ghs_fixture_" + tokens.size; tokens.set(token, body.permissions);
       return reply({ token, expires_at: new Date(Date.now() + 3600000).toISOString() }, 201);
     }
     if (path.endsWith("/issues") && method === "POST") {
-      const token = new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");
+      const token = bearer(options);
       if (tokens.get(token)?.issues !== "write") return reply({ message: "Resource not accessible by integration" }, 403);
       const number = ++nextIssueNumber;
       const created = { id: number, node_id: "ISSUE_" + number, number, title: body.title, body: body.body, state: "open", html_url: `https://github.com/fixture/project/issues/${number}`, updated_at: "2026-10-19T02:00:00Z", labels: [], user: { login: config.github.botLogin } };
@@ -379,7 +255,7 @@ export async function fixture(scenario) {
         const next = page * size < all.length ? { link: `<https://api.github.com${path}?per_page=${size}&page=${page + 1}>; rel="next"` } : {};
         return reply(all.slice((page - 1) * size, page * size), 200, next);
       }
-      const token = new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");
+      const token = bearer(options);
       const permission = prs.some((pr) => pr.number === n) ? "pull_requests" : "issues";
       if (tokens.get(token)?.[permission] !== "write") return reply({ message: "Resource not accessible by integration" }, 403);
       writes.push({ type: "comment", number: n, body: body.body });
@@ -411,7 +287,7 @@ export async function fixture(scenario) {
     }
     if (path.endsWith("/pulls") && method === "GET") return reply(prs.filter((pr) => (!url.searchParams.get("head") || pr.head.ref === url.searchParams.get("head").split(":").slice(1).join(":")) && (url.searchParams.get("state") !== "open" || pr.state === "open")));
     if (path.endsWith("/pulls") && method === "POST") {
-      const token = new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");
+      const token = bearer(options);
       const permissions = tokens.get(token);
       if (permissions?.pull_requests !== "write" || !["read", "write"].includes(permissions.contents)) {
         return reply({ message: "Validation Failed", errors: [{ resource: "PullRequest", code: "custom", message: "not all refs are readable" }] }, 422);

@@ -16,6 +16,7 @@ ln -sfn "$install_root/.env" .env
 [ -e "$install_root/scrat.local.json" ] || printf '{}\n' > "$install_root/scrat.local.json"
 ln -sfn "$install_root/scrat.local.json" scrat.local.json
 node src/config.ts # Fail on a bad scrat.local.json, an invalid manifest or a trigger clash while the old release is still running.
+node src/sandbox.ts # Fail closed on missing bwrap/AppArmor/runtime before draining the old service.
 
 # Stop/drain the existing sole worker before migrating or moving its release.
 systemctl --user stop scrat.service

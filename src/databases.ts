@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { setTimeout } from "node:timers/promises";
 import { promisify } from "node:util";
+import { randomBytes } from "node:crypto";
 import { recordEvent, type EventReferences } from "./events.ts";
 import { withOperation } from "./logging.ts";
 
@@ -15,9 +16,10 @@ async function docker(args: string[]) {
 
 export async function createRunDatabase(runId: string, image: string, references: EventReferences = {}) {
   const container = containerName(runId);
+  const password = randomBytes(24).toString("hex");
   return withOperation("database.create", { ...references, runId, container, image }, async (operation) => {
     await docker(["create", "--name", container, "--label", `${runLabel}=${runId}`,
-      "--publish", "127.0.0.1::5432", "--env", "POSTGRES_PASSWORD=postgres", "--env", "POSTGRES_DB=scrat_test",
+      "--publish", "127.0.0.1::5432", "--env", `POSTGRES_PASSWORD=${password}`, "--env", "POSTGRES_DB=scrat_test",
       "--health-cmd", "pg_isready -h 127.0.0.1 -U postgres -d scrat_test",
       "--health-interval", "1s", "--health-timeout", "3s", "--health-retries", "30", image]);
     await docker(["start", container]);
@@ -33,7 +35,7 @@ export async function createRunDatabase(runId: string, image: string, references
     const address = await docker(["port", container, "5432/tcp"]);
     recordEvent({ ...references, runId, operationId: operation.operationId, type: "database.created", data: { container, image } });
     operation.complete();
-    return { container, url: `postgresql://postgres:postgres@${address}/scrat_test` };
+    return { container, url: `postgresql://postgres:${password}@${address}/scrat_test` };
   });
 }
 

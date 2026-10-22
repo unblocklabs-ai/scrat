@@ -98,6 +98,8 @@ const scenarios = {
   manifest_directory: "a deployment manifest directory adds an action for a freed trigger, rejects duplicate enabled triggers, unknown tools and files, and bad directories",
   manifest_tools_files: "manifest tools and files lists decide which tools and context files reach the agent session, and cross-field rules reject unsafe combinations",
   commit_review_no_start: "a commit manifest without a start slot posts no thread root before the agent and the reply creates the root",
+  schedule_source: "the schedule source parses cron expressions, seeds silently, fires one window task per due tick, fires a missed tick once, keeps a cursor per manifest and stops when disabled",
+  window_review: "a schedule-triggered review runs on the base branch with the window bounds, reads no GitHub item, publishes through its listed issue effect and sees its earlier reports as history",
   database: "real PostgreSQL runs isolate databases, apply new migrations and remove resources",
 };
 

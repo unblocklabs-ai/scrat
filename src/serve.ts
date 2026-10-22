@@ -5,6 +5,7 @@ import { db } from "./db.ts";
 import { syncGitHub } from "./github-sync.ts";
 import { logger } from "./logging.ts";
 import { runNextTask } from "./runner.ts";
+import { pollSchedules } from "./schedule-source.ts";
 import { prepareService } from "./startup.ts";
 import { signalWork, waitForWork, workGeneration } from "./work-signal.ts";
 
@@ -25,6 +26,8 @@ async function poll() {
     catch { }
     try { if (await pollCommits()) signalWork(); }
     catch { }
+    try { if (await pollSchedules()) signalWork(); }
+    catch { }
   }
 }
 async function worker() {
@@ -43,6 +46,8 @@ try {
   try { await syncGitHub(); }
   catch { }
   try { if (await pollCommits()) signalWork(); }
+  catch { }
+  try { if (await pollSchedules()) signalWork(); }
   catch { }
   await Promise.all([poll(), ...Array.from({ length: config.harness.maxConcurrency }, worker)]);
 } catch (error) {

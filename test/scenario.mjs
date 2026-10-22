@@ -1145,6 +1145,7 @@ try {
       items("low_grade", { triggerKey: "k", assessmentRunId: "a", grade: "D" }),
       items("manual", { manual: true }),
       { source: "github_commits", kind: "commit", triggerKey: "s", sha: "s", previousSha: "p", branch: "main", commitCount: 2, truncated: false },
+      { source: "schedule", kind: "tick", triggerKey: "2026-10-21T12:00:00.000Z", start: "2026-10-21T06:00:00.000Z", end: "2026-10-21T12:00:00.000Z" },
     ];
     for (const member of members) assert.deepEqual(parseTriggerInput(member), member);
     const legacy = (input, expected) => assert.deepEqual(parseTriggerInput(input), { ...input, ...expected });
@@ -1156,6 +1157,7 @@ try {
     legacy({ manual: true }, { source: "github_items", kind: "manual" });
     legacy({}, { source: "github_items", kind: "manual" });
     legacy({ kind: "commit", triggerKey: "s", sha: "s", previousSha: "p", branch: "main", commitCount: 1, truncated: true }, { source: "github_commits" });
+    legacy({ kind: "tick", triggerKey: "k", start: "s", end: "e" }, { source: "schedule" });
     legacy({ triggerKey: "k", revision: "r", mainSha: "m", manual: true }, { source: "github_items", kind: "item_changed" });
     assert.throws(() => parseTriggerInput(null), /must be an object/);
     assert.throws(() => parseTriggerInput([]), /must be an object/);
@@ -1163,6 +1165,7 @@ try {
     assert.throws(() => parseTriggerInput({ source: "schedule", kind: "label", triggerKey: "k", mainSha: "m" }), /Unknown trigger source for label: "schedule"/);
     assert.throws(() => parseTriggerInput({ triggerKey: "k", commentRevisions: "c@1" }), /Invalid github_items\/pr_feedback trigger input at \/commentRevisions/);
     assert.throws(() => parseTriggerInput({ kind: "commit", sha: "s" }), /Invalid github_commits\/commit trigger input/);
+    assert.throws(() => parseTriggerInput({ kind: "tick", triggerKey: "k" }), /Invalid schedule\/tick trigger input at \/: must have required properties start, end/);
     for (let n = 1; n <= 2; n++) f.addIssue(n);
     db.$client.prepare("INSERT INTO tasks (id, subject_id, action, priority, reason, input, created_at) VALUES ('malformed', 'issue-1', 'review_issue', 1000, 'Integration', '{\"triggerKey\":\"k\",\"commentRevisions\":7}', '2026-01-01')").run();
     f.enqueue(2);
@@ -2286,6 +2289,129 @@ try {
     assert.equal(await pollCommits(), 0); assert.equal(reviews().length, 5); assert.deepEqual(cursor(), [capped]);
     changeMain("src/eight.ts", "export const eight = 1;\n");
     assert.equal(await pollCommits(), 1); assert.equal(reviews().length, 6);
+  } else if (scenario === "schedule_source") {
+    const { eq } = await import("drizzle-orm");
+    const { parseCron, nextTick, parseWindow } = await f.app("cron.ts");
+    const { pollSchedules } = await f.app("schedule-source.ts");
+    const { readManifests } = await f.app("manifests.ts");
+    const { config: live } = await f.app("config.ts");
+    const next = (expression, after) => nextTick(parseCron(expression), new Date(after)).toISOString();
+    const table = [
+      ["* * * * *", "2026-10-21T10:00:30Z", "2026-10-21T10:01:00.000Z"],
+      ["* * * * *", "2026-10-21T10:00:00Z", "2026-10-21T10:01:00.000Z"],
+      ["*/15 * * * *", "2026-10-21T10:07:00Z", "2026-10-21T10:15:00.000Z"],
+      ["*/15 * * * *", "2026-10-21T10:45:00Z", "2026-10-21T11:00:00.000Z"],
+      ["0 */6 * * *", "2026-10-21T06:00:00Z", "2026-10-21T12:00:00.000Z"],
+      ["0 */6 * * *", "2026-10-21T23:59:59Z", "2026-10-22T00:00:00.000Z"],
+      ["30 9-17/4 * * *", "2026-10-21T10:00:00Z", "2026-10-21T13:30:00.000Z"],
+      ["5,35 8 * * *", "2026-10-21T08:05:00Z", "2026-10-21T08:35:00.000Z"],
+      ["5,35 8 * * *", "2026-10-21T08:35:00Z", "2026-10-22T08:05:00.000Z"],
+      ["0 0 1,15 * *", "2026-10-21T00:00:00Z", "2026-11-01T00:00:00.000Z"],
+      ["0 12 * * 1-5", "2026-10-23T12:00:00Z", "2026-10-26T12:00:00.000Z"],
+      ["0 0 * * 7", "2026-10-21T00:00:00Z", "2026-10-25T00:00:00.000Z"],
+      ["0 0 * * 0", "2026-10-21T00:00:00Z", "2026-10-25T00:00:00.000Z"],
+      ["0 0 13 * 5", "2026-10-21T00:00:00Z", "2026-10-23T00:00:00.000Z"],
+      ["0 0 1 */3 *", "2026-10-21T00:00:00Z", "2027-01-01T00:00:00.000Z"],
+      ["0 0 29 2 *", "2026-10-21T00:00:00Z", "2028-02-29T00:00:00.000Z"],
+      ["59 23 31 12 *", "2026-10-21T00:00:00Z", "2026-12-31T23:59:00.000Z"],
+    ];
+    for (const [expression, after, expected] of table) assert.equal(next(expression, after), expected, `${expression} after ${after}`);
+    for (const bad of ["* * * *", "* * * * * *", "60 * * * *", "* 24 * * *", "* * 0 * *", "* * * 13 *", "* * * * 8", "*/0 * * * *", "5-1 * * * *", "a * * * *", "1-2-3 * * * *", "1//2 * * * *", ",1 * * * *"]) {
+      assert.throws(() => parseCron(bad), /cron/i, bad);
+    }
+    assert.throws(() => nextTick(parseCron("0 0 31 2 *"), new Date(0)), /never matches/);
+    assert.deepEqual(["90m", "6h", "1d"].map(parseWindow), [5_400_000, 21_600_000, 86_400_000]);
+    for (const bad of ["6", "0h", "h", "6 h", "1w", "1.5h", "-1h"]) assert.throws(() => parseWindow(bad), /window/, bad);
+
+    let count = 0;
+    const broken = (file, change, message) => {
+      const root = resolve("broken-" + ++count); mkdirSync(root);
+      cpSync(resolve("app/actions"), resolve(root, "actions"), { recursive: true });
+      const path = resolve(root, "actions", file + ".yaml");
+      writeFileSync(path, change(readFileSync(path, "utf8")));
+      assert.throws(() => readManifests(root), message);
+    };
+    const trigger = (text, replacement) => text.replace(/^trigger: .*$/m, `trigger: ${replacement}`);
+    broken("implement", (text) => trigger(text, '{ source: schedule, kind: tick, cron: "0 * * * *", window: 1h }'), /a schedule trigger requires mode review/);
+    broken("review_issue", (text) => trigger(text, '{ source: schedule, kind: tick, cron: "0 * * *", window: 1h }'), /needs 5 fields/);
+    broken("review_issue", (text) => trigger(text, '{ source: schedule, kind: tick, cron: "0 * * * *", window: "6" }'), /A window must be/);
+    broken("review_issue", (text) => trigger(text, '{ source: schedule, kind: tick, cron: "0 0 31 2 *", window: 1h }'), /never matches/);
+    broken("review_issue", (text) => trigger(text, '{ source: schedule, kind: tick, cron: "0 * * * *" }'), /trigger\.cron and trigger\.window are required/);
+    broken("review_issue", (text) => trigger(text, '{ source: github_items, kind: item_changed, item: issue, cron: "0 * * * *", window: 1h }'), /forbidden for other sources/);
+    broken("review_issue", (text) => trigger(text, '{ source: schedule, kind: item_changed, cron: "0 * * * *", window: 1h }'), /does not belong to source schedule/);
+    broken("review_issue", (text) => trigger(text, '{ source: schedule, kind: tick, item: issue, cron: "0 * * * *", window: 1h }'), /trigger\.item is required for github_items/);
+
+    const cursors = () => Object.fromEntries(all(s.sourceCursors).map((row) => [row.action, row.sha]));
+    const tasksOf = (action) => all(s.tasks).filter((t) => t.action === action);
+    const poll = (at) => pollSchedules(undefined, new Date(at));
+    const first = "2026-10-21T12:00:00.000Z", monday = "2026-10-26T03:30:00.000Z";
+    assert.equal(await poll("2026-10-21T10:20:00Z"), 0);
+    assert.deepEqual(cursors(), { error_sweep: first, slow_sweep: monday });
+    assert.deepEqual(all(s.sourceCursors).map((row) => [row.repository, row.branch]), [["fixture/project", "schedule"], ["fixture/project", "schedule"]]);
+    assert.equal(all(s.tasks).length, 0); assert.equal(all(s.subjects).length, 0); assert.equal(all(s.items).length, 0);
+    assert.equal(await poll("2026-10-21T11:59:59Z"), 0); assert.equal(all(s.tasks).length, 0);
+    assert.equal(await poll("2026-10-21T12:00:00Z"), 1);
+    const [task] = tasksOf("error_sweep");
+    assert.deepEqual(task.input, { source: "schedule", kind: "tick", triggerKey: first, start: "2026-10-21T06:00:00.000Z", end: first });
+    assert.equal(task.reason, "schedule tick " + first); assert.equal(task.status, "queued"); assert.equal(task.priority, 20);
+    const subject = f.row(s.subjects, task.subjectId);
+    assert.equal(subject.kind, "window"); assert.equal(subject.state, "open"); assert.equal(subject.repository, "fixture/project"); assert.equal(subject.workspaceId, null);
+    assert.equal(subject.key, "error_sweep:" + first); assert.deepEqual(subject.metadata, { start: "2026-10-21T06:00:00.000Z", end: first });
+    assert.equal(all(s.items).length, 0); assert.equal(all(s.tasks).length, 1);
+    assert.deepEqual(cursors(), { error_sweep: "2026-10-21T18:00:00.000Z", slow_sweep: monday });
+    assert.equal(await poll("2026-10-21T12:00:01Z"), 0); assert.equal(await poll("2026-10-21T17:59:59Z"), 0);
+    assert.equal(all(s.tasks).length, 1); assert.equal(all(s.subjects).length, 1);
+    assert.equal(await poll("2026-10-22T05:10:00Z"), 1);
+    const missed = tasksOf("error_sweep").find((t) => t.input.triggerKey !== first);
+    assert.deepEqual(missed.input, { source: "schedule", kind: "tick", triggerKey: "2026-10-22T00:00:00.000Z", start: "2026-10-21T18:00:00.000Z", end: "2026-10-22T00:00:00.000Z" });
+    assert.equal(tasksOf("error_sweep").length, 2); assert.equal(all(s.subjects).length, 2);
+    assert.deepEqual(cursors(), { error_sweep: "2026-10-22T06:00:00.000Z", slow_sweep: monday });
+    db.update(s.sourceCursors).set({ sha: "2026-10-22T00:00:00.000Z" }).where(eq(s.sourceCursors.action, "error_sweep")).run();
+    assert.equal(await poll("2026-10-22T05:20:00Z"), 0);
+    assert.equal(tasksOf("error_sweep").length, 2); assert.equal(cursors().error_sweep, "2026-10-22T06:00:00.000Z");
+    assert.equal(await poll("2026-10-26T03:30:00Z"), 2);
+    assert.equal(tasksOf("slow_sweep").length, 1); assert.equal(tasksOf("error_sweep").length, 3);
+    assert.deepEqual(tasksOf("slow_sweep")[0].input, { source: "schedule", kind: "tick", triggerKey: monday, start: "2026-10-25T03:30:00.000Z", end: monday });
+    assert.equal(tasksOf("slow_sweep")[0].priority, 20);
+    assert.equal(tasksOf("error_sweep").at(-1).input.end, "2026-10-26T00:00:00.000Z");
+    assert.deepEqual(cursors(), { error_sweep: "2026-10-26T06:00:00.000Z", slow_sweep: "2026-11-02T03:30:00.000Z" });
+    live.actions.error_sweep.enabled = false;
+    assert.equal(await poll("2026-10-26T07:00:00Z"), 0);
+    assert.deepEqual(cursors(), { slow_sweep: "2026-11-02T03:30:00.000Z" }); assert.equal(all(s.tasks).length, 4);
+    assert.equal(await poll("2026-10-27T07:00:00Z"), 0); assert.equal(all(s.tasks).length, 4);
+    live.actions.error_sweep.enabled = true;
+    assert.equal(await poll("2026-10-27T07:00:00Z"), 0);
+    assert.deepEqual(cursors(), { error_sweep: "2026-10-27T12:00:00.000Z", slow_sweep: "2026-11-02T03:30:00.000Z" }); assert.equal(all(s.tasks).length, 4);
+    assert.equal(all(s.sourceCursors).length, 2);
+  } else if (scenario === "window_review") {
+    const { pollSchedules } = await f.app("schedule-source.ts");
+    const poll = (at) => pollSchedules(undefined, new Date(at));
+    const tip = git(resolve("remote.git"), "rev-parse", "main");
+    const requests = () => f.requests.filter((request) => request.context.action === "error_sweep");
+    f.reset(0, "issues");
+    assert.equal(await poll("2026-10-21T10:20:00Z"), 0); assert.equal(await poll("2026-10-21T12:00:00Z"), 1);
+    f.calls.length = 0;
+    const r = await success();
+    assert.equal(r.stage, "publishing"); assert.equal(r.publication.status, "published"); assert.equal(r.context.item.number, 0);
+    assert.equal(r.mainSha, tip); assert.equal(r.headSha, tip); assert.equal(f.row(s.tasks, r.taskId).status, "completed");
+    assert.ok(f.row(s.workspaces, r.workspaceId).removedAt); assert.equal(all(s.subjects)[0].workspaceId, null);
+    assert.deepEqual(f.writes.map((write) => [write.type, write.title]), [["issue", "Broken link"], ["issue", "Slow page"]]);
+    assert.deepEqual(Object.keys(r.publication.issues).sort(), ["link:docs-a", "perf:home"]);
+    assert.ok(!f.calls.some((call) => /\/(issues|pulls)\/\d+/.test(call.path)), JSON.stringify(f.calls));
+    const [one] = requests(), { context } = one;
+    assert.deepEqual(context.input, { kind: "tick", triggerKey: "2026-10-21T12:00:00.000Z", start: "2026-10-21T06:00:00.000Z", end: "2026-10-21T12:00:00.000Z" });
+    assert.equal(context.action, "error_sweep"); assert.equal(context.reason, "schedule tick 2026-10-21T12:00:00.000Z");
+    assert.equal(context.item.number, 0); assert.equal(context.workspace.mainSha, tip); assert.equal(context.files.history, undefined);
+    assert.deepEqual(context.diffPaths, []); assert.equal(context.commentRevisions.length, 0);
+    assert.equal(await poll("2026-10-21T18:00:00Z"), 1);
+    const second = await success();
+    assert.equal(second.publication.status, "published"); assert.equal(f.writes.length, 2);
+    assert.deepEqual(Object.keys(second.publication.issues).sort(), ["link:docs-a", "perf:home"]);
+    const later = requests().findLast((request) => request.context.input.triggerKey === "2026-10-21T18:00:00.000Z").context;
+    assert.deepEqual(later.input, { kind: "tick", triggerKey: "2026-10-21T18:00:00.000Z", start: "2026-10-21T12:00:00.000Z", end: "2026-10-21T18:00:00.000Z" });
+    const history = readFileSync(later.files.history, "utf8");
+    assert.match(history, /## 2026-10-21T12:00:00\.000Z/); assert.match(history, /link:docs-a/);
+    assert.equal(all(s.items).length, 0); assert.equal(all(s.subjects).length, 2); assert.equal(all(s.runs).length, 2);
   } else if (scenario.startsWith("commit_review_")) {
     const { pollCommits } = await f.app("commit-source.ts");
     const seed = resolve("seed"), remote = resolve("remote.git"), channel = "C0123456789";

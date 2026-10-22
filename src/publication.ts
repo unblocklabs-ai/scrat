@@ -2,7 +2,7 @@ import { manifestOf } from "./actions.ts";
 import { db } from "./db.ts";
 import { applyEffects, type EffectContext } from "./effects.ts";
 import type { EventReferences } from "./events.ts";
-import type { GitHubRepository } from "./github.ts";
+import { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { getRun, updateRun } from "./run-history.ts";
 import type { Run, Task, Subject } from "./schema.ts";
@@ -39,4 +39,9 @@ export async function publishRun(github: GitHubRepository, task: Task, run: Run,
 export function publishCommit(subject: Subject, task: Task, run: Run) {
   const saved = getRun(run.id)!;
   return applyEffects(manifestOf(task.action).publish, { ...receiptContext(saved, {}), subject, task, run });
+}
+
+export function publishWindow(subject: Subject, task: Task, run: Run, references: EventReferences) {
+  const saved = getRun(run.id)!;
+  return applyEffects(manifestOf(task.action).publish, { ...receiptContext(saved, references), github: new GitHubRepository(subject.repository), subject, task, run: saved });
 }

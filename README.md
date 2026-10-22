@@ -202,6 +202,26 @@ A deployment adds or changes actions without a code release. Set `actions.direct
 - `tools` is the list of agent tools (`read`, `grep`, `find`, `ls`, `git`, `read_base`, `bash`, `edit`, `write`); `review` manifests get no write tools and `change` manifests no `git` or `read_base`. `files` lists the optional context files written for the run (`discussion`, `review`, `previous_assessment`, `previous_repair`, `history`); `history` is opt-in. `publish` lists effects (`push`, `pull_request`, `comment`, `labels`, `pr_assessment`, `issue`, `slack_reply`). An unknown name or key stops startup with the file and path.
 - Manifests are read once at startup: restart the service to apply a change. The supervised repository never contributes manifests.
 
+A `schedule` trigger runs a `review` action on a cron expression instead of on a GitHub event. `error_sweep.yaml` in the actions directory sweeps logs every six hours and opens an issue for each problem it reports (the `http` tool arrives with scoped tools):
+
+```yaml
+name: error_sweep
+trigger: { source: schedule, kind: tick, cron: "0 */6 * * *", window: 6h }
+mode: review
+agent: single
+context: all
+tools: [read, grep, find, ls, http]
+files: [history]
+publish: [issue]
+skill: skills/error_sweep/SKILL.md
+model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }
+priority: 20
+```
+
+- `cron` has five UTC fields (minute, hour, day-of-month, month, day-of-week; 0 and 7 are Sunday), each a `*`, a number, a range `a-b`, a step `*/n` or `a-b/n`, or a comma list of those. When both day fields are restricted, either one matching is enough. `window` is a number of minutes, hours or days: `90m`, `6h`, `1d`. A schedule manifest must be `mode: review`, and several may be enabled at once.
+- Each manifest keeps its own cursor: the next tick. The first poll after enabling records the next tick and queues nothing; disabling deletes the cursor. When a tick is due, Scrat queues one task on a `window` subject keyed `<action>:<tick>` with `start` (the tick minus `window`) and `end` (the tick) in its metadata. Ticks missed while the service was down fire once, for the latest one.
+- The agent gets the base branch checked out read-only, the window as `input.start` and `input.end`, and no GitHub issue or PR. List `history` to give it its earlier reports, and `issue` in `publish` to open the problems it finds.
+
 ### Optional actions
 
 An action runs unless its `enabled` is `false`. Only `review_base_change` ships with `enabled: false` (in `actions/review_base_change.yaml`); a deployment turns it on in `scrat.local.json`:

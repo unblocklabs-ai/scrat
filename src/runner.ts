@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { actionsPublishing, manifestOf } from "./actions.ts";
 import { buildAgentInput, evaluateContext, readDiffScope } from "./agent-input.ts";
 import { commitInput, commitMetadata, describeCommit, startCommitThread } from "./commit-review.ts";
+import { describeWindow } from "./window-review.ts";
 import { config, getActionConfig, getRepositoryPath, isBotLogin } from "./config.ts";
 import type { Manifest } from "./manifests.ts";
 import { botName } from "./identity.ts";
@@ -15,12 +16,12 @@ import { freshness, savedEvaluation } from "./freshness.ts";
 import { startOperation } from "./logging.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
 import { observe, type ItemObservation } from "./observation.ts";
-import { assertConfiguredRepository } from "./repository.ts";
+import { assertConfiguredRepository, remoteUrl } from "./repository.ts";
 import { executePi } from "./pi.ts";
 import { resolvePrReview } from "./pr-assessment.ts";
 import { getRun, latestSessionRun, runHistory, updateRun } from "./run-history.ts";
 import { reviewPullRequest } from "./pr-review.ts";
-import { publishCommit, publishRun } from "./publication.ts";
+import { publishCommit, publishRun, publishWindow } from "./publication.ts";
 import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint, InterruptedError } from "./results.ts";
 import type { Item } from "./items.ts";
 import { subjects, workspaces, type Run, type Task, type Subject, type Workspace } from "./schema.ts";
@@ -204,9 +205,19 @@ async function acquireCommitWorkspace({ subject, run, task, manifest, references
   return { workspace, validationOnly: false, mergeInProgress: false, mainSha: sha, baseRef: sha, preparedHead: sha, startHeadSha: sha, title: commitMetadata(subject).title };
 }
 
+async function acquireWindowWorkspace({ subject, manifest, references, repositoryPath, cleanup }: Ctx) {
+  const { repository } = subject;
+  assertConfiguredRepository(repository);
+  const mainSha = await fetchRepository(repositoryPath, remoteUrl(repository), config.github.baseBranch, await new GitHubRepository(repository).getGitEnvironment());
+  const workspace = await createWorkspace({ repositoryPath, baseRef: mainSha }, references);
+  cleanup.reviewWorkspace = workspace;
+  return { workspace, validationOnly: false, mergeInProgress: false, mainSha, baseRef: mainSha, preparedHead: mainSha, startHeadSha: mainSha, title: manifest.name };
+}
+
 async function acquireWorkspace(ctx: Ctx, observed: Observed | undefined): Promise<Prepared> {
   const { run, references, readOnly, cleanup } = ctx;
-  const acquired = observed ? await acquireItemWorkspace(ctx, observed) : await acquireCommitWorkspace(ctx);
+  const acquired = observed ? await acquireItemWorkspace(ctx, observed)
+    : ctx.subject.kind === "window" ? await acquireWindowWorkspace(ctx) : await acquireCommitWorkspace(ctx);
   const { workspace, validationOnly, mainSha, startHeadSha } = acquired;
   if (!validationOnly) updateRun(run.id, { workspaceId: workspace.id, mainSha, headSha: startHeadSha });
   const databaseConfig = !readOnly ? config.workspace?.database : undefined;
@@ -230,7 +241,7 @@ async function planAgent({ task, run, subject, readOnly, acceptance, repositoryP
   const previous = !readOnly ? latestSessionRun(p.workspace.id, run.id) : undefined;
   const { evaluated, diffPaths, diffBaseSha } = observed
     ? { evaluated: evaluateContext(run, task, observed.observation), ...await readDiffScope(repositoryPath, p.mainSha, p.preparedHead, Boolean(observed.pullRequest)) }
-    : await describeCommit(repositoryPath, subject, run.input);
+    : subject.kind === "window" ? describeWindow(task.action, subject, p.mainSha) : await describeCommit(repositoryPath, subject, run.input);
   updateRun(run.id, { context: evaluated });
   Object.assign(p, {
     evaluated, diffPaths, diffBaseSha, previousSessionFile: previous?.piSessionFile ?? undefined,
@@ -336,7 +347,7 @@ async function validateStage(ctx: Ctx, p: Prepared) {
 }
 
 async function publishStage({ task, run, subject, references, readOnly, manifest, repositoryPath }: Ctx, observed: Observed | undefined) {
-  if (!observed) return publishCommit(subject, task, run);
+  if (!observed) return subject.kind === "window" ? publishWindow(subject, task, run, references) : publishCommit(subject, task, run);
   const { repository, github, context, item, observation, mainSha } = observed;
   const evaluatedRun = getRun(run.id)!;
   const publicationContext = run.stage !== "publishing"

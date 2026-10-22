@@ -270,6 +270,18 @@ export async function fixture(scenario) {
       writeFileSync("deployment/implement.yaml", field(field(field(shipped("implement"), "tools", "[read, grep, find, ls, edit, write]"), "files", "[discussion, history]"), "skill", skill("implement")));
     }
   }
+  if (["schedule_source", "window_review"].includes(scenario)) {
+    const directory = resolve("deployment"), skill = resolve("app/skills/review_issue/SKILL.md");
+    mkdirSync(directory); config.actions.directory = directory;
+    const sweep = (name, cron, window, tools) => writeFileSync(`deployment/${name}.yaml`, [
+      `name: ${name}`, `trigger: { source: schedule, kind: tick, cron: "${cron}", window: ${window} }`, "mode: review", "agent: single", "context: all",
+      `tools: [${tools}]`, "files: [history]", "publish: [issue]", `skill: ${skill}`,
+      "model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }", "priority: 20", "",
+    ].join("\n"));
+    sweep("error_sweep", "0 */6 * * *", "6h", "read, grep, find, ls");
+    config.actions.error_sweep = { provider: "fixture" };
+    if (scenario === "schedule_source") { sweep("slow_sweep", "30 3 * * 1", "24h", "read, grep"); config.actions.slow_sweep = { provider: "fixture" }; }
+  }
   const { actions, ...fileSettings } = config;
   writeFileSync("app/scrat.config.json", JSON.stringify(fileSettings));
   writeFileSync("app/scrat.local.json", JSON.stringify({ actions }));

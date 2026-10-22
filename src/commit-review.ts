@@ -20,7 +20,7 @@ export function commitInput(raw: Record<string, unknown>): CommitInput {
 }
 
 export function commitMetadata({ metadata }: Subject) {
-  if (!metadata) throw new Error("Commit subject has no metadata");
+  if (!metadata || !("title" in metadata)) throw new Error("Commit subject has no metadata");
   return metadata;
 }
 

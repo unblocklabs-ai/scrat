@@ -3,6 +3,7 @@ import { basename, resolve } from "node:path";
 import { type Static, type TSchema, Type } from "typebox";
 import Value from "typebox/value";
 import { parse } from "yaml";
+import { nextTick, parseCron, parseWindow } from "./cron.ts";
 import { triggerKinds, triggerSource } from "./triggers.ts";
 
 export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -18,10 +19,11 @@ const strict = { additionalProperties: false } as const;
 const list = <T extends TSchema>(items: T, minItems = 0) => Type.Array(items, { minItems, uniqueItems: true });
 const model = Type.Object({ provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels) }, strict);
 const trigger = Type.Object({
-  source: Type.Enum(["github_items", "github_commits"]), kind: Type.Enum(triggerKinds),
+  source: Type.Enum(["github_items", "github_commits", "schedule"]), kind: Type.Enum(triggerKinds),
   item: Type.Optional(Type.Enum(["issue", "pr"])), author: Type.Optional(Type.Literal("bot")),
   grades: Type.Optional(list(Type.Enum(["S", "A", "B", "C", "D", "F"]), 1)),
   manual: Type.Optional(Type.Boolean()), branch: Type.Optional(Type.String()),
+  cron: Type.Optional(Type.String()), window: Type.Optional(Type.String()),
 }, strict);
 const schema = Type.Object({
   name: Type.String({ pattern: "^[a-z][a-z0-9_]{0,63}$" }), enabled: Type.Optional(Type.Boolean()),
@@ -46,17 +48,23 @@ function crossChecks(m: Parsed) {
   const problems: string[] = [];
   const need = (ok: boolean, message: string) => { if (!ok) problems.push(message); };
   const any = (list: readonly string[], names: readonly string[]) => names.some((name) => list.includes(name));
-  const items = t.source === "github_items", commits = t.source === "github_commits", slack = [...m.start ?? [], ...publish];
+  const items = t.source === "github_items", commits = t.source === "github_commits", scheduled = t.source === "schedule", slack = [...m.start ?? [], ...publish];
   need(triggerSource(t.kind) === t.source, `trigger.kind ${t.kind} does not belong to source ${t.source}`);
   need(items === (t.item !== undefined), "trigger.item is required for github_items and forbidden for github_commits");
   need(!["pr_conflicts", "pr_feedback", "low_grade"].includes(t.kind) || (t.item === "pr" && t.author === "bot"), `trigger.kind ${t.kind} requires item: pr and author: bot`);
   need(t.kind !== "label" || t.item === "issue", "trigger.kind label requires item: issue");
   need(t.kind !== "item_changed" || t.item !== "pr" || publish.includes("pr_assessment"), "an item_changed trigger on prs must publish pr_assessment");
   need(commits === (t.branch !== undefined), "trigger.branch is required for github_commits and forbidden for github_items");
+  need(scheduled === (t.cron !== undefined && t.window !== undefined) && (scheduled || (t.cron === undefined && t.window === undefined)), "trigger.cron and trigger.window are required for schedule and forbidden for other sources");
+  if (scheduled && t.cron !== undefined && t.window !== undefined) {
+    try { nextTick(parseCron(t.cron), new Date(0)); parseWindow(t.window); } catch (error) { problems.push((error as Error).message); }
+  }
+  need(!scheduled || mode === "review", "a schedule trigger requires mode review");
   need(t.grades === undefined || t.kind === "low_grade", "trigger.grades is only allowed with kind low_grade");
   need((m.maxSelfRepairs === undefined && m.exhaustedLabel === undefined) || t.kind === "low_grade", "maxSelfRepairs and exhaustedLabel are only allowed with kind low_grade");
   need((m.channel === undefined && m.startMessage === undefined && m.maxRangeCommits === undefined) || commits, "channel, startMessage and maxRangeCommits are only allowed with source github_commits");
   need(!any(slack, ["slack_post", "slack_reply"]) || commits, "slack effects require source github_commits");
+  need(!publish.includes("issue") || !commits, "the issue effect requires source github_items or schedule");
   need(!any(publish, ["labels", "comment"]) || items, "labels and comment effects require a github_items trigger");
   need(!publish.includes("pr_assessment") || (t.item === "pr" && agent === "panel"), "pr_assessment requires item: pr and agent: panel");
   need(agent !== "panel" || m.reviewers?.length === 2, "agent: panel requires exactly two reviewers");
@@ -130,7 +138,7 @@ export function findTriggerConflicts(manifests: readonly Manifest[], enabled: (m
   live.forEach((a, index) => live.slice(index + 1).forEach((b) => {
     const [x, y] = [a.trigger, b.trigger];
     const grades = !x.grades || !y.grades || x.grades.some((grade) => y.grades!.includes(grade));
-    if (x.source === y.source && x.kind === y.kind && x.item === y.item && x.branch === y.branch && grades) {
+    if (x.source !== "schedule" && x.source === y.source && x.kind === y.kind && x.item === y.item && x.branch === y.branch && grades) {
       const shown = [`source: ${x.source}`, `kind: ${x.kind}`, ...x.item ? [`item: ${x.item}`] : [], ...x.branch ? [`branch: ${x.branch}`] : []].join(", ");
       problems.push(`${a.file} and ${b.file} both match {${shown}}; disable one`);
     }

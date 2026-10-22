@@ -18,6 +18,7 @@ const commit = Type.Object({
   source: Type.Literal("github_commits"), kind: Type.Literal("commit"),
   triggerKey: text, sha: text, previousSha: text, branch: text, commitCount: Type.Number(), truncated: Type.Boolean(),
 });
+const tick = Type.Object({ source: Type.Literal("schedule"), kind: Type.Literal("tick"), triggerKey: text, start: text, end: text });
 
 const members = {
   item_changed: { source: "github_items", schema: itemChanged },
@@ -27,10 +28,11 @@ const members = {
   low_grade: { source: "github_items", schema: lowGrade },
   manual: { source: "github_items", schema: manual },
   commit: { source: "github_commits", schema: commit },
+  tick: { source: "schedule", schema: tick },
 } as const;
 
 export type TriggerInput = Static<typeof itemChanged> | Static<typeof label> | Static<typeof prConflicts> | Static<typeof prFeedback>
-  | Static<typeof lowGrade> | Static<typeof manual> | Static<typeof commit>;
+  | Static<typeof lowGrade> | Static<typeof manual> | Static<typeof commit> | Static<typeof tick>;
 export type KeyedTriggerInput = Extract<TriggerInput, { triggerKey: string }>;
 type Kind = keyof typeof members;
 type ManifestKind = Exclude<Kind, "manual">;

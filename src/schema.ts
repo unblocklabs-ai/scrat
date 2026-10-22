@@ -16,11 +16,11 @@ export const githubSnapshots = sqliteTable("github_snapshots", {
 export const subjects = sqliteTable("subjects", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
   repository: text("repository").notNull(),
-  kind: text("kind", { enum: ["item", "commit"] }).notNull(),
+  kind: text("kind", { enum: ["item", "commit", "window"] }).notNull(),
   key: text("key").notNull(),
   state: text("state", { enum: ["open", "closed"] }).notNull().default("open"),
   workspaceId: text("workspace_id").references(() => workspaces.id),
-  metadata: text("metadata", { mode: "json" }).$type<{ title: string; author: string; url: string }>(),
+  metadata: text("metadata", { mode: "json" }).$type<{ title: string; author: string; url: string } | { start: string; end: string }>(),
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
 }, (table) => [unique().on(table.repository, table.kind, table.key)]);
 

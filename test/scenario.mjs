@@ -2901,6 +2901,32 @@ export const scenarios = {
     for (const hidden of [secret, "querysecret", "payload-body", "pw@"]) assert.ok(!journal.includes(hidden), hidden);
     const { containsSecret } = await f.app("secrets.ts"), { redactSecrets } = await f.app("errors.ts"), { childEnvironment } = await f.app("secrets.ts");
     assert.ok(containsSecret(`x ${secret} x`)); assert.ok(!redactSecrets(`x ${secret}`).includes(secret)); assert.equal(childEnvironment(process.env).SCOUT_TOKEN, undefined);
+    const { createHttpTool } = await f.app("scoped-tools.ts"), { publicAnswers } = await f.app("bindings.ts"), { fetch: networkFetch } = await import("undici");
+    const classified = { "127.0.0.1": true, "127.255.0.1": true, "10.1.2.3": true, "172.16.0.1": true, "172.31.255.255": true, "192.168.1.1": true, "169.254.169.254": true, "169.254.1.1": true,
+      "100.64.0.1": true, "100.127.255.255": true, "0.0.0.0": true, "::": true, "::1": true, "fe80::1": true, "fc00::1": true, "fd00:ec2::254": true,
+      "::ffff:10.0.0.1": true, "::ffff:127.0.0.1": true, "::ffff:169.254.169.254": true, "::ffff:100.64.0.1": true,
+      "198.18.0.1": true, "fec0::1": true, "ff02::1": true, "198.17.255.255": false, "8.8.8.8": false, "93.184.216.34": false, "172.32.0.1": false, "100.128.0.1": false, "169.255.0.1": false, "2606:4700::1111": false, "::ffff:8.8.8.8": false };
+    for (const [address, refused] of Object.entries(classified)) {
+      const outcome = publicAnswers("host.example.test", async () => [{ address, family: address.includes(":") ? 6 : 4 }]);
+      if (refused) await assert.rejects(outcome, /resolves to private address/, address); else assert.equal((await outcome)[0].address, address);
+    }
+    const seen = f.external.length, stubbed = globalThis.fetch;
+    globalThis.fetch = networkFetch;
+    const attempt = (answer, onResolve = () => {}, signal = undefined) => {
+      const asked = [], tool = createHttpTool({ settings: {}, binding: f.config.bindings.scout, runId: "run", resolve: async (host) => { asked.push(host); onResolve(); return [{ address: answer, family: answer.includes(":") ? 6 : 4 }]; } });
+      return { asked, run: tool.execute("call", { method: "GET", url: "https://api.example.test/data" }, signal, undefined, {}) };
+    };
+    try {
+      for (const address of ["10.0.0.5", "127.0.0.1", "169.254.169.254", "100.64.0.1", "fd00:ec2::254", "::ffff:192.168.1.1"]) {
+        const { asked, run } = attempt(address);
+        await assert.rejects(run, new RegExp(`Refused: api\\.example\\.test resolves to private address ${address.replace(/\./g, "\\.")}`));
+        assert.deepEqual(asked, ["api.example.test"]);
+      }
+      const stop = new AbortController(), { asked, run } = attempt("192.0.2.1", () => { setTimeout(() => stop.abort(), 100); }, stop.signal);
+      await assert.rejects(run, (error) => !/Refused/.test(error.message));
+      assert.deepEqual(asked, ["api.example.test"]);
+    } finally { globalThis.fetch = stubbed; }
+    assert.equal(f.external.length, seen);
     const { readManifests } = await f.app("manifests.ts");
     for (const manifest of readManifests(resolve("app"))) assert.ok(!manifest.tools.some((tool) => ["http", "browser", "github_search"].includes(tool)) && !manifest.http && !manifest.browser, manifest.name);
   } },
@@ -2941,10 +2967,11 @@ export const scenarios = {
                 screenshot: async ({ path }) => { writeFileSync(path, "png"); },
       };
       const browser = { async newContext(options) { state.contextOptions = options; return { route: async (_pattern, handler) => { state.handler = handler; }, newPage: async () => page, close: async () => {} }; }, close: async () => { state.closed = true; } };
-      return { state, page, launch: async () => browser };
+      return { state, page, launch: async (args) => { state.args = args; return browser; } };
     };
     const warnings = [], settings = { navigationHosts: ["shop.example.test"], resourceHosts: ["cdn.example.test", "api.example.test"] };
-    const make = (extra = {}) => { const stub = fake(), { tool, close } = createBrowserTool({ settings, contextDir: resolve("ctx"), runId: "run", launch: stub.launch, log: { warn: (details) => warnings.push(details) }, ...extra }); return { ...stub, tool, close }; };
+    const publicAnswer = [{ address: "93.184.216.34", family: 4 }];
+    const make = (extra = {}) => { const stub = fake(), { tool, close } = createBrowserTool({ settings, contextDir: resolve("ctx"), runId: "run", launch: stub.launch, resolve: async () => publicAnswer, log: { warn: (details) => warnings.push(details) }, ...extra }); return { ...stub, tool, close }; };
     const act = (browser, args) => browser.tool.execute("call", args, undefined, undefined, {});
     const textOf = (result) => result.content[0].text;
 
@@ -2958,7 +2985,15 @@ export const scenarios = {
     assert.equal(bound.state.handler, undefined, "refused navigations never start a browser");
     const visit = JSON.parse(textOf(await act(bound, { action: "goto", url: "https://shop.example.test/cart?x=1" })));
     assert.deepEqual(visit, { url: "https://shop.example.test/cart?x=1", status: 200, title: "Shop" });
+    assert.deepEqual(bound.state.args, ["--host-resolver-rules=MAP cdn.example.test 93.184.216.34,MAP api.example.test 93.184.216.34,MAP shop.example.test 93.184.216.34"]);
     assert.deepEqual(bound.state.contextOptions, { acceptDownloads: false, serviceWorkers: "block", viewport: { width: 1280, height: 800 } });
+
+    const pinned = make({ resolve: async (host) => host === "cdn.example.test" ? [{ address: "2606:4700::1111", family: 6 }] : host === "api.example.test" ? [] : publicAnswer });
+    await act(pinned, { action: "goto", url: "https://shop.example.test/" });
+    assert.deepEqual(pinned.state.args, ["--host-resolver-rules=MAP cdn.example.test [2606:4700::1111],MAP api.example.test ~NOTFOUND,MAP shop.example.test 93.184.216.34"]);
+    const rebound = make({ resolve: async (host) => host === "cdn.example.test" ? [{ address: "93.184.216.34", family: 4 }, { address: "10.0.0.8", family: 4 }] : publicAnswer });
+    await assert.rejects(act(rebound, { action: "goto", url: "https://shop.example.test/" }), /Refused: cdn\.example\.test resolves to private address 10\.0\.0\.8/);
+    assert.equal(rebound.state.args, undefined, "a privately resolving host never launches Chromium");
 
     const verdicts = async (browser) => [
       await browser.page.request("https://shop.example.test/checkout", true), await browser.page.request("https://cdn.example.test/app.js", false),
@@ -2999,15 +3034,16 @@ export const scenarios = {
     assert.equal(slow.state.closed, true); assert.equal(slow.state.visited.length, 1);
 
     const installed = await import("playwright-core").then(() => true, () => false);
-    if (!installed) await assert.rejects(validateStaticConfig(f.config), /review_issue: The browser tool needs the optional playwright-core package, which is not installed/);
+    if (!installed) await assert.rejects(validateStaticConfig({ ...f.config, resolve: async () => publicAnswer }), /review_issue: The browser tool needs the optional playwright-core package, which is not installed/);
     f.addIssue(1); f.enqueue(1); await success();
     assert.deepEqual(f.requests.at(-1).request.tools.map((tool) => tool.function.name), ["read", "grep", "browser"]);
   } },
   bindings_startup: { title: "every invalid binding stops startup, a manifest naming an unknown binding is rejected at load, and tool settings are validated structurally", configure: [configureScoped], run: async () => {
     const secret = process.env.SCOUT_TOKEN;
     const { validateStaticConfig } = await f.app("startup.ts"), { readManifests } = await f.app("manifests.ts");
-    await validateStaticConfig(f.config);
-    const variant = (change) => { const copy = structuredClone(f.config); change(copy.bindings); return copy; };
+    const publicAnswer = [{ address: "93.184.216.34", family: 4 }], resolving = (answers) => async (host) => answers[host] ?? publicAnswer;
+    await validateStaticConfig({ ...f.config, resolve: resolving({}) });
+    const variant = (change) => { const copy = structuredClone(f.config); change(copy.bindings); return { ...copy, resolve: resolving({}) }; };
     const rejects = (change, message) => assert.rejects(validateStaticConfig(variant(change)), message);
     await rejects((b) => { b.scout.secret = "${MISSING_SCOUT_VAR}"; }, /bindings\.scout: \$\{MISSING_SCOUT_VAR\} is not set in the environment/);
     await rejects((b) => { b.scout.secret = "literal-secret-value"; }, /bindings\.scout: secret must be a "\$\{VAR\}" placeholder/);
@@ -3025,6 +3061,14 @@ export const scenarios = {
     await rejects((b) => { b.Bad_Name = structuredClone(b.scout); }, /bindings\.Bad_Name: name must be lowercase/);
     await rejects((b) => { b.scout = "text"; }, /bindings\.scout: must be an object/);
     await validateStaticConfig(variant((b) => { b.scout.header = "X-Api-Key"; delete b.scout.prefix; }));
+    for (const address of ["10.0.0.9", "127.0.0.1", "169.254.169.254", "100.64.0.1", "fd00:ec2::254", "::ffff:192.168.0.1"]) {
+      await assert.rejects(validateStaticConfig({ ...f.config, resolve: resolving({ "other.example.test": [{ address: "93.184.216.34", family: 4 }, { address, family: address.includes(":") ? 6 : 4 }] }) }),
+        new RegExp(`bindings\\.scout: hosts: other\\.example\\.test resolves to private address ${address.replace(/\./g, "\\.")}`));
+    }
+    const { default: fs } = await import("node:fs"), lines = [], write = fs.writeSync;
+    fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string") { lines.push(data); return data.length; } return write(fd, data, ...rest); };
+    try { await validateStaticConfig({ ...f.config, resolve: async (host) => { if (host === "other.example.test") throw new Error("ENOTFOUND"); return publicAnswer; } }); } finally { fs.writeSync = write; }
+    assert.equal(lines.filter((line) => line.includes("bindings.unresolved") && line.includes("other.example.test")).length, 1);
     delete process.env.SCOUT_TOKEN;
     await assert.rejects(validateStaticConfig(f.config), /bindings\.scout: \$\{SCOUT_TOKEN\} is not set in the environment/);
     process.env.SCOUT_TOKEN = secret;

@@ -1,6 +1,24 @@
-import { isIP } from "node:net";
+import { lookup } from "node:dns/promises";
+import { BlockList, isIP } from "node:net";
 
 export type Binding = { secret: string; hosts: string[]; header: string; prefix?: string };
+
+type Answer = { address: string; family: number };
+export type Resolver = (host: string) => Promise<Answer[]>;
+export const resolveHost: Resolver = (host) => lookup(host, { all: true, verbatim: false });
+
+const refused = new BlockList();
+for (const [network, prefix] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.168.0.0", 16], ["198.18.0.0", 15]] as const) refused.addSubnet(network, prefix, "ipv4");
+for (const [network, prefix] of [["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8]] as const) refused.addSubnet(network, prefix, "ipv6");
+
+const privateAddress = (address: string) => refused.check(address, isIP(address) === 6 ? "ipv6" : "ipv4");
+
+export async function publicAnswers(host: string, resolve: Resolver) {
+  const answers = await resolve(host).catch(() => []);
+  const bad = answers.find((answer) => privateAddress(answer.address));
+  if (bad) throw new Error(`Refused: ${host} resolves to private address ${bad.address}`);
+  return answers.length ? answers : undefined;
+}
 
 const forbiddenHeaders = new Set(["host", "cookie", "set-cookie", "content-length", "connection", "transfer-encoding", "upgrade", "te", "expect", "proxy-authorization", "proxy-connection"]);
 

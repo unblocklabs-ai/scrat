@@ -1,6 +1,6 @@
 import { access } from "node:fs/promises";
 import { manifests } from "./actions.ts";
-import { validateBindings } from "./bindings.ts";
+import { type Resolver, publicAnswers, resolveHost, validateBindings } from "./bindings.ts";
 import { type ActionSettings, config, thinkingLevels } from "./config.ts";
 import { deploymentDefaults, findTriggerConflicts, skillPath } from "./manifests.ts";
 import { slugOf } from "./identity.ts";
@@ -16,7 +16,7 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 
 // @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: {
-  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; slack?: { enabled?: boolean; channel?: string }; workspace?: { heavyCommands?: string[] };
+  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; resolve?: Resolver; slack?: { enabled?: boolean; channel?: string }; workspace?: { heavyCommands?: string[] };
   actions: Record<string, Partial<ActionSettings>>;
 } = config) {
   const modelRuntime = await sharedModelRuntime();
@@ -42,7 +42,18 @@ export async function validateStaticConfig(settings: {
   settings.workspace?.heavyCommands?.forEach((pattern, index) => {
     try { new RegExp(pattern); } catch { problems.push(`workspace.heavyCommands[${index}] is not a valid regular expression`); }
   });
-  problems.push(...validateBindings(settings.bindings));
+  const bindingProblems = validateBindings(settings.bindings);
+  problems.push(...bindingProblems);
+  if (!bindingProblems.length) {
+    for (const [name, binding] of Object.entries(settings.bindings ?? {})) {
+      for (const host of (binding as { hosts: string[] }).hosts) {
+        await publicAnswers(host, settings.resolve ?? resolveHost).then(
+          (answers) => { if (!answers) logger.warn({ event: "bindings.unresolved", binding: name, host }, "Binding host does not resolve; the http tool will refuse it"); },
+          (error: Error) => { problems.push(`bindings.${name}: hosts: ${error.message.replace(/^Refused: /, "")}`); },
+        );
+      }
+    }
+  }
   if (settings.slack?.enabled) {
     if (!settings.slack.channel?.trim()) problems.push("slack.channel must not be empty when slack.enabled is true");
     if (!process.env.SLACK_BOT_TOKEN) problems.push("slack.enabled is true but SLACK_BOT_TOKEN is not set");

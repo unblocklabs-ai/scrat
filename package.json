@@ -28,6 +28,7 @@
     "octokit": "^5.0.5",
     "pino": "^10.4.0",
     "typebox": "1.3.27",
+    "undici": "8.10.2",
     "yaml": "2.9.0"
   },
   "peerDependencies": {

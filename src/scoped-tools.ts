@@ -1,8 +1,10 @@
 import { existsSync } from "node:fs";
+import type { LookupFunction } from "node:net";
 import { join } from "node:path";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { type Binding, bindingSecret, hostProblem } from "./bindings.ts";
+import { Agent, fetch as pinnedFetch } from "undici";
+import { type Binding, type Resolver, bindingSecret, hostProblem, publicAnswers, resolveHost } from "./bindings.ts";
 import { redactSecrets } from "./errors.ts";
 import type { GitHubRepository } from "./github.ts";
 import { withOperation } from "./logging.ts";
@@ -48,8 +50,19 @@ async function readCapped(response: Response) {
   return { body: redacted.slice(0, maxResponseBytes), truncated: size > maxResponseBytes };
 }
 
-export function createHttpTool({ settings, binding, runId }: { settings: { methods?: readonly string[] }; binding: Binding; runId: string }) {
-  const methods = settings.methods ?? ["GET"], secret = bindingSecret(binding);
+const nativeFetch = globalThis.fetch;
+const send = (url: string, init: object): Promise<Response> => (globalThis.fetch === nativeFetch ? pinnedFetch : globalThis.fetch as (url: string, init: object) => Promise<unknown>)(url, init) as Promise<Response>;
+
+const pinnedLookup = (resolve: Resolver): LookupFunction => (host, options, callback) => {
+  publicAnswers(host, resolve).then((answers) => {
+    if (!answers) callback(new Error(`Refused: ${host} did not resolve`), "");
+    else if (options.all) callback(null, answers);
+    else callback(null, answers[0].address, answers[0].family);
+  }, (error: Error) => callback(error, ""));
+};
+
+export function createHttpTool({ settings, binding, runId, resolve = resolveHost }: { settings: { methods?: readonly string[] }; binding: Binding; runId: string; resolve?: Resolver }) {
+  const methods = settings.methods ?? ["GET"], secret = bindingSecret(binding), dispatcher = new Agent({ connect: { lookup: pinnedLookup(resolve) } });
   return defineTool({
     name: "http",
     label: "HTTP request",
@@ -73,9 +86,12 @@ export function createHttpTool({ settings, binding, runId }: { settings: { metho
           if (!sentHeaders.has(name.toLowerCase())) throw new Error(`Refused: header ${name} cannot be set; allowed headers are ${[...sentHeaders].join(", ")}`);
         }
         const timeout = AbortSignal.timeout(requestTimeoutMs);
-        const response = await fetch(url.href, {
+        const response = await send(url.href, {
           method: verb, body, redirect: "manual", signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-          headers: { ...headers, [binding.header]: `${binding.prefix ?? ""}${secret}` },
+          headers: { ...headers, [binding.header]: `${binding.prefix ?? ""}${secret}` }, dispatcher,
+        }).catch((error: unknown) => {
+          const cause = error instanceof Error ? error.cause : undefined;
+          throw cause instanceof Error && cause.message.startsWith("Refused:") ? cause : error;
         });
         const shown: Record<string, string> = {};
         for (const name of keptHeaders) {
@@ -121,7 +137,7 @@ type PageLike = {
 };
 type ContextLike = { route(pattern: string, handler: (route: RouteLike) => Promise<void>): Promise<void>; newPage(): Promise<PageLike>; close(): Promise<void> };
 export type BrowserLike = { newContext(options: Record<string, unknown>): Promise<ContextLike>; close(): Promise<void> };
-type Playwright = { chromium: { launch(options: { headless: boolean; chromiumSandbox: boolean }): Promise<BrowserLike>; executablePath(): string } };
+type Playwright = { chromium: { launch(options: { headless: boolean; chromiumSandbox: boolean; args: string[] }): Promise<BrowserLike>; executablePath(): string } };
 
 export async function loadPlaywright(): Promise<Playwright> {
   const specifier = "playwright-core";
@@ -132,17 +148,18 @@ export async function loadPlaywright(): Promise<Playwright> {
   return playwright;
 }
 
-const launchChromium = async () => (await loadPlaywright()).chromium.launch({ headless: true, chromiumSandbox: true });
+const launchChromium = async (args: string[]) => (await loadPlaywright()).chromium.launch({ headless: true, chromiumSandbox: true, args });
 const browserActions = ["goto", "text", "screenshot"];
 const maxPageText = 32 * 1024;
 const stepTimeoutMs = 30_000;
 
-export function createBrowserTool({ settings, binding, contextDir, runId, launch = launchChromium, limits = { steps: 40, milliseconds: 5 * 60 * 1000 }, log }: {
+export function createBrowserTool({ settings, binding, contextDir, runId, launch = launchChromium, resolve = resolveHost, limits = { steps: 40, milliseconds: 5 * 60 * 1000 }, log }: {
   settings: { navigationHosts: readonly string[]; resourceHosts: readonly string[] };
   binding?: Binding;
   contextDir?: string;
   runId: string;
-  launch?: () => Promise<BrowserLike>;
+  launch?: (args: string[]) => Promise<BrowserLike>;
+  resolve?: Resolver;
   limits?: { steps: number; milliseconds: number };
   log?: { warn(details: Record<string, unknown>): void };
 }) {
@@ -170,7 +187,12 @@ export function createBrowserTool({ settings, binding, contextDir, runId, launch
   }
   async function open() {
     if (session) return session;
-    const browser = await launch();
+    const rules: string[] = [];
+    for (const host of resourceHosts) {
+      const answer = (await publicAnswers(host, resolve))?.[0];
+      rules.push(`MAP ${host} ${answer ? (answer.family === 6 ? `[${answer.address}]` : answer.address) : "~NOTFOUND"}`);
+    }
+    const browser = await launch([`--host-resolver-rules=${rules.join(",")}`]);
     try {
       const context = await browser.newContext({ acceptDownloads: false, serviceWorkers: "block", viewport: { width: 1280, height: 800 } });
       await context.route("**/*", async (intercepted) => {

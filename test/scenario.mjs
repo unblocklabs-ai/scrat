@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { resolve } from "node:path";
@@ -1198,6 +1198,37 @@ try {
     process.env.GITHUB_PAT = "ghp_x"; await validateStaticConfig(variant((c) => { c.github.auth = "pat"; })); delete process.env.GITHUB_PAT;
     process.env.GITHUB_APP_PRIVATE_KEY = key;
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.reviewers[1].thinkingLevel = "turbo"; })), /review_pr reviewer 2: invalid thinking level/);
+
+    assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
+    const local = resolve("app/scrat.local.json"), requestLog = resolve("startup-requests.log");
+    writeFileSync("startup-probe.mjs", `import{appendFileSync}from"node:fs";globalThis.fetch=async(input)=>{appendFileSync(${JSON.stringify(requestLog)},String(input?.url??input)+"\\n");throw new Error("blocked");};await import(${JSON.stringify(resolve("app/src/run-next.ts"))});`);
+    const existing = JSON.parse(readFileSync(local, "utf8"));
+    const layered = (overrides) => ({ ...existing, ...overrides, actions: Object.fromEntries([...new Set([...Object.keys(existing.actions ?? {}), ...Object.keys(overrides.actions ?? {})])].map((name) => [name, { ...existing.actions?.[name], ...overrides.actions?.[name] }])) });
+    const startup = (overrides) => {
+      writeFileSync(local, JSON.stringify(layered(overrides)));
+      const run = spawnSync(process.execPath, ["startup-probe.mjs"], { encoding: "utf8" });
+      const failure = run.stderr.split("\n").flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } }).find((line) => line.msg === "Run command failed");
+      return { status: run.status, message: failure?.err.message };
+    };
+    const outbound = () => existsSync(requestLog) ? readFileSync(requestLog, "utf8") : "";
+    const modelRequests = f.requests.length;
+    for (const exhaustedLabel of ["scrat-exhausted", null, ""]) assert.deepEqual(startup({ actions: { address_review: { exhaustedLabel } } }), { status: 0, message: undefined });
+    f.addIssue(7); f.enqueue(7);
+    const before = JSON.stringify([all(s.tasks), all(s.runs)]);
+    const base = JSON.parse(readFileSync("app/scrat.config.json", "utf8")), { provider } = existing.actions.implement;
+    writeFileSync("app/scrat.config.json", JSON.stringify({ ...base, workspace: { ...base.workspace, heavyCommands: [] } }));
+    for (const [overrides, problem] of [
+      [{ actions: { implement: { thinkingLevel: "turbo" } } }, "implement: invalid thinking level turbo"],
+      [{ actions: { implement: { model: "no-such-model" } } }, `implement: no Pi model ${provider}/no-such-model`],
+      [{ actions: { implement: { skill: "skills/missing/SKILL.md" } } }, `implement: skill file not found: ${resolve("app/skills/missing/SKILL.md")}`],
+      [{ harness: { maxConcurrentValidations: 0 } }, "harness.maxConcurrentValidations must be a positive integer"],
+      [{ workspace: { heavyCommands: ["^(unclosed"] } }, "workspace.heavyCommands[0] is not a valid regular expression"],
+      [{ actions: { address_review: { exhaustedLabel: 5 } } }, 'address_review: exhaustedLabel must be a string, or null or "" to disable it'],
+    ]) {
+      assert.deepEqual(startup(overrides), { status: 1, message: `Invalid Scrat configuration:\n- ${problem}` }, problem);
+      assert.equal(JSON.stringify([all(s.tasks), all(s.runs)]), before, "no task is claimed on a rejected start");
+    }
+    assert.equal(outbound(), ""); assert.equal(f.requests.length, modelRequests);
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_issue.model = "missing-model"; })), /review_issue: no Pi model fixture\/missing-model/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.reviewers[0].provider = "nowhere"; })), /review_pr reviewer 1: no Pi model nowhere/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.resolve_conflicts.skill = "skills/missing/SKILL.md"; })), /resolve_conflicts: skill file not found/);
@@ -1918,8 +1949,17 @@ try {
     fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string") { lines.push(...data.split("\n").filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } })); return data.length; } return write(fd, data, ...rest); };
     const toolResults = () => JSON.stringify(f.requests.findLast((entry) => entry.request.messages.some((message) => message.role === "tool")).request.messages.filter((message) => message.role === "tool"));
     const attempt = async (number, mode) => { f.addIssue(number, ["scrat"]); f.modes.set(number, mode); f.enqueue(number, "implement"); return run(); };
-    let nohup, background, foreground, nohupSeen, backgroundSeen;
-    try { nohup = await attempt(1, "heavy"); nohupSeen = toolResults(); background = await attempt(2, "heavy-bg"); backgroundSeen = toolResults(); foreground = await attempt(3, "heavy-fg"); } finally { fs.writeSync = write; }
+    const { withValidationSlot } = await f.app("commands.ts"), { config: live } = await f.app("config.ts");
+    let nohup, background, foreground, nohupSeen, backgroundSeen, heavyBeforeRelease, release, waiting;
+    try {
+      nohup = await attempt(1, "heavy"); nohupSeen = toolResults(); background = await attempt(2, "heavy-bg"); backgroundSeen = toolResults();
+      live.harness.maxConcurrentValidations = 1;
+      const holder = withValidationSlot(() => new Promise((done) => { release = done; }));
+      const pending = attempt(3, "heavy-fg");
+      for (let n = 0; n < 600 && !(waiting = lines.find((line) => line.event === "validation.waiting")); n++) await new Promise((done) => setTimeout(done, 50));
+      heavyBeforeRelease = lines.filter((line) => line.event === "pi.heavy_command").length;
+      release(); await holder; foreground = await pending;
+    } finally { release?.(); fs.writeSync = write; }
     const workspaceOf = (r) => f.row(s.workspaces, r.workspaceId).path;
     assert.ok(nohup.error);
     const failed = lines.find((line) => line.event === "pi.tool_failed");
@@ -1933,8 +1973,9 @@ try {
     assert.equal(foreground.error, null, JSON.stringify(foreground.error));
     assert.ok(existsSync(resolve(workspaceOf(foreground), ".scrat/heavy-fg")));
     const queued = lines.filter((line) => line.event === "pi.heavy_command");
-    assert.equal(queued.length, 1); assert.match(queued[0].command, /^touch \.scrat\/heavy-fg$/); assert.equal(typeof queued[0].waitedMs, "number");
-    assert.ok(lines.some((line) => line.event === "validation.started" && line.runId === foreground.id), "the heavy command took a validation slot");
+    assert.equal(queued.length, 1); assert.match(queued[0].command, /^touch \.scrat\/heavy-fg$/); assert.ok(queued[0].waitedMs > 0);
+    assert.equal(waiting?.runId, foreground.id, "the agent's heavy command queued for a validation slot");
+    assert.equal(heavyBeforeRelease, 0, "the heavy command must not run while another run holds the only slot");
   } else if (scenario === "validation_slots") {
     const { config } = await f.app("config.ts");
     const intervals = (skip) => readFileSync("validations.log", "utf8").trim().split("\n").slice(skip).map(JSON.parse).sort((a, b) => a.s - b.s);

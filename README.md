@@ -140,6 +140,34 @@ Before relying on a new deployment, run it once against a disposable repository 
 
 ### Workspace
 
+On Linux, set `workspace.sandbox: true` in deployment overrides to run repository
+preparation, validation, agent Bash and workspace Git (including hooks) inside
+Bubblewrap. Enabling it is fail-closed: missing namespaces or runtimes are errors,
+not a fallback to host execution. The installer checks the boundary before stopping
+the old service. On Ubuntu 24.04, an administrator installs `bubblewrap`, installs
+`deploy/scrat-bwrap.apparmor` as `/etc/apparmor.d/scrat-bwrap`, and loads it with
+`apparmor_parser -r /etc/apparmor.d/scrat-bwrap`. Do not disable the global userns
+restriction. Provision Node and the pinned pnpm version with Corepack first.
+
+Commands get the workspace, their own persistent home, private `/tmp`, `/run` and
+process namespace, read-only system/Node/pnpm runtimes, read-only repository Git
+objects, and (for Bash) their own context directory. They do not get controller
+credentials/data, other workspaces, host process environments or the Docker socket.
+New sandboxed workspaces are independent Git clones; legacy linked workspaces are
+converted in place with their index, merge state and working files retained. Old
+Git metadata/pointers remain under `data/private-git/` for recovery. The controller
+imports published commits through a checked Git bundle rather than executing Git
+in a writable shared repository. Review-workspace cleanup also removes its private
+home; retained implementation workspaces keep theirs for retries.
+
+Networking stays enabled. Apply VM/hypervisor egress rules separately: deny private,
+link-local and local IPv6 networks except explicit DNS/provider dependencies, while
+preserving management/monitoring replies. Test databases use per-run random
+passwords; these are the only database credentials repository commands receive.
+This is OS isolation, not a guarantee against kernel exploits, resource exhaustion,
+or exfiltration of workspace content over permitted internet access. The service
+account should have no sudo; administration belongs to a separately verified login.
+
 Workspace commands are argument arrays, not shell strings: `["pnpm", "verify"]`. Command lists execute sequentially inside the worktree; a failing command stops the run.
 
 | Setting | Purpose |

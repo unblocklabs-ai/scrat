@@ -11,6 +11,7 @@ const localConfigUrl = new URL("../scrat.local.json", import.meta.url);
 export { thinkingLevels, type ThinkingLevel };
 
 type WorkspaceConfig = {
+  sandbox?: boolean;
   environment?: Record<string, string>;
   prepare?: string[][];
   database?: { image: string; environment: string[]; migrate: string[] } | null;

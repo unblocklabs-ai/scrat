@@ -29,7 +29,7 @@ import { childEnvironment } from "./secrets.ts";
 import { recordEvent } from "./events.ts";
 import { claimTask, finishRun, interruptRun } from "./tasks.ts";
 import { parseTriggerInput } from "./triggers.ts";
-import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
+import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, isolateWorkspace, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
 
 type DatabaseConfig = NonNullable<NonNullable<typeof config.workspace>["database"]>;
 type Environment = Record<string, string | undefined>;
@@ -68,7 +68,7 @@ function stopBefore(stop: AbortSignal | undefined, next: string) {
 
 const unresolvedConflict = "PR still conflicts with its base branch after resolution";
 
-async function validateAndCommit({ run, references, repositoryPath, stop }: Ctx, p: Prepared, kind: Acceptance) {
+async function validateAndCommit({ run, references, stop }: Ctx, p: Prepared, kind: Acceptance) {
   const { workspace, commandEnvironment } = p;
   if (!p.validationOnly) updateRun(run.id, { agentCheckpoint: await checkpointWorkspace(workspace) });
   await asCheckFailure(() => prepareWorkspace(workspace, commandEnvironment, p.databaseConfig, references));
@@ -84,7 +84,7 @@ async function validateAndCommit({ run, references, repositoryPath, stop }: Ctx,
   const message = /^[a-z]+(\([^)]*\))?!?: /.test(p.title) ? p.title : `fix: ${p.title}`;
   const commitSha = await commitWorkspace(workspace, message, botAuthor(), references);
   if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
-  if (kind === "conflict_free" && await hasConflicts(repositoryPath, p.mainSha, commitSha)) {
+  if (kind === "conflict_free" && await hasConflicts(workspace.path, p.mainSha, commitSha)) {
     throw new Error(unresolvedConflict);
   }
   if (kind === "nonempty_diff" && !await git(workspace.path, ["diff", "--name-only", `${p.baseRef}...HEAD`])) {
@@ -159,7 +159,11 @@ async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
   const preparedHead = await git(repositoryPath, ["rev-parse", headRef]);
   let workspace = !readOnly && item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
   if (workspace?.removedAt) throw new Error(`Workspace was removed: ${workspace.id}`);
-  if (workspace) await validateWorkspace(workspace);
+  if (workspace) {
+    await validateWorkspace(workspace);
+    await isolateWorkspace(workspace);
+    if (config.workspace?.sandbox) await git(workspace.path, ["fetch", "--no-tags", "--", `${repositoryPath}/.git`, preparedHead, mainSha]);
+  }
   if (validationOnly) {
     if (!hasValidationCheckpoint(run)) throw new Error("No complete agent checkpoint to resume; use normal retry to repair");
     if (!workspace || workspace.id !== run.workspaceId) throw new Error("Validation checkpoint workspace is no longer attached to this item");

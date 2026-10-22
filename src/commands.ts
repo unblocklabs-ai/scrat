@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import type { EventReferences } from "./events.ts";
 import { config } from "./config.ts";
 import { logger, withOperation } from "./logging.ts";
+import { sandboxCommand } from "./sandbox.ts";
 
 const executeFile = promisify(execFile);
 
@@ -11,7 +12,8 @@ export async function runCommands(commands: string[][], cwd: string, environment
   for (const [file, ...args] of commands) {
     await withOperation("workspace.command", { ...references, command: [file, ...args], cwd }, async (operation) => {
       const started = performance.now();
-      const { stdout, stderr } = await executeFile(file, args, { cwd, env: environment, maxBuffer: 16 * 1024 * 1024, timeout: config.harness.commandTimeoutSeconds * 1000, killSignal: "SIGKILL" }).catch((error) => {
+      const command = sandboxCommand(cwd, file, args, environment);
+      const { stdout, stderr } = await executeFile(command.file, command.args, { cwd, env: command.env, maxBuffer: 16 * 1024 * 1024, timeout: config.harness.commandTimeoutSeconds * 1000, killSignal: "SIGKILL" }).catch((error) => {
         if (error instanceof Error && "killed" in error && error.killed) error.message = `Command timed out after ${config.harness.commandTimeoutSeconds} seconds: ${[file, ...args].join(" ")}`;
         throw error;
       });

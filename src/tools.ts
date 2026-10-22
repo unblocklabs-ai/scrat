@@ -14,6 +14,7 @@ import { blobSize, gitPage } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { createBrowserTool, createGithubSearchTool, createHttpTool } from "./scoped-tools.ts";
 import { createReviewGitTool, defaultBytes, maxBytes, pageText } from "./review-git.ts";
+import { sandboxCommand } from "./sandbox.ts";
 
 const heavyTimeoutSeconds = 45 * 60;
 
@@ -70,7 +71,13 @@ export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, ba
   const basePaths = new Set<string>();
 
   const sdkBash = createBashToolDefinition(cwd, {
-    spawnHook: (context) => ({ ...context, env: { ...childEnvironment(context.env), ...environment } }),
+    spawnHook: (context) => {
+      const command = sandboxCommand(cwd, "/bin/bash", ["-c", context.command], { ...childEnvironment(context.env), ...environment }, contextDir ? [contextDir] : []);
+      const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+      return config.workspace?.sandbox
+        ? { ...context, command: [command.file, ...command.args].map(quote).join(" "), env: command.env }
+        : { ...context, env: command.env };
+    },
   });
   const heavy = (config.workspace?.heavyCommands ?? []).map((pattern) => new RegExp(pattern));
   const bash: typeof sdkBash = {

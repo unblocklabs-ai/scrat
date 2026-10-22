@@ -24,6 +24,7 @@
     "channel": ""
   },
   "workspace": {
+    "sandbox": false,
     "environment": {
       "VITEST_MAX_WORKERS": "1"
     },

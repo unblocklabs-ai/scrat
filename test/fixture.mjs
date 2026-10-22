@@ -133,7 +133,7 @@ export async function fixture(scenario, spec) {
     if (!review && mode === "notes") tool = [{ name: "write", args: { path: ".scrat/notes.md", content: "Plan: change value\n" } },
       { name: "write", args: { path: "src/app.ts", content: "export const value = 5;\n" } }][step];
     if (!review && mode === "leak-file") tool = step === 0 ? { name: "write", args: { path: "src/app.ts", content: process.env.GITHUB_APP_PRIVATE_KEY } } : undefined;
-    if (script && review) tool = script[step];
+    if (script) tool = script[step];
     const fumble = !corrected && (mode === "format-once" || (mode === "reviewer-grade-once" && review && !consolidating && request.model.includes("deepseek"))
       || (mode === "consolidation-grade-once" && consolidating));
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : "complete";

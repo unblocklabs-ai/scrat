@@ -2147,6 +2147,55 @@ export const scenarios = {
     const r = await run(); assert.match(r.error.message, /Committed tree differs/);
     assert.equal(r.verification, null); assert.equal(f.prs.length, 0);
   } },
+  sandbox: { title: "Linux sandbox contains preparation, agent Bash and commit hooks while a fresh clone validates and publishes", needsSandbox: true,
+    seed: () => {
+      writeFileSync("outside-secret.txt", "controller-only-canary");
+      writeFileSync("seed/sandbox-probe.mjs", `import{strict as assert}from"node:assert";import{readFileSync,writeFileSync,appendFileSync,mkdirSync,existsSync}from"node:fs";
+        assert.throws(()=>readFileSync(${JSON.stringify(resolve("outside-secret.txt"))}));
+        try{writeFileSync(${JSON.stringify(resolve("outside-write.txt"))},"escaped")}catch{}
+        assert.throws(()=>writeFileSync("/usr/bin/scrat-write-canary","escaped"));
+        assert.equal(existsSync("/proc/${process.pid}/environ"),false);
+        assert.equal(process.env.DOCKER_HOST,undefined);assert.equal(process.env.GITHUB_APP_PRIVATE_KEY,undefined);
+        assert.match(readFileSync("/proc/self/status","utf8"),/NoNewPrivs:\\s+1/);
+        mkdirSync(".scrat",{recursive:true});appendFileSync(".scrat/sandbox-proof.jsonl",JSON.stringify({phase:process.argv[2]})+"\\n");`);
+    },
+    configure: [(config) => { config.workspace = { sandbox: true, prepare: [[process.execPath, "sandbox-probe.mjs", "prepare"]], validate: [[process.execPath, "sandbox-probe.mjs", "validate"]] }; }],
+    run: async () => {
+      f.script = [
+        { name: "bash", args: { command: `${process.execPath} sandbox-probe.mjs bash && printf 'export const value = 13;\\n' > src/app.ts` } },
+        { name: "bash", args: { command: `printf '#!/bin/sh\\nexec ${process.execPath} sandbox-probe.mjs hook\\n' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit` } },
+      ];
+      const result = await implement(1);
+      assert.equal(result.publication.status, "published");
+      assert.equal(git(resolve("remote.git"), "show", `${result.publication.commitSha}:src/app.ts`), "export const value = 13;");
+      const workspace = f.row(s.workspaces, result.workspaceId);
+      assert.ok(fs.lstatSync(resolve(workspace.path, ".git")).isDirectory());
+      const proof = readFileSync(resolve(workspace.path, ".scrat/sandbox-proof.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+      assert.deepEqual([...new Set(proof.map((row) => row.phase))].sort(), ["bash", "hook", "prepare", "validate"]);
+      assert.equal(existsSync("outside-write.txt"), false);
+      assert.equal(readFileSync("outside-secret.txt", "utf8"), "controller-only-canary");
+      const { removeWorkspace } = await f.app("workspaces.ts");
+      await removeWorkspace(workspace.id);
+      assert.equal(existsSync(workspace.path), false);
+      assert.equal(existsSync(resolve("data/sandbox-homes", workspace.id)), false);
+      const legacyPath = resolve("data/workspaces/legacy-migration"), checkout = f.config.github.repositoryPath;
+      const baseSha = git(checkout, "rev-parse", "HEAD");
+      git(checkout, "worktree", "add", "-b", "scrat/legacy-migration", legacyPath, baseSha);
+      writeFileSync(resolve(legacyPath, "src/app.ts"), "export const value = 21;\n");
+      git(legacyPath, "add", "."); commit(legacyPath, "Legacy branch edit");
+      writeFileSync(resolve(checkout, "src/app.ts"), "export const value = 22;\n");
+      git(checkout, "add", "."); commit(checkout, "Conflicting base edit");
+      assert.throws(() => git(legacyPath, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "merge", "--no-commit", git(checkout, "rev-parse", "HEAD")), /Command failed/);
+      const index = git(legacyPath, "ls-files", "--unmerged");
+      assert.ok(index);
+      mkdirSync(resolve(legacyPath, ".scrat")); writeFileSync(resolve(legacyPath, ".scrat/notes.md"), "Retain the unresolved merge\n");
+      const { isolateWorkspace } = await f.app("workspaces.ts");
+      await isolateWorkspace({ id: "legacy-migration", path: legacyPath, repositoryPath: checkout, branch: "scrat/legacy-migration" });
+      assert.equal(git(legacyPath, "ls-files", "--unmerged"), index);
+      assert.equal(git(legacyPath, "rev-parse", "MERGE_HEAD"), git(checkout, "rev-parse", "HEAD"));
+      assert.equal(readFileSync(resolve(legacyPath, ".scrat/notes.md"), "utf8"), "Retain the unresolved merge\n");
+      assert.ok(fs.lstatSync(resolve(legacyPath, ".git")).isDirectory());
+    } },
   isolation: { title: "workspace commands, hooks and agent tools cannot reach Scrat credentials, and credential material is never published", seed: seedIsolation, configure: [configureIsolation], run: async () => {
     const key = process.env.GITHUB_APP_PRIVATE_KEY;
     f.addIssue(1); f.reset(1, "outside"); f.enqueue(1); await success();
@@ -3253,8 +3302,20 @@ export const scenarios = {
     const runs = await Promise.all([f.runNextTask(), f.runNextTask()]);
     for (const r of runs) assert.equal(r.error, null, JSON.stringify(r.error));
     const urls = new Set(f.requests.map((r) => r.context.database.url)); assert.equal(urls.size, 2);
+    assert.equal(new Set([...urls].map((url) => new URL(url).password)).size, 2);
     assert.equal(process.env.DATABASE_URL, original);
     for (const r of runs) assert.equal(execFileSync("docker", ["ps", "-a", "--filter", `name=^/scrat-v2-db-${r.id}$`, "--format", "{{.ID}}"], { encoding: "utf8" }).trim(), "");
+    const { createRunDatabase, removeRunDatabase } = await f.app("databases.ts");
+    try {
+      const databases = await Promise.all(runs.map((run) => createRunDatabase(run.id, "postgres:16-alpine")));
+      const address = execFileSync("docker", ["inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", databases[0].container], { encoding: "utf8" }).trim();
+      assert.ok(address);
+      const query = (password) => execFileSync("docker", ["exec", "--env", `PGPASSWORD=${password}`, databases[1].container,
+        "psql", "-h", address, "-U", "postgres", "-d", "scrat_test", "-Atc", "SELECT 1"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      assert.equal(query(new URL(databases[0].url).password).trim(), "1");
+      assert.throws(() => query(new URL(databases[1].url).password), /password authentication failed/);
+      assert.throws(() => query("postgres"), /password authentication failed/);
+    } finally { await Promise.all(runs.map((run) => removeRunDatabase(run.id))); }
   } },
 };
 

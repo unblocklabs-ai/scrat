@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { childEnvironment } from "./secrets.ts";
 import { serialized } from "./single-flight.ts";
+import { inWorkspace, sandboxCommand } from "./sandbox.ts";
 
 const executeFile = promisify(execFile);
 const networkOptions = { timeout: 600_000, killSignal: "SIGKILL" } as const;
@@ -20,7 +21,9 @@ function timedOut(label: string) {
 }
 
 export async function git(repositoryPath: string, args: string[], env = childEnvironment()) {
-  const { stdout } = await executeFile("git", ["-C", repositoryPath, ...args], { env, maxBuffer: 16 * 1024 * 1024, ...(networkCommands.has(args[0]!) ? networkOptions : {}) }).catch(timedOut(args[0]!));
+  const command = inWorkspace(repositoryPath) ? sandboxCommand(repositoryPath, "git", args, env)
+    : { file: "git", args: ["-C", repositoryPath, ...args], env };
+  const { stdout } = await executeFile(command.file, command.args, { cwd: repositoryPath, env: command.env, maxBuffer: 16 * 1024 * 1024, ...(networkCommands.has(args[0]!) ? networkOptions : {}) }).catch(timedOut(args[0]!));
   return args.includes("-z") || args[0] === "show" ? stdout : stdout.trim();
 }
 
@@ -34,7 +37,9 @@ export async function blobSize(repositoryPath: string, object: string) {
 
 export function gitPage(repositoryPath: string, args: string[], offset: number, limit: number) {
   return new Promise<GitPage>((done, fail) => {
-    const child = spawn("git", ["-C", repositoryPath, ...args], { env: childEnvironment(), stdio: ["ignore", "pipe", "pipe"] });
+    const command = inWorkspace(repositoryPath) ? sandboxCommand(repositoryPath, "git", args, childEnvironment())
+      : { file: "git", args: ["-C", repositoryPath, ...args], env: childEnvironment() };
+    const child = spawn(command.file, command.args, { cwd: repositoryPath, env: command.env, stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
     let position = 0, kept = 0, stderr = "", stopped = false;
     child.stderr.on("data", (data: Buffer) => { if (stderr.length < 8192) stderr += data.toString(); });

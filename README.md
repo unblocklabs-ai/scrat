@@ -80,6 +80,15 @@ For project review, run `typecheck`, `knip`, and the integration/E2E tests after
 - Relative paths in overrides resolve from the config directory, like the defaults.
 - On the VM the file lives at `~/.local/share/scrat-v2/scrat.local.json` and is linked into each release by the installer, which checks it before stopping the running service. After editing it, check it with `node src/config.ts` from `~/.local/share/scrat-v2/current`, then apply it with `systemctl --user restart scrat.service`, which waits for running tasks like a deploy.
 
+Per-install systemd overrides go in `~/.config/systemd/user/scrat.service.d/local.conf` on the VM, for example a lower memory cap on a smaller host:
+
+```ini
+[Service]
+MemoryMax=8G
+```
+
+The installer keeps this file across deploys (any other drop-in is moved into the backup), and it overrides the `MemoryMax=20G` default in `deploy/scrat.service`. Apply an edit without a deploy with `systemctl --user daemon-reload && systemctl --user restart scrat.service`.
+
 ### Harness and GitHub
 
 | Setting | Purpose |
@@ -140,6 +149,34 @@ Before relying on a new deployment, run it once against a disposable repository 
 
 ### Workspace
 
+On Linux, set `workspace.sandbox: true` in deployment overrides to run repository
+preparation, validation, agent Bash and workspace Git (including hooks) inside
+Bubblewrap. Enabling it is fail-closed: missing namespaces or runtimes are errors,
+not a fallback to host execution. The installer checks the boundary before stopping
+the old service. On Ubuntu 24.04, an administrator installs `bubblewrap`, installs
+`deploy/scrat-bwrap.apparmor` as `/etc/apparmor.d/scrat-bwrap`, and loads it with
+`apparmor_parser -r /etc/apparmor.d/scrat-bwrap`. Do not disable the global userns
+restriction. Provision Node and the pinned pnpm version with Corepack first.
+
+Commands get the workspace, their own persistent home, private `/tmp`, `/run` and
+process namespace, read-only system/Node/pnpm runtimes, read-only repository Git
+objects, and (for Bash) their own context directory. They do not get controller
+credentials/data, other workspaces, host process environments or the Docker socket.
+New sandboxed workspaces are independent Git clones; legacy linked workspaces are
+converted in place with their index, merge state and working files retained. Old
+Git metadata/pointers remain under `data/private-git/` for recovery. The controller
+imports published commits through a checked Git bundle rather than executing Git
+in a writable shared repository. Review-workspace cleanup also removes its private
+home; retained implementation workspaces keep theirs for retries.
+
+Networking stays enabled. Apply VM/hypervisor egress rules separately: deny private,
+link-local and local IPv6 networks except explicit DNS/provider dependencies, while
+preserving management/monitoring replies. Test databases use per-run random
+passwords; these are the only database credentials repository commands receive.
+This is OS isolation, not a guarantee against kernel exploits, resource exhaustion,
+or exfiltration of workspace content over permitted internet access. The service
+account should have no sudo; administration belongs to a separately verified login.
+
 Workspace commands are argument arrays, not shell strings: `["pnpm", "verify"]`. Command lists execute sequentially inside the worktree; a failing command stops the run.
 
 | Setting | Purpose |
@@ -184,7 +221,7 @@ Each action is one manifest, `actions/<name>.yaml`, validated at startup (`src/m
 | `maxSelfRepairs` | `address_review` only: most self-repair runs started for one PR (non-negative integer, default 2; 0 disables self-repair; not enqueueable manually). A push makes the review stale and Scrat re-reviews; a reply-only repair is not retriggered for the same assessment. |
 | `exhaustedLabel` | `address_review` only, optional: label added to a Scrat PR whose current review is graded C or lower once `maxSelfRepairs` is reached, and removed when its current review grades better. `null` or `""` (e.g. in `scrat.local.json`) disables it; GitHub creates the label if it is missing. A repair counts toward `maxSelfRepairs` when it starts running, not when it is queued or cancelled. |
 
-The checked-in configuration currently uses six task slots and three validation slots (sized for a 24 GB host, with the service capped at `MemoryMax=20G`), priorities **PR 100 > implementation/maintenance 60 > issue 10**, and a Sol-high/DeepSeek-high review panel with Sol-high consolidation. These are configurable values, not built-in limits or model choices.
+The checked-in configuration currently uses six task slots and three validation slots (sized for a 24 GB host, with the service capped at `MemoryMax=20G` by default; `local.conf` sets it per install, see Deployment overrides), priorities **PR 100 > implementation/maintenance 60 > issue 10**, and a Sol-high/DeepSeek-high review panel with Sol-high consolidation. These are configurable values, not built-in limits or model choices.
 
 ### Adding an action
 

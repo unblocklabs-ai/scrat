@@ -33,9 +33,6 @@ export async function validateWorkspace(workspace: Workspace) {
     || !registered.split("\0").includes(`worktree ${path}`)) throw new Error("Workspace Git identity changed");
 }
 
-// Preserve legacy workspaces, including their index and conflict state, while
-// severing the writable Git metadata shared with other jobs. The old pointer
-// and metadata remain available for recovery outside the command sandbox.
 export async function isolateWorkspace(workspace: Workspace) {
   if (!config.workspace?.sandbox || (await lstat(resolve(workspace.path, ".git"))).isDirectory()) return;
   await validateWorkspace(workspace);

@@ -3300,8 +3300,6 @@ export const scenarios = {
       const databases = await Promise.all(runs.map((run) => createRunDatabase(run.id, "postgres:16-alpine")));
       const address = execFileSync("docker", ["inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", databases[0].container], { encoding: "utf8" }).trim();
       assert.ok(address);
-      // Connect from the other container: PostgreSQL's loopback trust must not
-      // make the wrong-password assertion pass without authenticating anything.
       const query = (password) => execFileSync("docker", ["exec", "--env", `PGPASSWORD=${password}`, databases[1].container,
         "psql", "-h", address, "-U", "postgres", "-d", "scrat_test", "-Atc", "SELECT 1"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
       assert.equal(query(new URL(databases[0].url).password).trim(), "1");

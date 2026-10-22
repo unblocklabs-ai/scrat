@@ -31,8 +31,6 @@ function workspaceRoot() {
   return existsSync(path) ? realpathSync(path) : path;
 }
 
-// This is the only OS execution boundary for repository code. No controller
-// directory, host /proc, runtime socket or credential-bearing environment enters.
 export function sandboxCommand(cwd: string, file: string, args: string[], environment: NodeJS.ProcessEnv, readOnly: string[] = []) {
   if (!config.workspace?.sandbox) return { file, args, env: environment };
   if (process.platform !== "linux" || !existsSync("/usr/bin/bwrap")) throw new Error("workspace.sandbox requires Linux bubblewrap; refusing unsandboxed execution");
@@ -49,8 +47,6 @@ export function sandboxCommand(cwd: string, file: string, args: string[], enviro
   };
   for (const path of ["/usr", "/bin", "/sbin", "/lib", "/lib64"]) if (existsSync(path)) bind(path);
   for (const path of ["/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/passwd", "/etc/group", "/etc/ssl/certs", "/etc/alternatives"]) if (existsSync(path)) bind(path);
-  // Node/Corepack can live outside /usr. Bind only their explicit runtime paths,
-  // never the surrounding home, release, package cache or controller data.
   const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
   if (!nodeRoot.startsWith("/usr/") && nodeRoot !== "/usr") bind(nodeRoot);
   const corepack = resolve(process.env.COREPACK_HOME ?? join(process.env.HOME ?? "/nonexistent", ".cache/node/corepack"));

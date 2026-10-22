@@ -16,7 +16,7 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 
 // @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: {
-  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number }; github?: { auth?: string; botLogin?: string; botName?: string; baseBranch?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; workspace?: { heavyCommands?: string[] };
+  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; workspace?: { heavyCommands?: string[] };
   actions: Record<string, Partial<ActionSettings>>;
 } = config) {
   const modelRuntime = await sharedModelRuntime();
@@ -62,7 +62,7 @@ export async function validateStaticConfig(settings: {
         if (!process.env.SLACK_BOT_TOKEN) problems.push(`${action}: SLACK_BOT_TOKEN is not set`);
         if (!entry.channel?.trim()) problems.push(`${action}: channel must not be empty`);
         if (!entry.startMessage?.trim()) problems.push(`${action}: startMessage must not be empty`);
-        if (entry.branch !== settings.github?.baseBranch) problems.push(`${action}: branch must equal github.baseBranch`);
+        if (!entry.branch?.trim()) problems.push(`${action}: branch must not be empty`);
         const unknown = [...(entry.startMessage ?? "").matchAll(/\{\{(.*?)\}\}/g)].map((match) => match[1]).filter((name) => !templateVariables.has(name));
         if (unknown.length) problems.push(`${action}: unknown startMessage variable ${unknown.map((name) => `{{${name}}}`).join(", ")}`);
       }

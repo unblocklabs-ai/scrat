@@ -21,9 +21,10 @@ const list = <T extends TSchema>(items: T, minItems = 0) => Type.Array(items, { 
 const model = Type.Object({ provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels) }, strict);
 const trigger = Type.Object({
   source: Type.Enum(["github_items", "github_commits", "schedule"]), kind: Type.Enum(triggerKinds),
-  item: Type.Optional(Type.Enum(["issue", "pr"])), author: Type.Optional(Type.Literal("bot")),
+  item: Type.Optional(Type.Enum(["issue", "pr"])), author: Type.Optional(Type.String({ minLength: 1 })),
   grades: Type.Optional(list(Type.Enum(["S", "A", "B", "C", "D", "F"]), 1)),
   manual: Type.Optional(Type.Boolean()), branch: Type.Optional(Type.String()),
+  granularity: Type.Optional(Type.Enum(["range", "commit"])), message: Type.Optional(Type.String({ minLength: 1 })),
   cron: Type.Optional(Type.String()), window: Type.Optional(Type.String()),
 }, strict);
 const httpSettings = Type.Object({ binding: Type.String(), methods: Type.Optional(list(Type.Enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]), 1)) }, strict);
@@ -58,6 +59,8 @@ function crossChecks(m: Parsed) {
   need(t.kind !== "label" || t.item === "issue", "trigger.kind label requires item: issue");
   need(t.kind !== "item_changed" || t.item !== "pr" || publish.includes("pr_assessment"), "an item_changed trigger on prs must publish pr_assessment");
   need(commits === (t.branch !== undefined), "trigger.branch is required for github_commits and forbidden for github_items");
+  need(t.author === undefined || (commits ? true : items && t.author === "bot"), 'trigger.author must be "bot" for github_items and is forbidden for schedule');
+  need((t.message === undefined && t.granularity === undefined) || commits, "trigger.message and trigger.granularity are only allowed with source github_commits");
   need(scheduled === (t.cron !== undefined && t.window !== undefined) && (scheduled || (t.cron === undefined && t.window === undefined)), "trigger.cron and trigger.window are required for schedule and forbidden for other sources");
   if (scheduled && t.cron !== undefined && t.window !== undefined) {
     try { nextTick(parseCron(t.cron), new Date(0)); parseWindow(t.window); } catch (error) { problems.push((error as Error).message); }
@@ -145,8 +148,8 @@ export function findTriggerConflicts(manifests: readonly Manifest[], enabled: (m
   live.forEach((a, index) => live.slice(index + 1).forEach((b) => {
     const [x, y] = [a.trigger, b.trigger];
     const grades = !x.grades || !y.grades || x.grades.some((grade) => y.grades!.includes(grade));
-    if (x.source !== "schedule" && x.source === y.source && x.kind === y.kind && x.item === y.item && x.branch === y.branch && grades) {
-      const shown = [`source: ${x.source}`, `kind: ${x.kind}`, ...x.item ? [`item: ${x.item}`] : [], ...x.branch ? [`branch: ${x.branch}`] : []].join(", ");
+    if (x.source !== "schedule" && x.source === y.source && x.kind === y.kind && x.item === y.item && x.branch === y.branch && grades && (x.source !== "github_commits" || (x.author === y.author && x.message === y.message))) {
+      const shown = [`source: ${x.source}`, `kind: ${x.kind}`, ...x.item ? [`item: ${x.item}`] : [], ...x.branch ? [`branch: ${x.branch}`] : [], ...x.source === "github_commits" && x.author ? [`author: ${x.author}`] : [], ...x.message ? [`message: ${x.message}`] : []].join(", ");
       problems.push(`${a.file} and ${b.file} both match {${shown}}; disable one`);
     }
   }));

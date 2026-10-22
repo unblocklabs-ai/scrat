@@ -250,6 +250,17 @@ sudo env PLAYWRIGHT_BROWSERS_PATH=$HOME/.local/share/scrat-v2/browsers npx playw
 
 Run the service with the same `PLAYWRIGHT_BROWSERS_PATH`. `npm ci` removes packages installed with `--no-save`, so repeat the first command after each release until `playwright-core` is added to the release's dependencies. Chromium is launched with its sandbox enabled (`chromiumSandbox: true`); if the host cannot support that unprivileged, fix the host rather than disabling it.
 
+A `github_commits` trigger reviews pushes to a branch. This manifest reviews each commit by `alice` whose message contains `[review]` on `release`:
+
+```yaml
+name: review_release_commits
+trigger: { source: github_commits, kind: commit, branch: release, granularity: commit, author: alice, message: "[review]" }
+```
+
+- `branch` is any branch of the repository; Scrat fetches it into the same clone. Each manifest keeps its own cursor per branch, so manifests on different branches, or on one branch with different `author` or `message`, may be enabled together. Two enabled commit manifests with the same branch, `author` and `message` stop startup.
+- `granularity` is `range` (default) or `commit`. `range` queues one task per push, covering the commits since the last seen tip. `commit` queues one task per first-parent commit, oldest first, each reviewed against its own parent. At most `maxRangeCommits` commits are queued per poll; the recorded tip then stays at the last queued commit and the rest follow on the next poll.
+- `author` is a login or `bot` (`github.botLogin`). It matches, case-insensitively, a commit's author name or the login in a `users.noreply.github.com` author email. `message` is a plain, case-sensitive substring of the full commit message. Both are only allowed on `github_commits` (`author: bot` also on `github_items`). They apply to each first-parent commit: with `commit` only matching commits are queued, with `range` the push is reviewed if any commit in it matches. The recorded tip advances to the new tip either way, except when the `commit` cap leaves matching commits unqueued.
+
 ### Optional actions
 
 An action runs unless its `enabled` is `false`. Only `review_base_change` ships with `enabled: false` (in `actions/review_base_change.yaml`); a deployment turns it on in `scrat.local.json`:
@@ -273,7 +284,7 @@ The agent receives the commit messages, the changed paths and the diff for the r
 | `enabled` | `false` by default. Set `true` in `scrat.local.json` to turn the action on. |
 | `agent` | `single` (default) runs one review session. `panel` runs the two `reviewers` as in PR review, and `provider` and `model` consolidate them into one reply. |
 | `reviewers` | Empty by default. Required with exactly two entries when `agent` is `panel`; each takes `provider`, `model` and `thinkingLevel`. |
-| `branch` | Must equal `github.baseBranch`; checked at startup. |
+| `branch` | Branch to watch, the manifest's `trigger.branch` by default; must not be empty. |
 | `channel` | Slack channel ID to post in. Required when enabled, and the bot must be a member of it. |
 | `maxRangeCommits` | Default 50. A range with more first-parent commits is recorded on its task as `truncated`. The review still covers the whole range. |
 | `startMessage` | Opening message template. Variables: `{{sha}}` (tip commit), `{{short_sha}}`, `{{author}}` (commit author name), `{{title}}` (commit subject), `{{url}}`, `{{branch}}`, `{{count}}` (commits in the range) and `{{bot}}` (`github.botName`). Any other `{{name}}` stops startup. |

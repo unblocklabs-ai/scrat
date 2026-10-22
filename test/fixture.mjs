@@ -248,7 +248,7 @@ export async function fixture(scenario) {
     const helper = fileURLToPath(new URL("database-command.mjs", import.meta.url)); cpSync(helper, "database-command.mjs");
     config.workspace = { ...config.workspace, environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), scenario === "validation_resume" ? "validate-resume" : "validate", resolve("database-receipts.jsonl")]] };
   }
-  if (scenario === "commits_source" || scenario === "publish_effects" || scenario.startsWith("commit_review")) Object.assign(config.actions.review_base_change, { enabled: true, channel: "C0123456789" });
+  if (scenario === "commits_source" || scenario === "commits_source_modes" || scenario === "publish_effects" || scenario.startsWith("commit_review")) Object.assign(config.actions.review_base_change, { enabled: true, channel: "C0123456789" });
   if (scenario === "commit_review_panel") Object.assign(config.actions.review_base_change, { agent: "panel", reviewers: structuredClone(config.actions.review_pr.reviewers) });
   if (scenario === "commit_review_isolation") {
     writeFileSync("prepare.mjs", 'import{appendFileSync}from"node:fs";appendFileSync(' + JSON.stringify(resolve("prepare.log")) + ',"prepare\\n");');

@@ -88,6 +88,7 @@ const scenarios = {
   slack_startup: "an enabled Slack action blocks startup on missing token, channel, template variables, panel reviewers or a failed auth.test, while a disabled one makes no Slack call and queued tasks for it are rejected",
   slack_redaction: "the Slack token never reaches child environments, is caught as a secret, redacted from errors and absent from the journal",
   commits_source: "the base-branch commit source seeds silently, enqueues one range task per push, survives force-pushes and replays, and stops when disabled",
+  commits_source_modes: "the commit source enqueues one task per matching commit oldest first with a cap, applies author and message filters in both modes, polls a second branch with its own cursor and rejects only identical trigger filters",
   commit_review_e2e: "a push to the base branch posts one templated root, runs one diff-only review and replies once in the thread without any GitHub write",
   commit_review_panel: "a panel commit review runs two reviewers and a consolidator without requiring a grade and replies once",
   commit_review_slack_down: "a failed root post still reviews and the reply creates the root, while a failed reply fails at publishing and retries without a new session or second root",

@@ -80,6 +80,15 @@ For project review, run `typecheck`, `knip`, and the integration/E2E tests after
 - Relative paths in overrides resolve from the config directory, like the defaults.
 - On the VM the file lives at `~/.local/share/scrat-v2/scrat.local.json` and is linked into each release by the installer, which checks it before stopping the running service. After editing it, check it with `node src/config.ts` from `~/.local/share/scrat-v2/current`, then apply it with `systemctl --user restart scrat.service`, which waits for running tasks like a deploy.
 
+Per-install systemd overrides go in `~/.config/systemd/user/scrat.service.d/local.conf` on the VM, for example a lower memory cap on a smaller host:
+
+```ini
+[Service]
+MemoryMax=8G
+```
+
+The installer keeps this file across deploys (any other drop-in is moved into the backup), and it overrides the `MemoryMax=20G` default in `deploy/scrat.service`. Apply an edit without a deploy with `systemctl --user daemon-reload && systemctl --user restart scrat.service`.
+
 ### Harness and GitHub
 
 | Setting | Purpose |
@@ -212,7 +221,7 @@ Each action is one manifest, `actions/<name>.yaml`, validated at startup (`src/m
 | `maxSelfRepairs` | `address_review` only: most self-repair runs started for one PR (non-negative integer, default 2; 0 disables self-repair; not enqueueable manually). A push makes the review stale and Scrat re-reviews; a reply-only repair is not retriggered for the same assessment. |
 | `exhaustedLabel` | `address_review` only, optional: label added to a Scrat PR whose current review is graded C or lower once `maxSelfRepairs` is reached, and removed when its current review grades better. `null` or `""` (e.g. in `scrat.local.json`) disables it; GitHub creates the label if it is missing. A repair counts toward `maxSelfRepairs` when it starts running, not when it is queued or cancelled. |
 
-The checked-in configuration currently uses six task slots and three validation slots (sized for a 24 GB host, with the service capped at `MemoryMax=20G`), priorities **PR 100 > implementation/maintenance 60 > issue 10**, and a Sol-high/DeepSeek-high review panel with Sol-high consolidation. These are configurable values, not built-in limits or model choices.
+The checked-in configuration currently uses six task slots and three validation slots (sized for a 24 GB host, with the service capped at `MemoryMax=20G` by default; `local.conf` sets it per install, see Deployment overrides), priorities **PR 100 > implementation/maintenance 60 > issue 10**, and a Sol-high/DeepSeek-high review panel with Sol-high consolidation. These are configurable values, not built-in limits or model choices.
 
 ### Adding an action
 

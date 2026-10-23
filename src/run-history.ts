@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import type { Action } from "./actions.ts";
 import { db } from "./db.ts";
 import { items, type Run, runs, type Subject, subjects, tasks } from "./schema.ts";
@@ -15,8 +15,15 @@ export const latestRunOfTask = (taskId: string, database: Database = db) =>
   database.select().from(runs).where(eq(runs.taskId, taskId))
     .orderBy(sql`${runs.sequence} is null desc`, desc(runs.sequence)).limit(1).get();
 
+type RunContext = NonNullable<Run["context"]>;
+type HistoryRun = Omit<Run, "context" | "verification"> & { context: Pick<RunContext, "revision" | "baseBranch" | "commentRevisions"> | null };
+
+const { context: _context, verification: _verification, ...historyColumns } = getTableColumns(runs);
+const historyContext = sql<string | null>`case when ${runs.context} is null then null else json_object('revision', json_extract(${runs.context}, '$.revision'), 'baseBranch', json_extract(${runs.context}, '$.baseBranch'), 'commentRevisions', json_extract(${runs.context}, '$.commentRevisions')) end`
+  .mapWith((value: string | null) => value === null ? null : JSON.parse(value) as HistoryRun["context"]);
+
 export const runHistory = (subjectId: string, actions: Action | readonly Action[]) =>
-  db.select({ run: runs, task: tasks }).from(runs)
+  db.select({ run: { ...historyColumns, context: historyContext }, task: tasks }).from(runs)
     .innerJoin(tasks, eq(runs.taskId, tasks.id))
     .where(and(eq(tasks.subjectId, subjectId), inArray(tasks.action, typeof actions === "string" ? [actions] : [...actions])))
     .orderBy(desc(runs.sequence)).all();
@@ -33,8 +40,8 @@ export const completedRunsOfActionInRepository = (repository: string, action: Ac
     .orderBy(desc(runs.sequence)).limit(limit).all().map(({ run, subject, payload }) => ({ run, subject, number: payload?.number }));
 
 export const latestFinishedRun = (subjectId: string) =>
-  db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.subjectId, subjectId), isNotNull(runs.finishedAt))).orderBy(desc(runs.sequence)).limit(1).get()?.run;
+  db.select({ error: runs.error, stage: runs.stage, headSha: runs.headSha }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
+    .where(and(eq(tasks.subjectId, subjectId), isNotNull(runs.finishedAt))).orderBy(desc(runs.sequence)).limit(1).get();
 
 export const latestSessionRun = (workspaceId: string, excludeRunId: string) =>
   db.select().from(runs).where(and(

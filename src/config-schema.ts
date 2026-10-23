@@ -10,7 +10,7 @@ const model = Type.Object({ provider: Type.String(), model: Type.String(), think
 
 const schema = Type.Object({
   harness: Type.Object({
-    maxConcurrency: positive, maxConcurrentValidations: positive, commandTimeoutSeconds: positive, agentTimeoutSeconds: positive, drainTimeoutSeconds: positive,
+    maxConcurrency: positive, maxConcurrentValidations: positive, commandTimeoutSeconds: positive, commandOutputTailBytes: positive, agentTimeoutSeconds: positive, drainTimeoutSeconds: positive,
     corrections: Type.Object({ incomplete: Type.Integer({ minimum: 0 }) }, strict),
     logLevel: Type.Enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]),
   }, strict),

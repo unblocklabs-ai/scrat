@@ -3,6 +3,7 @@
     "maxConcurrency": 6,
     "maxConcurrentValidations": 3,
     "commandTimeoutSeconds": 3600,
+    "commandOutputTailBytes": 65536,
     "agentTimeoutSeconds": 3600,
     "drainTimeoutSeconds": 900,
     "corrections": { "incomplete": 1 },

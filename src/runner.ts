@@ -41,8 +41,8 @@ const maxValidationCorrections = 2;
 const botAuthor = () => ({ name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com` });
 
 async function prepareWorkspace(workspace: Workspace, environment: Environment, databaseConfig: DatabaseConfig | null | undefined, references: References) {
-  await runCommands(config.workspace?.prepare ?? [], workspace.path, environment, references);
-  if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, environment, references);
+  await runCommands(config.workspace?.prepare ?? [], workspace.path, environment, references, "prepare");
+  if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, environment, references, "migrate");
 }
 
 async function asCheckFailure<T>(fn: () => Promise<T>) {
@@ -57,9 +57,9 @@ async function asCheckFailure<T>(fn: () => Promise<T>) {
 }
 
 function validationMessage(error: CheckFailure, round: number) {
-  const { message, exitCode, stdout, stderr } = describeError(error.cause);
-  const tail = (label: string, text?: string) => text?.trim() ? `\n${label} (last 6000 characters):\n${text.trim().slice(-6000)}\n` : "";
-  return `${botName}'s validation failed after your changes (round ${round} of ${maxValidationCorrections}).\n\nCommand: ${message.split("\n")[0].replace(/^Command failed: /, "")}\nExit code: ${exitCode ?? "unknown"}\n${tail("stdout", stdout)}${tail("stderr", stderr)}\nFix only what is reported. ${botName} re-validates after your turn, so a full rerun of the failing check is not needed. Then end your turn with one or two sentences on what you changed to fix this (it is appended to your earlier handoff), and the usual SCRAT_STATUS footer (add SCRAT_READY if the change is still ready).`;
+  const { message, exitCode, stdout } = describeError(error.cause);
+  const output = stdout?.trim() ? `\nOutput (tail):\n${stdout.trim()}\n` : "";
+  return `${botName}'s validation failed after your changes (round ${round} of ${maxValidationCorrections}).\n\nCommand: ${message.split("\n")[0].replace(/^Command failed: /, "")}\nExit code: ${exitCode ?? "unknown"}\n${output}\nFix only what is reported. ${botName} re-validates after your turn, so a full rerun of the failing check is not needed. Then end your turn with one or two sentences on what you changed to fix this (it is appended to your earlier handoff), and the usual SCRAT_STATUS footer (add SCRAT_READY if the change is still ready).`;
 }
 
 function stopBefore(stop: AbortSignal | undefined, next: string) {
@@ -76,7 +76,7 @@ async function validateAndCommit({ run, references, stop }: Ctx, p: Prepared, ki
   updateRun(run.id, { agentCheckpoint: checkpoint });
   const validationTree = checkpoint.treeSha;
   stopBefore(stop, "validation commands");
-  const commands = await asCheckFailure(() => withValidationSlot(() => runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references), references, stop)
+  const commands = await asCheckFailure(() => withValidationSlot(() => runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references, "validate"), references, stop)
     .catch((error) => { throw stop?.aborted && error === stop.reason ? new InterruptedError("Worker is stopping; run left waiting for a validation slot") : error; }));
   await git(workspace.path, ["add", "--all"]);
   if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");

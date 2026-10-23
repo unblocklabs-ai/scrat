@@ -1,27 +1,51 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
+import { createWriteStream } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { resolve } from "node:path";
+import { finished } from "node:stream/promises";
 import type { EventReferences } from "./events.ts";
 import { config } from "./config.ts";
+import { redactSecrets } from "./errors.ts";
 import { logger, withOperation } from "./logging.ts";
 import { reportMemoryKill, sandboxCommand } from "./sandbox.ts";
+import type { Check } from "./schema.ts";
 
-const executeFile = promisify(execFile);
-
-export async function runCommands(commands: string[][], cwd: string, environment: NodeJS.ProcessEnv, references: EventReferences = {}) {
-  const receipts: { command: string[]; durationMs: number; stdout: string; stderr: string }[] = [];
-  for (const [file, ...args] of commands) {
+export async function runCommands(commands: string[][], cwd: string, environment: NodeJS.ProcessEnv, references: EventReferences & { runId: string }, stage: string) {
+  const checks: Check[] = [];
+  const directory = resolve("data/checks", references.runId);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  for (const [index, [file, ...args]] of commands.entries()) {
     await withOperation("workspace.command", { ...references, command: [file, ...args], cwd }, async (operation) => {
       const started = performance.now();
+      const name = [file, ...args].join(" ");
+      const evidence = resolve(directory, `${stage}-${index}-${Date.now()}.log`);
       const command = sandboxCommand(cwd, file, args, environment, [], true);
-      const { stdout, stderr } = await executeFile(command.file, command.args, { cwd, env: command.env, maxBuffer: 16 * 1024 * 1024, timeout: config.harness.commandTimeoutSeconds * 1000, killSignal: "SIGKILL" }).catch(async (error) => {
-        if (error instanceof Error && "killed" in error && error.killed) error.message = `Command timed out after ${config.harness.commandTimeoutSeconds} seconds: ${[file, ...args].join(" ")}`;
-        throw await reportMemoryKill(command.unit, error);
-      });
+      const log = createWriteStream(evidence, { mode: 0o600 });
+      let writeError: Error | undefined;
+      log.on("error", (error) => { writeError ??= error; });
+      const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null; killed: boolean; tail: Buffer }>((done, fail) => {
+        const child = spawn(command.file, command.args, { cwd, env: command.env, stdio: ["ignore", "pipe", "pipe"], timeout: config.harness.commandTimeoutSeconds * 1000, killSignal: "SIGKILL" });
+        let tail = Buffer.alloc(0);
+        const keep = (chunk: Buffer) => {
+          tail = Buffer.concat([tail, chunk]);
+          if (tail.length > config.harness.commandOutputTailBytes) tail = tail.subarray(-config.harness.commandOutputTailBytes);
+        };
+        for (const stream of [child.stdout, child.stderr]) { stream.on("data", keep); stream.pipe(log, { end: false }); }
+        child.on("error", fail);
+        child.on("close", (code, signal) => done({ code, signal, killed: child.killed, tail }));
+      }).catch(async (error) => { throw await reportMemoryKill(command.unit, error); }).finally(() => { log.end(); return finished(log).catch(() => undefined); });
+      const tail = redactSecrets(outcome.tail.toString("utf8"));
+      const check: Check = { name, status: outcome.code === 0 ? "passed" : "failed", durationMs: Math.round(performance.now() - started), tail, evidence: [evidence] };
+      if (check.status === "failed") {
+        const message = outcome.killed ? `Command timed out after ${config.harness.commandTimeoutSeconds} seconds: ${name}` : `Command failed: ${name}`;
+        throw await reportMemoryKill(command.unit, Object.assign(new Error(message, { cause: writeError }), { code: outcome.code, signal: outcome.signal, killed: outcome.killed, stdout: tail }));
+      }
+      if (writeError) throw await reportMemoryKill(command.unit, new Error(`Could not write the output of ${name} to ${evidence}: ${writeError.message}`, { cause: writeError }));
       operation.complete();
-      receipts.push({ command: [file, ...args], durationMs: Math.round(performance.now() - started), stdout, stderr });
+      checks.push(check);
     });
   }
-  return receipts;
+  return checks;
 }
 
 let active = 0;

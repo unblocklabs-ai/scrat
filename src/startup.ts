@@ -16,7 +16,7 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 
 // @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: {
-  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number; corrections?: { incomplete?: number } }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; resolve?: Resolver; slack?: { enabled?: boolean; channel?: string }; workspace?: { heavyCommands?: string[]; sandbox?: boolean; layout?: string; commandMemoryMax?: string | null; validate?: string[][] };
+  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; commandOutputTailBytes?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number; corrections?: { incomplete?: number } }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; resolve?: Resolver; slack?: { enabled?: boolean; channel?: string }; workspace?: { heavyCommands?: string[]; sandbox?: boolean; layout?: string; commandMemoryMax?: string | null; validate?: string[][] };
   actions: Record<string, Partial<ActionSettings>>;
 } = config) {
   const modelRuntime = await sharedModelRuntime();
@@ -48,9 +48,9 @@ export async function validateStaticConfig(settings: {
   }
   const slots = settings.harness?.maxConcurrentValidations;
   if (slots !== undefined && !(Number.isSafeInteger(slots) && slots > 0)) problems.push("harness.maxConcurrentValidations must be a positive integer");
-  for (const key of ["commandTimeoutSeconds", "agentTimeoutSeconds", "drainTimeoutSeconds"] as const) {
-    const seconds = settings.harness?.[key];
-    if (seconds !== undefined && !(Number.isSafeInteger(seconds) && seconds > 0)) problems.push(`harness.${key} must be a positive integer`);
+  for (const key of ["commandTimeoutSeconds", "commandOutputTailBytes", "agentTimeoutSeconds", "drainTimeoutSeconds"] as const) {
+    const value = settings.harness?.[key];
+    if (value !== undefined && !(Number.isSafeInteger(value) && value > 0)) problems.push(`harness.${key} must be a positive integer`);
   }
   const continuations = settings.harness?.corrections?.incomplete;
   if (continuations !== undefined && !(Number.isSafeInteger(continuations) && continuations >= 0)) problems.push("harness.corrections.incomplete must be a non-negative integer");

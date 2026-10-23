@@ -1149,7 +1149,7 @@ export const scenarios = {
     const issue = await success(); assert.equal(issue.result.ready, false);
     assert.deepEqual(f.issues.get(2).labels, []);
   } },
-  format_retry: { title: "malformed final footers are corrected inside the same Pi session up to a cap, while incomplete and undecided outcomes are not", run: async () => {
+  format_retry: { title: "malformed final footers are corrected inside the same Pi session up to a cap, while implementations and undecided outcomes are not, and an incomplete review is continued within its budget", run: async () => {
     f.addIssue(1, ["scrat"]); f.reset(1, "format-once"); f.enqueue(1, "implement");
     let before = f.requests.length; const implemented = await success();
     assert.equal(f.requests.length - before, 3);
@@ -1179,6 +1179,22 @@ export const scenarios = {
       before = f.requests.length; const r = await run(); assert.ok(r.error);
       assert.equal(f.requests.length - before, 2);
     }
+    const lines = captureLogs();
+    const prompts = () => f.requests.filter((r) => r.request.messages.at(-1).role === "user" && JSON.stringify(r.request.messages.at(-1).content).includes("Your assessment was returned incomplete")).length;
+    const publications = () => f.writes.length;
+    f.reset(201, "incomplete-once"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Continue", input: {} });
+    let writes = publications(); const continued = await success().finally(restoreLogs);
+    assert.equal(lines.filter((l) => l.event === "pi.incomplete_continue").length, 3);
+    assert.equal(continued.result.outcome, "complete"); assert.ok(prompts() >= 3); assert.ok(publications() > writes);
+    const published = f.comments.get(201).length;
+    f.reset(201, "incomplete"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Never completes", input: {} });
+    writes = publications(); const spent = prompts(); const exhausted = await run();
+    assert.match(exhausted.error.cause.message, /Reviewer returned incomplete/); assert.equal(publications(), writes); assert.equal(f.comments.get(201).length, published);
+    assert.ok(prompts() > spent);
+    f.reset(201, "needs_decision"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Undecided", input: {} });
+    const asked = prompts(); await run(); assert.equal(prompts(), asked);
+    f.addIssue(6); f.reset(6, "incomplete-once"); f.enqueue(6, "implement");
+    const partial = await run(); assert.ok(partial.error); assert.equal(prompts(), asked);
   } },
   pr_head: { title: "a stale refs/pull head is replaced by the API head, and a head the remote lacks fails the run without publishing", run: async () => {
     await implement(1);
@@ -1571,6 +1587,8 @@ export const scenarios = {
     await assert.rejects(validateStaticConfig(variant((c) => { c.harness.maxConcurrentValidations = 0; })), /maxConcurrentValidations must be a positive integer/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.harness.commandTimeoutSeconds = 0; })), /commandTimeoutSeconds must be a positive integer/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.harness.agentTimeoutSeconds = 1.5; })), /agentTimeoutSeconds must be a positive integer/);
+    for (const bad of [-1, 1.5]) await assert.rejects(validateStaticConfig(variant((c) => { c.harness.corrections.incomplete = bad; })), /harness\.corrections\.incomplete must be a non-negative integer/);
+    await validateStaticConfig(variant((c) => { c.harness.corrections.incomplete = 0; }));
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.heavyCommands = ["^(unclosed"]; })), /heavyCommands\[0\] is not a valid regular expression/);
     for (const disabled of [null, ""]) await validateStaticConfig(variant((c) => { c.actions.address_review.exhaustedLabel = disabled; }));
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.address_review.exhaustedLabel = 5; })), /exhaustedLabel must be a string, or null or "" to disable it/);

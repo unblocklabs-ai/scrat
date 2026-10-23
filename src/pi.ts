@@ -17,8 +17,16 @@ import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 
 const maxFormatCorrections = 2;
 
+function footerRules(requireGrade: boolean) {
+  return `SCRAT_READY (optional, only when ready)\nSCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of S, A, B, C, D, F, with no plus or minus)\nSCRAT_STATUS: complete, incomplete, or needs_decision (required, and the very last line)`;
+}
+
 function correctionMessage(error: string, requireGrade: boolean) {
-  return `Your previous final answer was not accepted: ${error}.\n\nSend your complete final answer again, with the same content, correctly formatted. It must end with these footer lines, in this order:\nSCRAT_READY (optional, only when ready)\nSCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of S, A, B, C, D, F, with no plus or minus)\nSCRAT_STATUS: complete, incomplete, or needs_decision (required, and the very last line)`;
+  return `Your previous final answer was not accepted: ${error}.\n\nSend your complete final answer again, with the same content, correctly formatted. It must end with these footer lines, in this order:\n${footerRules(requireGrade)}`;
+}
+
+function continuationMessage(requireGrade: boolean) {
+  return `Your assessment was returned incomplete. This session has time to continue: finish the remaining inspection, then return the complete final assessment. It must end with these footer lines, in this order:\n${footerRules(requireGrade)}`;
 }
 
 export function saveReviewer(runId: string, index: number, patch: Partial<Reviewer>) {
@@ -111,6 +119,7 @@ export async function executePi({ run, cwd, context, readOnly, tools, scoped, lo
       if (drained) throw new InterruptedError(`Agent turn was still running ${config.harness.drainTimeoutSeconds} seconds after the worker was told to stop and was aborted`);
     };
     await prompt(followUp ?? `${withBotName(await readFile(run.skill, "utf8"))}\n\n${context}`);
+    let continuations = 0;
     for (let corrections = 0; ; corrections++) {
       const last = session.messages.findLast((message) => message.role === "assistant");
       if (!last || last.role !== "assistant" || last.stopReason !== "stop") {
@@ -120,6 +129,13 @@ export async function executePi({ run, cwd, context, readOnly, tools, scoped, lo
         const output = session.getLastAssistantText()?.trim();
         if (!output) throw new ResultFormatError("Pi returned an empty response");
         const result = parseResult(output, [], { requireGrade });
+        if (readOnly && result.outcome === "incomplete" && continuations < config.harness.corrections.incomplete) {
+          continuations++;
+          log.warn({ event: "pi.incomplete_continue", attempt: continuations });
+          await prompt(continuationMessage(requireGrade));
+          corrections--;
+          continue;
+        }
         const tracked = (await git(cwd, ["ls-files", "-z"])).split("\0").filter(Boolean);
         const baseTracked = baseSha && (basePaths.size || gitPaths.size)
           ? (await git(cwd, ["ls-tree", "-r", "--name-only", "-z", baseSha])).split("\0").filter(Boolean) : [];

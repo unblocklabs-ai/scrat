@@ -52,6 +52,7 @@ export async function fixture(scenario, spec) {
       .map((message) => typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("\n"));
     const text = texts.findLast((entry) => entry.includes('{\n  "action"'));
     const corrected = texts.at(-1).startsWith("Your previous final answer was not accepted");
+    const continued = texts.at(-1).startsWith("Your assessment was returned incomplete");
     const feedback = texts.at(-1).startsWith(`${config.github.botName}'s validation failed`), turnStart = request.messages.at(-1).role === "user";
     const start = text.indexOf('{\n  "action"');
     const context = JSON.parse(text.slice(start, text.indexOf("\n}", start) + 2));
@@ -136,7 +137,7 @@ export async function fixture(scenario, spec) {
     if (script) tool = script[step];
     const fumble = !corrected && (mode === "format-once" || (mode === "reviewer-grade-once" && review && !consolidating && request.model.includes("deepseek"))
       || (mode === "consolidation-grade-once" && consolidating));
-    const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : "complete";
+    const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : mode === "incomplete-once" && !continued ? "incomplete" : "complete";
     const output = (review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : feedback ? "Fixed the validation failure." : "Implemented the change.")
       + (scenario === "commit_review_e2e" ? " <!channel>" : "")
       + (mode === "leak-report" ? "\n" + process.env.GITHUB_APP_PRIVATE_KEY : "")

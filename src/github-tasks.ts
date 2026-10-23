@@ -93,7 +93,7 @@ async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation
   const repairActive = latestRepair?.status === "queued" || latestRepair?.status === "running";
   if (!settings?.exhaustedLabel || !routes.repairs.length || state.kind !== "current" || repairActive) return;
   const { exhaustedLabel } = settings;
-  const exhausted = repair !== undefined && count >= (settings.maxSelfRepairs ?? 2);
+  const exhausted = repair !== undefined && settings.maxSelfRepairs !== undefined && count >= settings.maxSelfRepairs;
   try {
     await reconcileLabels(ctx.github, item.payload.number, { current: observation.labels, desired: exhausted ? [exhaustedLabel] : [], managed: [exhaustedLabel] }, { subjectId: item.id });
   } catch (error) { ctx.log.warn({ event: "self_repair.label_pending", subjectId: item.id, err: error }); }
@@ -109,7 +109,7 @@ async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObse
   let added = applyDecisions(item.id, planReview({ kind: "pr", action, state, latest, attempt, revision: observation.revision, mainSha }));
   const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
   const repairAction = routes.repairFor(state.kind === "current" ? state.assessment.result.grade : undefined);
-  const limit = config.actions[repairAction ?? ""]?.maxSelfRepairs ?? 2;
+  const limit = config.actions[repairAction ?? ""]?.maxSelfRepairs;
   const repair = planSelfRepair({
     repairAction, repairActions: routes.repairs, state, feedbackTask: latestOf(item.id, routes.feedback),
     reviewTask: latest, repairTask: latestOf(item.id, repairAction), count, limit,

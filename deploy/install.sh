@@ -33,6 +33,7 @@ if [ -f "$backup_path/scrat.service.d/local.conf" ]; then
 fi
 if [ -f "$install_root/data/scrat.sqlite" ]; then
   node --input-type=module -e 'import {DatabaseSync,backup} from "node:sqlite"; const db=new DatabaseSync(process.argv[1]); await backup(db,process.argv[2]); db.close();' "$install_root/data/scrat.sqlite" "$backup_path/scrat.sqlite"
+  node --input-type=module -e 'import {DatabaseSync} from "node:sqlite"; const db=new DatabaseSync(process.argv[1]); db.exec("DROP TABLE IF EXISTS github_snapshots"); db.close();' "$install_root/data/scrat.sqlite"
 fi
 node deploy/migrate-subjects.mjs "$install_root/data/scrat.sqlite"
 npm run db:push

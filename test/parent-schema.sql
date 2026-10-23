@@ -11,13 +11,6 @@ CREATE TABLE `events` (
 	CONSTRAINT `fk_events_task_id_tasks_id_fk` FOREIGN KEY (`task_id`) REFERENCES `tasks`(`id`),
 	CONSTRAINT `fk_events_run_id_runs_id_fk` FOREIGN KEY (`run_id`) REFERENCES `runs`(`id`)
 );
-CREATE TABLE `github_snapshots` (
-	`id` integer PRIMARY KEY,
-	`repository` text NOT NULL,
-	`fetched_at` text NOT NULL,
-	`items` text NOT NULL,
-	`pull_requests` text NOT NULL
-);
 CREATE TABLE `items` (
 	`id` text PRIMARY KEY,
 	`source` text NOT NULL,

@@ -5,14 +5,6 @@ import type { ErrorDetails } from "./errors.ts";
 import type { AgentResult, Reviewer } from "./results.ts";
 import type { GithubComment, GithubItem } from "./github-types.ts";
 
-export const githubSnapshots = sqliteTable("github_snapshots", {
-  id: integer("id").primaryKey(),
-  repository: text("repository").notNull(),
-  fetchedAt: text("fetched_at").notNull(),
-  items: text("items", { mode: "json" }).$type<unknown[]>().notNull(),
-  pullRequests: text("pull_requests", { mode: "json" }).$type<unknown[]>().notNull(),
-});
-
 export const subjects = sqliteTable("subjects", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
   repository: text("repository").notNull(),

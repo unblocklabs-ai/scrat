@@ -540,7 +540,6 @@ export const scenarios = {
       assert.ok(peak > 1 && peak <= 4, `Expected bounded concurrent reads, saw ${peak}`);
       assert.equal(all(s.tasks).filter((task) => task.status === "queued").length, 9);
       assert.equal(f.row(s.items, "issue-1").payload.diagnosticOnly, undefined);
-      assert.equal(all(s.githubSnapshots)[0].items.find((item) => item.number === 1).diagnosticOnly.retained, true);
       const count = (permission) => exchanges.filter((exchange) => JSON.stringify(exchange.permissions) === JSON.stringify(permission)).length;
       const read = { issues: "read", pull_requests: "read", metadata: "read" }, contents = { contents: "read", metadata: "read" };
       assert.equal(count(read), 1); assert.equal(count(contents), 1);
@@ -561,10 +560,6 @@ export const scenarios = {
       await github.addLabels(1, ["another-note"]);
       assert.equal(count(write), 2); assert.equal(count(read), 2, "Refresh only the revoked scope");
       assert.ok(f.issues.get(1).labels.some((label) => label.name === "another-note"));
-      for (let sync = 0; sync < 50; sync++) await (await f.app("github-sync.ts")).syncGitHub(undefined, false);
-      const snapshots = all(s.githubSnapshots);
-      assert.equal(snapshots.length, 48, "Keep only the newest snapshots");
-      assert.equal(snapshots.at(-1).id, Math.max(...snapshots.map((snapshot) => snapshot.id)));
       fail = true;
       await assert.rejects(route(), (error) => error.status === 404);
       assert.equal(active, 0, "A failed sync must wait for its other in-flight readers");
@@ -1190,6 +1185,9 @@ export const scenarios = {
     assert.equal(git(remote, "rev-parse", "refs/pull/201/head"), stale);
     const reviewed = await success();
     assert.equal(reviewed.headSha, newer);
+    const { fetchPullRequestHead } = await f.app("git.ts");
+    assert.equal(await fetchPullRequestHead(resolve("checkout"), resolve("missing.git"), 201, newer), "refs/remotes/origin/pr/201", "A matching local ref needs no fetch");
+    await assert.rejects(fetchPullRequestHead(resolve("checkout"), resolve("missing.git"), 201, stale), /fetch/);
     const writes = f.writes.length;
     f.forced.set(201, "0".repeat(40)); tasks.enqueueManualTasks("review_pr", ["201"]);
     const failed = await run();
@@ -1839,7 +1837,7 @@ export const scenarios = {
     }
     const { GitHubRepository } = await f.app("github.ts");
     assert.throws(() => new GitHubRepository("other/repo"), /serves only fixture\/project/);
-    assert.equal(calls.length, 0); assert.equal(all(s.githubSnapshots).length, 0); assert.equal(all(s.items).length, 0);
+    assert.equal(calls.length, 0); assert.equal(all(s.items).length, 0);
     await syncGitHub(undefined, false); assert.ok(calls.length > 0);
 
     f.addIssue(1); f.addIssue(2);

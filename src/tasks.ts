@@ -186,6 +186,8 @@ export function ensureRunSequences(database: typeof db = db) {
 export function retryTask(taskId: string, mode: Task["retryMode"] = "repair") {
   return withOperationSync("task.retry", { taskId }, (operation) => {
     const task = db.transaction((transaction) => {
+      const waiting = transaction.select().from(tasks).where(and(eq(tasks.id, taskId), eq(tasks.status, "queued"), isNotNull(tasks.availableAt))).get();
+      if (waiting && mode !== "repair") throw new Error(`A delayed task can only be retried in repair mode: ${taskId}`);
       const delayed = transaction.update(tasks).set({ availableAt: null })
         .where(and(eq(tasks.id, taskId), eq(tasks.status, "queued"), isNotNull(tasks.availableAt))).returning().get();
       if (delayed) {
@@ -257,7 +259,7 @@ export function interruptRun(runId: string, error: unknown = new InterruptedErro
     )).get();
     const retryMode = hasValidationCheckpoint(run) ? "validation" : "repair";
     const attempt = (own.retryCount ?? 0) + 1;
-    const delaySeconds = retry && Math.min(retry.maxDelaySeconds, Math.min(retry.maxDelaySeconds, retry.initialDelaySeconds * 2 ** (attempt - 1)) * (1 + config.harness.retryJitter * Math.random()));
+    const delaySeconds = retry && Math.min(retry.maxDelaySeconds, retry.initialDelaySeconds * 2 ** (attempt - 1) * (1 + config.harness.retryJitter * Math.random()));
     const nextAttemptAt = delaySeconds === undefined ? undefined : new Date(Date.now() + delaySeconds * 1000).toISOString();
     const task = transaction.update(tasks).set(superseded ? { status: "failed" } : { status: "queued", retryMode, ...nextAttemptAt ? { retryCount: attempt, availableAt: nextAttemptAt } : {} })
       .where(and(eq(tasks.id, run.taskId), eq(tasks.status, "running"))).returning().get();

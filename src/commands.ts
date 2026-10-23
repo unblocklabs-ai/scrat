@@ -34,14 +34,13 @@ export async function runCommands(commands: string[][], cwd: string, environment
         child.on("error", fail);
         child.on("close", (code, signal) => done({ code, signal, killed: child.killed, tail }));
       }).catch(async (error) => { throw await reportMemoryKill(command.unit, error); }).finally(() => { log.end(); return finished(log).catch(() => undefined); });
-      if (writeError) throw new Error(`Could not write the output of ${name} to ${evidence}: ${writeError.message}`, { cause: writeError });
       const tail = redactSecrets(outcome.tail.toString("utf8"));
       const check: Check = { name, status: outcome.code === 0 ? "passed" : "failed", durationMs: Math.round(performance.now() - started), tail, evidence: [evidence] };
       if (check.status === "failed") {
         const message = outcome.killed ? `Command timed out after ${config.harness.commandTimeoutSeconds} seconds: ${name}` : `Command failed: ${name}`;
-        const error = Object.assign(new Error(message), { code: outcome.code, signal: outcome.signal, killed: outcome.killed, stdout: tail });
-        throw await reportMemoryKill(command.unit, error);
+        throw await reportMemoryKill(command.unit, Object.assign(new Error(message, { cause: writeError }), { code: outcome.code, signal: outcome.signal, killed: outcome.killed, stdout: tail }));
       }
+      if (writeError) throw await reportMemoryKill(command.unit, new Error(`Could not write the output of ${name} to ${evidence}: ${writeError.message}`, { cause: writeError }));
       operation.complete();
       checks.push(check);
     });

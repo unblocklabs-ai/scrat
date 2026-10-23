@@ -370,7 +370,7 @@ When the action is enabled, startup calls Slack's `auth.test` with the token, an
 ## Project layout
 
 - `src/github-tasks.ts` — GitHub observations, queue effects, and closure cleanup.
-- `src/github.ts`, `src/github-types.ts` — repository client, scoped authentication, and narrow issue/PR views; the newest 48 raw sync snapshots per repository remain in SQLite, and the latest in `tmp/responses/github/`, for diagnostics.
+- `src/github.ts`, `src/github-types.ts` — repository client, scoped authentication, and narrow issue/PR views.
 - `src/github-context.ts` — pure shared comment filtering and context revisions for routing, execution, and freshness checks.
 - `src/manifests.ts`, `src/actions.ts` — the manifest schema and loader, and the registry of loaded actions; workspace lifetime follows action mode.
 - `src/github-routing.ts` — pure issue-selection, PR-maintenance, and review-routing decisions.

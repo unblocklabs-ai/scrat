@@ -29,7 +29,7 @@ import { childEnvironment } from "./secrets.ts";
 import { recordEvent } from "./events.ts";
 import { claimTask, finishRun, interruptRun } from "./tasks.ts";
 import { parseTriggerInput } from "./triggers.ts";
-import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, isolateWorkspace, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
+import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, isolateWorkspace, pinWorkspaceBase, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
 
 type DatabaseConfig = NonNullable<NonNullable<typeof config.workspace>["database"]>;
 type Environment = Record<string, string | undefined>;
@@ -185,11 +185,14 @@ async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
   }
   const mergeInProgress = !readOnly && await hasPendingMerge(workspace.path);
   if (!readOnly && !mergeInProgress && !validationOnly) {
-    if (pullRequest) await git(workspace.path, ["merge", "--ff-only", preparedHead]);
-    else {
+    if (pullRequest) {
+      await git(workspace.path, ["merge", "--ff-only", preparedHead]);
+      await pinWorkspaceBase(workspace, preparedHead);
+    } else {
       try {
         await git(workspace.path, ["merge", "--ff-only", preparedHead]);
         if (await git(workspace.path, ["rev-parse", "HEAD"]) === preparedHead) {
+          await pinWorkspaceBase(workspace, preparedHead);
           db.update(workspaces).set({ baseSha: preparedHead }).where(eq(workspaces.id, workspace.id)).run();
         }
       } catch (error) {
@@ -244,7 +247,7 @@ async function acquireWorkspace(ctx: Ctx, observed: Observed | undefined): Promi
 async function planAgent({ task, run, subject, readOnly, acceptance, repositoryPath }: Ctx, observed: Observed | undefined, p: Prepared) {
   const previous = !readOnly ? latestSessionRun(p.workspace.id, run.id) : undefined;
   const { evaluated, diffPaths, diffBaseSha } = observed
-    ? { evaluated: evaluateContext(run, task, observed.observation), ...await readDiffScope(repositoryPath, p.mainSha, p.preparedHead, Boolean(observed.pullRequest)) }
+    ? { evaluated: evaluateContext(run, task, observed.observation), ...await readDiffScope(p.workspace.path, p.mainSha, p.preparedHead, Boolean(observed.pullRequest)) }
     : subject.kind === "window" ? describeWindow(task.action, subject, p.mainSha) : await describeCommit(repositoryPath, subject, run.input);
   updateRun(run.id, { context: evaluated });
   Object.assign(p, {

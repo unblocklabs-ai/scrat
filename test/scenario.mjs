@@ -922,7 +922,9 @@ export const scenarios = {
     db.update(s.runs).set({ startedAt: "2021-01-01T00:00:00Z" }).where(eq(s.runs.id, r5.id)).run();
     db.update(s.runs).set({ startedAt: "2020-01-01T00:00:00Z" }).where(eq(s.runs.id, r4.id)).run();
     rebuildRunsTable(["sequence"]);
+    db.$client.exec("ALTER TABLE workspaces DROP COLUMN layout");
     pushSchema();
+    assert.ok(db.$client.prepare("PRAGMA table_info(workspaces)").all().some((column) => column.name === "layout"));
     assert.deepEqual(db.$client.prepare("PRAGMA foreign_key_check").all(), []);
     assert.equal(all(s.runs).length, 5); assert.ok(all(s.runs).every((r) => r.sequence === null));
     assert.ok(db.$client.prepare("SELECT 1 FROM sqlite_master WHERE name = 'runs_sequence_unique'").get());
@@ -2260,6 +2262,65 @@ export const scenarios = {
     git(remote, "merge-base", "--is-ancestor", local, head);
     git(remote, "merge-base", "--is-ancestor", git(resolve("seed"), "rev-parse", "main"), head);
   } },
+  workspace_layout: { title: "workspaces record their layout, clones share objects that a shared-repository gc cannot remove, and publication bundles only the new commits with a full-bundle fallback", layouts: ["clone"], run: async () => {
+    const first = await implement(1), shared = f.config.github.repositoryPath, remote = resolve("remote.git");
+    const { createWorkspace, pushWorkspace } = await f.app("workspaces.ts");
+    const row = () => f.row(s.workspaces, first.workspaceId);
+    assert.equal(row().layout, layout ?? "worktree");
+    const pin = (id) => `refs/scrat/workspaces/${id}`;
+    assert.equal(git(shared, "rev-parse", pin(row().id)), layout === "clone" ? git(remote, "rev-parse", row().branch) : row().baseSha);
+    db.update(s.workspaces).set({ layout: null }).where(eq(s.workspaces.id, row().id)).run();
+    const { backfillWorkspaceLayouts } = await f.app("workspaces.ts");
+    await backfillWorkspaceLayouts();
+    assert.equal(row().layout, layout ?? "worktree");
+    if (layout !== "clone") return;
+    assert.ok(existsSync(resolve(row().path, ".git/objects/info/alternates")));
+    const header = () => readFileSync(resolve(row().path, ".scrat/publish.bundle"), "latin1").split("\n").filter((line) => line.startsWith("-"));
+    const publish = async (name) => {
+      writeFileSync(resolve(row().path, name), name + "\n"); git(row().path, "add", "."); commit(row().path, name);
+      const sha = git(row().path, "rev-parse", "HEAD");
+      await pushWorkspace(row(), remote, sha, { ...process.env });
+      assert.equal(git(remote, "rev-parse", row().branch), sha);
+      return sha;
+    };
+    const published = git(remote, "rev-parse", row().branch);
+    await publish("one.txt");
+    assert.equal(header().length, 1); assert.ok(header()[0].startsWith("-" + published));
+    const incremental = fs.statSync(resolve(row().path, ".scrat/publish.bundle")).size;
+    git(row().path, "bundle", "create", resolve(row().path, ".scrat/full.bundle"), "refs/heads/" + row().branch);
+    const full = fs.statSync(resolve(row().path, ".scrat/full.bundle")).size;
+    assert.ok(incremental < full, `${incremental} < ${full}`);
+    console.log(`BUNDLE_BYTES incremental=${incremental} full=${full}`);
+    writeFileSync(resolve(row().path, "local.txt"), "local\n"); git(row().path, "add", "."); commit(row().path, "local");
+    const local = git(row().path, "rev-parse", "HEAD");
+    db.update(s.workspaces).set({ baseSha: local }).where(eq(s.workspaces.id, row().id)).run();
+    git(shared, "update-ref", "-d", pin(row().id));
+    await publish("two.txt");
+    assert.deepEqual(header(), []);
+    git(remote, "merge-base", "--is-ancestor", local, row().branch);
+    const published2 = git(row().path, "rev-parse", "HEAD");
+    git(".", "clone", "-b", row().branch, remote, "pr-ahead");
+    writeFileSync("pr-ahead/ahead.txt", "ahead\n"); git(resolve("pr-ahead"), "add", "."); commit(resolve("pr-ahead"), "Ahead"); git(resolve("pr-ahead"), "push", "origin", row().branch);
+    git(row().path, "repack", "-a", "-d", "-q"); fs.rmSync(resolve(row().path, ".git/objects/info/alternates"));
+    const { branchContainsCommit } = await f.app("git.ts");
+    assert.equal(await branchContainsCommit(row(), remote, row().branch, published2, { ...process.env }), true);
+    db.update(s.workspaces).set({ layout: "worktree" }).where(eq(s.workspaces.id, row().id)).run();
+    await backfillWorkspaceLayouts();
+    assert.equal(row().layout, "clone");
+    const tree = git(shared, "rev-parse", "HEAD^{tree}"), head = git(shared, "rev-parse", "HEAD");
+    const orphan = () => git(shared, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", tree, "-p", head, "-m", "orphan " + Math.random());
+    const [kept, lost] = [orphan(), orphan()];
+    const retained = await createWorkspace({ repositoryPath: shared, baseRef: kept });
+    assert.equal(git(shared, "rev-parse", pin(retained.id)), kept);
+    git(shared, "reflog", "expire", "--expire=now", "--all"); git(shared, "gc", "--prune=now", "--quiet");
+    assert.throws(() => git(shared, "cat-file", "-e", lost + "^{commit}"));
+    git(retained.path, "cat-file", "-e", kept + "^{commit}");
+    assert.equal(git(retained.path, "rev-parse", "HEAD"), kept);
+    git(retained.path, "fsck", "--connectivity-only");
+    const { removeWorkspace } = await f.app("workspaces.ts");
+    await removeWorkspace(retained.id);
+    assert.throws(() => git(shared, "rev-parse", "--verify", pin(retained.id)));
+  } },
   sandbox: { title: "Linux sandbox contains preparation, agent Bash and commit hooks while a fresh clone validates and publishes", needsSandbox: true,
     seed: () => {
       writeFileSync("outside-secret.txt", "controller-only-canary");
@@ -2310,7 +2371,7 @@ export const scenarios = {
       assert.ok(index);
       mkdirSync(resolve(legacyPath, ".scrat")); writeFileSync(resolve(legacyPath, ".scrat/notes.md"), "Retain the unresolved merge\n");
       const { isolateWorkspace } = await f.app("workspaces.ts");
-      await isolateWorkspace({ id: "legacy-migration", path: legacyPath, repositoryPath: checkout, branch: "scrat/legacy-migration" });
+      await isolateWorkspace({ id: "legacy-migration", path: legacyPath, repositoryPath: checkout, branch: "scrat/legacy-migration", layout: "worktree" });
       assert.equal(git(legacyPath, "ls-files", "--unmerged"), index);
       assert.equal(git(legacyPath, "rev-parse", "MERGE_HEAD"), git(checkout, "rev-parse", "HEAD"));
       assert.equal(readFileSync(resolve(legacyPath, ".scrat/notes.md"), "utf8"), "Retain the unresolved merge\n");

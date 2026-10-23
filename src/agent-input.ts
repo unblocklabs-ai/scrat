@@ -32,10 +32,10 @@ function historyReport(entries: ReturnType<typeof completedRunsOfActionInReposit
   return parts.length > 1 ? parts.join("") : undefined;
 }
 
-export async function readDiffScope(repositoryPath: string, mainSha: string, preparedHead: string, isPullRequest: boolean) {
+export async function readDiffScope(workspacePath: string, mainSha: string, preparedHead: string, isPullRequest: boolean) {
   const [diffBaseSha, diffPaths] = await Promise.all([
-    isPullRequest ? git(repositoryPath, ["merge-base", mainSha, preparedHead]) : mainSha,
-    isPullRequest ? git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", `${mainSha}...${preparedHead}`]).then((output) => output.split("\0").filter(Boolean)) : [],
+    isPullRequest ? git(workspacePath, ["merge-base", mainSha, preparedHead]) : mainSha,
+    isPullRequest ? git(workspacePath, ["diff", "--name-only", "--no-renames", "-z", `${mainSha}...${preparedHead}`]).then((output) => output.split("\0").filter(Boolean)) : [],
   ]);
   return { diffBaseSha, diffPaths };
 }

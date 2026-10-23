@@ -254,8 +254,8 @@ async function planAgent({ task, run, subject, readOnly, acceptance, repositoryP
 }
 
 async function mergeBehind(ctx: Ctx, observed: Observed | undefined, p: Prepared) {
-  const { run, acceptance, repositoryPath } = ctx;
-  if (!observed || acceptance !== "conflict_free" || p.mergeInProgress || run.retryOfRunId || !await behindCleanly(repositoryPath, p.mainSha, p.headSha)) return;
+  const { run, acceptance } = ctx;
+  if (!observed || acceptance !== "conflict_free" || p.mergeInProgress || run.retryOfRunId || !await behindCleanly(p.workspace.path, p.mainSha, p.headSha)) return;
   const { baseBranch } = observed.observation;
   await mergeBase(p.workspace.path, p.mainSha, `Merge ${baseBranch} into ${observed.pullRequest!.head.ref}`, botAuthor());
   p.headSha = await git(p.workspace.path, ["rev-parse", "HEAD"]);
@@ -277,8 +277,8 @@ async function prepareCommands({ run, readOnly, repositoryPath, references, oper
   try { await prepareWorkspace(p.workspace, p.commandEnvironment, p.databaseConfig, references); }
   catch (error) {
     const humanReview = readOnly && !isBotLogin(context.item.user?.login);
-    if (!pullRequest || !(humanReview || !readOnly) || await isAncestor(repositoryPath, p.mainSha, p.headSha)) throw error;
-    if (await hasConflicts(repositoryPath, p.mainSha, p.headSha)) {
+    if (!pullRequest || !(humanReview || !readOnly) || await isAncestor(p.workspace.path, p.mainSha, p.headSha)) throw error;
+    if (await hasConflicts(p.workspace.path, p.mainSha, p.headSha)) {
       if (!readOnly) throw error;
       throw new Error(`PR branch is behind ${baseBranch} and does not merge cleanly; the author needs to update it`);
     }

@@ -53,6 +53,9 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
   if (changeActions.length && !settings.workspace?.validate?.length) {
     problems.push(`workspace.validate is empty but ${changeActions.join(", ")} publish commits; list the target repository's check commands, or use [["true"]] if it has nothing to check`);
   }
+  for (const manifest of manifests()) {
+    if (manifest.mode === "change" && ({ ...deploymentDefaults(manifest), ...settings.actions[manifest.name] }).agent !== "single") problems.push(`${manifest.name}: mode change requires source github_items and agent: single`);
+  }
   const bindingProblems = validateBindings(settings.bindings);
   problems.push(...bindingProblems);
   if (!bindingProblems.length) {

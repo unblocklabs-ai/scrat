@@ -1845,6 +1845,7 @@ export const scenarios = {
     await validateStaticConfig(variant((c) => { c.workspace.validate = []; for (const name of changeActions) c.actions[name].enabled = false; }));
     invalid((c) => { c.actions.implement.thinkingLevel = "turbo"; }, /actions\.implement\.thinkingLevel: must be equal to one of the allowed values/);
     invalid((c) => { c.github.auth = "token"; }, /github\.auth: must be equal to one of the allowed values/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.implement.agent = "panel"; })), /implement: mode change requires source github_items and agent: single/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.github.botLogin = " "; })), /github\.botLogin must not be empty/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.github.botName = " !! "; })), /github\.botName must contain a letter or digit/);
     const key = process.env.GITHUB_APP_PRIVATE_KEY;

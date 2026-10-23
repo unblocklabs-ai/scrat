@@ -15,10 +15,12 @@ export function pageText(page: GitPage, offset: number, size = page.total) {
 
 export function createReviewGitTool(cwd: string, revisions: Record<string, string>, touched: Set<string>) {
   const names = Object.keys(revisions);
-  async function resolveRevision(value: string | undefined, parameter: string) {
-    const candidate = value && Object.hasOwn(revisions, value) ? revisions[value] : value;
-    if (!candidate || !/^[0-9a-f]{7,40}$/.test(candidate)) {
-      throw new Error(`${parameter} must be a hex commit SHA or one of: ${names.join(", ")}`);
+  const accepted = `${names.join(", ")} or a 7-40 character hex commit SHA`;
+  async function resolveRevision(value: string | undefined, parameter: string, operation: string) {
+    if (!value) throw new Error(`${parameter} is required for ${operation}; use ${accepted}`);
+    const candidate = Object.hasOwn(revisions, value) ? revisions[value]! : value;
+    if (!/^[0-9a-f]{7,40}$/.test(candidate)) {
+      throw new Error(`${parameter} must be a hex commit SHA or one of: ${names.join(", ")}; ^, ~ and other revision syntax are not accepted: ${value}`);
     }
     try { return await git(cwd, ["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`]); }
     catch { throw new Error(`${parameter} is not a commit available in this checkout: ${value}`); }
@@ -40,14 +42,17 @@ export function createReviewGitTool(cwd: string, revisions: Record<string, strin
     description: [
       `Inspect Git history without a shell. Output is capped at ${config.tools.readBytes.max} bytes per call (default ${config.tools.readBytes.default}); when it is truncated the result says so and gives the offset for the next call.`,
       `Revisions are hex commit SHAs or: ${names.join(", ")}.`,
-      "operation=diff_stat: change summary between `from` and `to` (optional `path` limits it to a file or directory).",
-      "operation=diff: patch between `from` and `to` (optional `path` limits it to a file or directory).",
-      `operation=log: commit history ending at \`revision\` (default head), at most ${config.tools.git.maxCommits} commits, optionally for \`path\`.`,
-      "operation=show: contents of `path` at `revision`.",
+      "Revision syntax such as `^`, `~` or `HEAD@{1}` is not accepted.",
+      "operation=diff_stat: requires `from` and `to`; change summary between them (optional `path` limits it to a file or directory).",
+      "operation=diff: requires `from` and `to`; patch between them (optional `path` limits it to a file or directory).",
+      `operation=log: optional \`revision\` (defaults to head) and \`path\`; commit history ending at \`revision\`, at most ${config.tools.git.maxCommits} commits.`,
+      "operation=show: requires both `revision` and `path`; contents of `path` at `revision`.",
     ].join("\n"),
     parameters: Type.Object({
       operation: Type.String({ description: operations.join(" | ") }),
-      from: Type.Optional(Type.String()), to: Type.Optional(Type.String()), revision: Type.Optional(Type.String()),
+      from: Type.Optional(Type.String({ description: `Start revision; required for diff and diff_stat. ${accepted}` })),
+      to: Type.Optional(Type.String({ description: `End revision; required for diff and diff_stat. ${accepted}` })),
+      revision: Type.Optional(Type.String({ description: `Revision; required for show, defaults to head for log. ${accepted}` })),
       path: Type.Optional(Type.String()),
       offset: Type.Optional(Type.Integer({ minimum: 0, description: "Byte offset into the output, for paging" })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: config.tools.readBytes.max, description: `Maximum bytes to return (default ${config.tools.readBytes.default})` })),
@@ -58,7 +63,7 @@ export function createReviewGitTool(cwd: string, revisions: Record<string, strin
       const scope: string[] = path ? [path] : [];
       let page: GitPage, size: number | undefined;
       if (operation === "diff_stat" || operation === "diff") {
-        const range = [await resolveRevision(from, "from"), await resolveRevision(to, "to")];
+        const range = [await resolveRevision(from, "from", operation), await resolveRevision(to, "to", operation)];
         const options = ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"];
         page = await gitPage(cwd, [...options, ...(operation === "diff_stat" ? ["--stat=240,200"] : []), ...range, ...(path ? ["--", path] : [])], offset, limit);
         if (!path) {
@@ -66,11 +71,11 @@ export function createReviewGitTool(cwd: string, revisions: Record<string, strin
           scope.push(...(names.more ? ["."] : names.text.split("\0").filter(Boolean)));
         }
       } else if (operation === "log") {
-        const end = await resolveRevision(revision ?? "head", "revision");
+        const end = await resolveRevision(revision ?? "head", "revision", operation);
         page = await gitPage(cwd, ["--literal-pathspecs", "log", "--no-color", "--no-decorate", `--max-count=${config.tools.git.maxCommits}`,
           "--format=%H %cs %an: %s", end, ...(path ? ["--", path] : [])], offset, limit);
       } else {
-        const object = `${await resolveRevision(revision, "revision")}:${path}`;
+        const object = `${await resolveRevision(revision, "revision", operation)}:${path}`;
         page = await gitPage(cwd, ["show", object], offset, limit);
         if (page.more) size = await blobSize(cwd, object);
       }

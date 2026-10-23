@@ -726,6 +726,7 @@ export const scenarios = {
       assert.ok(toolText(mine, "[]"), "The agent can read its context directory");
       assert.ok(toolText(mine, "must be repository-relative"), "option-like paths are rejected");
       for (const message of ["revision must be a hex commit SHA"]) assert.ok(toolText(mine, message), message);
+      assert.ok(toolText(mine, "revision is required for show; use head, base, main"), "show without revision names the operation and accepted forms");
       assert.ok(toolText(mine, "Path is outside the workspace"), "reads outside the worktree and run directory stay refused");
     }
     assert.ok(consolidation.some((r) => toolText(r, "Independent review from")), "consolidator reads reviewer report files");

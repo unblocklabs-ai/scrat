@@ -64,7 +64,7 @@ async function cleanupClosedItem(item: Item) {
 
 async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observation: ItemObservation, pr: GithubPullRequest, mainSha: string, routes: Routes): Promise<PrMaintenanceFacts> {
   const { repositoryPath, remote, env } = ctx;
-  const headRef = await fetchPullRequestHead(repositoryPath, remote, pr.number, env);
+  const headRef = await fetchPullRequestHead(repositoryPath, remote, pr.number, pr.head.sha, env);
   const headSha = await git(repositoryPath, ["rev-parse", headRef]);
   const conflicts = await hasConflicts(repositoryPath, mainSha, headSha);
   const lastRun = latestFinishedRun(item.id);

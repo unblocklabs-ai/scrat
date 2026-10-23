@@ -1180,6 +1180,21 @@ export const scenarios = {
       assert.equal(f.requests.length - before, 2);
     }
   } },
+  pr_head: { title: "a stale refs/pull head is replaced by the API head, and a head the remote lacks fails the run without publishing", run: async () => {
+    await implement(1);
+    const remote = resolve("remote.git"), branch = f.prs[0].head.ref, stale = git(remote, "rev-parse", branch);
+    f.frozen.add(201);
+    const newer = git(remote, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", branch + "^{tree}", "-p", branch, "-m", "Newer head");
+    git(remote, "update-ref", "refs/heads/" + branch, newer);
+    await route();
+    assert.equal(git(remote, "rev-parse", "refs/pull/201/head"), stale);
+    const reviewed = await success();
+    assert.equal(reviewed.headSha, newer);    const writes = f.writes.length;
+    f.forced.set(201, "0".repeat(40)); tasks.enqueueManualTasks("review_pr", ["201"]);
+    const failed = await run();
+    assert.match(failed.error.message, /PR #201 head 0{40} could not be fetched/);
+    assert.equal(f.writes.length, writes);
+  } },
   incomplete: { title: "partial or undecided implementations never become PRs", run: async () => {
     for (const [i, mode] of ["incomplete", "needs_decision", "no-status", "bare-status"].entries()) {
       f.addIssue(i + 1); f.enqueue(i + 1, "implement"); f.reset(i + 1, mode);

@@ -30,6 +30,8 @@ const actionDefaults = { ...Object.fromEntries(loadedManifests.map((manifest) =>
 
 const merged = buildConfig({ ...settings, actions: actionDefaults }, overrides);
 delete (merged.actions as Json).directory;
+const unknownActions = Object.keys(merged.actions as Json).filter((name) => !loadedManifests.some((manifest) => manifest.name === name));
+if (unknownActions.length) throw new Error(`Invalid Scrat configuration:\n${unknownActions.map((name) => `- actions.${name}: unknown action`).join("\n")}`);
 export const config = validateConfig(merged);
 
 const conflicts = findTriggerConflicts(loadedManifests, (manifest) => config.actions[manifest.name]?.enabled !== false);
@@ -54,9 +56,9 @@ export function getActionConfig(action: string) {
   if (!manifest || !actionConfig) throw new Error(`Unknown action: ${action}`);
   return {
     ...actionConfig,
-    thinkingLevel: actionConfig.thinkingLevel as ThinkingLevel,
+    thinkingLevel: actionConfig.thinkingLevel,
     skill: skillPath(manifest, actionConfig.skill),
-    reviewers: (actionConfig.reviewers ?? []).map((reviewer) => ({ ...reviewer, thinkingLevel: reviewer.thinkingLevel as ThinkingLevel })),
+    reviewers: (actionConfig.reviewers ?? []).map((reviewer) => ({ ...reviewer, thinkingLevel: reviewer.thinkingLevel })),
   };
 }
 

@@ -1797,6 +1797,11 @@ export const scenarios = {
     };
     const outbound = () => existsSync(requestLog) ? readFileSync(requestLog, "utf8") : "";
     const modelRequests = f.requests.length;
+    const untouched = JSON.stringify([all(s.tasks), all(s.runs)]);
+    writeFileSync(local, JSON.stringify(layered({ harness: { maxConcurrentValidations: 0 } })));
+    const broken = spawnSync(process.execPath, ["startup-probe.mjs"], { encoding: "utf8" });
+    assert.notEqual(broken.status, 0); assert.match(broken.stderr, /Invalid Scrat configuration:\n- harness\.maxConcurrentValidations: must be >= 1/);
+    assert.equal(outbound(), ""); assert.equal(JSON.stringify([all(s.tasks), all(s.runs)]), untouched, "no task is claimed when the schema rejects the config");
     for (const exhaustedLabel of ["scrat-exhausted", null, ""]) assert.deepEqual(startup({ actions: { address_review: { exhaustedLabel } } }), { status: 0, message: undefined });
     f.addIssue(7); f.enqueue(7);
     const before = JSON.stringify([all(s.tasks), all(s.runs)]);
@@ -2449,7 +2454,6 @@ export const scenarios = {
     probe(undefined, ""); assert.equal(readFileSync(local, "utf8"), "{}\n");
     const { validateConfig } = await f.app("config-schema.ts");
     const check = (overrides, message) => assert.throws(() => validateConfig(buildConfig(defaults, overrides)), message);
-    check({ actions: { bogus: {} } }, /actions\.bogus\.priority: required/);
     check({ harness: 8 }, /^Error: Invalid Scrat configuration:\n- harness: must be object$/);
     check({ harness: null }, /harness: must be object/);
     check({ harness: { toString: 1 } }, /harness\.toString: unknown setting/);
@@ -2459,6 +2463,7 @@ export const scenarios = {
     check({ actions: { implement: { thinkingLevel: "turbo" } } }, /actions\.implement\.thinkingLevel: must be equal to one of the allowed values/);
     validateConfig(buildConfig(defaults, { workspace: { environment: { ANY_NEW_KEY: "1" } } }));
     rejected(JSON.parse('{"workspace":{"environment":{"__proto__":{"x":"1"}}}}'), /Unknown setting in scrat\.local\.json: workspace\.environment\.__proto__/);
+    assert.throws(() => probe({ actions: { bogus: {} } }, ""), (error) => /Invalid Scrat configuration:\n- actions\.bogus: unknown action/.test(error.stderr));
     assert.throws(() => probe({ harness: { maxConcurency: 8 } }, ""), (error) => /Invalid Scrat configuration:\n- harness\.maxConcurency: unknown setting/.test(error.stderr));
 
     const provider = Object.keys(defaults.providers)[0], model = defaults.providers[provider].models[0].id;
@@ -2870,6 +2875,8 @@ export const scenarios = {
     const extend = (fields) => (text) => text.replace(/^trigger: \{(.*)\}$/m, "trigger: {$1, " + fields + "}");
     mutate("review_base_change", extend("granularity: commit, author: alice, message: ship it"));
     mutate("review_base_change", extend("author: bot"));
+    mutate("address_review", (text) => text.replace(/^maxSelfRepairs: .*\n/m, ""), /kind low_grade requires maxSelfRepairs/);
+    mutate("review_base_change", (text) => text.replace(/^maxRangeCommits: .*\n/m, ""), /source github_commits requires maxRangeCommits/);
     mutate("review_base_change", extend("granularity: sometimes"), /granularity/);
     mutate("review_base_change", extend('message: ""'), /message/);
     mutate("review_issue", extend("message: x"), /trigger\.message and trigger\.granularity are only allowed with source github_commits/);

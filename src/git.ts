@@ -88,6 +88,7 @@ export async function fetchRepository(repositoryPath: string, remote: string, ba
       await executeFile("git", ["clone", "--single-branch", "--branch", baseBranch, "--", remote, repositoryPath], { env, ...networkOptions }).catch(timedOut("clone"));
     }
     await assertOrigin(repositoryPath, remote);
+    await git(repositoryPath, ["config", "gc.auto", "0"]);
     await excludeWorkingNotes(repositoryPath);
     await git(repositoryPath, ["fetch", "--", remote, `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`], env);
     return git(repositoryPath, ["rev-parse", `refs/remotes/origin/${baseBranch}`]);
@@ -122,18 +123,24 @@ export async function hasConflicts(repositoryPath: string, base: string, head: s
   }
 }
 
-export async function branchContainsCommit(repositoryPath: string, remote: string, branch: string, commitSha: string, env = childEnvironment()) {
+export async function branchContainsCommit(workspace: { path: string; repositoryPath: string }, remote: string, branch: string, commitSha: string, env = childEnvironment()) {
+  const { repositoryPath } = workspace;
   const advertised = await git(repositoryPath, ["ls-remote", "--heads", "--", remote, `refs/heads/${branch}`], env);
   const remoteSha = advertised.split(/\s+/)[0];
   if (!remoteSha) return false;
   if (remoteSha === commitSha) return true;
   await git(repositoryPath, ["fetch", "--no-write-fetch-head", "--", remote, remoteSha], env);
+  let where = workspace.path;
   try {
-    await git(repositoryPath, ["cat-file", "-e", `${commitSha}^{commit}`]);
+    await git(where, ["cat-file", "-e", `${commitSha}^{commit}`]);
+    await git(where, ["cat-file", "-e", `${remoteSha}^{commit}`]).catch(async () => {
+      where = repositoryPath;
+      await git(where, ["cat-file", "-e", `${commitSha}^{commit}`]);
+    });
   } catch {
     return false;
   }
-  return isAncestor(repositoryPath, commitSha, remoteSha);
+  return isAncestor(where, commitSha, remoteSha);
 }
 
 export async function isAncestor(repositoryPath: string, ancestor: string, descendant: string) {

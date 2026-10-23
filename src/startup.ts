@@ -10,6 +10,7 @@ import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 import { loadPlaywright } from "./scoped-tools.ts";
 import { authTest } from "./slack.ts";
 import { ensureRunSequences } from "./tasks.ts";
+import { backfillWorkspaceLayouts } from "./workspaces.ts";
 
 const templateVariables = new Set(["sha", "short_sha", "author", "title", "url", "branch", "count", "bot"]);
 
@@ -95,4 +96,5 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
 export async function prepareService() {
   await validateStaticConfig();
   ensureRunSequences();
+  await backfillWorkspaceLayouts();
 }

@@ -53,6 +53,7 @@ export const workspaces = sqliteTable("workspaces", {
   path: text("path").notNull().unique(),
   baseRef: text("base_ref").notNull(),
   baseSha: text("base_sha").notNull(),
+  layout: text("layout", { enum: ["worktree", "clone"] }),
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
   removedAt: text("removed_at"),
 });

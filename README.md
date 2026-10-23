@@ -75,7 +75,7 @@ For project review, run `typecheck`, `knip`, and the integration/E2E tests after
 
 `scrat.config.json` holds the defaults and ships with each release. Settings specific to one deployment go in `scrat.local.json`, a gitignored file next to it that holds only the overrides, for example `{"harness":{"maxConcurrency":8}}`. If it is missing, Scrat creates it containing `{}`.
 
-- Plain objects merge recursively; arrays and primitives replace the default. `null` is accepted only where the schema allows it: `workspace.database` (`"workspace":{"database":null}` disables the database), `workspace.commandMemoryMax` and an action's `exhaustedLabel`.
+- Plain objects merge recursively; arrays and primitives replace the default. `null` is accepted only where the schema allows it: `workspace.database` (`"workspace":{"database":null}` disables the database), `workspace.commandMemoryMax`, `workspace.packageStore` and an action's `exhaustedLabel`.
 - The merged config is validated against one schema (`src/config-schema.ts`): an unknown key, a wrong type or an out-of-range number stops startup with the setting path, for example `harness.maxConcurency: unknown setting` or `harness.maxConcurrentValidations: must be >= 1`. `workspace.environment` (variable names) and `providers` are open: they accept keys the defaults do not show, so a provider can be overridden or added.
 - Relative paths in overrides resolve from the config directory, like the defaults.
 - On the VM the file lives at `~/.local/share/scrat-v2/scrat.local.json` and is linked into each release by the installer, which checks it before stopping the running service. After editing it, check it with `node src/config.ts` from `~/.local/share/scrat-v2/current`, then apply it with `systemctl --user restart scrat.service`, which waits for running tasks like a deploy.
@@ -160,7 +160,7 @@ the old service. On Ubuntu 24.04, an administrator installs `bubblewrap`, instal
 `apparmor_parser -r /etc/apparmor.d/scrat-bwrap`. Do not disable the global userns
 restriction. Provision Node and the pinned pnpm version with Corepack first.
 
-`workspace.packageStore` (default `null`) is an absolute directory that is bind-mounted read-write at pnpm's store
+`workspace.packageStore` (default `null`) is an absolute directory, not a symlink, that is bind-mounted read-write at pnpm's store
 location in every sandboxed command, with a `storeDir` entry written to the sandbox home's pnpm `config.yaml` so
 pnpm uses it. A lockfile's packages are then downloaded once per install instead of once per workspace. It requires
 `workspace.sandbox`, and the installer's preflight writes to it. This is opt-in and meant for repositories whose

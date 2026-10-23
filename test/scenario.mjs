@@ -2031,9 +2031,20 @@ export const scenarios = {
     const moved = await run(); assert.equal(moved.taskId, repair9.id); assert.equal(moved.error.message, guarded);
     assert.equal(f.requests.length, calls9); assert.equal(git(resolve("remote.git"), "rev-parse", branch9), head9);
   } },
-  review_prior_assessment: { title: "a re-review of a Scrat PR after a pushed repair gives both panel reviewers and the consolidator the previous assessment and repair summary; first reviews and human PRs get neither", run: async () => {
+  review_prior_assessment: { title: "a re-review of a Scrat PR after a pushed repair gives both panel reviewers and the consolidator the previous assessment and repair summary; a re-review of a human PR after a pushed file gets the previous assessment and head; first reviews get neither", run: async () => {
     const review = async (n, mode) => { f.reset(n, mode); await route(); return success(); };
-    const filesOf = (assessmentId) => f.requests.filter((r) => r.context.action === "review_pr" && r.context.item.number === 201 && r.context.files.directory.includes(assessmentId));
+    const filesOf = (number, assessmentId) => f.requests.filter((r) => r.context.action === "review_pr" && r.context.item.number === number && r.context.files.directory.includes(assessmentId));
+    const pushFile = (branch, path, text) => {
+      const remote = resolve("remote.git"), parent = git(remote, "rev-parse", branch), index = resolve("human-push.index"), env = { ...process.env, GIT_INDEX_FILE: index };
+      rmSync(index, { force: true });
+      execFileSync("git", ["-C", remote, "read-tree", parent], { env });
+      const blob = execFileSync("git", ["-C", remote, "hash-object", "-w", "--stdin"], { input: text, encoding: "utf8" }).trim();
+      execFileSync("git", ["-C", remote, "update-index", "--add", "--cacheinfo", `100644,${blob},${path}`], { env });
+      const tree = execFileSync("git", ["-C", remote, "write-tree"], { env, encoding: "utf8" }).trim();
+      const next = git(remote, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", tree, "-p", parent, "-m", "Human follow-up");
+      git(remote, "update-ref", "refs/heads/" + branch, next);
+      return next;
+    };
     await implement(1); const first = await review(201, "grade-C");
     const firstRequests = f.requests.filter((r) => r.context.action === "review_pr");
     assert.ok(firstRequests.some((r) => r.consolidating));
@@ -2042,7 +2053,7 @@ export const scenarios = {
     assert.equal(repair.taskId, all(s.tasks).find((t) => t.action === "address_review").id); assert.ok(repair.result.text.includes("Implemented the change"));
     await route(); f.reset(201, "normal"); const second = await success();
     assert.notEqual(second.id, first.id);
-    const secondRequests = filesOf(second.id);
+    const secondRequests = filesOf(201, second.id);
     assert.equal(new Set(secondRequests.filter((r) => !r.consolidating).map((r) => r.request.model)).size, 2); assert.ok(secondRequests.some((r) => r.consolidating));
     for (const request of secondRequests) {
       assert.ok(!("history" in request.context.files), "PR reviews keep the #50 files instead of a history file");
@@ -2050,8 +2061,20 @@ export const scenarios = {
       assert.equal(readFileSync(request.context.files.previous_repair, "utf8"), repair.result.text);
     }
     await implement(2); f.prs.find((pr) => pr.number === 202).user.login = "human";
-    await review(202, "normal"); tasks.enqueueManualTasks("review_pr", ["202"]); await success();
-    assert.ok(f.requests.filter((r) => r.context.item.number === 202 && r.context.action === "review_pr").every((r) => !("previous_assessment" in r.context.files)), "Human PRs never get prior state");
+    const humanFirst = await review(202, "grade-C");
+    const humanFirstRequests = f.requests.filter((r) => r.context.item.number === 202 && r.context.action === "review_pr");
+    assert.ok(humanFirstRequests.length && humanFirstRequests.every((r) => !("previous_assessment" in r.context.files) && !("previous_repair" in r.context.files)), "A human PR's first review has no prior state");
+    const humanBranch = f.prs.find((pr) => pr.number === 202).head.ref, firstHead = git(resolve("remote.git"), "rev-parse", humanBranch);
+    const humanHead = pushFile(humanBranch, "human-note.txt", "A follow-up change\n");
+    const humanSecond = await review(202, "normal");
+    assert.notEqual(humanSecond.id, humanFirst.id); assert.equal(humanSecond.headSha, humanHead);
+    const humanSecondRequests = filesOf(202, humanSecond.id);
+    assert.equal(new Set(humanSecondRequests.filter((r) => !r.consolidating).map((r) => r.request.model)).size, 2); assert.ok(humanSecondRequests.some((r) => r.consolidating));
+    for (const request of humanSecondRequests) {
+      assert.equal(request.context.previous?.headSha, firstHead, "A human re-review names the previous head");
+      assert.equal(readFileSync(request.context.files.previous_assessment, "utf8"), humanFirst.result.text);
+      assert.ok(!("previous_repair" in request.context.files), "A human PR has no repair summary");
+    }
   } },
   issue_effect: { title: "SCRAT_ISSUE footer blocks parse only at the end of the report, and the issue effect creates each fingerprint once, skips receipted and marker-matched issues, and creates nothing when any block leaks a secret", run: async () => {
     const { applyEffects } = await f.app("effects.ts");

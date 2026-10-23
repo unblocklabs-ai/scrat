@@ -2322,7 +2322,7 @@ export const scenarios = {
   package_store: { title: "a configured package store is shared read-write across sandboxed workspaces", needsSandbox: true,
     configure: [(config) => {
       const store = "/home/scrat/.local/share/pnpm/store";
-      config.workspace = { sandbox: true, layout: "clone", packageStore: resolve("shared-store"), prepare: [["sh", "-c", `test "$npm_config_store_dir" = ${store} && if [ -f ${store}/marker ]; then touch ${store}/seen; else touch ${store}/marker; fi`]] };
+      config.workspace = { sandbox: true, layout: "clone", packageStore: resolve("shared-store"), prepare: [["sh", "-c", `pnpm store path > ${store}/path && if [ -f ${store}/marker ]; then touch ${store}/seen; else touch ${store}/marker; fi`]] };
     }],
     run: async () => {
       for (const number of [1, 2]) {
@@ -2330,6 +2330,7 @@ export const scenarios = {
         f.script = [{ name: "bash", args: { command: `printf 'export const value = 1${number};\\n' > src/app.ts` } }];
         assert.equal((await success()).publication.status, "published");
       }
+      assert.equal(readFileSync(resolve("shared-store/path"), "utf8").trim(), "/home/scrat/.local/share/pnpm/store/v11");
       assert.ok(existsSync(resolve("shared-store/marker")));
       assert.ok(existsSync(resolve("shared-store/seen")));
     } },

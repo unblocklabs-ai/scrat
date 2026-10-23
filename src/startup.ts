@@ -1,5 +1,5 @@
 import { isAbsolute } from "node:path";
-import { access, mkdir } from "node:fs/promises";
+import { access, lstat, mkdir } from "node:fs/promises";
 import { manifests } from "./actions.ts";
 import { type Resolver, publicAnswers, resolveHost, validateBindings } from "./bindings.ts";
 import { type ActionSettings, config, thinkingLevels } from "./config.ts";
@@ -39,6 +39,7 @@ export async function validateStaticConfig(settings: {
   if (store !== undefined && store !== null) {
     if (typeof store !== "string" || !isAbsolute(store)) problems.push("workspace.packageStore must be null or an absolute path");
     else if (!settings.workspace?.sandbox) problems.push("workspace.packageStore requires workspace.sandbox");
+    else if (await lstat(store).then((entry) => entry.isSymbolicLink(), () => false)) problems.push("workspace.packageStore must not be a symlink");
     else if (process.platform === "linux") await mkdir(store, { recursive: true, mode: 0o700 }).catch(() => { problems.push(`workspace.packageStore ${store} cannot be created`); });
   }
   const checkEntry = (label: string, { provider, model, thinkingLevel }: Entry) => {

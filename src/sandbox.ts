@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, statSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, writeFileSync, mkdirSync, statSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { execFile } from "node:child_process";
@@ -74,10 +74,13 @@ export function sandboxCommand(cwd: string, file: string, args: string[], enviro
     mkdirSync(store, { recursive: true, mode: 0o700 });
     if (lstatSync(store).isSymbolicLink() || !statSync(store).isDirectory()) throw new Error("workspace.packageStore must be a real directory");
     bind(realpathSync(store), packageStoreMount, true);
+    const settings = join(home, ".config/pnpm/config.yaml"), content = `storeDir: ${packageStoreMount}\n`;
+    mkdirSync(dirname(settings), { recursive: true, mode: 0o700 });
+    if (!existsSync(settings) || readFileSync(settings, "utf8") !== content) writeFileSync(settings, content, { mode: 0o600 });
   }
   const env = Object.fromEntries(Object.entries(environment).filter(([name]) =>
     !name.startsWith("XDG_") && !name.startsWith("GIT_CONFIG") && !["HOME", "PATH", "DOCKER_HOST", "TMPDIR", "TMP", "TEMP"].includes(name)));
-  Object.assign(env, store ? { npm_config_store_dir: packageStoreMount } : {}, { HOME: "/home/scrat", PATH: `${dirname(process.execPath)}:/opt/scrat-bin:/usr/local/bin:/usr/bin:/bin:/sbin`, TMPDIR: "/tmp", TMP: "/tmp", TEMP: "/tmp", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", COREPACK_DEFAULT_TO_LATEST: "0", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" });
+  Object.assign(env, { HOME: "/home/scrat", PATH: `${dirname(process.execPath)}:/opt/scrat-bin:/usr/local/bin:/usr/bin:/bin:/sbin`, TMPDIR: "/tmp", TMP: "/tmp", TEMP: "/tmp", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", COREPACK_DEFAULT_TO_LATEST: "0", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" });
   const bwrap = [...mounts, "--chdir", workspace, "--", file === "git" ? "/usr/bin/git" : file, ...args];
   if (!limit) return { file: "/usr/bin/bwrap", args: bwrap, env, unit: undefined };
   const unit = `scrat-${relative(workspaceRoot(), workspace).split("/")[0].replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 60)}-${randomBytes(6).toString("hex")}.scope`;

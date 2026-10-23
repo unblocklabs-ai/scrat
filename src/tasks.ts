@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { and, asc, count, desc, eq, isNotNull, isNull, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import { type Action, getManifest, manifests } from "./actions.ts";
-import { config, getActionConfig, isActionEnabled, thinkingLevels } from "./config.ts";
+import { config, getActionConfig, isActionEnabled } from "./config.ts";
 import { itemsInRepository, sameRepository } from "./repository.ts";
 import { db } from "./db.ts";
 import { describeError } from "./errors.ts";
@@ -25,10 +25,6 @@ const isKnownAction = (action: string) => getManifest(action) !== undefined;
 function checkClaimable({ task, subject }: { task: Task; subject: Subject }, database: Pick<typeof db, "select">) {
   if (!isKnownAction(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   if (!isActionEnabled(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
-  const actionConfig = config.actions[task.action];
-  const invalid = [actionConfig, ...actionConfig.reviewers ?? []]
-    .find(({ thinkingLevel }) => !(thinkingLevels as readonly string[]).includes(thinkingLevel));
-  if (invalid) return { ok: false as const, reason: `Invalid thinking level for ${task.action}: ${invalid.thinkingLevel}` };
   let trigger;
   try { trigger = parseTriggerInput(task.input); }
   catch (error) { return { ok: false as const, reason: `Invalid trigger input for ${task.action}: ${error instanceof Error ? error.message : String(error)}` }; }

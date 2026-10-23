@@ -61,7 +61,7 @@ export function planPrMaintenance({ conflictAction, feedbackAction, conflicts, s
 
 export function planSelfRepair({ repairAction, repairActions, state, feedbackTask, reviewTask, repairTask, count, limit }: {
   repairAction: Action | undefined; repairActions: readonly Action[]; state: PrReviewState;
-  feedbackTask?: TaskFacts; reviewTask?: TaskFacts; repairTask?: TaskFacts; count: number; limit: number;
+  feedbackTask?: TaskFacts; reviewTask?: TaskFacts; repairTask?: TaskFacts; count: number; limit: number | undefined;
 }): { decisions: RoutingDecision[]; limited: boolean } {
   const cancel: RoutingDecision[] = repairActions.map((action) => ({ type: "cancel", action, reason: "No current low-graded review to repair" }));
   const reviewActive = reviewTask?.status === "queued" || reviewTask?.status === "running";
@@ -70,7 +70,7 @@ export function planSelfRepair({ repairAction, repairActions, state, feedbackTas
   }
   const { originId } = state.assessment, grade = state.assessment.result.grade;
   const decisions = queue(repairTask, repairAction, `Current review graded ${grade}`, { source: "github_items", kind: "low_grade", triggerKey: originId, assessmentRunId: originId, grade: grade! });
-  return decisions.length && count >= limit ? { decisions: cancel, limited: true } : { decisions, limited: false };
+  return decisions.length && limit !== undefined && count >= limit ? { decisions: cancel, limited: true } : { decisions, limited: false };
 }
 
 type ReviewTriggerFacts = {

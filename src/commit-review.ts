@@ -19,7 +19,7 @@ export function commitInput(raw: Record<string, unknown>): CommitInput {
   return { sha, previousSha, branch, commitCount };
 }
 
-export function commitMetadata({ metadata }: Subject) {
+function commitMetadata({ metadata }: Subject) {
   if (!metadata || !("title" in metadata)) throw new Error("Commit subject has no metadata");
   return metadata;
 }

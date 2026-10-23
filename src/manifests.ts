@@ -86,6 +86,7 @@ function crossChecks(m: Parsed) {
   need(!tools.includes("read_base") || (mode === "review" && (agent === "panel" || m.context === "change")), "read_base requires a review with agent: panel or context: change");
   if (mode === "change") {
     need(m.acceptance !== undefined, "mode change requires acceptance");
+    need(items && agent === "single", "mode change requires source github_items and agent: single");
     need(publish[0] === "push", "mode change must publish push first");
     need(m.context !== "change", "mode change requires context all or feedback");
     need(!any(tools, ["git", "read_base"]), "mode change forbids the git and read_base tools");

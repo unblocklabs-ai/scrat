@@ -2186,7 +2186,7 @@ export const scenarios = {
     assert.equal(git(remote, "show", `${retried.publication.commitSha}:src/app.ts`), "export const value = 14;");
     assert.equal(f.prs.length, 1);
   } },
-  pr_head_routing: { title: "routing sees the API head of a PR whose refs/pull head is frozen behind it, so a conflict only the newer head has queues an update", layouts: ["clone"], run: async () => {
+  pr_head_routing: { title: "routing sees the API head of a PR whose refs/pull head is frozen behind it, so a conflict only the newer head has queues an update", run: async () => {
     await implement(1);
     const remote = resolve("remote.git"), branch = f.prs[0].head.ref, item = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 201);
     tasks.cancelQueuedTasks(item.id, "Isolate"); await route(); tasks.cancelQueuedTasks(item.id, "Isolate");

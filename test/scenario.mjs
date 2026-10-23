@@ -1189,11 +1189,15 @@ export const scenarios = {
     await route();
     assert.equal(git(remote, "rev-parse", "refs/pull/201/head"), stale);
     const reviewed = await success();
-    assert.equal(reviewed.headSha, newer);    const writes = f.writes.length;
+    assert.equal(reviewed.headSha, newer);
+    const writes = f.writes.length;
     f.forced.set(201, "0".repeat(40)); tasks.enqueueManualTasks("review_pr", ["201"]);
     const failed = await run();
     assert.match(failed.error.message, /PR #201 head 0{40} could not be fetched/);
     assert.equal(f.writes.length, writes);
+    await implement(2); await route();
+    const second = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 202);
+    assert.ok(all(s.tasks).some((t) => t.subjectId === second.id && t.action === "review_pr" && t.status === "queued"));
   } },
   incomplete: { title: "partial or undecided implementations never become PRs", run: async () => {
     for (const [i, mode] of ["incomplete", "needs_decision", "no-status", "bare-status"].entries()) {

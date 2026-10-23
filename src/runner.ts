@@ -162,7 +162,7 @@ async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
   if (workspace) {
     await validateWorkspace(workspace);
     await isolateWorkspace(workspace);
-    if (config.workspace?.sandbox) await git(workspace.path, ["fetch", "--no-tags", "--", `${repositoryPath}/.git`, preparedHead, mainSha]);
+    if (config.workspace?.layout === "clone") await git(workspace.path, ["fetch", "--no-tags", "--", `${repositoryPath}/.git`, preparedHead, mainSha]);
   }
   if (validationOnly) {
     if (!hasValidationCheckpoint(run)) throw new Error("No complete agent checkpoint to resume; use normal retry to repair");
@@ -299,7 +299,7 @@ async function prepareCommands({ run, readOnly, repositoryPath, references, oper
   }
 }
 
-async function agentStage({ task, run, manifest, readOnly, operation, stop }: Ctx, observed: Observed | undefined, p: Prepared) {
+async function agentStage({ task, run, manifest, readOnly, operation, stop }: Ctx, p: Prepared) {
   const { action } = task;
   const { workspace, environment } = p;
   const configured = getActionConfig(action);
@@ -308,7 +308,7 @@ async function agentStage({ task, run, manifest, readOnly, operation, stop }: Ct
   const { prompt, contextDir, revisions } = await buildAgentInput({
     run, task, evaluated: p.evaluated!, diffBaseSha: p.diffBaseSha, diffPaths: p.diffPaths, mainSha: p.mainSha, headSha: p.headSha,
     baseRef: p.baseRef, mergeInProgress: p.mergeInProgress, workspace, validationFailure: p.validationFailure,
-    priorReviews: manifest.publish.includes("pr_assessment") && isBotLogin(observed?.pullRequest?.user?.login),
+    priorReviews: manifest.publish.includes("pr_assessment"),
     database: p.database ? {
       ...p.database, environment, schemaPrepared: !p.deferred,
       prepare: config.workspace?.prepare, migrate: p.databaseConfig?.migrate,
@@ -394,7 +394,7 @@ export async function runNextTask(stop?: AbortSignal) {
           stopBefore(stop, "workspace preparation");
           await prepareCommands(ctx, observed, prepared);
           stopBefore(stop, "the agent");
-          await agentStage(ctx, observed, prepared);
+          await agentStage(ctx, prepared);
         }
       }
       await validateStage(ctx, prepared);

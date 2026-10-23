@@ -96,8 +96,9 @@ export async function fetchRepository(repositoryPath: string, remote: string, ba
 
 export async function fetchPullRequestHead(repositoryPath: string, remote: string, number: number, expectedSha: string, env = childEnvironment()) {
   const ref = `refs/remotes/origin/pr/${number}`;
-  const resolved = () => git(repositoryPath, ["rev-parse", "--verify", "--quiet", ref]).catch(() => "");
+  const resolved = () => git(repositoryPath, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).catch(() => "");
   return serialized(repositoryFetches, resolve(repositoryPath), async () => {
+    if (await resolved() === expectedSha) return ref;
     await git(repositoryPath, ["fetch", "--", remote, `+refs/pull/${number}/head:${ref}`], env);
     if (await resolved() !== expectedSha) await git(repositoryPath, ["fetch", "--", remote, `+${expectedSha}:${ref}`], env).catch(() => undefined);
     const actual = await resolved();

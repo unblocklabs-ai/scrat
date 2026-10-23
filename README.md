@@ -97,6 +97,7 @@ The installer keeps this file across deploys (any other drop-in is moved into th
 | `harness.commandTimeoutSeconds` | Longest a `workspace.prepare`, database migrate or `workspace.validate` command may run (default 3600, a positive integer). It is killed with SIGKILL and the run fails as infrastructure, eligible for validation-only retry, without re-prompting the agent. Clone, fetch and push are bounded separately at 600 seconds. |
 | `harness.agentTimeoutSeconds` | Longest one agent turn may run (default 3600, a positive integer). The session is aborted and the run fails with `AGENT_TIMEOUT`. |
 | `harness.drainTimeoutSeconds` | How long a running agent turn may continue after the service is told to stop (default 900, a positive integer). Other stages stop at their next boundary; an agent turn still running when this elapses is aborted. Either way the run is recorded as `RUN_INTERRUPTED` and its task is requeued to resume after the restart. |
+| `harness.corrections.incomplete` | How many times a review session that returns `SCRAT_STATUS: incomplete` is prompted, in the same session, to finish and return a complete assessment before the run fails as incomplete (default 1, a non-negative integer; 0 disables). Implementations are never continued. |
 | `harness.maxConcurrentValidations` | Maximum `workspace.validate` runs at once (default 3, a positive integer). Further runs wait in a FIFO queue; preparation does not take a slot. |
 | `harness.logLevel` | Pino log verbosity, such as `info` or `debug`. |
 | `github.repository` | Target GitHub repository as `owner/repo`. |
@@ -149,7 +150,7 @@ Before relying on a new deployment, run it once against a disposable repository 
 
 ### Workspace
 
-On Linux, set `workspace.sandbox: true` in deployment overrides to run repository
+On Linux, set `workspace.sandbox: true` (which requires `workspace.layout: "clone"`) in deployment overrides to run repository
 preparation, validation, agent Bash and workspace Git (including hooks) inside
 Bubblewrap. Enabling it is fail-closed: missing namespaces or runtimes are errors,
 not a fallback to host execution. The installer checks the boundary before stopping
@@ -158,11 +159,20 @@ the old service. On Ubuntu 24.04, an administrator installs `bubblewrap`, instal
 `apparmor_parser -r /etc/apparmor.d/scrat-bwrap`. Do not disable the global userns
 restriction. Provision Node and the pinned pnpm version with Corepack first.
 
+`workspace.commandMemoryMax` (default `null`, off) is a systemd `MemoryMax=` value such as `"6G"`
+or `"50%"`; it requires `workspace.sandbox` and a systemd user session. Each sandboxed command
+then runs in its own transient scope with swap disabled, so a runaway check is killed alone and
+its run fails as out of memory (`COMMAND_OUT_OF_MEMORY`), without the agent being re-prompted. Only prepare, migrate and validate commands get that
+classification; the agent's bash tool and Git are bounded too, but a kill there surfaces as an
+ordinary failed command. The transient scopes live outside `scrat.service`'s cgroup, so the unit's
+`MemoryMax` and `KillMode` no longer cover them; bwrap's `--die-with-parent` ends them when Scrat exits.
+
 Commands get the workspace, their own persistent home, private `/tmp`, `/run` and
 process namespace, read-only system/Node/pnpm runtimes, read-only repository Git
 objects, and (for Bash) their own context directory. They do not get controller
 credentials/data, other workspaces, host process environments or the Docker socket.
-New sandboxed workspaces are independent Git clones; legacy linked workspaces are
+`workspace.layout` is `"worktree"` (default; linked worktrees of the shared repository) or `"clone"` (independent private clones); `"clone"` works on any OS without Bubblewrap.
+New workspaces in the clone layout are independent Git clones; legacy linked workspaces are
 converted in place with their index, merge state and working files retained. Old
 Git metadata/pointers remain under `data/private-git/` for recovery. The controller
 imports published commits through a checked Git bundle rather than executing Git
@@ -182,6 +192,7 @@ Workspace commands are argument arrays, not shell strings: `["pnpm", "verify"]`.
 | Setting | Purpose |
 | --- | --- |
 | `workspace.environment` | Environment variables added to Pi's Bash commands and harness preparation/validation commands. These commands inherit only path, home, user, locale, temporary-directory, proxy, certificate and `DOCKER_HOST` settings, so any other variable they need belongs here. Test-process limits belong here too; task concurrency does not serialize tests. |
+| `workspace.layout` | `worktree` (default) or `clone`: linked worktrees of the shared repository, or independent private clones. Must be `clone` when `workspace.sandbox` is true; `clone` works on any OS. |
 | `workspace.prepare` | Setup commands, including dependency installation and code generation. Also used for read-only reviews, and rerun before mutating-work validation. |
 | `workspace.heavyCommands` | Optional regular expressions, matched against each shell command segment of Pi's Bash tool, with quoted text ignored and whitespace collapsed (leading `VAR=value`, `env`, `nohup`, `time`, `sudo`, `exec` and `timeout N` are stripped). A foreground match is queued, not refused: it runs in one of the `harness.maxConcurrentValidations` slots, shared with Scrat's own validation, and logs `pi.heavy_command` with its wait. It may hold the slot for at most 45 minutes, and a cancelled run leaves the queue. A command that backgrounds work (a background `&`, `nohup`, `setsid` or `disown`) is refused instead, because the job would outlive its slot; the agent is told to run it in the foreground. This is a speed bump against accidental parallel lint/type-check/verify runs, not a sandbox: `sh -c '...'` or a script can still evade it. |
 | `workspace.validate` | Required checks for mutating tasks before committing or publishing. Not run as a harness gate for read-only reviews. |
@@ -370,7 +381,7 @@ When the action is enabled, startup calls Slack's `auth.test` with the token, an
 ## Project layout
 
 - `src/github-tasks.ts` — GitHub observations, queue effects, and closure cleanup.
-- `src/github.ts`, `src/github-types.ts` — repository client, scoped authentication, and narrow issue/PR views; the newest 48 raw sync snapshots per repository remain in SQLite, and the latest in `tmp/responses/github/`, for diagnostics.
+- `src/github.ts`, `src/github-types.ts` — repository client, scoped authentication, and narrow issue/PR views.
 - `src/github-context.ts` — pure shared comment filtering and context revisions for routing, execution, and freshness checks.
 - `src/manifests.ts`, `src/actions.ts` — the manifest schema and loader, and the registry of loaded actions; workspace lifetime follows action mode.
 - `src/github-routing.ts` — pure issue-selection, PR-maintenance, and review-routing decisions.
@@ -382,4 +393,4 @@ When the action is enabled, startup calls Slack's `auth.test` with the token, an
 - `actions/` — one YAML manifest per action; `skills/` — action prompts.
 - `data/` — SQLite queue, run history, event journal, workspaces, and Pi sessions. Back it up alongside credentials before deployment.
 
-`deploy/install.sh` installs a staged release on the existing worker: it drains the service, backs up SQLite, applies schema updates, and switches to the selected release. It contains host-specific paths, so review it before reuse.
+`deploy/install.sh` installs a staged release on the existing worker: it drains the service, backs up SQLite, applies schema updates, and switches to the selected release. It refuses anything but a tagged release: the commit must be the one that its `package.json` version's `vX.Y.Z` tag points to, checked through the GitHub API before the service is touched. It contains host-specific paths, so review it before reuse.

@@ -9,7 +9,7 @@ import { parse as parseYaml } from "yaml";
 
 export const bearer = (options) => new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");
 
-export async function fixture(scenario, spec) {
+export async function fixture(scenario, spec, layout) {
   const repository = fileURLToPath(new URL("..", import.meta.url));
   const root = mkdtempSync(resolve(tmpdir(), "scrat-integration-"));
   for (const path of ["src", "skills", "actions", "scrat.config.json", "package.json"]) cpSync(resolve(repository, path), resolve(root, "app", path), { recursive: true });
@@ -52,6 +52,7 @@ export async function fixture(scenario, spec) {
       .map((message) => typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("\n"));
     const text = texts.findLast((entry) => entry.includes('{\n  "action"'));
     const corrected = texts.at(-1).startsWith("Your previous final answer was not accepted");
+    const continued = texts.at(-1).startsWith("Your assessment was returned incomplete");
     const feedback = texts.at(-1).startsWith(`${config.github.botName}'s validation failed`), turnStart = request.messages.at(-1).role === "user";
     const start = text.indexOf('{\n  "action"');
     const context = JSON.parse(text.slice(start, text.indexOf("\n}", start) + 2));
@@ -136,7 +137,7 @@ export async function fixture(scenario, spec) {
     if (script) tool = script[step];
     const fumble = !corrected && (mode === "format-once" || (mode === "reviewer-grade-once" && review && !consolidating && request.model.includes("deepseek"))
       || (mode === "consolidation-grade-once" && consolidating));
-    const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : "complete";
+    const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : mode === "incomplete-once" && !continued ? "incomplete" : "complete";
     const output = (review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : feedback ? "Fixed the validation failure." : "Implemented the change.")
       + (scenario === "commit_review_e2e" ? " <!channel>" : "")
       + (mode === "leak-report" ? "\n" + process.env.GITHUB_APP_PRIVATE_KEY : "")
@@ -169,6 +170,7 @@ export async function fixture(scenario, spec) {
   config.actions = Object.fromEntries(readdirSync("app/actions").map((file) => parseYaml(readFileSync("app/actions/" + file, "utf8")))
     .map(({ name, reviewers = [] }) => [name, { provider: "fixture", ...reviewers.length && { reviewers: reviewers.map((reviewer) => ({ ...reviewer, provider: "fixture" })) } }]));
   for (const configure of spec.configure ?? []) configure(config);
+  if (layout) config.workspace.layout = layout;
   const { actions, ...fileSettings } = config;
   writeFileSync("app/scrat.config.json", JSON.stringify(fileSettings));
   writeFileSync("app/scrat.local.json", JSON.stringify({ actions }));

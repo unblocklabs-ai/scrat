@@ -57,6 +57,14 @@ export const workspaces = sqliteTable("workspaces", {
   removedAt: text("removed_at"),
 });
 
+export type Check = {
+  name: string;
+  status: "passed" | "failed" | "inconclusive" | "unavailable";
+  durationMs: number;
+  tail: string;
+  evidence: string[];
+};
+
 export const runs = sqliteTable("runs", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
   taskId: text("task_id").notNull().references(() => tasks.id),
@@ -90,7 +98,7 @@ export const runs = sqliteTable("runs", {
   }>(),
   verification: text("verification", { mode: "json" }).$type<{
     headSha: string;
-    commands: { command: string[]; durationMs: number; stdout: string; stderr: string }[];
+    commands: (Check | { command: string[]; durationMs: number; stdout: string; stderr: string })[];
   }>(),
   result: text("result", { mode: "json" }).$type<AgentResult>(),
   error: text("error", { mode: "json" }).$type<ErrorDetails>(),

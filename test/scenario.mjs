@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { execFileSync, spawnSync } from "node:child_process";
-import fs, { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { eq, sql } from "drizzle-orm";
 import { DatabaseSync } from "node:sqlite";
 import { resolve } from "node:path";
@@ -101,6 +101,10 @@ const configureValidation = (config) => {
   script(config, "validate", 'import{appendFileSync,existsSync}from"node:fs";const s=Date.now();await new Promise((r)=>setTimeout(r,existsSync(' + flag("slow") + ')?300:0));'
     + 'appendFileSync(' + flag("validations.log") + ',JSON.stringify({s,e:Date.now()})+"\\n");if(existsSync(' + flag("kill-validation") + '))process.kill(process.pid,"SIGKILL");if(existsSync(' + flag("exit-137") + '))process.exit(137);'
     + 'if(existsSync(' + flag("slot-fail") + ')||existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed: marker present");process.exit(7);}');
+};
+const configureChatty = (config) => {
+  script(config, "validate", 'for(let i=0;i<20;i++)process.stdout.write("x".repeat(1024*1024)+"\\n");process.stdout.write("final line ghs_fixture_sensitive\\n");', "chatty");
+  config.harness.commandOutputTailBytes = 2000;
 };
 const configureCommandTimeout = (config) => {
   script(config, "validate", 'await new Promise((r)=>setTimeout(r,30000));');
@@ -1224,14 +1228,14 @@ export const scenarios = {
   verification: { title: "verification receipts bind to the published commit and failing checks block publication", layouts: ["clone"], configure: [configureCheck], run: async () => {
     const r = await implement(1);
     assert.equal(r.verification.headSha, r.publication.publishedCommitSha);
-    assert.match(r.verification.commands[0].stdout, /checked actual source/);
+    assert.match(r.verification.commands[0].tail, /checked actual source/); assert.equal(r.verification.commands[0].status, "passed"); assert.match(readFileSync(r.verification.commands[0].evidence[0], "utf8"), /checked actual source/);
     assert.equal(git(resolve("remote.git"), "rev-parse", f.prs[0].head.ref), r.verification.headSha);
     changeMain("fail-validation", "fail\n");
     f.addIssue(2); f.enqueue(2, "implement"); const failed = await run();
     assert.ok(failed.error); assert.equal(f.prs.length, 1); assert.equal(failed.verification, null);
     assert.equal(failed.error.exitCode, 7);
     assert.match(failed.error.stdout, /validation detail \[redacted\]/);
-    assert.match(failed.error.stderr, /Verification failed/);
+    assert.match(failed.error.stdout, /Verification failed/);
     assert.ok(!JSON.stringify(failed.error).includes("ghs_fixture_sensitive"));
   } },
   validation_mutation: { title: "checks that change source cannot certify the resulting commit", configure: [configureCheck], run: async () => {
@@ -1491,6 +1495,21 @@ export const scenarios = {
   stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", layouts: ["clone"], configure: [configureStaleBranch], run: staleBranch },
   validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit", layouts: ["clone"], configure: [configureValidation], run: validationFeedback },
   validation_feedback_cap: { title: "validation feedback stops after two rounds and never applies to signal-killed commands", configure: [configureValidation], run: validationFeedback },
+  measured_checks: { title: "a chatty passing validation command stores a bounded tail, keeps its full output on disk and old receipts still read", configure: [configureChatty], run: async () => {
+    const r = await implement(1);
+    const [check] = r.verification.commands;
+    assert.equal(check.status, "passed"); assert.equal(check.name, `${process.execPath} ${resolve("chatty.mjs")}`);
+    assert.ok(Buffer.byteLength(check.tail) <= 2000); assert.match(check.tail, /final line \[redacted\]/);
+    assert.ok(!JSON.stringify(r.verification).includes("ghs_fixture_sensitive"));
+    assert.equal(check.evidence.length, 1); assert.equal(check.evidence[0], resolve("data/runs", r.id, "checks", "validate-0.log"));
+    assert.ok(statSync(check.evidence[0]).size > 20 * 1024 * 1024);
+    const legacy = { headSha: r.verification.headSha, commands: [{ command: ["pnpm", "verify"], durationMs: 5, stdout: "old out", stderr: "old err" }] };
+    db.update(s.runs).set({ verification: legacy }).where(eq(s.runs.id, r.id)).run();
+    assert.deepEqual(f.row(s.runs, r.id).verification, legacy);
+    const { runHistory } = await f.app("run-history.ts");
+    const [entry] = runHistory(f.row(s.tasks, r.taskId).subjectId, ["implement"]);
+    assert.equal(entry.run.id, r.id); assert.ok(!("verification" in entry.run)); assert.deepEqual(Object.keys(entry.run.context).sort(), ["baseBranch", "commentRevisions", "revision"]);
+  } },
   command_timeout: { title: "a validation command that outlives harness.commandTimeoutSeconds is killed, fails the run as infrastructure without re-prompting the agent and accepts validation-only retry", configure: [configureCommandTimeout], run: async () => {
     f.addIssue(1, ["scrat"]); f.enqueue(1, "implement");
     const started = Date.now(), failed = await run();
@@ -1584,6 +1603,7 @@ export const scenarios = {
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
     await assert.rejects(validateStaticConfig(variant((c) => { c.harness.maxConcurrentValidations = 0; })), /maxConcurrentValidations must be a positive integer/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.harness.commandTimeoutSeconds = 0; })), /commandTimeoutSeconds must be a positive integer/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.harness.commandOutputTailBytes = 0; })), /commandOutputTailBytes must be a positive integer/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = true; c.workspace.commandMemoryMax = "lots"; })), /commandMemoryMax must be null or a size/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = true; c.workspace.commandMemoryMax = "0"; })), /commandMemoryMax must be null or a size/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = false; c.workspace.commandMemoryMax = "6G"; })), /commandMemoryMax requires workspace\.sandbox/);

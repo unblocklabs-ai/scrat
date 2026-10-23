@@ -96,6 +96,8 @@ try {
       reason text NOT NULL,
       input text NOT NULL,
       retry_mode text DEFAULT 'repair' NOT NULL,
+      retry_count integer,
+      available_at text,
       status text DEFAULT 'queued' NOT NULL,
       created_at text NOT NULL,
       CONSTRAINT fk_tasks_subject_id_subjects_id_fk FOREIGN KEY (subject_id) REFERENCES subjects(id)

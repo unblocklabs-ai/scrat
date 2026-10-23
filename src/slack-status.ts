@@ -16,7 +16,7 @@ function messageFor(event: JournalEvent, subject: Pick<Subject, "repository">): 
     case "run.started": return `Started ${escapeSlack(event.data.action)} with ${escapeSlack(event.data.skill)}`;
     case "run.completed": return `Completed at stage ${escapeSlack(event.data.stage)}`;
     case "run.failed": return `Failed at stage ${escapeSlack(event.data.stage)}: ${escapeSlack(event.data.error.message.slice(0, maxErrorLength))}`;
-    case "run.requeued": return `Requeued at stage ${escapeSlack(event.data.stage)} for a ${event.data.retryMode} round`;
+    case "run.requeued": return `Requeued at stage ${escapeSlack(event.data.stage)} for a ${event.data.retryMode} round${event.data.nextAttemptAt ? `; retry ${event.data.attempt} at ${escapeSlack(event.data.nextAttemptAt)}` : ""}`;
     case "task.retried": return `Retrying ${escapeSlack(event.data.action)} for a ${event.data.mode} round`;
     case "github.comment_created": return `Posted ${link(event.data.url, "a comment")}`;
     case "github.comment_updated": return `Updated ${link(event.data.url, "a comment")}`;

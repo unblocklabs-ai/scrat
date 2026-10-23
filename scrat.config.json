@@ -9,6 +9,7 @@
     "idlePollSeconds": 30,
     "agentTimeoutSeconds": 3600,
     "drainTimeoutSeconds": 900,
+    "retryJitter": 0.1,
     "corrections": { "incomplete": 1, "validation": 2, "format": 2 },
     "logLevel": "info"
   },

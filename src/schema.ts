@@ -34,6 +34,8 @@ export const tasks = sqliteTable("tasks", {
   reason: text("reason").notNull(),
   input: text("input", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
   retryMode: text("retry_mode", { enum: ["repair", "validation"] }).notNull().default("repair"),
+  retryCount: integer("retry_count"),
+  availableAt: text("available_at"),
   status: text("status", {
     enum: ["queued", "running", "completed", "failed", "cancelled"],
   }).notNull().default("queued"),

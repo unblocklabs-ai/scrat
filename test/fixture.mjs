@@ -43,6 +43,7 @@ export async function fixture(scenario, spec, layout) {
   const modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set() };
   const tokens = new Map(patMode ? [[pat, { issues: "write", pull_requests: "write", contents: "write" }]] : []);
+  const transient = { failures: 0, seen: new Map() };
   let onModel, script, nextCommentId = 1000, nextIssueNumber = 500;
   const external = [], searches = [];
   const server = createServer(async (req, res) => {
@@ -58,6 +59,12 @@ export async function fixture(scenario, spec, layout) {
     const context = JSON.parse(text.slice(start, text.indexOf("\n}", start) + 2));
     const consolidating = text.includes("Consolidate the two independent reviews below");
     const mode = modes.get(context.item.number) ?? "normal";
+    const seen = transient.seen.get(request.model) ?? 0;
+    if ((mode === "transient" || (mode === "transient-mixed" && !request.model.includes("deepseek"))) && seen < transient.failures) {
+      transient.seen.set(request.model, seen + 1);
+      res.writeHead(503, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "Service temporarily unavailable" } }));
+    }
     const key = `${context.item.number}/${request.model}/${consolidating}/${context.database?.container ?? ""}`;
     const step = steps.get(key) ?? 0; steps.set(key, step + 1);
     requests.push({ request, text, context, consolidating });
@@ -155,7 +162,7 @@ export async function fixture(scenario, spec, layout) {
     }
     res.writeHead(200, { "content-type": "text/event-stream" });
     res.end("data: " + JSON.stringify({ id: "local_" + requests.length, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: request.model,
-      choices: [{ index: 0, delta, finish_reason: tool ? "tool_calls" : (mode === "reviewer-failure" && request.model.includes("deepseek")) || mode === "merge-failure" ? "length" : "stop" }],
+      choices: [{ index: 0, delta, finish_reason: tool ? "tool_calls" : (["reviewer-failure", "transient-mixed"].includes(mode) && request.model.includes("deepseek")) || mode === "merge-failure" ? "length" : "stop" }],
       usage: { prompt_tokens: 100, completion_tokens: 30, total_tokens: 130 } }) + "\n\ndata: [DONE]\n\n");
   });
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
@@ -309,7 +316,7 @@ export async function fixture(scenario, spec, layout) {
   };
   const enqueue = (number, action = "review_issue", input = {}) => tasks.enqueueTask({ subjectId: "issue-" + number, action, reason: "Integration", input });
   const row = (table, id) => db.select().from(table).all().find((entry) => entry.id === id);
-  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, pat, user, githubApp, modes, requests, calls, slack, rate, issues, prs, comments, reviews, writes, faults, frozen, forced, addIssue, enqueue, row,
+  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, pat, user, githubApp, modes, requests, calls, slack, rate, issues, prs, comments, reviews, writes, faults, transient, frozen, forced, addIssue, enqueue, row,
     set onModel(value) { onModel = value; },
     set script(value) { script = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },

@@ -2838,7 +2838,7 @@ export const scenarios = {
 
     count = f.slack.calls.length; f.slack.rateLimitOnce = true;
     restarted.queueStatus({ subjectId: "issue-2", type: "run.completed", data: { stage: "after limit" } });
-    await until(() => posts().at(-1).body.text === "Completed at stage after limit");
+    await until(() => f.slack.calls.length === count + 2 && posts().at(-1).body.text === "Completed at stage after limit");
     assert.equal(f.slack.calls.length, count + 2); assert.equal(failures.length, 0);
 
     config.slack.channel = "C9999999999";

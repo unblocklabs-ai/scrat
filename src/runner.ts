@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { actionsPublishing, manifestOf } from "./actions.ts";
 import { buildAgentInput, evaluateContext, readDiffScope } from "./agent-input.ts";
-import { commitInput, commitMetadata, describeCommit, startCommitThread } from "./commit-review.ts";
+import { commitInput, describeCommit, startCommitThread } from "./commit-review.ts";
 import { describeWindow } from "./window-review.ts";
 import { config, getActionConfig, getRepositoryPath, isBotLogin } from "./config.ts";
 import type { Manifest } from "./manifests.ts";
@@ -38,7 +38,7 @@ type Acceptance = NonNullable<Manifest["acceptance"]>;
 
 const botAuthor = () => ({ name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com` });
 
-async function prepareWorkspace(workspace: Workspace, environment: Environment, databaseConfig: DatabaseConfig | null | undefined, references: References) {
+async function prepareWorkspace(workspace: Workspace, environment: Environment, references: References, databaseConfig?: DatabaseConfig | null) {
   await runCommands(config.workspace?.prepare ?? [], workspace.path, environment, references, "prepare");
   if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, environment, references, "migrate");
 }
@@ -66,10 +66,10 @@ function stopBefore(stop: AbortSignal | undefined, next: string) {
 
 const unresolvedConflict = "PR still conflicts with its base branch after resolution";
 
-async function validateAndCommit({ run, references, stop }: Ctx, p: Prepared, kind: Acceptance) {
+async function validateAndCommit({ run, references, stop }: Ctx, p: Change, kind: Acceptance) {
   const { workspace, commandEnvironment } = p;
   if (!p.validationOnly) updateRun(run.id, { agentCheckpoint: await checkpointWorkspace(workspace) });
-  await asCheckFailure(() => prepareWorkspace(workspace, commandEnvironment, p.databaseConfig, references));
+  await asCheckFailure(() => prepareWorkspace(workspace, commandEnvironment, references, p.databaseConfig));
   const checkpoint = await checkpointWorkspace(workspace);
   updateRun(run.id, { agentCheckpoint: checkpoint });
   const validationTree = checkpoint.treeSha;
@@ -78,7 +78,7 @@ async function validateAndCommit({ run, references, stop }: Ctx, p: Prepared, ki
     .catch((error) => { throw stop?.aborted && error === stop.reason ? new InterruptedError("Worker is stopping; run left waiting for a validation slot") : error; }));
   await git(workspace.path, ["add", "--all"]);
   if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
-  await assertNoCommittedSecrets(workspace, p.validationOnly ? run.headSha ?? p.baseRef : p.startHeadSha, validationTree);
+  await assertNoCommittedSecrets(workspace, p.validationOnly ? run.headSha ?? p.mainSha : p.startHeadSha, validationTree);
   const message = /^[a-z]+(\([^)]*\))?!?: /.test(p.title) ? p.title : `fix: ${p.title}`;
   const commitSha = await commitWorkspace(workspace, message, botAuthor(), references);
   if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
@@ -86,7 +86,7 @@ async function validateAndCommit({ run, references, stop }: Ctx, p: Prepared, ki
     const { conflicts } = await targetOf(p, commitSha);
     if (conflicts) throw new Error(unresolvedConflict);
   }
-  if (kind === "nonempty_diff" && !await git(workspace.path, ["diff", "--name-only", `${p.baseRef}...HEAD`])) {
+  if (kind === "nonempty_diff" && !await git(workspace.path, ["diff", "--name-only", `${p.mainSha}...HEAD`])) {
     throw new Error("Implementation produced no changes against the base branch");
   }
   updateRun(run.id, { headSha: commitSha, publication: { status: "pending", commitSha }, verification: { headSha: commitSha, commands }, stage: "publishing" });
@@ -95,41 +95,27 @@ async function validateAndCommit({ run, references, stop }: Ctx, p: Prepared, ki
 type Ctx = {
   task: Task; run: Run; subject: Subject; item: Item | undefined;
   references: References; operation: ReturnType<typeof startOperation>;
-  manifest: Manifest; repositoryPath: string;
-  readOnly: boolean; acceptance: Acceptance | undefined; stop: AbortSignal | undefined;
+  manifest: Manifest; repositoryPath: string; stop: AbortSignal | undefined;
   cleanup: { reviewWorkspace?: Workspace; databaseRequested: boolean };
 };
 type Observed = {
   repository: string; github: GitHubRepository; context: GithubContext; pullRequest: GithubPullRequest | undefined;
   item: Item; observation: ItemObservation; gitEnvironment: NodeJS.ProcessEnv; mainSha: string;
 };
-async function targetOf(p: Prepared, headSha = p.headSha) {
-  if (p.target?.headSha !== headSha || p.target.mainSha !== p.mainSha) p.target = await prepareTarget(p.workspace.path, p.mainSha, headSha);
-  return p.target;
-}
-
-type Prepared = {
-  workspace: Workspace; validationOnly: boolean; mergeInProgress: boolean; mainSha: string; baseRef: string;
-  preparedHead: string; startHeadSha: string; headSha: string; title: string;
+type Review = { workspace: Workspace; mainSha: string; headSha: string; diffBaseSha: string };
+type Change = {
+  workspace: Workspace; validationOnly: boolean; mergeInProgress: boolean; mainSha: string;
+  preparedHead: string; startHeadSha: string; headSha: string; title: string; deferred: boolean;
   target: Awaited<ReturnType<typeof prepareTarget>> | undefined;
-  databaseConfig: DatabaseConfig | null | undefined; database: Awaited<ReturnType<typeof createRunDatabase>> | undefined;
+  databaseConfig: DatabaseConfig | null | undefined;
   environment: Environment; commandEnvironment: Environment;
   result: AgentResult | null; validated: boolean; validationFailure: ErrorDetails | undefined;
   agentInput: { contextDir: string; revisions: Record<string, string> } | undefined;
-  evaluated: ReturnType<typeof evaluateContext> | undefined; diffPaths: string[]; diffBaseSha: string;
-  deferred: boolean; previousSessionFile: string | undefined;
 };
 
-function beginRun({ task, run, subject, item }: NonNullable<ReturnType<typeof claimTask>>, stop: AbortSignal | undefined): Ctx {
-  const references = { subjectId: subject.id, taskId: task.id, runId: run.id };
-  const { action } = task;
-  const operation = startOperation("run.execute", { ...references, action });
-  const manifest = manifestOf(action);
-  return {
-    task, run, subject, item, references, operation, manifest, repositoryPath: getRepositoryPath(),
-    readOnly: manifest.mode === "review", acceptance: manifest.mode === "change" ? manifest.acceptance : undefined, stop,
-    cleanup: { databaseRequested: false },
-  };
+async function targetOf(p: Change, headSha = p.headSha) {
+  if (p.target?.headSha !== headSha || p.target.mainSha !== p.mainSha) p.target = await prepareTarget(p.workspace.path, p.mainSha, headSha);
+  return p.target;
 }
 
 async function connect({ subject, item, repositoryPath }: Ctx): Promise<Observed | undefined> {
@@ -146,20 +132,89 @@ async function connect({ subject, item, repositoryPath }: Ctx): Promise<Observed
   return { repository, github, context, pullRequest, item, observation, gitEnvironment, mainSha };
 }
 
-async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
-  const { task, run, references, readOnly, repositoryPath, cleanup } = ctx;
-  const { repository, context, pullRequest, item, observation, gitEnvironment, mainSha } = observed;
+async function assertRepairCurrent({ task }: Ctx, { item, observation, mainSha }: Observed) {
   const trigger = parseTriggerInput(task.input);
-  if (trigger.kind === "low_grade") {
-    const state = await resolvePrReview(runHistory(item.id, actionsPublishing("pr_assessment")), observation, mainSha);
-    if (state.kind !== "current" || state.assessment.originId !== trigger.assessmentRunId) {
-      throw new Error("The review this repair addresses is no longer the current assessment");
-    }
+  if (trigger.kind !== "low_grade") return;
+  const state = await resolvePrReview(runHistory(item.id, actionsPublishing("pr_assessment")), observation, mainSha);
+  if (state.kind !== "current" || state.assessment.originId !== trigger.assessmentRunId) {
+    throw new Error("The review this repair addresses is no longer the current assessment");
   }
+}
+
+async function itemRevisions({ repositoryPath }: Ctx, { pullRequest, observation, gitEnvironment, mainSha }: Observed) {
+  const headSha = pullRequest ? await fetchPullRequestHead(repositoryPath, observation.remote, pullRequest.number, pullRequest.head.sha, gitEnvironment) : mainSha;
+  return { mainSha, headSha };
+}
+
+async function commitRevisions({ subject, run, task, manifest, operation }: Ctx) {
+  const input = commitInput(run.input), { sha } = input;
+  if (manifest.start?.includes("slack_post")) await startCommitThread(subject, task.action, input, operation.log);
+  return { mainSha: sha, headSha: sha };
+}
+
+async function windowRevisions({ subject, repositoryPath }: Ctx) {
+  const { repository } = subject;
+  assertConfiguredRepository(repository);
+  const mainSha = await fetchRepository(repositoryPath, remoteUrl(repository), config.github.baseBranch, await new GitHubRepository(repository).getGitEnvironment());
+  return { mainSha, headSha: mainSha };
+}
+
+async function prepareReviewCommands({ run, repositoryPath, references, operation, cleanup }: Ctx, { context, pullRequest, observation }: Observed, review: Review, environment: Environment) {
+  try { await prepareWorkspace(review.workspace, environment, references); }
+  catch (error) {
+    if (!pullRequest || isBotLogin(context.item.user?.login)) throw error;
+    const { behind, conflicts } = await prepareTarget(review.workspace.path, review.mainSha, review.headSha);
+    if (!behind) throw error;
+    const { baseBranch } = observation;
+    if (conflicts) throw new Error(`PR branch is behind ${baseBranch} and does not merge cleanly; the author needs to update it`);
+    const synthetic = await createMergeCommit(repositoryPath, review.mainSha, review.headSha, `Review merge of ${baseBranch} into the PR head`, botAuthor());
+    cleanup.reviewWorkspace = undefined;
+    try { await removeWorkspace(review.workspace.id, references); }
+    catch { operation.log.warn({ event: "run.cleanup_pending", workspaceId: review.workspace.id }); }
+    review.workspace = cleanup.reviewWorkspace = await createWorkspace({ repositoryPath, baseRef: synthetic }, references);
+    updateRun(run.id, { workspaceId: review.workspace.id });
+    review.headSha = synthetic;
+    review.diffBaseSha = review.mainSha;
+    await prepareWorkspace(review.workspace, environment, references);
+  }
+}
+
+async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
+  const { task, run, subject, manifest, repositoryPath, operation, stop } = ctx;
+  const { mainSha, headSha } = observed ? await itemRevisions(ctx, observed)
+    : subject.kind === "window" ? await windowRevisions(ctx) : await commitRevisions(ctx);
+  const workspace = ctx.cleanup.reviewWorkspace = await createWorkspace({ repositoryPath, baseRef: headSha }, ctx.references);
+  updateRun(run.id, { workspaceId: workspace.id, mainSha, headSha });
+  const { evaluated, diffPaths, diffBaseSha } = observed
+    ? { evaluated: evaluateContext(run, task, observed.observation), ...await readDiffScope(workspace.path, mainSha, headSha, Boolean(observed.pullRequest)) }
+    : subject.kind === "window" ? describeWindow(task.action, subject, mainSha) : await describeCommit(repositoryPath, subject, run.input);
+  updateRun(run.id, { context: evaluated });
+  const review: Review = { workspace, mainSha, headSha, diffBaseSha };
+  const environment: Environment = observed ? { ...config.workspace?.environment } : {};
+  stopBefore(stop, "workspace preparation");
+  if (observed) await prepareReviewCommands(ctx, observed, review, { ...childEnvironment(), ...environment });
+  stopBefore(stop, "the agent");
+  const changeContext = manifest.context === "change";
+  updateRun(run.id, { stage: "agent" });
+  const { prompt, contextDir, revisions } = await buildAgentInput({
+    run, task, evaluated, diffBaseSha: review.diffBaseSha, diffPaths, mainSha: review.mainSha, headSha: review.headSha,
+    baseRef: review.mainSha, mergeInProgress: false, workspace: review.workspace,
+  });
+  const agentResult = getActionConfig(task.action).agent === "panel"
+    ? await reviewPullRequest(run, review.workspace.path, prompt, operation.log, { baseSha: review.diffBaseSha, contextDir, revisions, tools: manifest.tools, scoped: manifest, requireGrade: !changeContext, stop })
+    : await executePi({ run, cwd: review.workspace.path, context: prompt, tools: manifest.tools, scoped: manifest, log: operation.log, environment, contextDir, revisions, baseSha: changeContext ? review.diffBaseSha : undefined, stop });
+  const result = { ...agentResult, paths: [...new Set([...diffPaths, ...agentResult.paths])] };
+  updateRun(run.id, { result, stage: "validating" });
+  assertComplete(result);
+  updateRun(run.id, { stage: "publishing" });
+}
+
+async function acquireChangeWorkspace(ctx: Ctx, observed: Observed) {
+  const { repository, context, pullRequest, item, observation } = observed;
+  const { run, references, repositoryPath } = ctx;
   const validationOnly = run.stage === "validating";
-  const baseRef = mainSha;
-  const preparedHead = pullRequest ? await fetchPullRequestHead(repositoryPath, observation.remote, pullRequest.number, pullRequest.head.sha, gitEnvironment) : baseRef;
-  let workspace = !readOnly && item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
+  const { mainSha, headSha: preparedHead } = await itemRevisions(ctx, observed);
+  let workspace = item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
   if (workspace?.removedAt) throw new Error(`Workspace was removed: ${workspace.id}`);
   if (workspace) {
     await validateWorkspace(workspace);
@@ -175,18 +230,14 @@ async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
     await validateCheckpoint(workspace, run.agentCheckpoint);
   }
   if (!workspace) {
-    if (!readOnly && pullRequest && pullRequest.head.repo?.full_name !== repository) {
+    if (pullRequest && pullRequest.head.repo?.full_name !== repository) {
       throw new Error("Cannot update a PR branch in a different repository");
     }
-    workspace = await createWorkspace({
-      repositoryPath, baseRef: preparedHead,
-      branch: !readOnly && pullRequest ? pullRequest.head.ref : undefined,
-    }, references);
-    if (readOnly) cleanup.reviewWorkspace = workspace;
-    else db.update(subjects).set({ workspaceId: workspace.id }).where(eq(subjects.id, item.id)).run();
+    workspace = await createWorkspace({ repositoryPath, baseRef: preparedHead, branch: pullRequest?.head.ref }, references);
+    db.update(subjects).set({ workspaceId: workspace.id }).where(eq(subjects.id, item.id)).run();
   }
-  const mergeInProgress = !readOnly && await hasPendingMerge(workspace.path);
-  if (!readOnly && !mergeInProgress && !validationOnly) {
+  const mergeInProgress = await hasPendingMerge(workspace.path);
+  if (!mergeInProgress && !validationOnly) {
     if (pullRequest) {
       await git(workspace.path, ["merge", "--ff-only", preparedHead]);
       await pinWorkspaceBase(workspace, preparedHead);
@@ -203,70 +254,18 @@ async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
     }
   }
   const startHeadSha = await git(workspace.path, ["rev-parse", "HEAD"]);
-  return { workspace, validationOnly, mergeInProgress, mainSha, baseRef, preparedHead, startHeadSha, title: context.item.title };
+  return { workspace, validationOnly, mergeInProgress, mainSha, preparedHead, startHeadSha, title: context.item.title };
 }
 
-async function acquireCommitWorkspace({ subject, run, task, manifest, references, repositoryPath, operation, cleanup }: Ctx) {
-  const input = commitInput(run.input), { sha } = input;
-  if (manifest.start?.includes("slack_post")) await startCommitThread(subject, task.action, input, operation.log);
-  const workspace = await createWorkspace({ repositoryPath, baseRef: sha }, references);
-  cleanup.reviewWorkspace = workspace;
-  return { workspace, validationOnly: false, mergeInProgress: false, mainSha: sha, baseRef: sha, preparedHead: sha, startHeadSha: sha, title: commitMetadata(subject).title };
-}
-
-async function acquireWindowWorkspace({ subject, manifest, references, repositoryPath, cleanup }: Ctx) {
-  const { repository } = subject;
-  assertConfiguredRepository(repository);
-  const mainSha = await fetchRepository(repositoryPath, remoteUrl(repository), config.github.baseBranch, await new GitHubRepository(repository).getGitEnvironment());
-  const workspace = await createWorkspace({ repositoryPath, baseRef: mainSha }, references);
-  cleanup.reviewWorkspace = workspace;
-  return { workspace, validationOnly: false, mergeInProgress: false, mainSha, baseRef: mainSha, preparedHead: mainSha, startHeadSha: mainSha, title: manifest.name };
-}
-
-async function acquireWorkspace(ctx: Ctx, observed: Observed | undefined): Promise<Prepared> {
-  const { run, references, readOnly, cleanup } = ctx;
-  const acquired = observed ? await acquireItemWorkspace(ctx, observed)
-    : ctx.subject.kind === "window" ? await acquireWindowWorkspace(ctx) : await acquireCommitWorkspace(ctx);
-  const { workspace, validationOnly, mainSha, startHeadSha } = acquired;
-  if (!validationOnly) updateRun(run.id, { workspaceId: workspace.id, mainSha, headSha: startHeadSha });
-  const databaseConfig = !readOnly ? config.workspace?.database : undefined;
-  let database: Prepared["database"];
-  if (databaseConfig) {
-    cleanup.databaseRequested = true;
-    database = await createRunDatabase(run.id, databaseConfig.image, references);
-  }
-  const environment: Environment = observed ? { ...config.workspace?.environment,
-    ...Object.fromEntries((databaseConfig?.environment ?? []).map((name) => [name, database!.url])),
-  } : {};
-  return {
-    ...acquired, headSha: startHeadSha, databaseConfig, database, environment,
-    commandEnvironment: { ...childEnvironment(), ...environment }, result: run.result,
-    validated: false, validationFailure: undefined, agentInput: undefined, target: undefined,
-    evaluated: undefined, diffPaths: [], diffBaseSha: acquired.baseRef, deferred: false, previousSessionFile: undefined,
-  };
-}
-
-async function planAgent({ task, run, subject, readOnly, acceptance, repositoryPath }: Ctx, observed: Observed | undefined, p: Prepared) {
-  const previous = !readOnly ? latestSessionRun(p.workspace.id, run.id) : undefined;
-  const { evaluated, diffPaths, diffBaseSha } = observed
-    ? { evaluated: evaluateContext(run, task, observed.observation), ...await readDiffScope(p.workspace.path, p.mainSha, p.preparedHead, Boolean(observed.pullRequest)) }
-    : subject.kind === "window" ? describeWindow(task.action, subject, p.mainSha) : await describeCommit(repositoryPath, subject, run.input);
-  updateRun(run.id, { context: evaluated });
-  Object.assign(p, {
-    evaluated, diffPaths, diffBaseSha, previousSessionFile: previous?.piSessionFile ?? undefined,
-    deferred: p.mergeInProgress || Boolean(run.retryOfRunId) || acceptance === "conflict_free",
-  });
-}
-
-async function mergeBehind(ctx: Ctx, observed: Observed | undefined, p: Prepared) {
-  const { run, acceptance } = ctx;
-  if (!observed || acceptance !== "conflict_free" || p.mergeInProgress || run.retryOfRunId) return;
+async function mergeBehind(ctx: Ctx, { observation, pullRequest }: Observed, p: Change, diffPaths: string[], acceptance: Acceptance) {
+  const { run } = ctx;
+  if (acceptance !== "conflict_free" || p.mergeInProgress || run.retryOfRunId) return;
   const { behind, conflicts } = await targetOf(p);
   if (!behind || conflicts) return;
-  const { baseBranch } = observed.observation;
-  await mergeBase(p.workspace.path, p.mainSha, `Merge ${baseBranch} into ${observed.pullRequest!.head.ref}`, botAuthor());
+  const { baseBranch } = observation;
+  await mergeBase(p.workspace.path, p.mainSha, `Merge ${baseBranch} into ${pullRequest!.head.ref}`, botAuthor());
   p.headSha = await git(p.workspace.path, ["rev-parse", "HEAD"]);
-  p.result = { text: `Merged ${baseBranch} (${p.mainSha.slice(0, 7)}) into this branch; no conflicts`, ready: false, paths: [...new Set(p.diffPaths)], outcome: "complete" };
+  p.result = { text: `Merged ${baseBranch} (${p.mainSha.slice(0, 7)}) into this branch; no conflicts`, ready: false, paths: [...new Set(diffPaths)], outcome: "complete" };
   updateRun(run.id, { result: p.result, stage: "validating" });
   try {
     await validateAndCommit(ctx, p, acceptance);
@@ -277,62 +276,22 @@ async function mergeBehind(ctx: Ctx, observed: Observed | undefined, p: Prepared
   }
 }
 
-async function prepareCommands({ run, readOnly, repositoryPath, references, operation, cleanup }: Ctx, observed: Observed | undefined, p: Prepared) {
-  if (!observed || (!readOnly && p.deferred)) return;
-  const { context, pullRequest, observation } = observed;
-  const { baseBranch } = observation;
-  try { await prepareWorkspace(p.workspace, p.commandEnvironment, p.databaseConfig, references); }
+async function prepareChangeCommands({ references }: Ctx, { pullRequest, observation }: Observed, p: Change) {
+  if (p.deferred) return;
+  try { await prepareWorkspace(p.workspace, p.commandEnvironment, references, p.databaseConfig); }
   catch (error) {
-    const humanReview = readOnly && !isBotLogin(context.item.user?.login);
-    if (!pullRequest || !(humanReview || !readOnly)) throw error;
+    if (!pullRequest) throw error;
     const { behind, conflicts } = await targetOf(p);
-    if (!behind) throw error;
-    if (conflicts) {
-      if (!readOnly) throw error;
-      throw new Error(`PR branch is behind ${baseBranch} and does not merge cleanly; the author needs to update it`);
-    }
-    if (readOnly) {
-      const synthetic = await createMergeCommit(repositoryPath, p.mainSha, p.headSha, `Review merge of ${baseBranch} into the PR head`, botAuthor());
-      cleanup.reviewWorkspace = undefined;
-      try { await removeWorkspace(p.workspace.id, references); }
-      catch { operation.log.warn({ event: "run.cleanup_pending", workspaceId: p.workspace.id }); }
-      p.workspace = cleanup.reviewWorkspace = await createWorkspace({ repositoryPath, baseRef: synthetic }, references);
-      updateRun(run.id, { workspaceId: p.workspace.id });
-      p.headSha = synthetic;
-      p.diffBaseSha = p.mainSha;
-    } else {
-      await mergeBase(p.workspace.path, p.mainSha, `Merge ${baseBranch} into ${pullRequest.head.ref}`, botAuthor()).catch(() => { throw error; });
-      p.headSha = await git(p.workspace.path, ["rev-parse", "HEAD"]);
-    }
-    await prepareWorkspace(p.workspace, p.commandEnvironment, p.databaseConfig, references);
+    if (!behind || conflicts) throw error;
+    const { baseBranch } = observation;
+    await mergeBase(p.workspace.path, p.mainSha, `Merge ${baseBranch} into ${pullRequest.head.ref}`, botAuthor()).catch(() => { throw error; });
+    p.headSha = await git(p.workspace.path, ["rev-parse", "HEAD"]);
+    await prepareWorkspace(p.workspace, p.commandEnvironment, references, p.databaseConfig);
   }
 }
 
-async function agentStage({ task, run, manifest, readOnly, operation, stop }: Ctx, p: Prepared) {
-  const { action } = task;
-  const { workspace, environment } = p;
-  const configured = getActionConfig(action);
-  const changeContext = manifest.context === "change";
-  updateRun(run.id, { stage: "agent" });
-  const { prompt, contextDir, revisions } = await buildAgentInput({
-    run, task, evaluated: p.evaluated!, diffBaseSha: p.diffBaseSha, diffPaths: p.diffPaths, mainSha: p.mainSha, headSha: p.headSha,
-    baseRef: p.baseRef, mergeInProgress: p.mergeInProgress, workspace, validationFailure: p.validationFailure,
-    priorReviews: manifest.publish.includes("pr_assessment"),
-    database: p.database ? {
-      ...p.database, environment, schemaPrepared: !p.deferred,
-      prepare: config.workspace?.prepare, migrate: p.databaseConfig?.migrate,
-    } : undefined,
-  });
-  p.agentInput = { contextDir, revisions };
-  const agentResult = configured.agent === "panel"
-    ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { baseSha: p.diffBaseSha, contextDir, revisions, tools: manifest.tools, scoped: manifest, requireGrade: !changeContext, stop })
-    : await executePi({ run, cwd: workspace.path, context: prompt, readOnly, tools: manifest.tools, scoped: manifest, log: operation.log, sessionFile: p.previousSessionFile, environment, contextDir, revisions, baseSha: changeContext ? p.diffBaseSha : undefined, stop });
-  p.result = { ...agentResult, paths: [...new Set([...p.diffPaths, ...agentResult.paths])] };
-  updateRun(run.id, { result: p.result, stage: "validating" });
-}
-
-async function validateStage(ctx: Ctx, p: Prepared) {
-  const { run, operation, readOnly, acceptance, stop } = ctx;
+async function validateStage(ctx: Ctx, p: Change, acceptance: Acceptance) {
+  const { run, operation, stop } = ctx;
   const { workspace, validationOnly } = p;
   let { result } = p;
   if (!result) throw new Error("No saved agent result to validate");
@@ -341,7 +300,7 @@ async function validateStage(ctx: Ctx, p: Prepared) {
     && p.startHeadSha === p.preparedHead && !p.mergeInProgress && await git(workspace.path, ["rev-parse", "HEAD"]) === p.startHeadSha
     && !await git(workspace.path, ["status", "--porcelain"]);
   if (unchanged) updateRun(run.id, { publication: { status: "pending", commitSha: p.startHeadSha }, stage: "publishing" });
-  else if (acceptance && !p.validated) {
+  else if (!p.validated) {
     for (let round = 1; ; round++) {
       try { await validateAndCommit(ctx, p, acceptance); break; }
       catch (error) {
@@ -350,7 +309,7 @@ async function validateStage(ctx: Ctx, p: Prepared) {
         if (validationOnly || !p.agentInput || !sessionFile || round > config.harness.corrections.validation) throw error.cause;
         operation.log.warn({ event: "pi.validation_retry", round });
         updateRun(run.id, { stage: "agent" });
-        const followUp = await executePi({ run, cwd: workspace.path, context: "", readOnly, tools: ctx.manifest.tools, scoped: ctx.manifest, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });
+        const followUp = await executePi({ run, cwd: workspace.path, context: "", tools: ctx.manifest.tools, scoped: ctx.manifest, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });
         result = { ...followUp, text: `${result.text}\n\n**Validation correction ${round}:** ${followUp.text}`, paths: [...new Set([...result.paths, ...followUp.paths])] };
         updateRun(run.id, { result, stage: "validating" });
         assertComplete(result);
@@ -359,22 +318,68 @@ async function validateStage(ctx: Ctx, p: Prepared) {
   }
 }
 
-async function publishStage({ task, run, subject, references, readOnly, manifest, repositoryPath }: Ctx, observed: Observed | undefined) {
+async function changeRun(ctx: Ctx, observed: Observed) {
+  const { task, run, references, cleanup, stop, manifest, operation } = ctx;
+  const acceptance = manifest.acceptance!;
+  const acquired = await acquireChangeWorkspace(ctx, observed);
+  const { workspace, validationOnly, mainSha, startHeadSha } = acquired;
+  if (!validationOnly) updateRun(run.id, { workspaceId: workspace.id, mainSha, headSha: startHeadSha });
+  const databaseConfig = config.workspace?.database;
+  let database: Awaited<ReturnType<typeof createRunDatabase>> | undefined;
+  if (databaseConfig) {
+    cleanup.databaseRequested = true;
+    database = await createRunDatabase(run.id, databaseConfig.image, references);
+  }
+  const environment: Environment = { ...config.workspace?.environment,
+    ...Object.fromEntries((databaseConfig?.environment ?? []).map((name) => [name, database!.url])),
+  };
+  const p: Change = {
+    ...acquired, headSha: startHeadSha, databaseConfig, environment,
+    commandEnvironment: { ...childEnvironment(), ...environment }, result: run.result,
+    validated: false, validationFailure: undefined, agentInput: undefined, target: undefined,
+    deferred: acquired.mergeInProgress || Boolean(run.retryOfRunId) || acceptance === "conflict_free",
+  };
+  if (!validationOnly) {
+    const evaluated = evaluateContext(run, task, observed.observation);
+    const { diffPaths, diffBaseSha } = await readDiffScope(workspace.path, mainSha, p.preparedHead, Boolean(observed.pullRequest));
+    updateRun(run.id, { context: evaluated });
+    await mergeBehind(ctx, observed, p, diffPaths, acceptance);
+    if (!p.validated) {
+      stopBefore(stop, "workspace preparation");
+      await prepareChangeCommands(ctx, observed, p);
+      stopBefore(stop, "the agent");
+      updateRun(run.id, { stage: "agent" });
+      const { prompt, contextDir, revisions } = await buildAgentInput({
+        run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha: p.headSha,
+        baseRef: mainSha, mergeInProgress: p.mergeInProgress, workspace, validationFailure: p.validationFailure,
+        database: database ? { ...database, environment, schemaPrepared: !p.deferred, prepare: config.workspace?.prepare, migrate: databaseConfig?.migrate } : undefined,
+      });
+      p.agentInput = { contextDir, revisions };
+      const agentResult = await executePi({ run, cwd: workspace.path, context: prompt, tools: manifest.tools, scoped: manifest, log: operation.log, sessionFile: latestSessionRun(workspace.id, run.id)?.piSessionFile ?? undefined, environment, contextDir, revisions, stop });
+      p.result = { ...agentResult, paths: [...new Set([...diffPaths, ...agentResult.paths])] };
+      updateRun(run.id, { result: p.result, stage: "validating" });
+    }
+  }
+  await validateStage(ctx, p, acceptance);
+}
+
+async function publishStage({ task, run, subject, references, manifest, repositoryPath }: Ctx, observed: Observed | undefined) {
   if (!observed) return subject.kind === "window" ? publishWindow(subject, task, run, references) : publishCommit(subject, task, run);
   const { repository, github, context, item, observation, mainSha } = observed;
+  const review = manifest.mode === "review";
   const evaluatedRun = getRun(run.id)!;
   const publicationContext = run.stage !== "publishing"
     ? await github.fetchItemContext(observation.kind, item.payload.number) : context;
   if (publicationContext.item.state !== "open") throw new Error("GitHub item is no longer open");
   let headOverride: string | undefined;
-  if (!readOnly && "head" in publicationContext.item && evaluatedRun.context?.headSha) {
+  if (!review && "head" in publicationContext.item && evaluatedRun.context?.headSha) {
     const { sha } = publicationContext.item.head;
     if (sha !== evaluatedRun.context.headSha && sha !== evaluatedRun.publication.publishedCommitSha
       && sha !== evaluatedRun.publication.commitSha) throw new Error("GitHub PR head changed during execution");
     headOverride = evaluatedRun.context.headSha;
   }
   const current = observe(repository, publicationContext, headOverride);
-  const currentMainSha = readOnly ? async () => run.stage === "publishing" ? mainSha
+  const currentMainSha = review ? async () => run.stage === "publishing" ? mainSha
     : await fetchRepository(repositoryPath, observation.remote, current.baseBranch, await github.getGitEnvironment()) : undefined;
   if (manifest.publish.includes("pr_assessment")) await currentMainSha?.();
   else {
@@ -389,25 +394,18 @@ async function publishStage({ task, run, subject, references, readOnly, manifest
 export async function runNextTask(stop?: AbortSignal) {
   const claimed = claimTask();
   if (!claimed) return;
-  const ctx = beginRun(claimed, stop);
-  const { run, references, operation, cleanup } = ctx;
+  const { task, run, subject, item } = claimed;
+  const references = { subjectId: subject.id, taskId: task.id, runId: run.id };
+  const operation = startOperation("run.execute", { ...references, action: task.action });
+  const cleanup: Ctx["cleanup"] = { databaseRequested: false };
+  const ctx: Ctx = { task, run, subject, item, references, operation, manifest: manifestOf(task.action), repositoryPath: getRepositoryPath(), stop, cleanup };
   try {
     const observed = await connect(ctx);
     if (run.stage !== "publishing") {
       stopBefore(stop, "workspace acquisition");
-      const prepared = await acquireWorkspace(ctx, observed);
-      if (!prepared.validationOnly) {
-        await planAgent(ctx, observed, prepared);
-        await mergeBehind(ctx, observed, prepared);
-        if (!prepared.validated) {
-          stopBefore(stop, "workspace preparation");
-          await prepareCommands(ctx, observed, prepared);
-          stopBefore(stop, "the agent");
-          await agentStage(ctx, prepared);
-        }
-      }
-      await validateStage(ctx, prepared);
-      if (!ctx.acceptance) updateRun(run.id, { stage: "publishing" });
+      if (observed) await assertRepairCurrent(ctx, observed);
+      if (ctx.manifest.mode === "review") await reviewRun(ctx, observed);
+      else await changeRun(ctx, observed!);
       stopBefore(stop, "publication");
     }
     await publishStage(ctx, observed);

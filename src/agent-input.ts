@@ -56,7 +56,6 @@ export async function buildAgentInput(options: {
   workspace: { path: string; branch: string | null };
   database?: Record<string, unknown>;
   validationFailure?: ErrorDetails;
-  priorReviews?: boolean;
 }) {
   const { run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha } = options;
   const { action } = task;
@@ -80,7 +79,7 @@ export async function buildAgentInput(options: {
   const failure = run.retryOfRunId ? getRun(run.retryOfRunId)?.error : undefined;
   const listed = manifestOf(action).files;
   const history = listed.includes("history") ? historyReport(completedRunsOfActionInRepository(config.github.repository, action, config.context.historyRuns), action) : undefined;
-  const prior = options.priorReviews ? priorReviewTexts(task.subjectId) : undefined;
+  const prior = manifestOf(action).publish.includes("pr_assessment") ? priorReviewTexts(task.subjectId) : undefined;
   await Promise.all([
     listed.includes("discussion") && writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),
     listed.includes("review") && report && writeContext("review", "review.md", report),

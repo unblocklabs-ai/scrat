@@ -1582,18 +1582,26 @@ export const scenarios = {
     const { validateStaticConfig } = await f.app("startup.ts");
     await validateStaticConfig(f.config);
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
-    await assert.rejects(validateStaticConfig(variant((c) => { c.harness.maxConcurrentValidations = 0; })), /maxConcurrentValidations must be a positive integer/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.harness.commandTimeoutSeconds = 0; })), /commandTimeoutSeconds must be a positive integer/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = true; c.workspace.commandMemoryMax = "lots"; })), /commandMemoryMax must be null or a size/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = true; c.workspace.commandMemoryMax = "0"; })), /commandMemoryMax must be null or a size/);
+    const { validateConfig } = await f.app("config-schema.ts");
+    const { config: merged } = await f.app("config.ts");
+    const invalid = (change, message) => assert.throws(() => { const copy = structuredClone(merged); change(copy); validateConfig(copy); }, message);
+    validateConfig(merged);
+    invalid((c) => { c.harness.maxConcurrentValidations = 0; }, /^Error: Invalid Scrat configuration:\n- harness\.maxConcurrentValidations: must be >= 1$/);
+    invalid((c) => { c.harness.commandTimeoutSeconds = 0; }, /harness\.commandTimeoutSeconds: must be >= 1/);
+    invalid((c) => { c.harness.maxConcurrentValidations = "3"; }, /harness\.maxConcurrentValidations: must be integer/);
+    invalid((c) => { c.harness.maxConcurency = 8; }, /harness\.maxConcurency: unknown setting/);
+    invalid((c) => { c.workspace.commandMemoryMax = "lots"; }, /workspace\.commandMemoryMax: must match pattern/);
+    invalid((c) => { c.workspace.commandMemoryMax = "0"; }, /workspace\.commandMemoryMax: must match pattern/);
+    { const copy = structuredClone(merged); copy.workspace.environment = { ANY_NEW_KEY: "1" }; validateConfig(copy); }
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = false; c.workspace.commandMemoryMax = "6G"; })), /commandMemoryMax requires workspace\.sandbox/);
     await validateStaticConfig(variant((c) => { c.workspace.commandMemoryMax = null; }));
-    await assert.rejects(validateStaticConfig(variant((c) => { c.harness.agentTimeoutSeconds = 1.5; })), /agentTimeoutSeconds must be a positive integer/);
-    for (const bad of [-1, 1.5]) await assert.rejects(validateStaticConfig(variant((c) => { c.harness.corrections.incomplete = bad; })), /harness\.corrections\.incomplete must be a non-negative integer/);
+    invalid((c) => { c.harness.agentTimeoutSeconds = 1.5; }, /harness\.agentTimeoutSeconds: must be integer/);
+    invalid((c) => { c.harness.corrections.incomplete = -1; }, /harness\.corrections\.incomplete: must be >= 0/);
+    invalid((c) => { c.harness.corrections.incomplete = 1.5; }, /harness\.corrections\.incomplete: must be integer/);
     await validateStaticConfig(variant((c) => { c.harness.corrections.incomplete = 0; }));
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.heavyCommands = ["^(unclosed"]; })), /heavyCommands\[0\] is not a valid regular expression/);
     for (const disabled of [null, ""]) await validateStaticConfig(variant((c) => { c.actions.address_review.exhaustedLabel = disabled; }));
-    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.address_review.exhaustedLabel = 5; })), /exhaustedLabel must be a string, or null or "" to disable it/);
+    invalid((c) => { c.actions.address_review.exhaustedLabel = 5; }, /actions\.address_review\.exhaustedLabel: must be string/);
     const lines = captureLogs();
     const toolResults = () => JSON.stringify(f.requests.findLast((entry) => entry.request.messages.some((message) => message.role === "tool")).request.messages.filter((message) => message.role === "tool"));
     const attempt = async (number, mode) => { f.addIssue(number, ["scrat"]); f.reset(number, mode); f.enqueue(number, "implement"); return run(); };
@@ -1744,16 +1752,13 @@ export const scenarios = {
     assert.equal(rejections().at(-1).taskId, damaged.task.id);
     assert.equal(rejections().length, 3);
 
-    const { config: live } = await f.app("config.ts"); live.actions.review_pr.thinkingLevel = "turbo";
-    f.addIssue(5); f.addIssue(6); f.enqueue(5, "review_pr"); f.enqueue(6);
-    assert.equal(tasks.claimTask().task.subjectId, "issue-6");
-    assert.equal(f.row(s.tasks, all(s.tasks).find((t) => t.subjectId === "issue-5").id).status, "failed");
-    assert.match(rejections().at(-1).data.reason, /Invalid thinking level for review_pr: turbo/);
-    live.actions.review_pr.thinkingLevel = "high";
 
     const { validateStaticConfig } = await f.app("startup.ts");
     await validateStaticConfig(f.config);
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
+    const { validateConfig } = await f.app("config-schema.ts");
+    const { config: merged } = await f.app("config.ts");
+    const invalid = (change, message) => assert.throws(() => { const copy = structuredClone(merged); change(copy); validateConfig(copy); }, message);
     const { GitHubRepository: Verified } = await f.app("github.ts");
     f.githubApp.slug = "other-app";
     await assert.rejects(new Verified("fixture/project").fetchOpenItems(), /GitHub App other-app posts as other-app\[bot\], but github\.botLogin is scrat-unblock\[bot\]/);
@@ -1764,11 +1769,11 @@ export const scenarios = {
     await assert.rejects(validateStaticConfig(variant((c) => { delete c.workspace.validate; c.actions.address_review.enabled = false; })), /workspace\.validate is empty but address_pr_feedback, implement, resolve_conflicts publish/);
     await validateStaticConfig(variant((c) => { c.workspace.validate = [["true"]]; }));
     await validateStaticConfig(variant((c) => { c.workspace.layout = "clone"; }));
-    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.layout = "copy"; })), /workspace\.layout must be "worktree" or "clone"/);
+    invalid((c) => { c.workspace.layout = "copy"; }, /workspace\.layout: must be equal to one of the allowed values/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = true; c.workspace.layout = "worktree"; })), /workspace\.sandbox requires workspace\.layout "clone"/);
     await validateStaticConfig(variant((c) => { c.workspace.validate = []; for (const name of changeActions) c.actions[name].enabled = false; }));
-    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.implement.thinkingLevel = "turbo"; })), /implement: invalid thinking level turbo/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.github.auth = "token"; })), /github\.auth must be "app" or "pat"/);
+    invalid((c) => { c.actions.implement.thinkingLevel = "turbo"; }, /actions\.implement\.thinkingLevel: must be equal to one of the allowed values/);
+    invalid((c) => { c.github.auth = "token"; }, /github\.auth: must be equal to one of the allowed values/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.github.botLogin = " "; })), /github\.botLogin must not be empty/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.github.botName = " !! "; })), /github\.botName must contain a letter or digit/);
     const key = process.env.GITHUB_APP_PRIVATE_KEY;
@@ -1777,7 +1782,7 @@ export const scenarios = {
     await assert.rejects(validateStaticConfig(variant((c) => { c.github.auth = "pat"; })), /github\.auth is "pat" but GITHUB_PAT is not set/);
     process.env.GITHUB_PAT = "ghp_x"; await validateStaticConfig(variant((c) => { c.github.auth = "pat"; })); delete process.env.GITHUB_PAT;
     process.env.GITHUB_APP_PRIVATE_KEY = key;
-    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.reviewers[1].thinkingLevel = "turbo"; })), /review_pr reviewer 2: invalid thinking level/);
+    invalid((c) => { c.actions.review_pr.reviewers[1].thinkingLevel = "turbo"; }, /actions\.review_pr\.reviewers\.1\.thinkingLevel: must be equal to one of the allowed values/);
 
     assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
     const local = resolve("app/scrat.local.json"), requestLog = resolve("startup-requests.log");
@@ -1798,12 +1803,9 @@ export const scenarios = {
     const base = JSON.parse(readFileSync("app/scrat.config.json", "utf8")), { provider } = existing.actions.implement;
     writeFileSync("app/scrat.config.json", JSON.stringify({ ...base, workspace: { ...base.workspace, heavyCommands: [] } }));
     for (const [overrides, problem] of [
-      [{ actions: { implement: { thinkingLevel: "turbo" } } }, "implement: invalid thinking level turbo"],
       [{ actions: { implement: { model: "no-such-model" } } }, `implement: no Pi model ${provider}/no-such-model`],
       [{ actions: { implement: { skill: "skills/missing/SKILL.md" } } }, `implement: skill file not found: ${resolve("app/skills/missing/SKILL.md")}`],
-      [{ harness: { maxConcurrentValidations: 0 } }, "harness.maxConcurrentValidations must be a positive integer"],
       [{ workspace: { heavyCommands: ["^(unclosed"] } }, "workspace.heavyCommands[0] is not a valid regular expression"],
-      [{ actions: { address_review: { exhaustedLabel: 5 } } }, 'address_review: exhaustedLabel must be a string, or null or "" to disable it'],
     ]) {
       assert.deepEqual(startup(overrides), { status: 1, message: `Invalid Scrat configuration:\n- ${problem}` }, problem);
       assert.equal(JSON.stringify([all(s.tasks), all(s.runs)]), before, "no task is claimed on a rejected start");
@@ -2445,13 +2447,19 @@ export const scenarios = {
     assert.deepEqual(merged.workspace.validate, defaults.workspace.validate);
 
     probe(undefined, ""); assert.equal(readFileSync(local, "utf8"), "{}\n");
-    rejected({ harness: { maxConcurency: 8 } }, /Unknown setting in scrat\.local\.json: harness\.maxConcurency/);
-    rejected({ actions: { bogus: {} } }, /Unknown setting in scrat\.local\.json: actions\.bogus/);
-    rejected({ harness: 8 }, /must be an object: harness/);
-    rejected({ harness: null }, /must be an object: harness/);
-    rejected({ harness: { toString: 1 } }, /Unknown setting in scrat\.local\.json: harness\.toString/);
+    const { validateConfig } = await f.app("config-schema.ts");
+    const check = (overrides, message) => assert.throws(() => validateConfig(buildConfig(defaults, overrides)), message);
+    check({ actions: { bogus: {} } }, /actions\.bogus\.priority: required/);
+    check({ harness: 8 }, /^Error: Invalid Scrat configuration:\n- harness: must be object$/);
+    check({ harness: null }, /harness: must be object/);
+    check({ harness: { toString: 1 } }, /harness\.toString: unknown setting/);
+    check({ harness: { maxConcurrentValidations: "3" } }, /harness\.maxConcurrentValidations: must be integer/);
+    check({ harness: { maxConcurrentValidations: 0 } }, /harness\.maxConcurrentValidations: must be >= 1/);
+    check({ harness: { maxConcurency: 8 } }, /harness\.maxConcurency: unknown setting/);
+    check({ actions: { implement: { thinkingLevel: "turbo" } } }, /actions\.implement\.thinkingLevel: must be equal to one of the allowed values/);
+    validateConfig(buildConfig(defaults, { workspace: { environment: { ANY_NEW_KEY: "1" } } }));
     rejected(JSON.parse('{"workspace":{"environment":{"__proto__":{"x":"1"}}}}'), /Unknown setting in scrat\.local\.json: workspace\.environment\.__proto__/);
-    assert.throws(() => probe({ harness: { maxConcurency: 8 } }, ""), (error) => /Unknown setting in scrat\.local\.json: harness\.maxConcurency/.test(error.stderr));
+    assert.throws(() => probe({ harness: { maxConcurency: 8 } }, ""), (error) => /Invalid Scrat configuration:\n- harness\.maxConcurency: unknown setting/.test(error.stderr));
 
     const provider = Object.keys(defaults.providers)[0], model = defaults.providers[provider].models[0].id;
     const seen = probe({ providers: { [provider]: { baseUrl: "http://override.invalid/v1" } } }, `
@@ -2559,6 +2567,7 @@ export const scenarios = {
   slack_startup: { title: "an enabled Slack action blocks startup on missing token, channel, template variables, panel reviewers or a failed auth.test, while a disabled one makes no Slack call and queued tasks for it are rejected", run: async () => {
     const { validateStaticConfig } = await f.app("startup.ts");
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
+    const { validateConfig } = await f.app("config-schema.ts");
     const enabled = (change = () => {}) => variant((c) => {
       Object.assign(c.actions.review_base_change, { enabled: true, channel: "C0123456789", skill: "skills/review_issue/SKILL.md" }); change(c.actions.review_base_change);
     });
@@ -2575,7 +2584,9 @@ export const scenarios = {
     await assert.rejects(validateStaticConfig(enabled((a) => { a.branch = " "; })), /branch must not be empty/);
     await assert.rejects(validateStaticConfig(enabled((a) => { a.startMessage = "{{bot}} saw {{commit}}"; })), /unknown startMessage variable \{\{commit\}\}/);
     await assert.rejects(validateStaticConfig(enabled((a) => { a.agent = "panel"; })), /requires exactly two reviewers/);
-    await assert.rejects(validateStaticConfig(enabled((a) => { a.agent = "solo"; })), /agent must be "single" or "panel"/);
+    const { config: merged } = await f.app("config.ts");
+    const copy = structuredClone(merged); copy.actions.review_base_change.agent = "solo";
+    assert.throws(() => validateConfig(copy), /actions\.review_base_change\.agent: must be equal to one of the allowed values/);
     f.slack.fail = "invalid_auth";
     await assert.rejects(validateStaticConfig(enabled()), /Slack auth\.test failed: .*invalid_auth/);
     f.slack.fail = null;

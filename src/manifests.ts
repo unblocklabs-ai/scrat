@@ -68,6 +68,8 @@ function crossChecks(m: Parsed) {
   need(!scheduled || mode === "review", "a schedule trigger requires mode review");
   need(t.grades === undefined || t.kind === "low_grade", "trigger.grades is only allowed with kind low_grade");
   need((m.maxSelfRepairs === undefined && m.exhaustedLabel === undefined) || t.kind === "low_grade", "maxSelfRepairs and exhaustedLabel are only allowed with kind low_grade");
+  need(t.kind !== "low_grade" || m.maxSelfRepairs !== undefined, "kind low_grade requires maxSelfRepairs");
+  need(!commits || m.maxRangeCommits !== undefined, "source github_commits requires maxRangeCommits");
   need((m.channel === undefined && m.startMessage === undefined && m.maxRangeCommits === undefined) || commits, "channel, startMessage and maxRangeCommits are only allowed with source github_commits");
   need(!any(slack, ["slack_post", "slack_reply"]) || commits, "slack effects require source github_commits");
   need(!publish.includes("issue") || !commits, "the issue effect requires source github_items or schedule");
@@ -111,8 +113,7 @@ function readManifest(root: string, path: string, label: string): Manifest {
   if (basename(path, ".yaml") !== parsed.name) problems.unshift(`name ${parsed.name} must equal the file name`);
   if (parsed.name === "directory") problems.unshift("directory is not a legal action name");
   if (problems.length) throw new Error(`${label}: ${problems.join("; ")}`);
-  const range = parsed.trigger.source === "github_commits" ? { maxRangeCommits: parsed.maxRangeCommits ?? 50 } : {};
-  return { ...parsed, ...range, tools: parsed.tools ?? defaultTools(parsed), files: parsed.files ?? [], reviewers: parsed.reviewers ?? [], file: label, root };
+  return { ...parsed, tools: parsed.tools ?? defaultTools(parsed), files: parsed.files ?? [], reviewers: parsed.reviewers ?? [], file: label, root };
 }
 
 export function readManifests(root: string, directory?: string | null) {

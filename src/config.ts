@@ -3,29 +3,12 @@ import { fileURLToPath } from "node:url";
 import { isAbsolute, resolve } from "node:path";
 import settings from "../scrat.config.json" with { type: "json" };
 import { buildConfig, type Json } from "./config-merge.ts";
-import type { Binding } from "./bindings.ts";
-import { deploymentDefaults, findTriggerConflicts, readManifests, skillPath, thinkingLevels, type ThinkingLevel } from "./manifests.ts";
+import { validateConfig } from "./config-schema.ts";
+import { deploymentDefaults, findTriggerConflicts, readManifests, skillPath, type ThinkingLevel } from "./manifests.ts";
 
 const configUrl = new URL("../scrat.config.json", import.meta.url);
 const localConfigUrl = new URL("../scrat.local.json", import.meta.url);
-export { thinkingLevels, type ThinkingLevel };
-
-type WorkspaceConfig = {
-  sandbox?: boolean;
-  commandMemoryMax?: string | null;
-  layout?: "worktree" | "clone";
-  environment?: Record<string, string>;
-  prepare?: string[][];
-  database?: { image: string; environment: string[]; migrate: string[] } | null;
-  validate?: string[][];
-  heavyCommands?: string[];
-};
-
-type ModelEntry = { provider: string; model: string; thinkingLevel: string };
-export type ActionSettings = ModelEntry & {
-  enabled?: boolean; priority: number; skill: string; agent: string; reviewers?: ModelEntry[]; branch?: string; channel?: string;
-  maxRangeCommits?: number; startMessage?: string; maxSelfRepairs?: number; exhaustedLabel?: string | null;
-};
+export { type ThinkingLevel };
 
 const isObject = (value: unknown): value is Json => typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -47,7 +30,7 @@ const actionDefaults = { ...Object.fromEntries(loadedManifests.map((manifest) =>
 
 const merged = buildConfig({ ...settings, actions: actionDefaults }, overrides);
 delete (merged.actions as Json).directory;
-export const config: Omit<typeof settings, "workspace" | "bindings"> & { workspace?: WorkspaceConfig; bindings: Record<string, Binding>; actions: Record<string, ActionSettings> } = merged as never;
+export const config = validateConfig(merged);
 
 const conflicts = findTriggerConflicts(loadedManifests, (manifest) => config.actions[manifest.name]?.enabled !== false);
 if (conflicts.length) throw new Error(`Invalid Scrat configuration:\n${conflicts.map((conflict) => `- ${conflict}`).join("\n")}`);

@@ -69,13 +69,13 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
       ...readOnly ? [] : [`Keep working notes in ${resolve(cwd, ".scrat/notes.md")} (Git-ignored, never committed or published): the plan, decisions and why, findings, checks run and their results, and what remains. Update it at each milestone, keep it short, and read it first, if it exists, when resuming or after context compaction.`,
         `Your final response is published as written after ${botName} validates, commits and pushes your changes; do not say the changes are uncommitted.`],
       "Tool rules:",
-      ...readOnly ? [
+      ...tools.includes("git") ? [
         "- git `show` needs both `path` and `revision`; `log` takes `revision`; `diff` and `diff_stat` need both `from` and `to`. `head`, `base` and `main` are accepted; there are no defaults for `show` or `diff`.",
-        "- A revision is a 7-40 char hex commit SHA or a named one (head, base, main, previousMain, previousHead). No `^`/`~` suffixes and no 64-char hashes.",
+        "- A revision is a 7-40 char lowercase hex commit SHA or a named one (head, base, main, plus previousMain and previousHead when the input has `previous`). No `^`/`~` suffixes.",
       ] : [],
       "- Never repeat a failed call unchanged; read the error, change the argument, or switch tools.",
-      "- Before reading a path you have not seen listed, list it first (`ls`, `find`, or `diffPaths`). Do not guess repo layouts or config names.",
-      ...readOnly ? ["- A path the PR deletes or renames is missing from the head checkout; read it with `read_base` or `git show revision=base`."] : [],
+      `- Before reading a path you have not seen listed, list it first (\`ls\`, \`find\`${readOnly ? ", or \`diffPaths\`" : ""}). Do not guess repo layouts or config names.`,
+      ...readOnly && (tools.includes("read_base") && baseSha || tools.includes("git")) ? [`- A path the PR deletes or renames is missing from the head checkout; read it with ${tools.includes("read_base") && baseSha ? "`read_base`" : "`git show` with revision=base"}${tools.includes("read_base") && baseSha && tools.includes("git") ? " if you have it, otherwise `git show` with revision=base" : ""}.`] : [],
       "- Look inside `node_modules/<pkg>` only after listing it or reading its `package.json` `main`/`exports`.",
       ...readOnly ? ["- Reviews have no shell and no `bash`."] : [],
       "- `grep` is Rust regex: no lookahead or backreferences; set `literal: true` for exact text.",

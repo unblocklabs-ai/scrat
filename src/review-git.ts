@@ -15,12 +15,12 @@ export function pageText(page: GitPage, offset: number, size = page.total) {
 
 export function createReviewGitTool(cwd: string, revisions: Record<string, string>, touched: Set<string>) {
   const names = Object.keys(revisions);
-  const accepted = `${names.join(", ")} or a 7-40 character hex commit SHA`;
+  const accepted = `a 7-40 character lowercase hex commit SHA or one of: ${names.join(", ")}`;
   async function resolveRevision(value: string | undefined, parameter: string, operation: string) {
     if (!value) throw new Error(`${parameter} is required for ${operation}; use ${accepted}`);
     const candidate = Object.hasOwn(revisions, value) ? revisions[value]! : value;
     if (!/^[0-9a-f]{7,40}$/.test(candidate)) {
-      throw new Error(`${parameter} must be a hex commit SHA or one of: ${names.join(", ")}; ^, ~ and other revision syntax are not accepted: ${value}`);
+      throw new Error(`${parameter} must be ${accepted}; ^, ~ and other revision syntax are not accepted: ${value}`);
     }
     try { return await git(cwd, ["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`]); }
     catch { throw new Error(`${parameter} is not a commit available in this checkout: ${value}`); }

@@ -2327,7 +2327,7 @@ export const scenarios = {
     run: async () => {
       for (const number of [1, 2]) {
         f.addIssue(number, ["scrat"]); f.enqueue(number, "implement");
-        f.script = [{ name: "bash", args: { command: `printf 'export const value = ${number};\\n' > src/app.ts` } }];
+        f.script = [{ name: "bash", args: { command: `printf 'export const value = 1${number};\\n' > src/app.ts` } }];
         assert.equal((await success()).publication.status, "published");
       }
       assert.ok(existsSync(resolve("shared-store/marker")));

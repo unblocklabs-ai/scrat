@@ -17,7 +17,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   mkdirSync("data/workspaces", { recursive: true });
   const cwd = await mkdtemp(join(workspaceRoot(), "sandbox-preflight-"));
   try {
-    const command = sandboxCommand(cwd, "/bin/sh", ["-c", "node --version && pnpm --version && git --version"], {}, [], true);
+    const command = sandboxCommand(cwd, "/bin/sh", ["-c", "node --version && pnpm --version && git --version"], {});
     const { stdout } = await promisify(execFile)(command.file, command.args, { env: command.env, timeout: 30_000 });
     process.stdout.write(`Sandbox ready\n${stdout}`);
   } finally {

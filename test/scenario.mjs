@@ -2228,7 +2228,7 @@ export const scenarios = {
     } },
   command_memory: { title: "a sandboxed command that exceeds workspace.commandMemoryMax is killed alone, fails the run as out of memory without re-prompting the agent and accepts validation-only retry", needsSandbox: true, needsSystemd: true,
     configure: [(config) => {
-      config.workspace = { sandbox: true, commandMemoryMax: "64M", environment: { ALLOCATE_MB: "256" }, validate: [[process.execPath, "-e", "const n=Number(process.env.ALLOCATE_MB);const held=[];for(let i=0;i<n;i++){const b=Buffer.alloc(1024*1024);b.fill(1);held.push(b);}console.log('allocated',held.length);"]] };
+      config.workspace = { sandbox: true, commandMemoryMax: "128M", environment: { ALLOCATE_MB: "512" }, validate: [[process.execPath, "-e", "const n=Number(process.env.ALLOCATE_MB);const held=[];for(let i=0;i<n;i++){const b=Buffer.alloc(1024*1024);b.fill(1);held.push(b);}console.log('allocated',held.length);"]] };
     }],
     run: async () => {
       f.addIssue(1, ["scrat"]); f.enqueue(1, "implement");

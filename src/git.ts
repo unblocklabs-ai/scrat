@@ -127,6 +127,11 @@ export async function branchContainsCommit(repositoryPath: string, remote: strin
   if (!remoteSha) return false;
   if (remoteSha === commitSha) return true;
   await git(repositoryPath, ["fetch", "--no-write-fetch-head", "--", remote, remoteSha], env);
+  try {
+    await git(repositoryPath, ["cat-file", "-e", `${commitSha}^{commit}`]);
+  } catch {
+    return false;
+  }
   return isAncestor(repositoryPath, commitSha, remoteSha);
 }
 

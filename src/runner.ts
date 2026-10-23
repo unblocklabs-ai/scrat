@@ -36,7 +36,6 @@ type Environment = Record<string, string | undefined>;
 type References = { subjectId: string; taskId: string; runId: string };
 type Acceptance = NonNullable<Manifest["acceptance"]>;
 
-
 const botAuthor = () => ({ name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com` });
 
 async function prepareWorkspace(workspace: Workspace, environment: Environment, databaseConfig: DatabaseConfig | null | undefined, references: References) {

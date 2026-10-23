@@ -16,7 +16,6 @@ import { createBrowserTool, createGithubSearchTool, createHttpTool } from "./sco
 import { createReviewGitTool, pageText } from "./review-git.ts";
 import { sandboxCommand } from "./sandbox.ts";
 
-
 type ScopedToolName = "http" | "browser" | "github_search";
 
 export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, baseSha, revisions = {}, environment = {}, log, runId }: {

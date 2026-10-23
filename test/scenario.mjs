@@ -2252,6 +2252,12 @@ export const scenarios = {
     assert.ok(capped.includes("## ") && !capped.includes("report 10"), "a report over the cap crowds out older ones");
     config.context.historyBytes = 2048; await review(1);
     assert.ok(Buffer.byteLength(seen.at(-1)) <= 2048 && Buffer.byteLength(seen.at(-1)) > 1500);
+    const { buildAgentInput } = await f.app("agent-input.ts"), sha = "a".repeat(40), evaluated = { revision: "r", baseBranch: "main", headSha: undefined, item: { number: 1, title: "t", body: "", url: "u" }, comments: [], commentRevisions: [] };
+    const build = async (paths) => JSON.parse((await buildAgentInput({ run: huge, task: f.row(s.tasks, huge.taskId), evaluated, diffBaseSha: sha, diffPaths: paths, mainSha: sha, headSha: sha, baseRef: "main", mergeInProgress: false, workspace: { path: "w", branch: null } })).prompt);
+    assert.deepEqual((await build(["a", "b", "c"])).diffPaths, ["a", "b", "c"]);
+    config.context.inlinePaths = 2;
+    const offloaded = await build(["a", "b", "c"]);
+    assert.equal(offloaded.diffPathCount, 3); assert.equal(offloaded.diffPaths, undefined); assert.equal(readFileSync(offloaded.files.diffPaths, "utf8"), "a\nb\nc\n");
   } },
   commit_hook: { title: "commit hooks cannot attach verification receipts to an unverified tree", run: async () => {
     f.addIssue(1); f.enqueue(1, "implement");
@@ -2571,6 +2577,9 @@ export const scenarios = {
     assert.deepEqual(merged.workspace.validate, defaults.workspace.validate);
 
     probe(undefined, ""); assert.equal(readFileSync(local, "utf8"), "{}\n");
+    const { validateStaticConfig: startupCheck } = await f.app("startup.ts"), narrow = structuredClone(f.config);
+    narrow.tools.readBytes.max = narrow.tools.readBytes.default - 1;
+    await assert.rejects(startupCheck(narrow), /tools\.readBytes\.max must not be less than tools\.readBytes\.default/);
     const { validateConfig } = await f.app("config-schema.ts");
     const check = (overrides, message) => assert.throws(() => validateConfig(buildConfig(defaults, overrides)), message);
     check({ harness: 8 }, /^Error: Invalid Scrat configuration:\n- harness: must be object$/);
@@ -3380,6 +3389,10 @@ export const scenarios = {
     await assert.rejects(act(slow, { action: "text" }), /limited to 1 seconds per session/);
     await assert.rejects(act(slow, { action: "goto", url: "https://shop.example.test/" }), /limited to 1 seconds per session/);
     assert.equal(slow.state.closed, true); assert.equal(slow.state.visited.length, 1);
+    const { config: liveConfig } = await f.app("config.ts"); liveConfig.tools.browser.steps = 2;
+    const configured = make();
+    for (let n = 0; n < 2; n++) await act(configured, { action: "goto", url: "https://shop.example.test/" });
+    await assert.rejects(act(configured, { action: "text" }), /limited to 2 actions per session/);
 
     const installed = await import("playwright-core").then(() => true, () => false);
     if (!installed) await assert.rejects(validateStaticConfig({ ...f.config, resolve: async () => publicAnswer }), /review_issue: The browser tool needs the optional playwright-core package, which is not installed/);

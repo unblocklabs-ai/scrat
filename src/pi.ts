@@ -15,7 +15,6 @@ import { canonicalReviewPaths } from "./review-paths.ts";
 import { redactSecrets } from "./errors.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 
-
 function footerRules(requireGrade: boolean) {
   return `SCRAT_READY (optional, only when ready)\nSCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of S, A, B, C, D, F, with no plus or minus)\nSCRAT_STATUS: complete, incomplete, or needs_decision (required, and the very last line)`;
 }

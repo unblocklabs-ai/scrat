@@ -143,7 +143,6 @@ export class GitHubRepository {
     return {
       issues: items.filter((item) => !item.pull_request).map(issueView),
       pullRequests: pullRequests.map(pullRequestView),
-      snapshot: { items, pullRequests },
     };
   }
 

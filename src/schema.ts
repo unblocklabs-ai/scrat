@@ -34,6 +34,8 @@ export const tasks = sqliteTable("tasks", {
   reason: text("reason").notNull(),
   input: text("input", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
   retryMode: text("retry_mode", { enum: ["repair", "validation"] }).notNull().default("repair"),
+  retryCount: integer("retry_count"),
+  availableAt: text("available_at"),
   status: text("status", {
     enum: ["queued", "running", "completed", "failed", "cancelled"],
   }).notNull().default("queued"),
@@ -53,9 +55,18 @@ export const workspaces = sqliteTable("workspaces", {
   path: text("path").notNull().unique(),
   baseRef: text("base_ref").notNull(),
   baseSha: text("base_sha").notNull(),
+  layout: text("layout", { enum: ["worktree", "clone"] }),
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
   removedAt: text("removed_at"),
 });
+
+export type Check = {
+  name: string;
+  status: "passed" | "failed" | "inconclusive" | "unavailable";
+  durationMs: number;
+  tail: string;
+  evidence: string[];
+};
 
 export const runs = sqliteTable("runs", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
@@ -90,7 +101,7 @@ export const runs = sqliteTable("runs", {
   }>(),
   verification: text("verification", { mode: "json" }).$type<{
     headSha: string;
-    commands: { command: string[]; durationMs: number; stdout: string; stderr: string }[];
+    commands: (Check | { command: string[]; durationMs: number; stdout: string; stderr: string })[];
   }>(),
   result: text("result", { mode: "json" }).$type<AgentResult>(),
   error: text("error", { mode: "json" }).$type<ErrorDetails>(),

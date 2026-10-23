@@ -24,6 +24,8 @@ export function redactSecrets(value: string) {
     .replace(/\b(Bearer|token)\s+\S+/gi, "$1 [redacted]");
 }
 
+export const transientInferenceCode = "TRANSIENT_INFERENCE";
+
 export function errorCode(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }

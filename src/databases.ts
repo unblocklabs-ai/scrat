@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { setTimeout } from "node:timers/promises";
 import { promisify } from "node:util";
 import { randomBytes } from "node:crypto";
+import { config } from "./config.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
 import { withOperation } from "./logging.ts";
 
@@ -10,7 +11,7 @@ const runLabel = "ai.unblock.scrat.v2.database";
 const containerName = (runId: string) => `scrat-v2-db-${runId}`;
 
 async function docker(args: string[]) {
-  const { stdout } = await executeFile("docker", args, { maxBuffer: 16 * 1024 * 1024 });
+  const { stdout } = await executeFile("docker", args, { maxBuffer: config.harness.maxOutputBytes });
   return stdout.trim();
 }
 

@@ -1,59 +1,51 @@
-import { access } from "node:fs/promises";
+import { access, lstat, mkdir } from "node:fs/promises";
 import { manifests } from "./actions.ts";
 import { type Resolver, publicAnswers, resolveHost, validateBindings } from "./bindings.ts";
-import { type ActionSettings, config, thinkingLevels } from "./config.ts";
-import { deploymentDefaults, findTriggerConflicts, skillPath } from "./manifests.ts";
+import { config } from "./config.ts";
+import type { ActionSettings, ScratConfig } from "./config-schema.ts";
+import { deploymentDefaults, skillPath } from "./manifests.ts";
 import { slugOf } from "./identity.ts";
 import { logger } from "./logging.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 import { loadPlaywright } from "./scoped-tools.ts";
 import { authTest } from "./slack.ts";
 import { ensureRunSequences } from "./tasks.ts";
+import { backfillWorkspaceLayouts } from "./workspaces.ts";
 
 const templateVariables = new Set(["sha", "short_sha", "author", "title", "url", "branch", "count", "bot"]);
 
-type Entry = { provider: string; model: string; thinkingLevel: string };
+type Entry = { provider: string; model: string };
 
 // @public: exported for the scenario tests, which validate alternative configurations directly.
-export async function validateStaticConfig(settings: {
-  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number; corrections?: { incomplete?: number } }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; resolve?: Resolver; slack?: { enabled?: boolean; channel?: string }; workspace?: { heavyCommands?: string[]; sandbox?: boolean; layout?: string; commandMemoryMax?: string | null; validate?: string[][] };
-  actions: Record<string, Partial<ActionSettings>>;
-} = config) {
+export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, "actions"> & { resolve?: Resolver; actions: Record<string, Partial<ActionSettings>> } = config) {
   const modelRuntime = await sharedModelRuntime();
   const problems: string[] = [];
-  if (settings.workspace?.sandbox !== undefined && typeof settings.workspace.sandbox !== "boolean") problems.push("workspace.sandbox must be a boolean");
-  if (settings.workspace?.layout !== undefined && settings.workspace.layout !== "worktree" && settings.workspace.layout !== "clone") problems.push('workspace.layout must be "worktree" or "clone"');
   if (settings.workspace?.sandbox && settings.workspace.layout !== "clone") problems.push('workspace.sandbox requires workspace.layout "clone"');
   if (settings.workspace?.sandbox) {
     if (process.platform !== "linux") problems.push("workspace.sandbox requires Linux bubblewrap");
     else await access("/usr/bin/bwrap").catch(() => { problems.push("workspace.sandbox requires /usr/bin/bwrap"); });
   }
   const memoryMax = settings.workspace?.commandMemoryMax;
-  if (memoryMax !== undefined && memoryMax !== null) {
-    if (typeof memoryMax !== "string" || !/^(?:[1-9]\d*[KMGT]?|(?:100|[1-9]\d?)%)$/.test(memoryMax)) problems.push("workspace.commandMemoryMax must be null or a size such as 6G or a percentage such as 50%");
-    else if (!settings.workspace?.sandbox) problems.push("workspace.commandMemoryMax requires workspace.sandbox");
+  if (memoryMax) {
+    if (!settings.workspace?.sandbox) problems.push("workspace.commandMemoryMax requires workspace.sandbox");
     else if (process.platform === "linux") await access("/usr/bin/systemd-run").catch(() => { problems.push("workspace.commandMemoryMax requires /usr/bin/systemd-run"); });
   }
-  const checkEntry = (label: string, { provider, model, thinkingLevel }: Entry) => {
-    if (!(thinkingLevels as readonly string[]).includes(thinkingLevel)) problems.push(`${label}: invalid thinking level ${thinkingLevel}`);
+  const store = settings.workspace?.packageStore;
+  if (store) {
+    if (!settings.workspace?.sandbox) problems.push("workspace.packageStore requires workspace.sandbox");
+    else if (await lstat(store).then((entry) => entry.isSymbolicLink(), () => false)) problems.push("workspace.packageStore must not be a symlink");
+    else if (process.platform === "linux") await mkdir(store, { recursive: true, mode: 0o700 }).catch(() => { problems.push(`workspace.packageStore ${store} cannot be created`); });
+  }
+  const checkEntry = (label: string, { provider, model }: Entry) => {
     if (!modelRuntime.getModel(provider, model)) problems.push(`${label}: no Pi model ${provider}/${model}${modelRuntime.getError() ? ` (${modelRuntime.getError()})` : ""}`);
   };
-  const auth = settings.github?.auth;
-  if (auth !== undefined && auth !== "app" && auth !== "pat") problems.push('github.auth must be "app" or "pat"');
-  else if (auth === "pat" && !process.env.GITHUB_PAT) problems.push('github.auth is "pat" but GITHUB_PAT is not set');
-  else if (auth !== "pat" && !process.env.GITHUB_APP_PRIVATE_KEY) problems.push('github.auth is "app" but GITHUB_APP_PRIVATE_KEY is not set');
+  if (settings.github?.auth === "pat") { if (!process.env.GITHUB_PAT) problems.push('github.auth is "pat" but GITHUB_PAT is not set'); }
+  else if (!process.env.GITHUB_APP_PRIVATE_KEY) problems.push('github.auth is "app" but GITHUB_APP_PRIVATE_KEY is not set');
   if (settings.github?.botLogin !== undefined && !settings.github.botLogin.trim()) problems.push("github.botLogin must not be empty");
   if (settings.github?.botName !== undefined && !/^[a-z0-9][a-z0-9-]*$/.test(slugOf(settings.github.botName))) {
     problems.push("github.botName must contain a letter or digit; its lowercase form names the selection label and the branch prefix");
   }
-  const slots = settings.harness?.maxConcurrentValidations;
-  if (slots !== undefined && !(Number.isSafeInteger(slots) && slots > 0)) problems.push("harness.maxConcurrentValidations must be a positive integer");
-  for (const key of ["commandTimeoutSeconds", "agentTimeoutSeconds", "drainTimeoutSeconds"] as const) {
-    const seconds = settings.harness?.[key];
-    if (seconds !== undefined && !(Number.isSafeInteger(seconds) && seconds > 0)) problems.push(`harness.${key} must be a positive integer`);
-  }
-  const continuations = settings.harness?.corrections?.incomplete;
-  if (continuations !== undefined && !(Number.isSafeInteger(continuations) && continuations >= 0)) problems.push("harness.corrections.incomplete must be a non-negative integer");
+  if (settings.tools && settings.tools.readBytes.max < settings.tools.readBytes.default) problems.push("tools.readBytes.max must not be less than tools.readBytes.default");
   settings.workspace?.heavyCommands?.forEach((pattern, index) => {
     try { new RegExp(pattern); } catch { problems.push(`workspace.heavyCommands[${index}] is not a valid regular expression`); }
   });
@@ -84,12 +76,8 @@ export async function validateStaticConfig(settings: {
   for (const manifest of manifests()) {
     const action = manifest.name, entry = { ...deploymentDefaults(manifest), ...settings.actions[action] };
     checkEntry(action, entry);
-    if (manifest.trigger.kind === "low_grade" && entry.maxSelfRepairs !== undefined && !(Number.isSafeInteger(entry.maxSelfRepairs) && entry.maxSelfRepairs >= 0)) {
-      problems.push(`${action}: maxSelfRepairs must be a non-negative integer`);
-    }
-    if (manifest.trigger.kind === "low_grade" && entry.exhaustedLabel != null && typeof entry.exhaustedLabel !== "string") {
-      problems.push(`${action}: exhaustedLabel must be a string, or null or "" to disable it`);
-    }
+    if (entry.retry && manifest.mode !== "review") problems.push(`${action}: retry requires mode review`);
+    if (entry.retry && entry.retry.maxDelaySeconds < entry.retry.initialDelaySeconds) problems.push(`${action}: retry.maxDelaySeconds must be at least retry.initialDelaySeconds`);
     entry.reviewers?.forEach((reviewer, index) => checkEntry(`${action} reviewer ${index + 1}`, reviewer));
     if (entry.enabled !== false) {
       const slack = [...manifest.start ?? [], ...manifest.publish].some((effect) => effect.startsWith("slack_"));
@@ -101,15 +89,13 @@ export async function validateStaticConfig(settings: {
         const unknown = [...(entry.startMessage ?? "").matchAll(/\{\{(.*?)\}\}/g)].map((match) => match[1]).filter((name) => !templateVariables.has(name));
         if (unknown.length) problems.push(`${action}: unknown startMessage variable ${unknown.map((name) => `{{${name}}}`).join(", ")}`);
       }
-      if (entry.agent !== "single" && entry.agent !== "panel") problems.push(`${action}: agent must be "single" or "panel"`);
-      else if (entry.agent === "panel" && entry.reviewers?.length !== 2) problems.push(`${action}: agent "panel" requires exactly two reviewers`);
+      if (entry.agent === "panel" && entry.reviewers?.length !== 2) problems.push(`${action}: agent "panel" requires exactly two reviewers`);
       if (slack && process.env.SLACK_BOT_TOKEN) await authTest().catch((error: unknown) => { problems.push(`${action}: Slack auth.test failed: ${error instanceof Error ? error.message : String(error)}`); });
       if (manifest.browser) await loadPlaywright().catch((error: unknown) => { problems.push(`${action}: ${error instanceof Error ? error.message : String(error)}`); });
       const skill = skillPath(manifest, entry.skill);
       if (!await access(skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${skill}`);
     }
   }
-  problems.push(...findTriggerConflicts(manifests(), (manifest) => ({ ...deploymentDefaults(manifest), ...settings.actions[manifest.name] }).enabled !== false));
   if (problems.length) {
     if (modelRuntime.getError()) dropModelRuntime();
     throw new Error(`Invalid Scrat configuration:\n${problems.map((problem) => `- ${problem}`).join("\n")}`);
@@ -119,4 +105,5 @@ export async function validateStaticConfig(settings: {
 export async function prepareService() {
   await validateStaticConfig();
   ensureRunSequences();
+  await backfillWorkspaceLayouts();
 }

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { execFileSync, spawnSync } from "node:child_process";
-import fs, { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { eq, sql } from "drizzle-orm";
 import { DatabaseSync } from "node:sqlite";
 import { resolve } from "node:path";
@@ -101,6 +101,10 @@ const configureValidation = (config) => {
   script(config, "validate", 'import{appendFileSync,existsSync}from"node:fs";const s=Date.now();await new Promise((r)=>setTimeout(r,existsSync(' + flag("slow") + ')?300:0));'
     + 'appendFileSync(' + flag("validations.log") + ',JSON.stringify({s,e:Date.now()})+"\\n");if(existsSync(' + flag("kill-validation") + '))process.kill(process.pid,"SIGKILL");if(existsSync(' + flag("exit-137") + '))process.exit(137);'
     + 'if(existsSync(' + flag("slot-fail") + ')||existsSync("fail-validation")){console.log("validation detail ghs_fixture_sensitive");console.error("Verification failed: marker present");process.exit(7);}');
+};
+const configureChatty = (config) => {
+  script(config, "validate", 'for(let i=0;i<20;i++)process.stdout.write("x".repeat(1024*1024)+"\\n");process.stdout.write("final line ghs_fixture_sensitive\\n");', "chatty");
+  config.harness.commandOutputTailBytes = 2000;
 };
 const configureCommandTimeout = (config) => {
   script(config, "validate", 'await new Promise((r)=>setTimeout(r,30000));');
@@ -247,7 +251,7 @@ const staleBranch = async () => {
     branchOff("feature-c", "src/c.ts", "export const c = 1;\n"); needs("needed4.txt");
     addPr(303, "feature-c", "human"); await route();
     const workspaces = all(s.workspaces).length, unmasked = await run();
-    assert.match(unmasked.error.message, /ERR_MISSING needed4\.txt/); assert.equal(f.requests.length, calls);
+    assert.match(unmasked.error.stdout, /ERR_MISSING needed4\.txt/); assert.equal(f.requests.length, calls);
     assert.equal(all(s.workspaces).length, workspaces + 1, "no synthetic workspace is made");
   } else {
     await implement(1); await route(); drainExcept(201);
@@ -257,7 +261,7 @@ const staleBranch = async () => {
     assert.deepEqual(queuedFor(201), ["review_pr"], "a clean, behind branch is not updated before anything fails");
     const calls = f.requests.length, staleHead = remoteGit("rev-parse", pr.head.ref);
     const failed = await run();
-    assert.match(failed.error.message, /ERR_MISSING needed\.txt/); assert.equal(failed.stage, "preparing"); assert.equal(failed.headSha, staleHead);
+    assert.match(failed.error.stdout, /ERR_MISSING needed\.txt/); assert.equal(failed.stage, "preparing"); assert.equal(failed.headSha, staleHead);
     await route(); assert.deepEqual(queuedFor(201), ["resolve_conflicts"]);
     await route(); assert.deepEqual(queuedFor(201), ["resolve_conflicts"], "routing neither duplicates nor cancels the update");
     const update = await success();
@@ -334,6 +338,11 @@ const validationFeedback = async () => {
       rmSync("kill-validation"); writeFileSync("exit-137", ""); f.addIssue(3, ["scrat"]); f.enqueue(3, "implement");
       const wrapped = await run();
       assert.equal(wrapped.error.exitCode, 137); assert.equal(f.requests.length, calls + 4, "agent turn only"); assert.equal(feedbackRequests().length, 2);
+      rmSync("exit-137"); const { config } = await f.app("config.ts"); config.harness.corrections.validation = 1;
+      f.addIssue(4, ["scrat"]); f.reset(4, "feedback-stubborn"); f.enqueue(4, "implement");
+      const limited = await run();
+      assert.equal(limited.error.exitCode, 7); assert.equal(feedbackRequests().length, 3);
+      assert.match(lastUser(feedbackRequests()[2]), /round 1 of 1/);
     }
   } finally { restoreLogs(); }
 };
@@ -922,7 +931,9 @@ export const scenarios = {
     db.update(s.runs).set({ startedAt: "2021-01-01T00:00:00Z" }).where(eq(s.runs.id, r5.id)).run();
     db.update(s.runs).set({ startedAt: "2020-01-01T00:00:00Z" }).where(eq(s.runs.id, r4.id)).run();
     rebuildRunsTable(["sequence"]);
+    db.$client.exec("ALTER TABLE workspaces DROP COLUMN layout");
     pushSchema();
+    assert.ok(db.$client.prepare("PRAGMA table_info(workspaces)").all().some((column) => column.name === "layout"));
     assert.deepEqual(db.$client.prepare("PRAGMA foreign_key_check").all(), []);
     assert.equal(all(s.runs).length, 5); assert.ok(all(s.runs).every((r) => r.sequence === null));
     assert.ok(db.$client.prepare("SELECT 1 FROM sqlite_master WHERE name = 'runs_sequence_unique'").get());
@@ -1130,6 +1141,32 @@ export const scenarios = {
     const invalid = await run(); assert.match(invalid.error.message, /grade/i);
     assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
   } },
+  review_retry: { title: "a review whose reviewers all fail transiently is requeued with doubling delays and publishes once after recovery, while a mixed panel stays failed", run: async () => {
+    await implement(2); await route(); f.transient.failures = 8; f.reset(202, "transient");
+    const delay = () => (Date.parse(f.row(s.tasks, failed.taskId).availableAt) - Date.parse(f.row(s.runs, failed.id).finishedAt)) / 1000;
+    let failed = await run(); const task = () => f.row(s.tasks, failed.taskId);
+    assert.equal(failed.error.code, "TRANSIENT_INFERENCE"); assert.equal(task().status, "queued"); assert.equal(task().retryCount, 1);
+    assert.ok(delay() >= 60 && delay() <= 66.1, String(delay()));
+    assert.equal(await f.runNextTask(), undefined);
+    const id = task().id, available = task().availableAt; await route();
+    assert.equal(task().availableAt, available); assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 1);
+    tasks.retryTask(id); assert.equal(task().availableAt, null); assert.equal(task().retryCount, 1); assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 1);
+    failed = await run(); assert.equal(task().retryCount, 2); assert.ok(delay() >= 120 && delay() <= 132.1, String(delay()));
+    assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
+    tasks.enqueueTask({ subjectId: task().subjectId, action: "review_pr", reason: "Changed", input: {} });
+    assert.equal(task().retryCount, null); assert.equal(task().availableAt, null);
+    const reviewed = await success(); assert.equal(reviewed.taskId, id);
+    assert.equal(task().status, "completed"); assert.equal(task().retryCount, null); assert.equal(task().availableAt, null); assert.equal(f.writes.filter((w) => w.type === "comment").length, 1);
+    await implement(3); await route(); f.transient.failures = 100; f.reset(203, "transient-mixed");
+    const mixed = await run(); assert.ok(mixed.error); assert.notEqual(mixed.error.code, "TRANSIENT_INFERENCE");
+    assert.equal(f.row(s.tasks, mixed.taskId).status, "failed"); assert.equal(f.row(s.tasks, mixed.taskId).retryCount, null);
+    await implement(4); await route(); f.reset(204, "reviewer-failure");
+    const permanent = await run(); assert.ok(permanent.error); assert.equal(f.row(s.tasks, permanent.taskId).status, "failed"); assert.equal(f.row(s.tasks, permanent.taskId).retryCount, null);
+    await implement(5); await route(); f.transient.failures = 100; f.reset(205, "transient");
+    const closing = await run(); assert.equal(f.row(s.tasks, closing.taskId).status, "queued");
+    f.prs.find((pr) => pr.number === 205).state = "closed"; await route();
+    assert.equal(f.row(s.tasks, closing.taskId).status, "cancelled"); assert.equal(await f.runNextTask(), undefined);
+  } },
   footer: { title: "quoted control markers stay report text and cannot supply a PR grade or issue approval", run: async () => {
     await implement(1); f.reset(201, "quoted-grade"); await route();
     const reviewed = await success();
@@ -1202,7 +1239,7 @@ export const scenarios = {
     const reviewed = await success();
     assert.equal(reviewed.headSha, newer);
     const { fetchPullRequestHead } = await f.app("git.ts");
-    assert.equal(await fetchPullRequestHead(resolve("checkout"), resolve("missing.git"), 201, newer), "refs/remotes/origin/pr/201", "A matching local ref needs no fetch");
+    assert.equal(await fetchPullRequestHead(resolve("checkout"), resolve("missing.git"), 201, newer), newer, "A matching local ref needs no fetch");
     await assert.rejects(fetchPullRequestHead(resolve("checkout"), resolve("missing.git"), 201, stale), /fetch/);
     const writes = f.writes.length;
     f.forced.set(201, "0".repeat(40)); tasks.enqueueManualTasks("review_pr", ["201"]);
@@ -1224,14 +1261,14 @@ export const scenarios = {
   verification: { title: "verification receipts bind to the published commit and failing checks block publication", layouts: ["clone"], configure: [configureCheck], run: async () => {
     const r = await implement(1);
     assert.equal(r.verification.headSha, r.publication.publishedCommitSha);
-    assert.match(r.verification.commands[0].stdout, /checked actual source/);
+    assert.match(r.verification.commands[0].tail, /checked actual source/); assert.equal(r.verification.commands[0].status, "passed"); assert.match(readFileSync(r.verification.commands[0].evidence[0], "utf8"), /checked actual source/);
     assert.equal(git(resolve("remote.git"), "rev-parse", f.prs[0].head.ref), r.verification.headSha);
     changeMain("fail-validation", "fail\n");
     f.addIssue(2); f.enqueue(2, "implement"); const failed = await run();
     assert.ok(failed.error); assert.equal(f.prs.length, 1); assert.equal(failed.verification, null);
     assert.equal(failed.error.exitCode, 7);
     assert.match(failed.error.stdout, /validation detail \[redacted\]/);
-    assert.match(failed.error.stderr, /Verification failed/);
+    assert.match(failed.error.stdout, /Verification failed/);
     assert.ok(!JSON.stringify(failed.error).includes("ghs_fixture_sensitive"));
   } },
   validation_mutation: { title: "checks that change source cannot certify the resulting commit", configure: [configureCheck], run: async () => {
@@ -1491,6 +1528,21 @@ export const scenarios = {
   stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", layouts: ["clone"], configure: [configureStaleBranch], run: staleBranch },
   validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit", layouts: ["clone"], configure: [configureValidation], run: validationFeedback },
   validation_feedback_cap: { title: "validation feedback stops after two rounds and never applies to signal-killed commands", configure: [configureValidation], run: validationFeedback },
+  measured_checks: { title: "a chatty passing validation command stores a bounded tail, keeps its full output on disk and old receipts still read", configure: [configureChatty], run: async () => {
+    const r = await implement(1);
+    const [check] = r.verification.commands;
+    assert.equal(check.status, "passed"); assert.equal(check.name, `${process.execPath} ${resolve("chatty.mjs")}`);
+    assert.ok(Buffer.byteLength(check.tail) <= 2000); assert.match(check.tail, /final line \[redacted\]/);
+    assert.ok(!JSON.stringify(r.verification).includes("ghs_fixture_sensitive"));
+    assert.equal(check.evidence.length, 1); assert.match(check.evidence[0], new RegExp(`^${resolve("data/checks", r.id)}/validate-0-\\d+\\.log$`)); assert.ok(!check.evidence[0].startsWith(resolve("data/runs", r.id)));
+    assert.ok(statSync(check.evidence[0]).size > 20 * 1024 * 1024);
+    const legacy = { headSha: r.verification.headSha, commands: [{ command: ["pnpm", "verify"], durationMs: 5, stdout: "old out", stderr: "old err" }] };
+    db.update(s.runs).set({ verification: legacy }).where(eq(s.runs.id, r.id)).run();
+    assert.deepEqual(f.row(s.runs, r.id).verification, legacy);
+    const { runHistory } = await f.app("run-history.ts");
+    const [entry] = runHistory(f.row(s.tasks, r.taskId).subjectId, ["implement"]);
+    assert.equal(entry.run.id, r.id); assert.ok(!("verification" in entry.run)); assert.deepEqual(Object.keys(entry.run.context).sort(), ["baseBranch", "commentRevisions", "revision"]);
+  } },
   command_timeout: { title: "a validation command that outlives harness.commandTimeoutSeconds is killed, fails the run as infrastructure without re-prompting the agent and accepts validation-only retry", configure: [configureCommandTimeout], run: async () => {
     f.addIssue(1, ["scrat"]); f.enqueue(1, "implement");
     const started = Date.now(), failed = await run();
@@ -1582,18 +1634,45 @@ export const scenarios = {
     const { validateStaticConfig } = await f.app("startup.ts");
     await validateStaticConfig(f.config);
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
-    await assert.rejects(validateStaticConfig(variant((c) => { c.harness.maxConcurrentValidations = 0; })), /maxConcurrentValidations must be a positive integer/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.harness.commandTimeoutSeconds = 0; })), /commandTimeoutSeconds must be a positive integer/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = true; c.workspace.commandMemoryMax = "lots"; })), /commandMemoryMax must be null or a size/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = true; c.workspace.commandMemoryMax = "0"; })), /commandMemoryMax must be null or a size/);
+    const { validateConfig } = await f.app("config-schema.ts");
+    const { config: merged } = await f.app("config.ts");
+    const invalid = (change, message) => assert.throws(() => { const copy = structuredClone(merged); change(copy); validateConfig(copy); }, message);
+    validateConfig(merged);
+    invalid((c) => { c.harness.maxConcurrentValidations = 0; }, /^Error: Invalid Scrat configuration:\n- harness\.maxConcurrentValidations: must be >= 1$/);
+    invalid((c) => { c.harness.commandTimeoutSeconds = 0; }, /harness\.commandTimeoutSeconds: must be >= 1/);
+    invalid((c) => { c.harness.commandOutputTailBytes = 0; }, /harness\.commandOutputTailBytes: must be >= 1/);
+    invalid((c) => { c.harness.maxConcurrentValidations = "3"; }, /harness\.maxConcurrentValidations: must be integer/);
+    invalid((c) => { c.harness.maxConcurency = 8; }, /harness\.maxConcurency: unknown setting/);
+    invalid((c) => { c.workspace.commandMemoryMax = "lots"; }, /workspace\.commandMemoryMax: must match pattern/);
+    invalid((c) => { c.workspace.commandMemoryMax = "0"; }, /workspace\.commandMemoryMax: must match pattern/);
+    { const copy = structuredClone(merged); copy.workspace.environment = { ANY_NEW_KEY: "1" }; validateConfig(copy); }
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = false; c.workspace.commandMemoryMax = "6G"; })), /commandMemoryMax requires workspace\.sandbox/);
     await validateStaticConfig(variant((c) => { c.workspace.commandMemoryMax = null; }));
-    await assert.rejects(validateStaticConfig(variant((c) => { c.harness.agentTimeoutSeconds = 1.5; })), /agentTimeoutSeconds must be a positive integer/);
-    for (const bad of [-1, 1.5]) await assert.rejects(validateStaticConfig(variant((c) => { c.harness.corrections.incomplete = bad; })), /harness\.corrections\.incomplete must be a non-negative integer/);
+    invalid((c) => { c.workspace.packageStore = "relative/store"; }, /workspace\.packageStore: must match pattern/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = false; c.workspace.packageStore = "/tmp/scrat-store"; })), /packageStore requires workspace\.sandbox/);
+    await validateStaticConfig(variant((c) => { c.workspace.packageStore = null; }));
+    invalid((c) => { c.harness.agentTimeoutSeconds = 1.5; }, /harness\.agentTimeoutSeconds: must be integer/);
+    invalid((c) => { c.harness.corrections.incomplete = -1; }, /harness\.corrections\.incomplete: must be >= 0/);
+    invalid((c) => { c.harness.corrections.incomplete = 1.5; }, /harness\.corrections\.incomplete: must be integer/);
+    invalid((c) => { c.harness.corrections.validation = -1; }, /harness\.corrections\.validation: must be >= 0/);
+    invalid((c) => { c.harness.gitNetworkTimeoutSeconds = 0; }, /harness\.gitNetworkTimeoutSeconds: must be >= 1/);
+    invalid((c) => { c.context.historyRuns = 0; }, /context\.historyRuns: must be >= 1/);
+    invalid((c) => { c.context.windowSize = 1; }, /context\.windowSize: unknown setting/);
+    invalid((c) => { delete c.tools; }, /tools: required/);
+    invalid((c) => { c.tools.readBytes.max = "big"; }, /tools\.readBytes\.max: must be integer/);
+    invalid((c) => { c.tools.git.maxCommits = 0; }, /tools\.git\.maxCommits: must be >= 1/);
+    invalid((c) => { c.tools.http.timeoutSeconds = 1.5; }, /tools\.http\.timeoutSeconds: must be integer/);
+    invalid((c) => { c.tools.browser.steps = 0; }, /tools\.browser\.steps: must be >= 1/);
+    invalid((c) => { c.slack.maxRetryAfterSeconds = 0; }, /slack\.maxRetryAfterSeconds: must be >= 1/);
     await validateStaticConfig(variant((c) => { c.harness.corrections.incomplete = 0; }));
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.heavyCommands = ["^(unclosed"]; })), /heavyCommands\[0\] is not a valid regular expression/);
     for (const disabled of [null, ""]) await validateStaticConfig(variant((c) => { c.actions.address_review.exhaustedLabel = disabled; }));
-    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.address_review.exhaustedLabel = 5; })), /exhaustedLabel must be a string, or null or "" to disable it/);
+    invalid((c) => { c.actions.address_review.exhaustedLabel = 5; }, /actions\.address_review\.exhaustedLabel: must be string/);
+    await validateStaticConfig(variant((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 5, maxDelaySeconds: 5 }; }));
+    await validateStaticConfig(variant((c) => { c.actions.review_pr.retry = null; }));
+    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 30 }; })), /review_pr: retry\.maxDelaySeconds must be at least retry\.initialDelaySeconds/);
+    invalid((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 0, maxDelaySeconds: 30 }; }, /actions\.review_pr\.retry\.initialDelaySeconds: must be >= 1/);
+    invalid((c) => { c.harness.retryJitter = 2; }, /harness\.retryJitter: must be <= 1/);
     const lines = captureLogs();
     const toolResults = () => JSON.stringify(f.requests.findLast((entry) => entry.request.messages.some((message) => message.role === "tool")).request.messages.filter((message) => message.role === "tool"));
     const attempt = async (number, mode) => { f.addIssue(number, ["scrat"]); f.reset(number, mode); f.enqueue(number, "implement"); return run(); };
@@ -1744,16 +1823,13 @@ export const scenarios = {
     assert.equal(rejections().at(-1).taskId, damaged.task.id);
     assert.equal(rejections().length, 3);
 
-    const { config: live } = await f.app("config.ts"); live.actions.review_pr.thinkingLevel = "turbo";
-    f.addIssue(5); f.addIssue(6); f.enqueue(5, "review_pr"); f.enqueue(6);
-    assert.equal(tasks.claimTask().task.subjectId, "issue-6");
-    assert.equal(f.row(s.tasks, all(s.tasks).find((t) => t.subjectId === "issue-5").id).status, "failed");
-    assert.match(rejections().at(-1).data.reason, /Invalid thinking level for review_pr: turbo/);
-    live.actions.review_pr.thinkingLevel = "high";
 
     const { validateStaticConfig } = await f.app("startup.ts");
     await validateStaticConfig(f.config);
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
+    const { validateConfig } = await f.app("config-schema.ts");
+    const { config: merged } = await f.app("config.ts");
+    const invalid = (change, message) => assert.throws(() => { const copy = structuredClone(merged); change(copy); validateConfig(copy); }, message);
     const { GitHubRepository: Verified } = await f.app("github.ts");
     f.githubApp.slug = "other-app";
     await assert.rejects(new Verified("fixture/project").fetchOpenItems(), /GitHub App other-app posts as other-app\[bot\], but github\.botLogin is scrat-unblock\[bot\]/);
@@ -1764,11 +1840,11 @@ export const scenarios = {
     await assert.rejects(validateStaticConfig(variant((c) => { delete c.workspace.validate; c.actions.address_review.enabled = false; })), /workspace\.validate is empty but address_pr_feedback, implement, resolve_conflicts publish/);
     await validateStaticConfig(variant((c) => { c.workspace.validate = [["true"]]; }));
     await validateStaticConfig(variant((c) => { c.workspace.layout = "clone"; }));
-    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.layout = "copy"; })), /workspace\.layout must be "worktree" or "clone"/);
+    invalid((c) => { c.workspace.layout = "copy"; }, /workspace\.layout: must be equal to one of the allowed values/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = true; c.workspace.layout = "worktree"; })), /workspace\.sandbox requires workspace\.layout "clone"/);
     await validateStaticConfig(variant((c) => { c.workspace.validate = []; for (const name of changeActions) c.actions[name].enabled = false; }));
-    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.implement.thinkingLevel = "turbo"; })), /implement: invalid thinking level turbo/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.github.auth = "token"; })), /github\.auth must be "app" or "pat"/);
+    invalid((c) => { c.actions.implement.thinkingLevel = "turbo"; }, /actions\.implement\.thinkingLevel: must be equal to one of the allowed values/);
+    invalid((c) => { c.github.auth = "token"; }, /github\.auth: must be equal to one of the allowed values/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.github.botLogin = " "; })), /github\.botLogin must not be empty/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.github.botName = " !! "; })), /github\.botName must contain a letter or digit/);
     const key = process.env.GITHUB_APP_PRIVATE_KEY;
@@ -1777,7 +1853,7 @@ export const scenarios = {
     await assert.rejects(validateStaticConfig(variant((c) => { c.github.auth = "pat"; })), /github\.auth is "pat" but GITHUB_PAT is not set/);
     process.env.GITHUB_PAT = "ghp_x"; await validateStaticConfig(variant((c) => { c.github.auth = "pat"; })); delete process.env.GITHUB_PAT;
     process.env.GITHUB_APP_PRIVATE_KEY = key;
-    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.reviewers[1].thinkingLevel = "turbo"; })), /review_pr reviewer 2: invalid thinking level/);
+    invalid((c) => { c.actions.review_pr.reviewers[1].thinkingLevel = "turbo"; }, /actions\.review_pr\.reviewers\.1\.thinkingLevel: must be equal to one of the allowed values/);
 
     assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
     const local = resolve("app/scrat.local.json"), requestLog = resolve("startup-requests.log");
@@ -1792,18 +1868,21 @@ export const scenarios = {
     };
     const outbound = () => existsSync(requestLog) ? readFileSync(requestLog, "utf8") : "";
     const modelRequests = f.requests.length;
+    const untouched = JSON.stringify([all(s.tasks), all(s.runs)]);
+    writeFileSync(local, JSON.stringify(layered({ harness: { maxConcurrentValidations: 0 } })));
+    const broken = spawnSync(process.execPath, ["startup-probe.mjs"], { encoding: "utf8" });
+    assert.notEqual(broken.status, 0); assert.match(broken.stderr, /Invalid Scrat configuration:\n- harness\.maxConcurrentValidations: must be >= 1/);
+    assert.equal(outbound(), ""); assert.equal(JSON.stringify([all(s.tasks), all(s.runs)]), untouched, "no task is claimed when the schema rejects the config");
     for (const exhaustedLabel of ["scrat-exhausted", null, ""]) assert.deepEqual(startup({ actions: { address_review: { exhaustedLabel } } }), { status: 0, message: undefined });
     f.addIssue(7); f.enqueue(7);
     const before = JSON.stringify([all(s.tasks), all(s.runs)]);
     const base = JSON.parse(readFileSync("app/scrat.config.json", "utf8")), { provider } = existing.actions.implement;
     writeFileSync("app/scrat.config.json", JSON.stringify({ ...base, workspace: { ...base.workspace, heavyCommands: [] } }));
     for (const [overrides, problem] of [
-      [{ actions: { implement: { thinkingLevel: "turbo" } } }, "implement: invalid thinking level turbo"],
       [{ actions: { implement: { model: "no-such-model" } } }, `implement: no Pi model ${provider}/no-such-model`],
       [{ actions: { implement: { skill: "skills/missing/SKILL.md" } } }, `implement: skill file not found: ${resolve("app/skills/missing/SKILL.md")}`],
-      [{ harness: { maxConcurrentValidations: 0 } }, "harness.maxConcurrentValidations must be a positive integer"],
       [{ workspace: { heavyCommands: ["^(unclosed"] } }, "workspace.heavyCommands[0] is not a valid regular expression"],
-      [{ actions: { address_review: { exhaustedLabel: 5 } } }, 'address_review: exhaustedLabel must be a string, or null or "" to disable it'],
+      [{ actions: { implement: { retry: { initialDelaySeconds: 1, maxDelaySeconds: 2 } } } }, "implement: retry requires mode review"],
     ]) {
       assert.deepEqual(startup(overrides), { status: 1, message: `Invalid Scrat configuration:\n- ${problem}` }, problem);
       assert.equal(JSON.stringify([all(s.tasks), all(s.runs)]), before, "no task is claimed on a rejected start");
@@ -2193,6 +2272,9 @@ export const scenarios = {
     assert.ok(last.indexOf("report 11") < last.indexOf("report 10") && last.indexOf("report 10") < last.indexOf("report 3"), "newest first");
     assert.ok(!/report 1\b/.test(last), "the history keeps the newest ten runs");
     assert.equal((last.match(/^## /gm) ?? []).length, 10);
+    const { config } = await f.app("config.ts");
+    config.context.historyRuns = 3; await review(1);
+    assert.equal((seen.at(-1).match(/^## /gm) ?? []).length, 3); config.context.historyRuns = 10;
     const { r: huge, request } = await review(1);
     assert.match(request.context.files.history, /history\.md$/);
     rewrite(huge, "x".repeat(200 * 1024));
@@ -2200,6 +2282,14 @@ export const scenarios = {
     const capped = seen.at(-1);
     assert.ok(Buffer.byteLength(capped) <= 64 * 1024 && Buffer.byteLength(capped) > 60 * 1024, Buffer.byteLength(capped) + capped.slice(0, 300));
     assert.ok(capped.includes("## ") && !capped.includes("report 10"), "a report over the cap crowds out older ones");
+    config.context.historyBytes = 2048; await review(1);
+    assert.ok(Buffer.byteLength(seen.at(-1)) <= 2048 && Buffer.byteLength(seen.at(-1)) > 1500);
+    const { buildAgentInput } = await f.app("agent-input.ts"), sha = "a".repeat(40), evaluated = { revision: "r", baseBranch: "main", headSha: undefined, item: { number: 1, title: "t", body: "", url: "u" }, comments: [], commentRevisions: [] };
+    const build = async (paths) => JSON.parse((await buildAgentInput({ run: huge, task: f.row(s.tasks, huge.taskId), evaluated, diffBaseSha: sha, diffPaths: paths, mainSha: sha, headSha: sha, baseRef: "main", mergeInProgress: false, workspace: { path: "w", branch: null } })).prompt);
+    assert.deepEqual((await build(["a", "b", "c"])).diffPaths, ["a", "b", "c"]);
+    config.context.inlinePaths = 2;
+    const offloaded = await build(["a", "b", "c"]);
+    assert.equal(offloaded.diffPathCount, 3); assert.equal(offloaded.diffPaths, undefined); assert.equal(readFileSync(offloaded.files.diffPaths, "utf8"), "a\nb\nc\n");
   } },
   commit_hook: { title: "commit hooks cannot attach verification receipts to an unverified tree", run: async () => {
     f.addIssue(1); f.enqueue(1, "implement");
@@ -2260,6 +2350,65 @@ export const scenarios = {
     git(remote, "merge-base", "--is-ancestor", local, head);
     git(remote, "merge-base", "--is-ancestor", git(resolve("seed"), "rev-parse", "main"), head);
   } },
+  workspace_layout: { title: "workspaces record their layout, clones share objects that a shared-repository gc cannot remove, and publication bundles only the new commits with a full-bundle fallback", layouts: ["clone"], run: async () => {
+    const first = await implement(1), shared = f.config.github.repositoryPath, remote = resolve("remote.git");
+    const { createWorkspace, pushWorkspace } = await f.app("workspaces.ts");
+    const row = () => f.row(s.workspaces, first.workspaceId);
+    assert.equal(row().layout, layout ?? "worktree");
+    const pin = (id) => `refs/scrat/workspaces/${id}`;
+    assert.equal(git(shared, "rev-parse", pin(row().id)), layout === "clone" ? git(remote, "rev-parse", row().branch) : row().baseSha);
+    db.update(s.workspaces).set({ layout: null }).where(eq(s.workspaces.id, row().id)).run();
+    const { backfillWorkspaceLayouts } = await f.app("workspaces.ts");
+    await backfillWorkspaceLayouts();
+    assert.equal(row().layout, layout ?? "worktree");
+    if (layout !== "clone") return;
+    assert.ok(existsSync(resolve(row().path, ".git/objects/info/alternates")));
+    const header = () => readFileSync(resolve(row().path, ".scrat/publish.bundle"), "latin1").split("\n").filter((line) => line.startsWith("-"));
+    const publish = async (name) => {
+      writeFileSync(resolve(row().path, name), name + "\n"); git(row().path, "add", "."); commit(row().path, name);
+      const sha = git(row().path, "rev-parse", "HEAD");
+      await pushWorkspace(row(), remote, sha, { ...process.env });
+      assert.equal(git(remote, "rev-parse", row().branch), sha);
+      return sha;
+    };
+    const published = git(remote, "rev-parse", row().branch);
+    await publish("one.txt");
+    assert.equal(header().length, 1); assert.ok(header()[0].startsWith("-" + published));
+    const incremental = fs.statSync(resolve(row().path, ".scrat/publish.bundle")).size;
+    git(row().path, "bundle", "create", resolve(row().path, ".scrat/full.bundle"), "refs/heads/" + row().branch);
+    const full = fs.statSync(resolve(row().path, ".scrat/full.bundle")).size;
+    assert.ok(incremental < full, `${incremental} < ${full}`);
+    console.log(`BUNDLE_BYTES incremental=${incremental} full=${full}`);
+    writeFileSync(resolve(row().path, "local.txt"), "local\n"); git(row().path, "add", "."); commit(row().path, "local");
+    const local = git(row().path, "rev-parse", "HEAD");
+    db.update(s.workspaces).set({ baseSha: local }).where(eq(s.workspaces.id, row().id)).run();
+    git(shared, "update-ref", "-d", pin(row().id));
+    await publish("two.txt");
+    assert.deepEqual(header(), []);
+    git(remote, "merge-base", "--is-ancestor", local, row().branch);
+    const published2 = git(row().path, "rev-parse", "HEAD");
+    git(".", "clone", "-b", row().branch, remote, "pr-ahead");
+    writeFileSync("pr-ahead/ahead.txt", "ahead\n"); git(resolve("pr-ahead"), "add", "."); commit(resolve("pr-ahead"), "Ahead"); git(resolve("pr-ahead"), "push", "origin", row().branch);
+    git(row().path, "repack", "-a", "-d", "-q"); fs.rmSync(resolve(row().path, ".git/objects/info/alternates"));
+    const { branchContainsCommit } = await f.app("git.ts");
+    assert.equal(await branchContainsCommit(row(), remote, row().branch, published2, { ...process.env }), true);
+    db.update(s.workspaces).set({ layout: "worktree" }).where(eq(s.workspaces.id, row().id)).run();
+    await backfillWorkspaceLayouts();
+    assert.equal(row().layout, "clone");
+    const tree = git(shared, "rev-parse", "HEAD^{tree}"), head = git(shared, "rev-parse", "HEAD");
+    const orphan = () => git(shared, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", tree, "-p", head, "-m", "orphan " + Math.random());
+    const [kept, lost] = [orphan(), orphan()];
+    const retained = await createWorkspace({ repositoryPath: shared, baseRef: kept });
+    assert.equal(git(shared, "rev-parse", pin(retained.id)), kept);
+    git(shared, "reflog", "expire", "--expire=now", "--all"); git(shared, "gc", "--prune=now", "--quiet");
+    assert.throws(() => git(shared, "cat-file", "-e", lost + "^{commit}"));
+    git(retained.path, "cat-file", "-e", kept + "^{commit}");
+    assert.equal(git(retained.path, "rev-parse", "HEAD"), kept);
+    git(retained.path, "fsck", "--connectivity-only");
+    const { removeWorkspace } = await f.app("workspaces.ts");
+    await removeWorkspace(retained.id);
+    assert.throws(() => git(shared, "rev-parse", "--verify", pin(retained.id)));
+  } },
   sandbox: { title: "Linux sandbox contains preparation, agent Bash and commit hooks while a fresh clone validates and publishes", needsSandbox: true,
     seed: () => {
       writeFileSync("outside-secret.txt", "controller-only-canary");
@@ -2310,11 +2459,26 @@ export const scenarios = {
       assert.ok(index);
       mkdirSync(resolve(legacyPath, ".scrat")); writeFileSync(resolve(legacyPath, ".scrat/notes.md"), "Retain the unresolved merge\n");
       const { isolateWorkspace } = await f.app("workspaces.ts");
-      await isolateWorkspace({ id: "legacy-migration", path: legacyPath, repositoryPath: checkout, branch: "scrat/legacy-migration" });
+      await isolateWorkspace({ id: "legacy-migration", path: legacyPath, repositoryPath: checkout, branch: "scrat/legacy-migration", layout: "worktree" });
       assert.equal(git(legacyPath, "ls-files", "--unmerged"), index);
       assert.equal(git(legacyPath, "rev-parse", "MERGE_HEAD"), git(checkout, "rev-parse", "HEAD"));
       assert.equal(readFileSync(resolve(legacyPath, ".scrat/notes.md"), "utf8"), "Retain the unresolved merge\n");
       assert.ok(fs.lstatSync(resolve(legacyPath, ".git")).isDirectory());
+    } },
+  package_store: { title: "a configured package store is shared read-write across sandboxed workspaces", needsSandbox: true,
+    configure: [(config) => {
+      const store = "/home/scrat/.local/share/pnpm/store";
+      config.workspace = { sandbox: true, layout: "clone", packageStore: resolve("shared-store"), prepare: [["sh", "-c", `pnpm store path > ${store}/path && if [ -f ${store}/marker ]; then touch ${store}/seen; else touch ${store}/marker; fi`]] };
+    }],
+    run: async () => {
+      for (const number of [1, 2]) {
+        f.addIssue(number, ["scrat"]); f.enqueue(number, "implement");
+        f.script = [{ name: "bash", args: { command: `printf 'export const value = 1${number};\\n' > src/app.ts` } }];
+        assert.equal((await success()).publication.status, "published");
+      }
+      assert.equal(readFileSync(resolve("shared-store/path"), "utf8").trim(), "/home/scrat/.local/share/pnpm/store/v11");
+      assert.ok(existsSync(resolve("shared-store/marker")));
+      assert.ok(existsSync(resolve("shared-store/seen")));
     } },
   command_memory: { title: "a sandboxed command that exceeds workspace.commandMemoryMax is killed alone, fails the run as out of memory without re-prompting the agent and accepts validation-only retry", needsSandbox: true, needsSystemd: true,
     configure: [(config) => {
@@ -2445,13 +2609,22 @@ export const scenarios = {
     assert.deepEqual(merged.workspace.validate, defaults.workspace.validate);
 
     probe(undefined, ""); assert.equal(readFileSync(local, "utf8"), "{}\n");
-    rejected({ harness: { maxConcurency: 8 } }, /Unknown setting in scrat\.local\.json: harness\.maxConcurency/);
-    rejected({ actions: { bogus: {} } }, /Unknown setting in scrat\.local\.json: actions\.bogus/);
-    rejected({ harness: 8 }, /must be an object: harness/);
-    rejected({ harness: null }, /must be an object: harness/);
-    rejected({ harness: { toString: 1 } }, /Unknown setting in scrat\.local\.json: harness\.toString/);
+    const { validateStaticConfig: startupCheck } = await f.app("startup.ts"), narrow = structuredClone(f.config);
+    narrow.tools.readBytes.max = narrow.tools.readBytes.default - 1;
+    await assert.rejects(startupCheck(narrow), /tools\.readBytes\.max must not be less than tools\.readBytes\.default/);
+    const { validateConfig } = await f.app("config-schema.ts");
+    const check = (overrides, message) => assert.throws(() => validateConfig(buildConfig(defaults, overrides)), message);
+    check({ harness: 8 }, /^Error: Invalid Scrat configuration:\n- harness: must be object$/);
+    check({ harness: null }, /harness: must be object/);
+    check({ harness: { toString: 1 } }, /harness\.toString: unknown setting/);
+    check({ harness: { maxConcurrentValidations: "3" } }, /harness\.maxConcurrentValidations: must be integer/);
+    check({ harness: { maxConcurrentValidations: 0 } }, /harness\.maxConcurrentValidations: must be >= 1/);
+    check({ harness: { maxConcurency: 8 } }, /harness\.maxConcurency: unknown setting/);
+    check({ actions: { implement: { thinkingLevel: "turbo" } } }, /actions\.implement\.thinkingLevel: must be equal to one of the allowed values/);
+    validateConfig(buildConfig(defaults, { workspace: { environment: { ANY_NEW_KEY: "1" } } }));
     rejected(JSON.parse('{"workspace":{"environment":{"__proto__":{"x":"1"}}}}'), /Unknown setting in scrat\.local\.json: workspace\.environment\.__proto__/);
-    assert.throws(() => probe({ harness: { maxConcurency: 8 } }, ""), (error) => /Unknown setting in scrat\.local\.json: harness\.maxConcurency/.test(error.stderr));
+    assert.throws(() => probe({ actions: { bogus: {} } }, ""), (error) => /Invalid Scrat configuration:\n- actions\.bogus: unknown action/.test(error.stderr));
+    assert.throws(() => probe({ harness: { maxConcurency: 8 } }, ""), (error) => /Invalid Scrat configuration:\n- harness\.maxConcurency: unknown setting/.test(error.stderr));
 
     const provider = Object.keys(defaults.providers)[0], model = defaults.providers[provider].models[0].id;
     const seen = probe({ providers: { [provider]: { baseUrl: "http://override.invalid/v1" } } }, `
@@ -2541,6 +2714,10 @@ export const scenarios = {
     const before = f.slack.calls.length; f.slack.rateLimitOnce = true;
     assert.ok(await postMessage({ channel: "C1", text: "after limit" }));
     assert.equal(f.slack.calls.length, before + 2);
+    const { config: slackConfig } = await f.app("config.ts");
+    slackConfig.slack.maxRetryAfterSeconds = 1; f.slack.rateLimitOnce = true; f.slack.retryAfter = "2";
+    await assert.rejects(postMessage({ channel: "C1", text: "too long" }), /rate limited \(retry-after 2\)/);
+    slackConfig.slack.maxRetryAfterSeconds = 30; f.slack.retryAfter = "0";
     f.slack.down = true;
     await assert.rejects(postMessage({ channel: "C1", text: "outage" }), /HTTP 503/);
     f.slack.down = false; f.slack.fail = "channel_not_found";
@@ -2559,6 +2736,7 @@ export const scenarios = {
   slack_startup: { title: "an enabled Slack action blocks startup on missing token, channel, template variables, panel reviewers or a failed auth.test, while a disabled one makes no Slack call and queued tasks for it are rejected", run: async () => {
     const { validateStaticConfig } = await f.app("startup.ts");
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
+    const { validateConfig } = await f.app("config-schema.ts");
     const enabled = (change = () => {}) => variant((c) => {
       Object.assign(c.actions.review_base_change, { enabled: true, channel: "C0123456789", skill: "skills/review_issue/SKILL.md" }); change(c.actions.review_base_change);
     });
@@ -2575,7 +2753,9 @@ export const scenarios = {
     await assert.rejects(validateStaticConfig(enabled((a) => { a.branch = " "; })), /branch must not be empty/);
     await assert.rejects(validateStaticConfig(enabled((a) => { a.startMessage = "{{bot}} saw {{commit}}"; })), /unknown startMessage variable \{\{commit\}\}/);
     await assert.rejects(validateStaticConfig(enabled((a) => { a.agent = "panel"; })), /requires exactly two reviewers/);
-    await assert.rejects(validateStaticConfig(enabled((a) => { a.agent = "solo"; })), /agent must be "single" or "panel"/);
+    const { config: merged } = await f.app("config.ts");
+    const copy = structuredClone(merged); copy.actions.review_base_change.agent = "solo";
+    assert.throws(() => validateConfig(copy), /actions\.review_base_change\.agent: must be equal to one of the allowed values/);
     f.slack.fail = "invalid_auth";
     await assert.rejects(validateStaticConfig(enabled()), /Slack auth\.test failed: .*invalid_auth/);
     f.slack.fail = null;
@@ -2658,7 +2838,7 @@ export const scenarios = {
 
     count = f.slack.calls.length; f.slack.rateLimitOnce = true;
     restarted.queueStatus({ subjectId: "issue-2", type: "run.completed", data: { stage: "after limit" } });
-    await until(() => posts().at(-1).body.text === "Completed at stage after limit");
+    await until(() => f.slack.calls.length === count + 2 && posts().at(-1).body.text === "Completed at stage after limit");
     assert.equal(f.slack.calls.length, count + 2); assert.equal(failures.length, 0);
 
     config.slack.channel = "C9999999999";
@@ -2859,6 +3039,8 @@ export const scenarios = {
     const extend = (fields) => (text) => text.replace(/^trigger: \{(.*)\}$/m, "trigger: {$1, " + fields + "}");
     mutate("review_base_change", extend("granularity: commit, author: alice, message: ship it"));
     mutate("review_base_change", extend("author: bot"));
+    mutate("address_review", (text) => text.replace(/^maxSelfRepairs: .*\n/m, ""), /kind low_grade requires maxSelfRepairs/);
+    mutate("review_base_change", (text) => text.replace(/^maxRangeCommits: .*\n/m, ""), /source github_commits requires maxRangeCommits/);
     mutate("review_base_change", extend("granularity: sometimes"), /granularity/);
     mutate("review_base_change", extend('message: ""'), /message/);
     mutate("review_issue", extend("message: x"), /trigger\.message and trigger\.granularity are only allowed with source github_commits/);
@@ -3123,6 +3305,17 @@ export const scenarios = {
       assert.deepEqual(asked, ["api.example.test"]);
     } finally { globalThis.fetch = stubbed; }
     assert.equal(f.external.length, seen);
+    const { config } = await f.app("config.ts"), { createReviewGitTool } = await f.app("review-git.ts");
+    config.tools.http.maxRequestBytes = 8;
+    const post = createHttpTool({ settings: { methods: ["POST"] }, binding: f.config.bindings.scout, runId: "run" });
+    await assert.rejects(post.execute("call", { method: "POST", url: "https://api.example.test/data", body: "123456789" }, undefined, undefined, {}), /Refused: body exceeds 8 bytes/);
+    const repository = resolve(f.config.github.repositoryPath);
+    writeFileSync(resolve(repository, "second.txt"), "second\n"); git(repository, "add", "."); commit(repository, "Second commit");
+    const tip = git(repository, "rev-parse", "HEAD");
+    assert.equal(git(repository, "rev-list", "--count", "HEAD"), "2");
+    config.tools.git.maxCommits = 1;
+    const history = await createReviewGitTool(repository, { head: tip }, new Set()).execute("call", { operation: "log" }, undefined, undefined, {});
+    assert.equal(history.content[0].text.split("\n").length, 1);
     const { readManifests } = await f.app("manifests.ts");
     for (const manifest of readManifests(resolve("app"))) assert.ok(!manifest.tools.some((tool) => ["http", "browser", "github_search"].includes(tool)) && !manifest.http && !manifest.browser, manifest.name);
   } },
@@ -3228,6 +3421,10 @@ export const scenarios = {
     await assert.rejects(act(slow, { action: "text" }), /limited to 1 seconds per session/);
     await assert.rejects(act(slow, { action: "goto", url: "https://shop.example.test/" }), /limited to 1 seconds per session/);
     assert.equal(slow.state.closed, true); assert.equal(slow.state.visited.length, 1);
+    const { config: liveConfig } = await f.app("config.ts"); liveConfig.tools.browser.steps = 2;
+    const configured = make();
+    for (let n = 0; n < 2; n++) await act(configured, { action: "goto", url: "https://shop.example.test/" });
+    await assert.rejects(act(configured, { action: "text" }), /limited to 2 actions per session/);
 
     const installed = await import("playwright-core").then(() => true, () => false);
     if (!installed) await assert.rejects(validateStaticConfig({ ...f.config, resolve: async () => publicAnswer }), /review_issue: The browser tool needs the optional playwright-core package, which is not installed/);

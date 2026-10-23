@@ -10,7 +10,7 @@ import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
 import { describeError, type ErrorDetails } from "./errors.ts";
-import { behindCleanly, createMergeCommit, fetchPullRequestHead, fetchRepository, git, hasConflicts, hasPendingMerge, isAncestor, mergeBase } from "./git.ts";
+import { createMergeCommit, fetchPullRequestHead, fetchRepository, git, hasPendingMerge, mergeBase, prepareTarget } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { startOperation } from "./logging.ts";
@@ -27,22 +27,20 @@ import type { Item } from "./items.ts";
 import { subjects, workspaces, type Run, type Task, type Subject, type Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { recordEvent } from "./events.ts";
-import { claimTask, finishRun, interruptRun } from "./tasks.ts";
+import { claimTask, finishRun, interruptRun, retryTransientFailure } from "./tasks.ts";
 import { parseTriggerInput } from "./triggers.ts";
-import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, isolateWorkspace, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
+import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, isolateWorkspace, pinWorkspaceBase, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
 
 type DatabaseConfig = NonNullable<NonNullable<typeof config.workspace>["database"]>;
 type Environment = Record<string, string | undefined>;
 type References = { subjectId: string; taskId: string; runId: string };
 type Acceptance = NonNullable<Manifest["acceptance"]>;
 
-const maxValidationCorrections = 2;
-
 const botAuthor = () => ({ name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com` });
 
 async function prepareWorkspace(workspace: Workspace, environment: Environment, databaseConfig: DatabaseConfig | null | undefined, references: References) {
-  await runCommands(config.workspace?.prepare ?? [], workspace.path, environment, references);
-  if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, environment, references);
+  await runCommands(config.workspace?.prepare ?? [], workspace.path, environment, references, "prepare");
+  if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, environment, references, "migrate");
 }
 
 async function asCheckFailure<T>(fn: () => Promise<T>) {
@@ -57,9 +55,9 @@ async function asCheckFailure<T>(fn: () => Promise<T>) {
 }
 
 function validationMessage(error: CheckFailure, round: number) {
-  const { message, exitCode, stdout, stderr } = describeError(error.cause);
-  const tail = (label: string, text?: string) => text?.trim() ? `\n${label} (last 6000 characters):\n${text.trim().slice(-6000)}\n` : "";
-  return `${botName}'s validation failed after your changes (round ${round} of ${maxValidationCorrections}).\n\nCommand: ${message.split("\n")[0].replace(/^Command failed: /, "")}\nExit code: ${exitCode ?? "unknown"}\n${tail("stdout", stdout)}${tail("stderr", stderr)}\nFix only what is reported. ${botName} re-validates after your turn, so a full rerun of the failing check is not needed. Then end your turn with one or two sentences on what you changed to fix this (it is appended to your earlier handoff), and the usual SCRAT_STATUS footer (add SCRAT_READY if the change is still ready).`;
+  const { message, exitCode, stdout } = describeError(error.cause);
+  const output = stdout?.trim() ? `\nOutput (tail):\n${stdout.trim()}\n` : "";
+  return `${botName}'s validation failed after your changes (round ${round} of ${config.harness.corrections.validation}).\n\nCommand: ${message.split("\n")[0].replace(/^Command failed: /, "")}\nExit code: ${exitCode ?? "unknown"}\n${output}\nFix only what is reported. ${botName} re-validates after your turn, so a full rerun of the failing check is not needed. Then end your turn with one or two sentences on what you changed to fix this (it is appended to your earlier handoff), and the usual SCRAT_STATUS footer (add SCRAT_READY if the change is still ready).`;
 }
 
 function stopBefore(stop: AbortSignal | undefined, next: string) {
@@ -76,7 +74,7 @@ async function validateAndCommit({ run, references, stop }: Ctx, p: Prepared, ki
   updateRun(run.id, { agentCheckpoint: checkpoint });
   const validationTree = checkpoint.treeSha;
   stopBefore(stop, "validation commands");
-  const commands = await asCheckFailure(() => withValidationSlot(() => runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references), references, stop)
+  const commands = await asCheckFailure(() => withValidationSlot(() => runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references, "validate"), references, stop)
     .catch((error) => { throw stop?.aborted && error === stop.reason ? new InterruptedError("Worker is stopping; run left waiting for a validation slot") : error; }));
   await git(workspace.path, ["add", "--all"]);
   if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
@@ -84,8 +82,9 @@ async function validateAndCommit({ run, references, stop }: Ctx, p: Prepared, ki
   const message = /^[a-z]+(\([^)]*\))?!?: /.test(p.title) ? p.title : `fix: ${p.title}`;
   const commitSha = await commitWorkspace(workspace, message, botAuthor(), references);
   if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
-  if (kind === "conflict_free" && await hasConflicts(workspace.path, p.mainSha, commitSha)) {
-    throw new Error(unresolvedConflict);
+  if (kind === "conflict_free") {
+    const { conflicts } = await targetOf(p, commitSha);
+    if (conflicts) throw new Error(unresolvedConflict);
   }
   if (kind === "nonempty_diff" && !await git(workspace.path, ["diff", "--name-only", `${p.baseRef}...HEAD`])) {
     throw new Error("Implementation produced no changes against the base branch");
@@ -104,9 +103,15 @@ type Observed = {
   repository: string; github: GitHubRepository; context: GithubContext; pullRequest: GithubPullRequest | undefined;
   item: Item; observation: ItemObservation; gitEnvironment: NodeJS.ProcessEnv; mainSha: string;
 };
+async function targetOf(p: Prepared, headSha = p.headSha) {
+  if (p.target?.headSha !== headSha || p.target.mainSha !== p.mainSha) p.target = await prepareTarget(p.workspace.path, p.mainSha, headSha);
+  return p.target;
+}
+
 type Prepared = {
   workspace: Workspace; validationOnly: boolean; mergeInProgress: boolean; mainSha: string; baseRef: string;
   preparedHead: string; startHeadSha: string; headSha: string; title: string;
+  target: Awaited<ReturnType<typeof prepareTarget>> | undefined;
   databaseConfig: DatabaseConfig | null | undefined; database: Awaited<ReturnType<typeof createRunDatabase>> | undefined;
   environment: Environment; commandEnvironment: Environment;
   result: AgentResult | null; validated: boolean; validationFailure: ErrorDetails | undefined;
@@ -153,10 +158,7 @@ async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
   }
   const validationOnly = run.stage === "validating";
   const baseRef = mainSha;
-  const headRef = pullRequest
-    ? await fetchPullRequestHead(repositoryPath, observation.remote, pullRequest.number, pullRequest.head.sha, gitEnvironment)
-    : baseRef;
-  const preparedHead = await git(repositoryPath, ["rev-parse", headRef]);
+  const preparedHead = pullRequest ? await fetchPullRequestHead(repositoryPath, observation.remote, pullRequest.number, pullRequest.head.sha, gitEnvironment) : baseRef;
   let workspace = !readOnly && item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
   if (workspace?.removedAt) throw new Error(`Workspace was removed: ${workspace.id}`);
   if (workspace) {
@@ -185,11 +187,14 @@ async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
   }
   const mergeInProgress = !readOnly && await hasPendingMerge(workspace.path);
   if (!readOnly && !mergeInProgress && !validationOnly) {
-    if (pullRequest) await git(workspace.path, ["merge", "--ff-only", preparedHead]);
-    else {
+    if (pullRequest) {
+      await git(workspace.path, ["merge", "--ff-only", preparedHead]);
+      await pinWorkspaceBase(workspace, preparedHead);
+    } else {
       try {
         await git(workspace.path, ["merge", "--ff-only", preparedHead]);
         if (await git(workspace.path, ["rev-parse", "HEAD"]) === preparedHead) {
+          await pinWorkspaceBase(workspace, preparedHead);
           db.update(workspaces).set({ baseSha: preparedHead }).where(eq(workspaces.id, workspace.id)).run();
         }
       } catch (error) {
@@ -236,7 +241,7 @@ async function acquireWorkspace(ctx: Ctx, observed: Observed | undefined): Promi
   return {
     ...acquired, headSha: startHeadSha, databaseConfig, database, environment,
     commandEnvironment: { ...childEnvironment(), ...environment }, result: run.result,
-    validated: false, validationFailure: undefined, agentInput: undefined,
+    validated: false, validationFailure: undefined, agentInput: undefined, target: undefined,
     evaluated: undefined, diffPaths: [], diffBaseSha: acquired.baseRef, deferred: false, previousSessionFile: undefined,
   };
 }
@@ -244,7 +249,7 @@ async function acquireWorkspace(ctx: Ctx, observed: Observed | undefined): Promi
 async function planAgent({ task, run, subject, readOnly, acceptance, repositoryPath }: Ctx, observed: Observed | undefined, p: Prepared) {
   const previous = !readOnly ? latestSessionRun(p.workspace.id, run.id) : undefined;
   const { evaluated, diffPaths, diffBaseSha } = observed
-    ? { evaluated: evaluateContext(run, task, observed.observation), ...await readDiffScope(repositoryPath, p.mainSha, p.preparedHead, Boolean(observed.pullRequest)) }
+    ? { evaluated: evaluateContext(run, task, observed.observation), ...await readDiffScope(p.workspace.path, p.mainSha, p.preparedHead, Boolean(observed.pullRequest)) }
     : subject.kind === "window" ? describeWindow(task.action, subject, p.mainSha) : await describeCommit(repositoryPath, subject, run.input);
   updateRun(run.id, { context: evaluated });
   Object.assign(p, {
@@ -255,7 +260,9 @@ async function planAgent({ task, run, subject, readOnly, acceptance, repositoryP
 
 async function mergeBehind(ctx: Ctx, observed: Observed | undefined, p: Prepared) {
   const { run, acceptance } = ctx;
-  if (!observed || acceptance !== "conflict_free" || p.mergeInProgress || run.retryOfRunId || !await behindCleanly(p.workspace.path, p.mainSha, p.headSha)) return;
+  if (!observed || acceptance !== "conflict_free" || p.mergeInProgress || run.retryOfRunId) return;
+  const { behind, conflicts } = await targetOf(p);
+  if (!behind || conflicts) return;
   const { baseBranch } = observed.observation;
   await mergeBase(p.workspace.path, p.mainSha, `Merge ${baseBranch} into ${observed.pullRequest!.head.ref}`, botAuthor());
   p.headSha = await git(p.workspace.path, ["rev-parse", "HEAD"]);
@@ -277,8 +284,10 @@ async function prepareCommands({ run, readOnly, repositoryPath, references, oper
   try { await prepareWorkspace(p.workspace, p.commandEnvironment, p.databaseConfig, references); }
   catch (error) {
     const humanReview = readOnly && !isBotLogin(context.item.user?.login);
-    if (!pullRequest || !(humanReview || !readOnly) || await isAncestor(p.workspace.path, p.mainSha, p.headSha)) throw error;
-    if (await hasConflicts(p.workspace.path, p.mainSha, p.headSha)) {
+    if (!pullRequest || !(humanReview || !readOnly)) throw error;
+    const { behind, conflicts } = await targetOf(p);
+    if (!behind) throw error;
+    if (conflicts) {
       if (!readOnly) throw error;
       throw new Error(`PR branch is behind ${baseBranch} and does not merge cleanly; the author needs to update it`);
     }
@@ -338,7 +347,7 @@ async function validateStage(ctx: Ctx, p: Prepared) {
       catch (error) {
         if (!(error instanceof CheckFailure)) throw error;
         const sessionFile = getRun(run.id)!.piSessionFile ?? undefined;
-        if (validationOnly || !p.agentInput || !sessionFile || round > maxValidationCorrections) throw error.cause;
+        if (validationOnly || !p.agentInput || !sessionFile || round > config.harness.corrections.validation) throw error.cause;
         operation.log.warn({ event: "pi.validation_retry", round });
         updateRun(run.id, { stage: "agent" });
         const followUp = await executePi({ run, cwd: workspace.path, context: "", readOnly, tools: ctx.manifest.tools, scoped: ctx.manifest, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });
@@ -410,6 +419,10 @@ export async function runNextTask(stop?: AbortSignal) {
       recordEvent({ ...references, type: "run.interrupting", data: { stage: getRun(run.id)!.stage, reason: error.message } });
       operation.complete({ interrupted: true });
       interruptRun(run.id, error);
+      return getRun(run.id)!;
+    }
+    if (retryTransientFailure(run.id, error)) {
+      operation.fail(error);
       return getRun(run.id)!;
     }
     const failed = finishRun(run.id, { status: "failed", error });

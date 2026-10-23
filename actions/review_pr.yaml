@@ -12,3 +12,4 @@ publish: [pr_assessment]
 skill: skills/review_pr/SKILL.md
 model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }
 priority: 100
+retry: { initialDelaySeconds: 60, maxDelaySeconds: 3600 }

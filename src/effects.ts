@@ -62,7 +62,7 @@ const push = {
     const { workspace, commitSha } = changed(context);
     const remote = remoteUrl(github.repository);
     const env = await github.getGitEnvironment(true);
-    if (!await branchContainsCommit(workspace.repositoryPath, remote, workspace.branch, commitSha, env)) {
+    if (!await branchContainsCommit(workspace, remote, workspace.branch, commitSha, env)) {
       await pushWorkspace(workspace, remote, commitSha, env, references);
     }
     context.saveReceipt({ publishedCommitSha: commitSha });

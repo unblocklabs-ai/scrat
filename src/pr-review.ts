@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { Logger } from "pino";
-import { describeError } from "./errors.ts";
+import { describeError, errorCode, transientInferenceCode } from "./errors.ts";
 import { InterruptedError } from "./results.ts";
 import type { Manifest, ToolName } from "./manifests.ts";
 import { executePi, saveReviewer } from "./pi.ts";
@@ -26,7 +26,10 @@ export async function reviewPullRequest(run: Run, cwd: string, context: string, 
   const failed = settled.find((entry) => entry.status === "rejected");
   const interrupted = settled.find((entry) => entry.status === "rejected" && entry.reason instanceof InterruptedError);
   if (interrupted?.status === "rejected") throw interrupted.reason;
-  if (failed?.status === "rejected") throw new Error("An independent PR reviewer did not finish", { cause: failed.reason });
+  if (failed?.status === "rejected") {
+    const transient = settled.every((entry) => entry.status === "fulfilled" || errorCode(entry.reason) === transientInferenceCode);
+    throw Object.assign(new Error("An independent PR reviewer did not finish", { cause: failed.reason }), transient ? { code: transientInferenceCode } : {});
+  }
   const reviews = settled.flatMap((entry) => entry.status === "fulfilled" ? [entry.value] : []);
   const independentReviews = await Promise.all(reviews.map(async ({ result, ...reviewer }, index) => {
     const report = resolve(contextDir, `reviewer-${index + 1}.md`);

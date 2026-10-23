@@ -3,19 +3,20 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
+import { config } from "./config.ts";
 import { childEnvironment } from "./secrets.ts";
 import { serialized } from "./single-flight.ts";
 import { inWorkspace, sandboxCommand } from "./sandbox.ts";
 
 const executeFile = promisify(execFile);
-const networkOptions = { timeout: 600_000, killSignal: "SIGKILL" } as const;
+const networkOptions = () => ({ timeout: config.harness.gitNetworkTimeoutSeconds * 1000, killSignal: "SIGKILL" }) as const;
 const repositoryFetches = new Map<string, Promise<unknown>>();
 
 const networkCommands = new Set(["fetch", "ls-remote", "push"]);
 
 function timedOut(label: string) {
   return (error: unknown) => {
-    if (error instanceof Error && "killed" in error && error.killed) error.message = `Git ${label} timed out after ${networkOptions.timeout / 1000} seconds`;
+    if (error instanceof Error && "killed" in error && error.killed) error.message = `Git ${label} timed out after ${config.harness.gitNetworkTimeoutSeconds} seconds`;
     throw error;
   };
 }
@@ -23,7 +24,7 @@ function timedOut(label: string) {
 export async function git(repositoryPath: string, args: string[], env = childEnvironment()) {
   const command = inWorkspace(repositoryPath) ? sandboxCommand(repositoryPath, "git", args, env)
     : { file: "git", args: ["-C", repositoryPath, ...args], env };
-  const { stdout } = await executeFile(command.file, command.args, { cwd: repositoryPath, env: command.env, maxBuffer: 16 * 1024 * 1024, ...(networkCommands.has(args[0]!) ? networkOptions : {}) }).catch(timedOut(args[0]!));
+  const { stdout } = await executeFile(command.file, command.args, { cwd: repositoryPath, env: command.env, maxBuffer: config.harness.maxOutputBytes, ...(networkCommands.has(args[0]!) ? networkOptions() : {}) }).catch(timedOut(args[0]!));
   return args.includes("-z") || args[0] === "show" ? stdout : stdout.trim();
 }
 
@@ -85,9 +86,10 @@ export async function fetchRepository(repositoryPath: string, remote: string, ba
   return serialized(repositoryFetches, repositoryPath, async () => {
     if (!existsSync(repositoryPath)) {
       await mkdir(dirname(repositoryPath), { recursive: true });
-      await executeFile("git", ["clone", "--single-branch", "--branch", baseBranch, "--", remote, repositoryPath], { env, ...networkOptions }).catch(timedOut("clone"));
+      await executeFile("git", ["clone", "--single-branch", "--branch", baseBranch, "--", remote, repositoryPath], { env, ...networkOptions() }).catch(timedOut("clone"));
     }
     await assertOrigin(repositoryPath, remote);
+    await git(repositoryPath, ["config", "gc.auto", "0"]);
     await excludeWorkingNotes(repositoryPath);
     await git(repositoryPath, ["fetch", "--", remote, `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`], env);
     return git(repositoryPath, ["rev-parse", `refs/remotes/origin/${baseBranch}`]);
@@ -98,13 +100,18 @@ export async function fetchPullRequestHead(repositoryPath: string, remote: strin
   const ref = `refs/remotes/origin/pr/${number}`;
   const resolved = () => git(repositoryPath, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).catch(() => "");
   return serialized(repositoryFetches, resolve(repositoryPath), async () => {
-    if (await resolved() === expectedSha) return ref;
+    if (await resolved() === expectedSha) return expectedSha;
     await git(repositoryPath, ["fetch", "--", remote, `+refs/pull/${number}/head:${ref}`], env);
     if (await resolved() !== expectedSha) await git(repositoryPath, ["fetch", "--", remote, `+${expectedSha}:${ref}`], env).catch(() => undefined);
     const actual = await resolved();
     if (actual !== expectedSha) throw new Error(`PR #${number} head ${expectedSha} could not be fetched; ${ref} resolves to ${actual || "nothing"}`);
-    return ref;
+    return expectedSha;
   });
+}
+
+export async function prepareTarget(cwd: string, mainSha: string, headSha: string) {
+  const behind = !await isAncestor(cwd, mainSha, headSha);
+  return { mainSha, headSha, behind, conflicts: behind && await hasConflicts(cwd, mainSha, headSha) };
 }
 
 export async function hasPendingMerge(repositoryPath: string) {
@@ -112,7 +119,7 @@ export async function hasPendingMerge(repositoryPath: string) {
   return existsSync(resolve(repositoryPath, mergeHead));
 }
 
-export async function hasConflicts(repositoryPath: string, base: string, head: string) {
+async function hasConflicts(repositoryPath: string, base: string, head: string) {
   try {
     await git(repositoryPath, ["merge-tree", "--write-tree", base, head]);
     return false;
@@ -122,18 +129,24 @@ export async function hasConflicts(repositoryPath: string, base: string, head: s
   }
 }
 
-export async function branchContainsCommit(repositoryPath: string, remote: string, branch: string, commitSha: string, env = childEnvironment()) {
+export async function branchContainsCommit(workspace: { path: string; repositoryPath: string }, remote: string, branch: string, commitSha: string, env = childEnvironment()) {
+  const { repositoryPath } = workspace;
   const advertised = await git(repositoryPath, ["ls-remote", "--heads", "--", remote, `refs/heads/${branch}`], env);
   const remoteSha = advertised.split(/\s+/)[0];
   if (!remoteSha) return false;
   if (remoteSha === commitSha) return true;
   await git(repositoryPath, ["fetch", "--no-write-fetch-head", "--", remote, remoteSha], env);
+  let where = workspace.path;
   try {
-    await git(repositoryPath, ["cat-file", "-e", `${commitSha}^{commit}`]);
+    await git(where, ["cat-file", "-e", `${commitSha}^{commit}`]);
+    await git(where, ["cat-file", "-e", `${remoteSha}^{commit}`]).catch(async () => {
+      where = repositoryPath;
+      await git(where, ["cat-file", "-e", `${commitSha}^{commit}`]);
+    });
   } catch {
     return false;
   }
-  return isAncestor(repositoryPath, commitSha, remoteSha);
+  return isAncestor(where, commitSha, remoteSha);
 }
 
 export async function isAncestor(repositoryPath: string, ancestor: string, descendant: string) {
@@ -144,10 +157,6 @@ export async function isAncestor(repositoryPath: string, ancestor: string, desce
     if (error instanceof Error && "code" in error && error.code === 1) return false;
     throw error;
   }
-}
-
-export async function behindCleanly(repositoryPath: string, base: string, head: string) {
-  return !await isAncestor(repositoryPath, base, head) && !await hasConflicts(repositoryPath, base, head);
 }
 
 type Author = { name: string; email: string };

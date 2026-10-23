@@ -10,8 +10,8 @@ const model = Type.Object({ provider: Type.String(), model: Type.String(), think
 
 const schema = Type.Object({
   harness: Type.Object({
-    maxConcurrency: positive, maxConcurrentValidations: positive, commandTimeoutSeconds: positive, commandOutputTailBytes: positive, agentTimeoutSeconds: positive, drainTimeoutSeconds: positive,
-    corrections: Type.Object({ incomplete: Type.Integer({ minimum: 0 }) }, strict),
+    maxConcurrency: positive, maxConcurrentValidations: positive, commandTimeoutSeconds: positive, commandOutputTailBytes: positive, maxOutputBytes: positive, gitNetworkTimeoutSeconds: positive, idlePollSeconds: positive, agentTimeoutSeconds: positive, drainTimeoutSeconds: positive,
+    corrections: Type.Object({ incomplete: Type.Integer({ minimum: 0 }), validation: Type.Integer({ minimum: 0 }), format: Type.Integer({ minimum: 0 }) }, strict),
     logLevel: Type.Enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]),
   }, strict),
   github: Type.Object({
@@ -19,7 +19,14 @@ const schema = Type.Object({
     appId: positive, installationId: positive, fetchIntervalSeconds: positive,
   }, strict),
   bindings: Type.Record(Type.String(), Type.Object({ secret: Type.String(), hosts: Type.Array(Type.String()), header: Type.String(), prefix: Type.Optional(Type.String()) }, strict)),
-  slack: Type.Object({ enabled: Type.Boolean(), channel: Type.String() }, strict),
+  context: Type.Object({ inlinePaths: positive, historyRuns: positive, historyBytes: positive }, strict),
+  tools: Type.Object({
+    readBytes: Type.Object({ default: positive, max: positive }, strict),
+    git: Type.Object({ maxCommits: positive, maxScopeBytes: positive }, strict),
+    http: Type.Object({ timeoutSeconds: positive, maxRequestBytes: positive }, strict),
+    browser: Type.Object({ steps: positive, sessionSeconds: positive, stepSeconds: positive }, strict),
+  }, strict),
+  slack: Type.Object({ enabled: Type.Boolean(), channel: Type.String(), maxRetryAfterSeconds: positive }, strict),
   workspace: Type.Object({
     sandbox: Type.Optional(Type.Boolean()),
     commandMemoryMax: Type.Optional(nullable(Type.String({ pattern: "^(?:[1-9]\\d*[KMGT]?|(?:100|[1-9]\\d?)%)$" }))),

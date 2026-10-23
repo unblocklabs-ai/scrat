@@ -178,7 +178,7 @@ export async function fixture(scenario, spec, layout) {
   execFileSync(process.execPath, [resolve(repository, "node_modules/drizzle-kit/bin.cjs"), "push", "--dialect=sqlite", "--schema=./app/src/schema.ts", "--url=./data/scrat.sqlite"], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
   const app = async (path) => import(pathToFileURL(resolve("app/src", path)));
   const { db } = await app("db.ts"), schema = await app("schema.ts"), tasks = await app("tasks.ts"), { runNextTask } = await app("runner.ts");
-  const slack = { calls: [], down: false, rateLimitOnce: false, fail: null, sequence: 0 };
+  const slack = { calls: [], down: false, rateLimitOnce: false, retryAfter: "0", fail: null, sequence: 0 };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, options = {}) => {
     const url = new URL(typeof input === "string" ? input : input.url);
@@ -188,7 +188,7 @@ export async function fixture(scenario, spec, layout) {
       slack.calls.push({ method: url.pathname.replace("/api/", ""), body: slackBody, token: new Headers(options.headers).get("authorization")?.replace(/^bearer /i, "") });
       const json = (data, status = 200, headers = {}) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...headers } });
       if (slack.down) return json({ ok: false, error: "service_unavailable" }, 503);
-      if (slack.rateLimitOnce) { slack.rateLimitOnce = false; return json({ ok: false, error: "ratelimited" }, 429, { "retry-after": "0" }); }
+      if (slack.rateLimitOnce) { slack.rateLimitOnce = false; return json({ ok: false, error: "ratelimited" }, 429, { "retry-after": slack.retryAfter }); }
       if (slack.fail) return json({ ok: false, error: slack.fail });
       return url.pathname.endsWith("/auth.test") ? json({ ok: true, team: "Fixture", user: "scrat" }) : json({ ok: true, channel: slackBody.channel, ts: `1700000000.${String(++slack.sequence).padStart(6, "0")}` });
     }

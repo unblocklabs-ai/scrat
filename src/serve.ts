@@ -10,7 +10,6 @@ import { prepareService } from "./startup.ts";
 import { signalWork, waitForWork, workGeneration } from "./work-signal.ts";
 import { drainStatus } from "./slack-status.ts";
 
-const idleWorkerFallbackMs = 30_000;
 const shutdown = new AbortController();
 const wait = (ms: number) => setTimeout(ms, undefined, { signal: shutdown.signal }).catch((error: unknown) => {
   if (!(error instanceof Error) || error.name !== "AbortError") throw error;
@@ -34,7 +33,7 @@ async function poll() {
 async function worker() {
   while (!shutdown.signal.aborted) {
     const seen = workGeneration();
-    try { if (!await runNextTask(shutdown.signal)) await waitForWork(seen, idleWorkerFallbackMs, shutdown.signal); }
+    try { if (!await runNextTask(shutdown.signal)) await waitForWork(seen, config.harness.idlePollSeconds * 1000, shutdown.signal); }
     catch (error) {
       logger.error({ err: error }, "Worker failed");
       await wait(1000);

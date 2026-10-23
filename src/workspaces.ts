@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { cp, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, or } from "drizzle-orm";
 import { db } from "./db.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
 import { git, hasPendingMerge } from "./git.ts";
@@ -24,9 +24,9 @@ export async function pinWorkspaceBase(workspace: Workspace, sha: string) {
 }
 
 export async function backfillWorkspaceLayouts() {
-  for (const workspace of db.select().from(workspaces).where(and(isNull(workspaces.layout), isNull(workspaces.removedAt))).all()) {
+  for (const workspace of db.select().from(workspaces).where(and(or(isNull(workspaces.layout), eq(workspaces.layout, "worktree")), isNull(workspaces.removedAt))).all()) {
     const stats = await lstat(resolve(workspace.path, ".git")).catch((error: unknown) => { if (errorCode(error) !== "ENOENT") throw error; });
-    if (stats) db.update(workspaces).set({ layout: stats.isDirectory() ? "clone" : "worktree" }).where(eq(workspaces.id, workspace.id)).run();
+    if (stats && (workspace.layout === null || stats.isDirectory())) db.update(workspaces).set({ layout: stats.isDirectory() ? "clone" : "worktree" }).where(eq(workspaces.id, workspace.id)).run();
   }
 }
 

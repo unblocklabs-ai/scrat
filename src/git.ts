@@ -130,13 +130,17 @@ export async function branchContainsCommit(workspace: { path: string; repository
   if (!remoteSha) return false;
   if (remoteSha === commitSha) return true;
   await git(repositoryPath, ["fetch", "--no-write-fetch-head", "--", remote, remoteSha], env);
+  let where = workspace.path;
   try {
-    await git(workspace.path, ["cat-file", "-e", `${commitSha}^{commit}`]);
-    await git(workspace.path, ["cat-file", "-e", `${remoteSha}^{commit}`]);
+    await git(where, ["cat-file", "-e", `${commitSha}^{commit}`]);
+    await git(where, ["cat-file", "-e", `${remoteSha}^{commit}`]).catch(async () => {
+      where = repositoryPath;
+      await git(where, ["cat-file", "-e", `${commitSha}^{commit}`]);
+    });
   } catch {
     return false;
   }
-  return isAncestor(workspace.path, commitSha, remoteSha);
+  return isAncestor(where, commitSha, remoteSha);
 }
 
 export async function isAncestor(repositoryPath: string, ancestor: string, descendant: string) {

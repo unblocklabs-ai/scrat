@@ -2298,6 +2298,15 @@ export const scenarios = {
     await publish("two.txt");
     assert.deepEqual(header(), []);
     git(remote, "merge-base", "--is-ancestor", local, row().branch);
+    const published2 = git(row().path, "rev-parse", "HEAD");
+    git(".", "clone", "-b", row().branch, remote, "pr-ahead");
+    writeFileSync("pr-ahead/ahead.txt", "ahead\n"); git(resolve("pr-ahead"), "add", "."); commit(resolve("pr-ahead"), "Ahead"); git(resolve("pr-ahead"), "push", "origin", row().branch);
+    git(row().path, "repack", "-a", "-d", "-q"); fs.rmSync(resolve(row().path, ".git/objects/info/alternates"));
+    const { branchContainsCommit } = await f.app("git.ts");
+    assert.equal(await branchContainsCommit(row(), remote, row().branch, published2, { ...process.env }), true);
+    db.update(s.workspaces).set({ layout: "worktree" }).where(eq(s.workspaces.id, row().id)).run();
+    await backfillWorkspaceLayouts();
+    assert.equal(row().layout, "clone");
     const tree = git(shared, "rev-parse", "HEAD^{tree}"), head = git(shared, "rev-parse", "HEAD");
     const orphan = () => git(shared, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", tree, "-p", head, "-m", "orphan " + Math.random());
     const [kept, lost] = [orphan(), orphan()];

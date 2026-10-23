@@ -1597,6 +1597,9 @@ export const scenarios = {
     { const copy = structuredClone(merged); copy.workspace.environment = { ANY_NEW_KEY: "1" }; validateConfig(copy); }
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = false; c.workspace.commandMemoryMax = "6G"; })), /commandMemoryMax requires workspace\.sandbox/);
     await validateStaticConfig(variant((c) => { c.workspace.commandMemoryMax = null; }));
+    invalid((c) => { c.workspace.packageStore = "relative/store"; }, /workspace\.packageStore: must match pattern/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = false; c.workspace.packageStore = "/tmp/scrat-store"; })), /packageStore requires workspace\.sandbox/);
+    await validateStaticConfig(variant((c) => { c.workspace.packageStore = null; }));
     invalid((c) => { c.harness.agentTimeoutSeconds = 1.5; }, /harness\.agentTimeoutSeconds: must be integer/);
     invalid((c) => { c.harness.corrections.incomplete = -1; }, /harness\.corrections\.incomplete: must be >= 0/);
     invalid((c) => { c.harness.corrections.incomplete = 1.5; }, /harness\.corrections\.incomplete: must be integer/);
@@ -2383,6 +2386,21 @@ export const scenarios = {
       assert.equal(git(legacyPath, "rev-parse", "MERGE_HEAD"), git(checkout, "rev-parse", "HEAD"));
       assert.equal(readFileSync(resolve(legacyPath, ".scrat/notes.md"), "utf8"), "Retain the unresolved merge\n");
       assert.ok(fs.lstatSync(resolve(legacyPath, ".git")).isDirectory());
+    } },
+  package_store: { title: "a configured package store is shared read-write across sandboxed workspaces", needsSandbox: true,
+    configure: [(config) => {
+      const store = "/home/scrat/.local/share/pnpm/store";
+      config.workspace = { sandbox: true, layout: "clone", packageStore: resolve("shared-store"), prepare: [["sh", "-c", `pnpm store path > ${store}/path && if [ -f ${store}/marker ]; then touch ${store}/seen; else touch ${store}/marker; fi`]] };
+    }],
+    run: async () => {
+      for (const number of [1, 2]) {
+        f.addIssue(number, ["scrat"]); f.enqueue(number, "implement");
+        f.script = [{ name: "bash", args: { command: `printf 'export const value = 1${number};\\n' > src/app.ts` } }];
+        assert.equal((await success()).publication.status, "published");
+      }
+      assert.equal(readFileSync(resolve("shared-store/path"), "utf8").trim(), "/home/scrat/.local/share/pnpm/store/v11");
+      assert.ok(existsSync(resolve("shared-store/marker")));
+      assert.ok(existsSync(resolve("shared-store/seen")));
     } },
   command_memory: { title: "a sandboxed command that exceeds workspace.commandMemoryMax is killed alone, fails the run as out of memory without re-prompting the agent and accepts validation-only retry", needsSandbox: true, needsSystemd: true,
     configure: [(config) => {

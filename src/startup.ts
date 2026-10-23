@@ -1,4 +1,4 @@
-import { access } from "node:fs/promises";
+import { access, lstat, mkdir } from "node:fs/promises";
 import { manifests } from "./actions.ts";
 import { type Resolver, publicAnswers, resolveHost, validateBindings } from "./bindings.ts";
 import { config } from "./config.ts";
@@ -29,6 +29,12 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
   if (memoryMax) {
     if (!settings.workspace?.sandbox) problems.push("workspace.commandMemoryMax requires workspace.sandbox");
     else if (process.platform === "linux") await access("/usr/bin/systemd-run").catch(() => { problems.push("workspace.commandMemoryMax requires /usr/bin/systemd-run"); });
+  }
+  const store = settings.workspace?.packageStore;
+  if (store) {
+    if (!settings.workspace?.sandbox) problems.push("workspace.packageStore requires workspace.sandbox");
+    else if (await lstat(store).then((entry) => entry.isSymbolicLink(), () => false)) problems.push("workspace.packageStore must not be a symlink");
+    else if (process.platform === "linux") await mkdir(store, { recursive: true, mode: 0o700 }).catch(() => { problems.push(`workspace.packageStore ${store} cannot be created`); });
   }
   const checkEntry = (label: string, { provider, model }: Entry) => {
     if (!modelRuntime.getModel(provider, model)) problems.push(`${label}: no Pi model ${provider}/${model}${modelRuntime.getError() ? ` (${modelRuntime.getError()})` : ""}`);

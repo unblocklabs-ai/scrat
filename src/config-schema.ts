@@ -23,6 +23,7 @@ const schema = Type.Object({
   workspace: Type.Object({
     sandbox: Type.Optional(Type.Boolean()),
     commandMemoryMax: Type.Optional(nullable(Type.String({ pattern: "^(?:[1-9]\\d*[KMGT]?|(?:100|[1-9]\\d?)%)$" }))),
+    packageStore: Type.Optional(nullable(Type.String({ pattern: "^/" }))),
     layout: Type.Optional(Type.Enum(["worktree", "clone"])),
     environment: Type.Optional(Type.Record(Type.String(), Type.String())),
     prepare: Type.Optional(Type.Array(Type.Array(Type.String()))),

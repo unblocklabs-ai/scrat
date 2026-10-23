@@ -159,6 +159,17 @@ the old service. On Ubuntu 24.04, an administrator installs `bubblewrap`, instal
 `apparmor_parser -r /etc/apparmor.d/scrat-bwrap`. Do not disable the global userns
 restriction. Provision Node and the pinned pnpm version with Corepack first.
 
+`workspace.packageStore` (default `null`) is an absolute directory that is bind-mounted read-write at pnpm's store
+location in every sandboxed command, with a `storeDir` entry written to the sandbox home's pnpm `config.yaml` so
+pnpm uses it. A lockfile's packages are then downloaded once per install instead of once per workspace. It requires
+`workspace.sandbox`, and the installer's preflight writes to it. This is opt-in and meant for repositories whose
+contributors are trusted: the store is shared mutable state across that install's sandboxes. pnpm's integrity check
+(`verify-store-integrity`, on by default) only re-hashes file contents, so a malicious repository command could rewrite a
+package's index entry and poison later installs of the same lockfile; a read-only store filled by a trusted fetch step
+would close that and is a possible follow-up. Nothing else is shared: each workspace keeps its own `node_modules` and
+runs its own `prepare`. The store and the workspace are different mounts, so pnpm copies files instead of hardlinking:
+the saving is download time and the per-run sandbox home, not disk in `node_modules`.
+
 `workspace.commandMemoryMax` (default `null`, off) is a systemd `MemoryMax=` value such as `"6G"`
 or `"50%"`; it requires `workspace.sandbox` and a systemd user session. Each sandboxed command
 then runs in its own transient scope with swap disabled, so a runaway check is killed alone and

@@ -3,8 +3,7 @@ set -euo pipefail
 release_sha="${1:?Usage: bash deploy/install.sh <released-commit-sha>}"
 install_root=/home/bek/.local/share/scrat-v2
 release_path="$install_root/releases/$release_sha"
-cd "$release_path"
-bash deploy/install-node.sh
+bash "$release_path/deploy/install-node.sh"
 export PATH="/home/bek/.local/share/scrat/runtime/node-v24.22.1-linux-x64/bin:$install_root/bin:/home/bek/.local/share/scrat/runtime/docker:/usr/local/bin:/usr/bin:/bin"
 
 cd "$release_path"

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Stage the supported official runtime without touching the running controller.
 set -euo pipefail
 scrat_runtime=/home/bek/.local/share/scrat/runtime
 scrat_node="$scrat_runtime/node-v24.22.1-linux-x64"

@@ -19,6 +19,7 @@ export type EffectName = (typeof effectNames)[number];
 const strict = { additionalProperties: false } as const;
 const list = <T extends TSchema>(items: T, minItems = 0) => Type.Array(items, { minItems, uniqueItems: true });
 const model = Type.Object({ provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels) }, strict);
+const retry = Type.Object({ initialDelaySeconds: Type.Integer({ minimum: 1 }), maxDelaySeconds: Type.Integer({ minimum: 1 }) }, strict);
 const trigger = Type.Object({
   source: Type.Enum(["github_items", "github_commits", "schedule"]), kind: Type.Enum(triggerKinds),
   item: Type.Optional(Type.Enum(["issue", "pr"])), author: Type.Optional(Type.String({ minLength: 1 })),
@@ -36,7 +37,7 @@ const schema = Type.Object({
   tools: Type.Optional(list(Type.Enum(toolNames), 1)), http: Type.Optional(httpSettings), browser: Type.Optional(browserSettings), files: Type.Optional(list(Type.Enum(contextFileNames))),
   acceptance: Type.Optional(Type.Enum(["complete", "nonempty_diff", "conflict_free"])),
   start: Type.Optional(list(Type.Enum(startEffectNames))), publish: list(Type.Enum(effectNames), 1),
-  skill: Type.String(), model, priority: Type.Integer(),
+  skill: Type.String(), model, priority: Type.Integer(), retry: Type.Optional(retry),
   maxSelfRepairs: Type.Optional(Type.Integer({ minimum: 0 })), exhaustedLabel: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   channel: Type.Optional(Type.String()), maxRangeCommits: Type.Optional(Type.Integer({ minimum: 1 })), startMessage: Type.Optional(Type.String()),
 }, strict);
@@ -76,6 +77,7 @@ function crossChecks(m: Parsed) {
   need(!any(publish, ["labels", "comment"]) || items, "labels and comment effects require a github_items trigger");
   need(!publish.includes("pr_assessment") || (t.item === "pr" && agent === "panel"), "pr_assessment requires item: pr and agent: panel");
   need(agent !== "panel" || m.reviewers?.length === 2, "agent: panel requires exactly two reviewers");
+  need(m.retry === undefined || mode === "review", "retry requires mode review");
   need(tools.includes("read"), "tools must include read");
   need(tools.includes("http") === (m.http !== undefined), "the http tool and the http setting require each other");
   need(tools.includes("browser") === (m.browser !== undefined), "the browser tool and the browser setting require each other");
@@ -160,7 +162,7 @@ export function findTriggerConflicts(manifests: readonly Manifest[], enabled: (m
 export const skillPath = (manifest: Manifest, skill = manifest.skill) => resolve(manifest.root, skill);
 
 export function deploymentDefaults(m: Manifest) {
-  const optional = { branch: m.trigger.branch, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel };
+  const optional = { branch: m.trigger.branch, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel, retry: m.retry };
   return {
     enabled: m.enabled ?? true, priority: m.priority, skill: m.skill, ...m.model, agent: m.agent, reviewers: m.reviewers,
     ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== undefined)),

@@ -1136,6 +1136,26 @@ export const scenarios = {
     const invalid = await run(); assert.match(invalid.error.message, /grade/i);
     assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
   } },
+  review_retry: { title: "a review whose reviewers all fail transiently is requeued with doubling delays and publishes once after recovery, while a mixed panel stays failed", run: async () => {
+    await implement(2); await route(); f.transient.failures = 8; f.reset(202, "transient");
+    const delay = () => (Date.parse(f.row(s.tasks, failed.taskId).availableAt) - Date.now()) / 1000;
+    let failed = await run(); const task = () => f.row(s.tasks, failed.taskId);
+    assert.equal(failed.error.code, "TRANSIENT_INFERENCE"); assert.equal(task().status, "queued"); assert.equal(task().retryCount, 1);
+    assert.ok(delay() > 50 && delay() < 67, String(delay()));
+    assert.equal(await f.runNextTask(), undefined);
+    const id = task().id, available = task().availableAt; await route();
+    assert.equal(task().availableAt, available); assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 1);
+    tasks.retryTask(id); assert.equal(task().availableAt, null); assert.equal(task().retryCount, 1); assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 1);
+    failed = await run(); assert.equal(task().retryCount, 2); assert.ok(delay() > 110 && delay() < 133, String(delay()));
+    assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
+    tasks.enqueueTask({ subjectId: task().subjectId, action: "review_pr", reason: "Changed", input: {} });
+    assert.equal(task().retryCount, null); assert.equal(task().availableAt, null);
+    const reviewed = await success(); assert.equal(reviewed.taskId, id);
+    assert.equal(task().status, "completed"); assert.equal(f.writes.filter((w) => w.type === "comment").length, 1);
+    await implement(3); await route(); f.transient.failures = 100; f.reset(203, "transient-mixed");
+    const mixed = await run(); assert.ok(mixed.error); assert.notEqual(mixed.error.code, "TRANSIENT_INFERENCE");
+    assert.equal(f.row(s.tasks, mixed.taskId).status, "failed"); assert.equal(f.row(s.tasks, mixed.taskId).retryCount, null);
+  } },
   footer: { title: "quoted control markers stay report text and cannot supply a PR grade or issue approval", run: async () => {
     await implement(1); f.reset(201, "quoted-grade"); await route();
     const reviewed = await success();
@@ -1627,6 +1647,11 @@ export const scenarios = {
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.heavyCommands = ["^(unclosed"]; })), /heavyCommands\[0\] is not a valid regular expression/);
     for (const disabled of [null, ""]) await validateStaticConfig(variant((c) => { c.actions.address_review.exhaustedLabel = disabled; }));
     invalid((c) => { c.actions.address_review.exhaustedLabel = 5; }, /actions\.address_review\.exhaustedLabel: must be string/);
+    await validateStaticConfig(variant((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 5, maxDelaySeconds: 5 }; }));
+    await validateStaticConfig(variant((c) => { c.actions.review_pr.retry = null; }));
+    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 30 }; })), /review_pr: retry\.maxDelaySeconds must be at least retry\.initialDelaySeconds/);
+    invalid((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 0, maxDelaySeconds: 30 }; }, /actions\.review_pr\.retry\.initialDelaySeconds: must be >= 1/);
+    invalid((c) => { c.harness.retryJitter = 2; }, /harness\.retryJitter: must be <= 1/);
     const lines = captureLogs();
     const toolResults = () => JSON.stringify(f.requests.findLast((entry) => entry.request.messages.some((message) => message.role === "tool")).request.messages.filter((message) => message.role === "tool"));
     const attempt = async (number, mode) => { f.addIssue(number, ["scrat"]); f.reset(number, mode); f.enqueue(number, "implement"); return run(); };

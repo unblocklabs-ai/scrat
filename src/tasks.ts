@@ -1,15 +1,15 @@
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, count, desc, eq, isNotNull, isNull, notExists, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, isNotNull, isNull, lte, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import { type Action, getManifest, manifests } from "./actions.ts";
 import { config, getActionConfig, isActionEnabled } from "./config.ts";
 import { itemsInRepository, sameRepository } from "./repository.ts";
 import { db } from "./db.ts";
-import { describeError } from "./errors.ts";
+import { describeError, errorCode, transientInferenceCode } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { withOperationSync } from "./logging.ts";
 import { entryStage, hasPublicationSnapshot, hasValidationCheckpoint, InterruptedError } from "./results.ts";
-import { latestRunOfTask, updateRun } from "./run-history.ts";
+import { getRun, latestRunOfTask, updateRun } from "./run-history.ts";
 import { asItem } from "./items.ts";
 import { items, runs, subjects, tasks, type Task, type Subject } from "./schema.ts";
 import { isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
@@ -53,6 +53,8 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | 
           reason: task.reason,
           input,
           retryMode: "repair",
+          retryCount: null,
+          availableAt: null,
         },
       }).returning().get()!;
       const references = { subjectId: queuedTask.subjectId, taskId: queuedTask.id, operationId: operation.operationId };
@@ -107,7 +109,7 @@ export function claimTask() {
     const busySubjects = alias(subjects, "busy_subjects");
     const select = () => transaction.select({ task: tasks, subject: subjects }).from(tasks)
       .innerJoin(subjects, eq(tasks.subjectId, subjects.id))
-      .where(and(eq(tasks.status, "queued"), eq(subjects.state, "open"), notExists(
+      .where(and(eq(tasks.status, "queued"), eq(subjects.state, "open"), or(isNull(tasks.availableAt), lte(tasks.availableAt, new Date().toISOString())), notExists(
         transaction.select({ id: busyTasks.id }).from(busyTasks)
           .innerJoin(busySubjects, eq(busyTasks.subjectId, busySubjects.id))
           .where(and(eq(busyTasks.status, "running"), or(
@@ -131,7 +133,8 @@ export function claimTask() {
     const publicationResume = !validationOnly && hasPublicationSnapshot(retry) ? retry : undefined;
     const resume = validationOnly ? (hasValidationCheckpoint(retry) ? retry : undefined) : publicationResume;
     const prior = retry?.error?.name === "InterruptedError" && !resume ? undefined : retry;
-    const settings = prior ?? actionSettings;
+    const pinned = getManifest(next.task.action)?.mode === "review" && !resume ? undefined : prior;
+    const settings = pinned ?? actionSettings;
     const task = transaction.update(tasks).set({ status: "running" }).where(eq(tasks.id, next.task.id)).returning().get()!;
     const run = transaction.insert(runs).values({
       taskId: task.id,
@@ -143,7 +146,7 @@ export function claimTask() {
       provider: settings.provider,
       model: settings.model,
       thinkingLevel: settings.thinkingLevel,
-      reviewers: resume ? resume.reviewers : (prior?.reviewers ?? actionSettings.reviewers)
+      reviewers: resume ? resume.reviewers : (pinned?.reviewers ?? actionSettings.reviewers)
         .map(({ provider, model, thinkingLevel }) => ({ provider, model, thinkingLevel })),
       workspaceId: resume?.workspaceId ?? next.subject.workspaceId,
       stage: entryStage(retry, next.task.retryMode),
@@ -183,6 +186,12 @@ export function ensureRunSequences(database: typeof db = db) {
 export function retryTask(taskId: string, mode: Task["retryMode"] = "repair") {
   return withOperationSync("task.retry", { taskId }, (operation) => {
     const task = db.transaction((transaction) => {
+      const delayed = transaction.update(tasks).set({ availableAt: null })
+        .where(and(eq(tasks.id, taskId), eq(tasks.status, "queued"), isNotNull(tasks.availableAt))).returning().get();
+      if (delayed) {
+        recordEvent({ subjectId: delayed.subjectId, taskId, operationId: operation.operationId, type: "task.retried", data: { action: delayed.action, mode } }, transaction);
+        return delayed;
+      }
       const failed = transaction.select().from(tasks).where(and(eq(tasks.id, taskId), eq(tasks.status, "failed"))).get();
       if (!failed) throw new Error(`Task is not failed: ${taskId}`);
       const queued = transaction.select().from(tasks).where(and(
@@ -196,7 +205,7 @@ export function retryTask(taskId: string, mode: Task["retryMode"] = "repair") {
           throw new Error("Validation-only retry requires an unchanged task input and a complete agent checkpoint from a failed validation; use normal retry to repair");
         }
       }
-      const updated = transaction.update(tasks).set({ status: "queued", retryMode: mode }).where(eq(tasks.id, taskId)).returning().get()!;
+      const updated = transaction.update(tasks).set({ status: "queued", retryMode: mode, retryCount: null, availableAt: null }).where(eq(tasks.id, taskId)).returning().get()!;
       recordEvent({ subjectId: updated.subjectId, taskId, operationId: operation.operationId, type: "task.retried", data: { action: updated.action, mode } }, transaction);
       return updated;
     }, { behavior: "immediate" });
@@ -212,7 +221,7 @@ export function finishRun(runId: string, outcome: { status: "completed" } | { st
     const run = transaction.update(runs).set({ error, finishedAt: new Date().toISOString() })
       .where(and(eq(runs.id, runId), isNull(runs.finishedAt))).returning().get();
     if (!run) throw new Error(`Run not active: ${runId}`);
-    const task = transaction.update(tasks).set({ status: outcome.status })
+    const task = transaction.update(tasks).set({ status: outcome.status, ...outcome.status === "completed" ? { retryCount: null, availableAt: null } : {} })
       .where(and(eq(tasks.id, run.taskId), eq(tasks.status, "running"))).returning().get();
     if (!task) throw new Error(`Task not running: ${run.taskId}`);
     const references = { subjectId: task.subjectId, taskId: task.id, runId };
@@ -227,7 +236,16 @@ export function finishRun(runId: string, outcome: { status: "completed" } | { st
   return finished;
 }
 
-export function interruptRun(runId: string, error: unknown = new InterruptedError("Worker stopped before finishing this run")) {
+export function retryTransientFailure(runId: string, error: unknown) {
+  const run = getRun(runId);
+  const task = run && db.select().from(tasks).where(eq(tasks.id, run.taskId)).get();
+  const retry = task && getManifest(task.action)?.mode === "review" ? config.actions[task.action]?.retry : undefined;
+  if (!run || !retry || run.stage !== "agent" || errorCode(error) !== transientInferenceCode) return false;
+  interruptRun(runId, error, retry);
+  return true;
+}
+
+export function interruptRun(runId: string, error: unknown = new InterruptedError("Worker stopped before finishing this run"), retry?: { initialDelaySeconds: number; maxDelaySeconds: number }) {
   const details = describeError(error);
   const interrupted = db.transaction((transaction) => {
     const run = transaction.update(runs).set({ error: details, finishedAt: new Date().toISOString() })
@@ -238,12 +256,15 @@ export function interruptRun(runId: string, error: unknown = new InterruptedErro
       eq(tasks.subjectId, own.subjectId), eq(tasks.action, own.action), eq(tasks.status, "queued"),
     )).get();
     const retryMode = hasValidationCheckpoint(run) ? "validation" : "repair";
-    const task = transaction.update(tasks).set(superseded ? { status: "failed" } : { status: "queued", retryMode })
+    const attempt = (own.retryCount ?? 0) + 1;
+    const delaySeconds = retry && Math.min(retry.maxDelaySeconds, Math.min(retry.maxDelaySeconds, retry.initialDelaySeconds * 2 ** (attempt - 1)) * (1 + config.harness.retryJitter * Math.random()));
+    const nextAttemptAt = delaySeconds === undefined ? undefined : new Date(Date.now() + delaySeconds * 1000).toISOString();
+    const task = transaction.update(tasks).set(superseded ? { status: "failed" } : { status: "queued", retryMode, ...nextAttemptAt ? { retryCount: attempt, availableAt: nextAttemptAt } : {} })
       .where(and(eq(tasks.id, run.taskId), eq(tasks.status, "running"))).returning().get();
     if (!task) throw new Error(`Task not running: ${run.taskId}`);
     const references = { subjectId: task.subjectId, taskId: task.id, runId };
     recordEvent(superseded ? { ...references, type: "run.failed", data: { stage: run.stage, error: details } }
-      : { ...references, type: "run.requeued", data: { stage: run.stage, retryMode } }, transaction);
+      : { ...references, type: "run.requeued", data: { stage: run.stage, retryMode, ...nextAttemptAt ? { attempt, nextAttemptAt } : {} } }, transaction);
     return run;
   }, { behavior: "immediate" });
   signalWork();

@@ -75,6 +75,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
   for (const manifest of manifests()) {
     const action = manifest.name, entry = { ...deploymentDefaults(manifest), ...settings.actions[action] };
     checkEntry(action, entry);
+    if (entry.retry && entry.retry.maxDelaySeconds < entry.retry.initialDelaySeconds) problems.push(`${action}: retry.maxDelaySeconds must be at least retry.initialDelaySeconds`);
     entry.reviewers?.forEach((reviewer, index) => checkEntry(`${action} reviewer ${index + 1}`, reviewer));
     if (entry.enabled !== false) {
       const slack = [...manifest.start ?? [], ...manifest.publish].some((effect) => effect.startsWith("slack_"));

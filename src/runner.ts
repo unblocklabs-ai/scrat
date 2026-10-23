@@ -27,7 +27,7 @@ import type { Item } from "./items.ts";
 import { subjects, workspaces, type Run, type Task, type Subject, type Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { recordEvent } from "./events.ts";
-import { claimTask, finishRun, interruptRun } from "./tasks.ts";
+import { claimTask, finishRun, interruptRun, retryTransientFailure } from "./tasks.ts";
 import { parseTriggerInput } from "./triggers.ts";
 import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, isolateWorkspace, pinWorkspaceBase, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
 
@@ -413,6 +413,10 @@ export async function runNextTask(stop?: AbortSignal) {
       recordEvent({ ...references, type: "run.interrupting", data: { stage: getRun(run.id)!.stage, reason: error.message } });
       operation.complete({ interrupted: true });
       interruptRun(run.id, error);
+      return getRun(run.id)!;
+    }
+    if (retryTransientFailure(run.id, error)) {
+      operation.fail(error);
       return getRun(run.id)!;
     }
     const failed = finishRun(run.id, { status: "failed", error });

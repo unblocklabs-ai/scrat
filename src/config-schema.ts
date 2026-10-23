@@ -11,6 +11,7 @@ const model = Type.Object({ provider: Type.String(), model: Type.String(), think
 const schema = Type.Object({
   harness: Type.Object({
     maxConcurrency: positive, maxConcurrentValidations: positive, commandTimeoutSeconds: positive, commandOutputTailBytes: positive, agentTimeoutSeconds: positive, drainTimeoutSeconds: positive,
+    retryJitter: Type.Number({ minimum: 0, maximum: 1 }),
     corrections: Type.Object({ incomplete: Type.Integer({ minimum: 0 }) }, strict),
     logLevel: Type.Enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]),
   }, strict),
@@ -44,6 +45,7 @@ const schema = Type.Object({
     branch: Type.Optional(Type.String()), channel: Type.Optional(Type.String()), maxRangeCommits: Type.Optional(positive), startMessage: Type.Optional(Type.String()),
     maxSelfRepairs: Type.Optional(Type.Integer({ minimum: 0 })), exhaustedLabel: Type.Optional(nullable(Type.String())),
     provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels),
+    retry: Type.Optional(nullable(Type.Object({ initialDelaySeconds: positive, maxDelaySeconds: positive }, strict))),
   }, strict)),
 }, strict);
 

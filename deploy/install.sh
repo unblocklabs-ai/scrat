@@ -5,6 +5,7 @@ install_root=/home/bek/.local/share/scrat-v2
 release_path="$install_root/releases/$release_sha"
 bash "$release_path/deploy/install-node.sh"
 export PATH="/home/bek/.local/share/scrat/runtime/node-v24.22.1-linux-x64/bin:$install_root/bin:/home/bek/.local/share/scrat/runtime/docker:/usr/local/bin:/usr/bin:/bin"
+bash "$release_path/deploy/assert-release.sh" "$release_sha" "$release_path"
 
 cd "$release_path"
 npm ci --no-audit --no-fund
@@ -37,6 +38,7 @@ fi
 node deploy/migrate-subjects.mjs "$install_root/data/scrat.sqlite"
 npm run db:push
 ln -sfn "$release_path" "$install_root/current"
+[ "$(readlink -f "$install_root/current")" = "$(readlink -f "$release_path")" ] || { printf 'current does not point to %s\n' "$release_path" >&2; exit 1; }
 cp deploy/scrat.service /home/bek/.config/systemd/user/scrat.service
 systemctl --user daemon-reload
 systemctl --user enable --now scrat.service

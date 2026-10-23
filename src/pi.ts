@@ -26,7 +26,7 @@ function correctionMessage(error: string, requireGrade: boolean) {
 }
 
 function continuationMessage(requireGrade: boolean) {
-  return `Your assessment was returned incomplete. This session has time to continue: finish the remaining inspection, then return the complete final assessment. It must end with these footer lines, in this order:\n${footerRules(requireGrade)}`;
+  return `Your assessment was returned incomplete. Finish the remaining inspection, then return the full final assessment. It must end with these footer lines, in this order:\n${footerRules(requireGrade)}`;
 }
 
 export function saveReviewer(runId: string, index: number, patch: Partial<Reviewer>) {

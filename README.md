@@ -368,7 +368,7 @@ Posting is best effort. It runs after the database write, one message at a time,
 
 `review_base_change` reviews each update to `github.baseBranch` and reports the review in Slack. It runs on the `github.fetchIntervalSeconds` interval, and at startup, and queues one review per push range: from the last seen tip to the new tip, not one per commit. Scrat's own merged commits are reviewed too; there is no author filter.
 
-For each review, Scrat posts `startMessage` to the channel as the opening message, then replies in that thread with the review: at most two short paragraphs, and at most 3,000 characters.
+For each review, Scrat posts `startMessage` to the channel as the opening message, then replies in that thread with the review: a one-line verdict followed by at most five bullets, highest consequence first, and at most 3,000 characters.
 
 The agent receives the commit messages, the changed paths and the diff for the range. It has read-only tools, including `read_base` for the commit before the range. It does not install dependencies, run validation, open a PR or post to Slack, and it never sees the Slack token.
 

@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { bearer, fixture } from "./fixture.mjs";
 
-const scenario = process.argv[2];
+const [scenario, layout] = (process.argv[2] ?? "").split("@");
 let f, db, s, tasks, git, commit;
 const all = (table) => db.select().from(table).all();
 const route = async () => (await f.app("github-sync.ts")).syncGitHub();
@@ -868,7 +868,7 @@ export const scenarios = {
     await route();
     assert.deepEqual(reviews2().filter((t) => t.status === "queued"), [], "a running manual review covers the sync");
   } },
-  working_notes: { title: "change sessions keep working notes in an excluded workspace file that never reaches a commit; reviews are not told to", run: async () => {
+  working_notes: { title: "change sessions keep working notes in an excluded workspace file that never reaches a commit; reviews are not told to", layouts: ["clone"], run: async () => {
     f.addIssue(1, ["scrat"]); f.reset(1, "notes"); f.enqueue(1, "implement"); const r = await success();
     const notes = resolve(f.row(s.workspaces, r.workspaceId).path, ".scrat/notes.md");
     const system = ({ request }) => JSON.stringify(request.messages.filter((m) => m.role === "system" || m.role === "developer"));
@@ -883,7 +883,7 @@ export const scenarios = {
     const reviews = f.requests.filter((entry) => entry.context.action === "review_pr");
     assert.ok(reviews.length && reviews.every((entry) => !system(entry).includes(".scrat/notes.md")));
   } },
-  implement_base_moved: { title: "a retried implementation whose retained workspace began on an older base moves up to the current base first", configure: [configureCheck], run: async () => {
+  implement_base_moved: { title: "a retried implementation whose retained workspace began on an older base moves up to the current base first", layouts: ["clone"], configure: [configureCheck], run: async () => {
     changeMain("fail-validation", "fail\n"); const oldBase = git(resolve("remote.git"), "rev-parse", "main");
     f.addIssue(1); f.enqueue(1, "implement"); const failed = await run();
     f.addIssue(2); f.enqueue(2, "implement"); const overlapping = await run();
@@ -1191,7 +1191,7 @@ export const scenarios = {
     f.addIssue(6); f.reset(6, "incomplete-once"); f.enqueue(6, "implement");
     const partial = await run(); assert.ok(partial.error); assert.equal(prompts(), asked);
   } },
-  pr_head: { title: "a stale refs/pull head is replaced by the API head, and a head the remote lacks fails the run without publishing", run: async () => {
+  pr_head: { title: "a stale refs/pull head is replaced by the API head, and a head the remote lacks fails the run without publishing", layouts: ["clone"], run: async () => {
     await implement(1);
     const remote = resolve("remote.git"), branch = f.prs[0].head.ref, stale = git(remote, "rev-parse", branch);
     f.frozen.add(201);
@@ -1221,7 +1221,7 @@ export const scenarios = {
     }
     assert.equal(f.prs.length, 0); assert.equal(f.writes.length, 0);
   } },
-  verification: { title: "verification receipts bind to the published commit and failing checks block publication", configure: [configureCheck], run: async () => {
+  verification: { title: "verification receipts bind to the published commit and failing checks block publication", layouts: ["clone"], configure: [configureCheck], run: async () => {
     const r = await implement(1);
     assert.equal(r.verification.headSha, r.publication.publishedCommitSha);
     assert.match(r.verification.commands[0].stdout, /checked actual source/);
@@ -1487,9 +1487,9 @@ export const scenarios = {
       reviewed = await success();
     }
   } },
-  stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or fails clearly when the merge conflicts", configure: [configureStaleBranch], run: staleBranch },
-  stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", configure: [configureStaleBranch], run: staleBranch },
-  validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit", configure: [configureValidation], run: validationFeedback },
+  stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or fails clearly when the merge conflicts", layouts: ["clone"], configure: [configureStaleBranch], run: staleBranch },
+  stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", layouts: ["clone"], configure: [configureStaleBranch], run: staleBranch },
+  validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit", layouts: ["clone"], configure: [configureValidation], run: validationFeedback },
   validation_feedback_cap: { title: "validation feedback stops after two rounds and never applies to signal-killed commands", configure: [configureValidation], run: validationFeedback },
   command_timeout: { title: "a validation command that outlives harness.commandTimeoutSeconds is killed, fails the run as infrastructure without re-prompting the agent and accepts validation-only retry", configure: [configureCommandTimeout], run: async () => {
     f.addIssue(1, ["scrat"]); f.enqueue(1, "implement");
@@ -1652,7 +1652,7 @@ export const scenarios = {
     await assert.rejects(aborted, /cancelled/); release(); await holder; await next;
     assert.deepEqual(ran, ["next"]);
   } },
-  merge: { title: "retry resumes an unfinished merge and preserves partial work", run: async () => {
+  merge: { title: "retry resumes an unfinished merge and preserves partial work", layouts: ["clone"], run: async () => {
     const original = await implement(1); changeMain("src/app.ts", "export const value = 200;\n");
     await route(); f.reset(201, "merge-failure");
     for (const t of all(s.tasks).filter((t) => t.action === "review_pr")) db.update(s.tasks).set({ status: "cancelled" }).where(eq(s.tasks.id, t.id)).run();
@@ -1763,6 +1763,9 @@ export const scenarios = {
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.validate = []; })), /workspace\.validate is empty but address_pr_feedback, address_review, implement, resolve_conflicts publish commits.*\[\["true"\]\]/);
     await assert.rejects(validateStaticConfig(variant((c) => { delete c.workspace.validate; c.actions.address_review.enabled = false; })), /workspace\.validate is empty but address_pr_feedback, implement, resolve_conflicts publish/);
     await validateStaticConfig(variant((c) => { c.workspace.validate = [["true"]]; }));
+    await validateStaticConfig(variant((c) => { c.workspace.layout = "clone"; }));
+    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.layout = "copy"; })), /workspace\.layout must be "worktree" or "clone"/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = true; c.workspace.layout = "worktree"; })), /workspace\.sandbox requires workspace\.layout "clone"/);
     await validateStaticConfig(variant((c) => { c.workspace.validate = []; for (const name of changeActions) c.actions[name].enabled = false; }));
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.implement.thinkingLevel = "turbo"; })), /implement: invalid thinking level turbo/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.github.auth = "token"; })), /github\.auth must be "app" or "pat"/);
@@ -1817,7 +1820,7 @@ export const scenarios = {
     const r = f.row(s.runs, claim.run.id); assert.equal(r.error.code, "RUN_INTERRUPTED"); assert.equal(r.result.text, "Saved"); assert.equal(r.publication.commentId, 123);
     tasks.retryTask(r.taskId); assert.ok(tasks.claimTask());
   } },
-  crash_before_publishing: { title: "validated artifacts and the publishing stage are written together, so a run failed after validation resumes at publishing without validating again", configure: [configureValidation], run: async () => {
+  crash_before_publishing: { title: "validated artifacts and the publishing stage are written together, so a run failed after validation resumes at publishing without validating again", layouts: ["clone"], configure: [configureValidation], run: async () => {
     const updates = [], update = db.update.bind(db);
     db.update = (table) => {
       const builder = update(table);
@@ -1905,7 +1908,7 @@ export const scenarios = {
     const [failed, ran] = await Promise.allSettled([failing, after]);
     assert.equal(failed.reason.message, "first"); assert.equal(ran.value, "ok"); assert.equal(locks.size, 0);
   } },
-  identity: { title: "retained workspaces reject branch replacement and retain unpublished commits", run: async () => {
+  identity: { title: "retained workspaces reject branch replacement and retain unpublished commits", layouts: ["clone"], run: async () => {
     const original = await implement(1); const w = f.row(s.workspaces, original.workspaceId);
     const { removeWorkspace } = await f.app("workspaces.ts");
     git(w.path, "switch", "-c", "replacement");
@@ -2209,6 +2212,54 @@ export const scenarios = {
     const r = await run(); assert.match(r.error.message, /Committed tree differs/);
     assert.equal(r.verification, null); assert.equal(f.prs.length, 0);
   } },
+  publish_existing_branch: { title: "a retained workspace whose push was rejected publishes a new commit onto the existing PR branch when retried", layouts: ["clone"], run: async () => {
+    const first = await implement(1), remote = resolve("remote.git"), branch = f.prs[0].head.ref, workspace = f.row(s.workspaces, first.workspaceId);
+    assert.equal(fs.lstatSync(resolve(workspace.path, ".git")).isDirectory(), layout === "clone");
+    const item = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 201);
+    f.script = [{ name: "bash", args: { command: "printf 'export const value = 14;\\n' > src/app.ts" } }];
+    tasks.enqueueTask({ subjectId: item.id, action: "address_pr_feedback", reason: "Publish onto the existing branch", input: {} });
+    f.reset(201, "normal");
+    writeFileSync(resolve(remote, "hooks/pre-receive"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const rejected = await run();
+    assert.ok(rejected.error); assert.equal(rejected.stage, "publishing"); assert.equal(git(remote, "rev-parse", branch), first.publication.commitSha);
+    unlinkSync(resolve(remote, "hooks/pre-receive"));
+    tasks.retryTask(rejected.taskId); const retried = await success();
+    assert.equal(retried.publication.status, "published"); assert.notEqual(retried.publication.commitSha, first.publication.commitSha);
+    assert.equal(git(remote, "rev-parse", branch), retried.publication.commitSha);
+    assert.equal(git(remote, "show", `${retried.publication.commitSha}:src/app.ts`), "export const value = 14;");
+    assert.equal(f.prs.length, 1);
+  } },
+  pr_head_routing: { title: "routing sees the API head of a PR whose refs/pull head is frozen behind it, so a conflict only the newer head has queues an update", run: async () => {
+    await implement(1);
+    const remote = resolve("remote.git"), branch = f.prs[0].head.ref, item = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 201);
+    tasks.cancelQueuedTasks(item.id, "Isolate"); await route(); tasks.cancelQueuedTasks(item.id, "Isolate");
+    f.frozen.add(201);
+    git(".", "clone", "-b", branch, remote, "pr-edit");
+    writeFileSync("pr-edit/src/conflict.ts", "export const conflict = 'pr';\n");
+    git(resolve("pr-edit"), "add", "."); commit(resolve("pr-edit"), "Add conflicting file"); git(resolve("pr-edit"), "push", "origin", branch);
+    changeMain("src/conflict.ts", "export const conflict = 'main';\n");
+    await route();
+    assert.notEqual(git(remote, "rev-parse", "refs/pull/201/head"), git(remote, "rev-parse", branch));
+    assert.equal(all(s.tasks).filter((t) => t.subjectId === item.id && t.status === "queued" && t.action === "resolve_conflicts").length, 1);
+  } },
+  behind_unpublished: { title: "a retained workspace holding a commit the shared repository has never seen is merged with a behind main in code, without the agent", layouts: ["clone"], run: async () => {
+    const first = await implement(1), remote = resolve("remote.git"), workspace = f.row(s.workspaces, first.workspaceId);
+    const item = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 201);
+    tasks.cancelQueuedTasks(item.id, "Isolate");
+    writeFileSync(resolve(workspace.path, "src/local.ts"), "export const local = 1;\n");
+    git(workspace.path, "add", "."); commit(workspace.path, "Unpublished work");
+    const local = git(workspace.path, "rev-parse", "HEAD");
+    if (layout === "clone") assert.throws(() => git(f.config.github.repositoryPath, "cat-file", "-e", local + "^{commit}"));
+    changeMain("src/other.ts", "export const other = 1;\n");
+    const calls = f.requests.length;
+    tasks.enqueueTask({ subjectId: item.id, action: "resolve_conflicts", reason: "Merge main", input: {} });
+    const merged = await success();
+    assert.equal(f.requests.length, calls, "a clean update needs no model");
+    const head = git(remote, "rev-parse", f.prs[0].head.ref);
+    assert.equal(merged.publication.publishedCommitSha, head);
+    git(remote, "merge-base", "--is-ancestor", local, head);
+    git(remote, "merge-base", "--is-ancestor", git(resolve("seed"), "rev-parse", "main"), head);
+  } },
   sandbox: { title: "Linux sandbox contains preparation, agent Bash and commit hooks while a fresh clone validates and publishes", needsSandbox: true,
     seed: () => {
       writeFileSync("outside-secret.txt", "controller-only-canary");
@@ -2221,7 +2272,7 @@ export const scenarios = {
         assert.match(readFileSync("/proc/self/status","utf8"),/NoNewPrivs:\\s+1/);
         mkdirSync(".scrat",{recursive:true});appendFileSync(".scrat/sandbox-proof.jsonl",JSON.stringify({phase:process.argv[2]})+"\\n");`);
     },
-    configure: [(config) => { config.workspace = { sandbox: true, prepare: [[process.execPath, "sandbox-probe.mjs", "prepare"]], validate: [[process.execPath, "sandbox-probe.mjs", "validate"]] }; }],
+    configure: [(config) => { config.workspace = { sandbox: true, layout: "clone", prepare: [[process.execPath, "sandbox-probe.mjs", "prepare"]], validate: [[process.execPath, "sandbox-probe.mjs", "validate"]] }; }],
     run: async () => {
       f.script = [
         { name: "bash", args: { command: `${process.execPath} sandbox-probe.mjs bash && printf 'export const value = 13;\\n' > src/app.ts` } },
@@ -3408,7 +3459,8 @@ export const scenarios = {
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const spec = Object.hasOwn(scenarios, scenario) ? scenarios[scenario] : undefined;
   if (!spec) throw new Error("Unknown scenario " + scenario);
-  f = await fixture(scenario, spec);
+  if (layout && !spec.layouts?.includes(layout)) throw new Error("Unknown layout " + layout);
+  f = await fixture(scenario, spec, layout);
   ({ db, schema: s, tasks, git, commit } = f);
   try {
     await spec.run();

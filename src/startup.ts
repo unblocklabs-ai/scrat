@@ -16,12 +16,14 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 
 // @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: {
-  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number; corrections?: { incomplete?: number } }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; resolve?: Resolver; slack?: { enabled?: boolean; channel?: string }; workspace?: { heavyCommands?: string[]; sandbox?: boolean; commandMemoryMax?: string | null; validate?: string[][] };
+  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number; corrections?: { incomplete?: number } }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; resolve?: Resolver; slack?: { enabled?: boolean; channel?: string }; workspace?: { heavyCommands?: string[]; sandbox?: boolean; layout?: string; commandMemoryMax?: string | null; validate?: string[][] };
   actions: Record<string, Partial<ActionSettings>>;
 } = config) {
   const modelRuntime = await sharedModelRuntime();
   const problems: string[] = [];
   if (settings.workspace?.sandbox !== undefined && typeof settings.workspace.sandbox !== "boolean") problems.push("workspace.sandbox must be a boolean");
+  if (settings.workspace?.layout !== undefined && settings.workspace.layout !== "worktree" && settings.workspace.layout !== "clone") problems.push('workspace.layout must be "worktree" or "clone"');
+  if (settings.workspace?.sandbox && settings.workspace.layout !== "clone") problems.push('workspace.sandbox requires workspace.layout "clone"');
   if (settings.workspace?.sandbox) {
     if (process.platform !== "linux") problems.push("workspace.sandbox requires Linux bubblewrap");
     else await access("/usr/bin/bwrap").catch(() => { problems.push("workspace.sandbox requires /usr/bin/bwrap"); });

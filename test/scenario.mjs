@@ -1584,6 +1584,10 @@ export const scenarios = {
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
     await assert.rejects(validateStaticConfig(variant((c) => { c.harness.maxConcurrentValidations = 0; })), /maxConcurrentValidations must be a positive integer/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.harness.commandTimeoutSeconds = 0; })), /commandTimeoutSeconds must be a positive integer/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = true; c.workspace.commandMemoryMax = "lots"; })), /commandMemoryMax must be null or a size/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = true; c.workspace.commandMemoryMax = "0"; })), /commandMemoryMax must be null or a size/);
+    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = false; c.workspace.commandMemoryMax = "6G"; })), /commandMemoryMax requires workspace\.sandbox/);
+    await validateStaticConfig(variant((c) => { c.workspace.commandMemoryMax = null; }));
     await assert.rejects(validateStaticConfig(variant((c) => { c.harness.agentTimeoutSeconds = 1.5; })), /agentTimeoutSeconds must be a positive integer/);
     for (const bad of [-1, 1.5]) await assert.rejects(validateStaticConfig(variant((c) => { c.harness.corrections.incomplete = bad; })), /harness\.corrections\.incomplete must be a non-negative integer/);
     await validateStaticConfig(variant((c) => { c.harness.corrections.incomplete = 0; }));
@@ -2260,6 +2264,23 @@ export const scenarios = {
       assert.equal(git(legacyPath, "rev-parse", "MERGE_HEAD"), git(checkout, "rev-parse", "HEAD"));
       assert.equal(readFileSync(resolve(legacyPath, ".scrat/notes.md"), "utf8"), "Retain the unresolved merge\n");
       assert.ok(fs.lstatSync(resolve(legacyPath, ".git")).isDirectory());
+    } },
+  command_memory: { title: "a sandboxed command that exceeds workspace.commandMemoryMax is killed alone, fails the run as out of memory without re-prompting the agent and accepts validation-only retry", needsSandbox: true, needsSystemd: true,
+    configure: [(config) => {
+      config.workspace = { sandbox: true, layout: "clone", commandMemoryMax: "128M", environment: { ALLOCATE_MB: "512" }, validate: [[process.execPath, "-e", "const n=Number(process.env.ALLOCATE_MB);const held=[];for(let i=0;i<n;i++){const b=Buffer.alloc(1024*1024);b.fill(1);held.push(b);}console.log('allocated',held.length);"]] };
+    }],
+    run: async () => {
+      f.addIssue(1, ["scrat"]); f.enqueue(1, "implement");
+      const failed = await run();
+      assert.ok(failed.error); assert.equal(failed.error.code, "COMMAND_OUT_OF_MEMORY"); assert.equal(failed.stage, "validating");
+      assert.match(failed.error.message, /workspace\.commandMemoryMax \(128M\).*out of memory/);
+      assert.equal(f.requests.length, 2, "agent turn only");
+      assert.equal(f.prs.length, 0);
+      const { config: live } = await f.app("config.ts");
+      live.workspace.environment.ALLOCATE_MB = "1";
+      tasks.retryTask(failed.taskId, "validation");
+      const retried = await success();
+      assert.equal(retried.publication.status, "published");
     } },
   isolation: { title: "workspace commands, hooks and agent tools cannot reach Scrat credentials, and credential material is never published", seed: seedIsolation, configure: [configureIsolation], run: async () => {
     const key = process.env.GITHUB_APP_PRIVATE_KEY;

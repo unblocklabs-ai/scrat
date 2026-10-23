@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { config, getRepositoryPath } from "./config.ts";
@@ -31,7 +32,7 @@ function workspaceRoot() {
   return existsSync(path) ? realpathSync(path) : path;
 }
 
-export function sandboxCommand(cwd: string, file: string, args: string[], environment: NodeJS.ProcessEnv, readOnly: string[] = []) {
+export function sandboxCommand(cwd: string, file: string, args: string[], environment: NodeJS.ProcessEnv, readOnly: string[] = [], track = false) {
   if (!config.workspace?.sandbox) return { file, args, env: environment };
   if (process.platform !== "linux" || !existsSync("/usr/bin/bwrap")) throw new Error("workspace.sandbox requires Linux bubblewrap; refusing unsandboxed execution");
   if (!inWorkspace(cwd)) throw new Error("Sandbox commands must run inside an owned workspace");
@@ -40,6 +41,7 @@ export function sandboxCommand(cwd: string, file: string, args: string[], enviro
   const home = join(realpathSync("data/sandbox-homes"), relative(workspaceRoot(), workspace).split("/")[0]);
   mkdirSync(home, { recursive: true, mode: 0o700 });
   if (realpathSync(home) !== home) throw new Error("Sandbox home is not its owned directory");
+  const limit = config.workspace?.commandMemoryMax;
   const mounts = ["--unshare-all", "--share-net", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
     "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run"];
   const bind = (source: string, destination = source, writable = false) => {
@@ -68,5 +70,23 @@ export function sandboxCommand(cwd: string, file: string, args: string[], enviro
   const env = Object.fromEntries(Object.entries(environment).filter(([name]) =>
     !name.startsWith("XDG_") && !name.startsWith("GIT_CONFIG") && !["HOME", "PATH", "DOCKER_HOST", "TMPDIR", "TMP", "TEMP"].includes(name)));
   Object.assign(env, { HOME: "/home/scrat", PATH: `${dirname(process.execPath)}:/opt/scrat-bin:/usr/local/bin:/usr/bin:/bin:/sbin`, TMPDIR: "/tmp", TMP: "/tmp", TEMP: "/tmp", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", COREPACK_DEFAULT_TO_LATEST: "0", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" });
-  return { file: "/usr/bin/bwrap", args: [...mounts, "--chdir", workspace, "--", file === "git" ? "/usr/bin/git" : file, ...args], env };
+  const bwrap = [...mounts, "--chdir", workspace, "--", file === "git" ? "/usr/bin/git" : file, ...args];
+  if (!limit) return { file: "/usr/bin/bwrap", args: bwrap, env, unit: undefined };
+  const unit = `scrat-${relative(workspaceRoot(), workspace).split("/")[0].replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 60)}-${randomBytes(6).toString("hex")}.scope`;
+  for (const name of ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]) if (process.env[name]) env[name] = process.env[name];
+  const unset = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"].flatMap((name) => ["--unsetenv", name]);
+  return {
+    file: "/usr/bin/systemd-run",
+    args: ["--user", "--scope", "--quiet", ...(track ? [] : ["--collect"]), `--unit=${unit}`, "-p", `MemoryMax=${limit}`, "-p", "MemorySwapMax=0", "-p", "OOMPolicy=stop", "--", "/usr/bin/bwrap", ...unset, ...bwrap],
+    env, unit,
+  };
+}
+
+export async function reportMemoryKill(unit: string | undefined, error: unknown) {
+  if (!unit) return error;
+  const run = promisify(execFile);
+  const { stdout } = await run("/usr/bin/systemctl", ["--user", "show", unit, "-p", "Result", "--value"], { env: process.env }).catch(() => ({ stdout: "" }));
+  await run("/usr/bin/systemctl", ["--user", "reset-failed", unit], { env: process.env }).catch(() => undefined);
+  if (stdout.trim() !== "oom-kill") return error;
+  return Object.assign(new Error(`Command exceeded workspace.commandMemoryMax (${config.workspace?.commandMemoryMax}) and was killed for running out of memory`, { cause: error }), { code: "COMMAND_OUT_OF_MEMORY" });
 }

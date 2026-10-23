@@ -16,7 +16,7 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 
 // @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: {
-  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number; corrections?: { incomplete?: number } }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; resolve?: Resolver; slack?: { enabled?: boolean; channel?: string }; workspace?: { heavyCommands?: string[]; sandbox?: boolean; validate?: string[][] };
+  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number; corrections?: { incomplete?: number } }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; resolve?: Resolver; slack?: { enabled?: boolean; channel?: string }; workspace?: { heavyCommands?: string[]; sandbox?: boolean; commandMemoryMax?: string | null; validate?: string[][] };
   actions: Record<string, Partial<ActionSettings>>;
 } = config) {
   const modelRuntime = await sharedModelRuntime();
@@ -25,6 +25,12 @@ export async function validateStaticConfig(settings: {
   if (settings.workspace?.sandbox) {
     if (process.platform !== "linux") problems.push("workspace.sandbox requires Linux bubblewrap");
     else await access("/usr/bin/bwrap").catch(() => { problems.push("workspace.sandbox requires /usr/bin/bwrap"); });
+  }
+  const memoryMax = settings.workspace?.commandMemoryMax;
+  if (memoryMax !== undefined && memoryMax !== null) {
+    if (typeof memoryMax !== "string" || !/^(?:[1-9]\d*[KMGT]?|(?:100|[1-9]\d?)%)$/.test(memoryMax)) problems.push("workspace.commandMemoryMax must be null or a size such as 6G or a percentage such as 50%");
+    else if (!settings.workspace?.sandbox) problems.push("workspace.commandMemoryMax requires workspace.sandbox");
+    else if (process.platform === "linux") await access("/usr/bin/systemd-run").catch(() => { problems.push("workspace.commandMemoryMax requires /usr/bin/systemd-run"); });
   }
   const checkEntry = (label: string, { provider, model, thinkingLevel }: Entry) => {
     if (!(thinkingLevels as readonly string[]).includes(thinkingLevel)) problems.push(`${label}: invalid thinking level ${thinkingLevel}`);

@@ -26,6 +26,7 @@
   },
   "workspace": {
     "sandbox": false,
+    "commandMemoryMax": null,
     "environment": {
       "VITEST_MAX_WORKERS": "1"
     },

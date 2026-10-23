@@ -94,10 +94,16 @@ export async function fetchRepository(repositoryPath: string, remote: string, ba
   });
 }
 
-export async function fetchPullRequestHead(repositoryPath: string, remote: string, number: number, env = childEnvironment()) {
+export async function fetchPullRequestHead(repositoryPath: string, remote: string, number: number, expectedSha: string, env = childEnvironment()) {
   const ref = `refs/remotes/origin/pr/${number}`;
-  await serialized(repositoryFetches, resolve(repositoryPath), () => git(repositoryPath, ["fetch", "--", remote, `+refs/pull/${number}/head:${ref}`], env));
-  return ref;
+  const resolved = () => git(repositoryPath, ["rev-parse", "--verify", "--quiet", ref]).catch(() => "");
+  return serialized(repositoryFetches, resolve(repositoryPath), async () => {
+    await git(repositoryPath, ["fetch", "--", remote, `+refs/pull/${number}/head:${ref}`], env);
+    if (await resolved() !== expectedSha) await git(repositoryPath, ["fetch", "--", remote, `+${expectedSha}:${ref}`], env).catch(() => undefined);
+    const actual = await resolved();
+    if (actual !== expectedSha) throw new Error(`PR #${number} head ${expectedSha} could not be fetched; ${ref} resolves to ${actual || "nothing"}`);
+    return ref;
+  });
 }
 
 export async function hasPendingMerge(repositoryPath: string) {

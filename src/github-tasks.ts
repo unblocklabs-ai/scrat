@@ -64,7 +64,7 @@ async function cleanupClosedItem(item: Item) {
 
 async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observation: ItemObservation, pr: GithubPullRequest, mainSha: string, routes: Routes): Promise<PrMaintenanceFacts> {
   const { repositoryPath, remote, env } = ctx;
-  const headRef = await fetchPullRequestHead(repositoryPath, remote, pr.number, env);
+  const headRef = await fetchPullRequestHead(repositoryPath, remote, pr.number, pr.head.sha, env);
   const headSha = await git(repositoryPath, ["rev-parse", headRef]);
   const conflicts = await hasConflicts(repositoryPath, mainSha, headSha);
   const lastRun = latestFinishedRun(item.id);
@@ -152,7 +152,10 @@ async function routeObserved(ctx: SyncContext, item: Item, context: GithubContex
   let added = 0;
   if ((routes.conflicts || routes.feedback || routes.repairs.length) && "head" in context.item) {
     if (context.item.head.repo?.full_name !== repository) return added;
-    if (routes.conflicts || routes.feedback) added += applyDecisions(item.id, planPrMaintenance(await gatherPrMaintenanceFacts(ctx, item, observation, context.item, mainSha, routes)));
+    if (routes.conflicts || routes.feedback) {
+      try { added += applyDecisions(item.id, planPrMaintenance(await gatherPrMaintenanceFacts(ctx, item, observation, context.item, mainSha, routes))); }
+      catch (error) { log.warn({ event: "github.pr_maintenance_skipped", subjectId: item.id, err: error }); }
+    }
   }
   try {
     added += item.kind === "pr" ? await routePrReview(ctx, item, observation, mainSha, routes) : await routeIssueReview(item, observation, mainSha, routes.review);

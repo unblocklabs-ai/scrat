@@ -16,7 +16,7 @@ export async function fixture(scenario, spec) {
   symlinkSync(resolve(repository, "node_modules"), resolve(root, "app/node_modules"));
   process.chdir(root);
   const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-  const pulled = new Map();
+  const pulled = new Map(), frozen = new Set(), forced = new Map();
   const headOf = (ref) => {
     try { return readFileSync(resolve("remote.git/refs/heads", ref), "utf8").trim(); } catch {}
     try { const packed = readFileSync(resolve("remote.git/packed-refs"), "utf8").split("\n").find((line) => line.endsWith(" refs/heads/" + ref)); if (packed) return packed.split(" ")[0]; } catch {}
@@ -209,8 +209,8 @@ export async function fixture(scenario, spec) {
     const path = url.pathname, method = options.method ?? "GET", body = options.body ? JSON.parse(options.body) : {};
     for (const pr of prs) {
       const sha = headOf(pr.head.ref);
-      pr.head.sha = sha;
-      if (pulled.get(pr.number) !== sha) { pulled.set(pr.number, sha); git(resolve("remote.git"), "update-ref", `refs/pull/${pr.number}/head`, sha); }
+      pr.head.sha = forced.get(pr.number) ?? sha;
+      if (!frozen.has(pr.number) && pulled.get(pr.number) !== sha) { pulled.set(pr.number, sha); git(resolve("remote.git"), "update-ref", `refs/pull/${pr.number}/head`, sha); }
     }
     const credential = bearer(options);
     const call = { method, path: path + url.search, token: credential }; calls.push(call);
@@ -307,7 +307,7 @@ export async function fixture(scenario, spec) {
   };
   const enqueue = (number, action = "review_issue", input = {}) => tasks.enqueueTask({ subjectId: "issue-" + number, action, reason: "Integration", input });
   const row = (table, id) => db.select().from(table).all().find((entry) => entry.id === id);
-  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, pat, user, githubApp, modes, requests, calls, slack, rate, issues, prs, comments, reviews, writes, faults, addIssue, enqueue, row,
+  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, pat, user, githubApp, modes, requests, calls, slack, rate, issues, prs, comments, reviews, writes, faults, frozen, forced, addIssue, enqueue, row,
     set onModel(value) { onModel = value; },
     set script(value) { script = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },

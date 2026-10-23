@@ -154,7 +154,7 @@ async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
   const validationOnly = run.stage === "validating";
   const baseRef = mainSha;
   const headRef = pullRequest
-    ? await fetchPullRequestHead(repositoryPath, observation.remote, pullRequest.number, gitEnvironment)
+    ? await fetchPullRequestHead(repositoryPath, observation.remote, pullRequest.number, pullRequest.head.sha, gitEnvironment)
     : baseRef;
   const preparedHead = await git(repositoryPath, ["rev-parse", headRef]);
   let workspace = !readOnly && item.workspaceId ? getWorkspace(item.workspaceId) : undefined;

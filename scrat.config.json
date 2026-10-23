@@ -4,9 +4,13 @@
     "maxConcurrentValidations": 3,
     "commandTimeoutSeconds": 3600,
     "commandOutputTailBytes": 65536,
+    "maxOutputBytes": 16777216,
+    "gitNetworkTimeoutSeconds": 600,
+    "idlePollSeconds": 30,
     "agentTimeoutSeconds": 3600,
     "drainTimeoutSeconds": 900,
-    "corrections": { "incomplete": 1 },
+    "retryJitter": 0.1,
+    "corrections": { "incomplete": 1, "validation": 2, "format": 2 },
     "logLevel": "info"
   },
   "github": {
@@ -21,9 +25,21 @@
     "fetchIntervalSeconds": 300
   },
   "bindings": {},
+  "context": {
+    "inlinePaths": 200,
+    "historyRuns": 10,
+    "historyBytes": 65536
+  },
+  "tools": {
+    "readBytes": { "default": 32768, "max": 65536 },
+    "git": { "maxCommits": 200, "maxScopeBytes": 1048576 },
+    "http": { "timeoutSeconds": 30, "maxRequestBytes": 65536 },
+    "browser": { "steps": 40, "sessionSeconds": 300, "stepSeconds": 30 }
+  },
   "slack": {
     "enabled": false,
-    "channel": ""
+    "channel": "",
+    "maxRetryAfterSeconds": 30
   },
   "workspace": {
     "sandbox": false,

@@ -1,9 +1,9 @@
+import { config } from "./config.ts";
 import { withOperation } from "./logging.ts";
 import { assertPublishable } from "./secrets.ts";
 
 const apiUrl = "https://slack.com/api/";
 const maxTextLength = 3000;
-const maxRetryAfterSeconds = 30;
 
 export const escapeSlack = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
@@ -18,7 +18,7 @@ async function call(method: string, body: Record<string, unknown>): Promise<Reco
     });
     if (response.status === 429) {
       const seconds = Number(response.headers.get("retry-after"));
-      if (attempt > 0 || !Number.isFinite(seconds) || seconds < 0 || seconds > maxRetryAfterSeconds) {
+      if (attempt > 0 || !Number.isFinite(seconds) || seconds < 0 || seconds > config.slack.maxRetryAfterSeconds) {
         throw new Error(`Slack ${method} was rate limited (retry-after ${response.headers.get("retry-after")})`);
       }
       await new Promise((done) => setTimeout(done, seconds * 1000));

@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { isContextOverflow, isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { Logger } from "pino";
 import { config, type ThinkingLevel } from "./config.ts";
@@ -12,10 +13,8 @@ import { git } from "./git.ts";
 import type { Manifest, ToolName } from "./manifests.ts";
 import { createAgentTools } from "./tools.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
-import { redactSecrets } from "./errors.ts";
+import { redactSecrets, transientInferenceCode } from "./errors.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
-
-const maxFormatCorrections = 2;
 
 function footerRules(requireGrade: boolean) {
   return `SCRAT_READY (optional, only when ready)\nSCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of S, A, B, C, D, F, with no plus or minus)\nSCRAT_STATUS: complete, incomplete, or needs_decision (required, and the very last line)`;
@@ -123,7 +122,9 @@ export async function executePi({ run, cwd, context, readOnly, tools, scoped, lo
     for (let corrections = 0; ; corrections++) {
       const last = session.messages.findLast((message) => message.role === "assistant");
       if (!last || last.role !== "assistant" || last.stopReason !== "stop") {
-        throw new Error(last?.role === "assistant" ? last.errorMessage || `Pi stopped: ${last.stopReason}` : "Pi returned no assistant response");
+        if (last?.role !== "assistant") throw new Error("Pi returned no assistant response");
+        const transient = !isContextOverflow(last, model.contextWindow) && isRetryableAssistantError(last);
+        throw Object.assign(new Error(last.errorMessage || `Pi stopped: ${last.stopReason}`), transient ? { code: transientInferenceCode } : {});
       }
       try {
         const output = session.getLastAssistantText()?.trim();
@@ -144,7 +145,7 @@ export async function executePi({ run, cwd, context, readOnly, tools, scoped, lo
           ...canonicalReviewPaths([...gitPaths], tracked), ...canonicalReviewPaths([...gitPaths], baseTracked),
         ])] };
       } catch (error) {
-        if (!(error instanceof ResultFormatError) || corrections >= maxFormatCorrections) throw error;
+        if (!(error instanceof ResultFormatError) || corrections >= config.harness.corrections.format) throw error;
         log.warn({ event: "pi.format_retry", attempt: corrections + 1, error: error.message });
         await prompt(correctionMessage(error.message, requireGrade));
       }

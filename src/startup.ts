@@ -45,6 +45,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
   if (settings.github?.botName !== undefined && !/^[a-z0-9][a-z0-9-]*$/.test(slugOf(settings.github.botName))) {
     problems.push("github.botName must contain a letter or digit; its lowercase form names the selection label and the branch prefix");
   }
+  if (settings.tools && settings.tools.readBytes.max < settings.tools.readBytes.default) problems.push("tools.readBytes.max must not be less than tools.readBytes.default");
   settings.workspace?.heavyCommands?.forEach((pattern, index) => {
     try { new RegExp(pattern); } catch { problems.push(`workspace.heavyCommands[${index}] is not a valid regular expression`); }
   });
@@ -75,6 +76,8 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
   for (const manifest of manifests()) {
     const action = manifest.name, entry = { ...deploymentDefaults(manifest), ...settings.actions[action] };
     checkEntry(action, entry);
+    if (entry.retry && manifest.mode !== "review") problems.push(`${action}: retry requires mode review`);
+    if (entry.retry && entry.retry.maxDelaySeconds < entry.retry.initialDelaySeconds) problems.push(`${action}: retry.maxDelaySeconds must be at least retry.initialDelaySeconds`);
     entry.reviewers?.forEach((reviewer, index) => checkEntry(`${action} reviewer ${index + 1}`, reviewer));
     if (entry.enabled !== false) {
       const slack = [...manifest.start ?? [], ...manifest.publish].some((effect) => effect.startsWith("slack_"));

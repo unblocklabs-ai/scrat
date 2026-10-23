@@ -338,6 +338,11 @@ const validationFeedback = async () => {
       rmSync("kill-validation"); writeFileSync("exit-137", ""); f.addIssue(3, ["scrat"]); f.enqueue(3, "implement");
       const wrapped = await run();
       assert.equal(wrapped.error.exitCode, 137); assert.equal(f.requests.length, calls + 4, "agent turn only"); assert.equal(feedbackRequests().length, 2);
+      rmSync("exit-137"); const { config } = await f.app("config.ts"); config.harness.corrections.validation = 1;
+      f.addIssue(4, ["scrat"]); f.reset(4, "feedback-stubborn"); f.enqueue(4, "implement");
+      const limited = await run();
+      assert.equal(limited.error.exitCode, 7); assert.equal(feedbackRequests().length, 3);
+      assert.match(lastUser(feedbackRequests()[2]), /round 1 of 1/);
     }
   } finally { restoreLogs(); }
 };
@@ -1136,6 +1141,32 @@ export const scenarios = {
     const invalid = await run(); assert.match(invalid.error.message, /grade/i);
     assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
   } },
+  review_retry: { title: "a review whose reviewers all fail transiently is requeued with doubling delays and publishes once after recovery, while a mixed panel stays failed", run: async () => {
+    await implement(2); await route(); f.transient.failures = 8; f.reset(202, "transient");
+    const delay = () => (Date.parse(f.row(s.tasks, failed.taskId).availableAt) - Date.parse(f.row(s.runs, failed.id).finishedAt)) / 1000;
+    let failed = await run(); const task = () => f.row(s.tasks, failed.taskId);
+    assert.equal(failed.error.code, "TRANSIENT_INFERENCE"); assert.equal(task().status, "queued"); assert.equal(task().retryCount, 1);
+    assert.ok(delay() >= 60 && delay() <= 66.1, String(delay()));
+    assert.equal(await f.runNextTask(), undefined);
+    const id = task().id, available = task().availableAt; await route();
+    assert.equal(task().availableAt, available); assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 1);
+    tasks.retryTask(id); assert.equal(task().availableAt, null); assert.equal(task().retryCount, 1); assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 1);
+    failed = await run(); assert.equal(task().retryCount, 2); assert.ok(delay() >= 120 && delay() <= 132.1, String(delay()));
+    assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
+    tasks.enqueueTask({ subjectId: task().subjectId, action: "review_pr", reason: "Changed", input: {} });
+    assert.equal(task().retryCount, null); assert.equal(task().availableAt, null);
+    const reviewed = await success(); assert.equal(reviewed.taskId, id);
+    assert.equal(task().status, "completed"); assert.equal(task().retryCount, null); assert.equal(task().availableAt, null); assert.equal(f.writes.filter((w) => w.type === "comment").length, 1);
+    await implement(3); await route(); f.transient.failures = 100; f.reset(203, "transient-mixed");
+    const mixed = await run(); assert.ok(mixed.error); assert.notEqual(mixed.error.code, "TRANSIENT_INFERENCE");
+    assert.equal(f.row(s.tasks, mixed.taskId).status, "failed"); assert.equal(f.row(s.tasks, mixed.taskId).retryCount, null);
+    await implement(4); await route(); f.reset(204, "reviewer-failure");
+    const permanent = await run(); assert.ok(permanent.error); assert.equal(f.row(s.tasks, permanent.taskId).status, "failed"); assert.equal(f.row(s.tasks, permanent.taskId).retryCount, null);
+    await implement(5); await route(); f.transient.failures = 100; f.reset(205, "transient");
+    const closing = await run(); assert.equal(f.row(s.tasks, closing.taskId).status, "queued");
+    f.prs.find((pr) => pr.number === 205).state = "closed"; await route();
+    assert.equal(f.row(s.tasks, closing.taskId).status, "cancelled"); assert.equal(await f.runNextTask(), undefined);
+  } },
   footer: { title: "quoted control markers stay report text and cannot supply a PR grade or issue approval", run: async () => {
     await implement(1); f.reset(201, "quoted-grade"); await route();
     const reviewed = await success();
@@ -1208,7 +1239,7 @@ export const scenarios = {
     const reviewed = await success();
     assert.equal(reviewed.headSha, newer);
     const { fetchPullRequestHead } = await f.app("git.ts");
-    assert.equal(await fetchPullRequestHead(resolve("checkout"), resolve("missing.git"), 201, newer), "refs/remotes/origin/pr/201", "A matching local ref needs no fetch");
+    assert.equal(await fetchPullRequestHead(resolve("checkout"), resolve("missing.git"), 201, newer), newer, "A matching local ref needs no fetch");
     await assert.rejects(fetchPullRequestHead(resolve("checkout"), resolve("missing.git"), 201, stale), /fetch/);
     const writes = f.writes.length;
     f.forced.set(201, "0".repeat(40)); tasks.enqueueManualTasks("review_pr", ["201"]);
@@ -1623,10 +1654,25 @@ export const scenarios = {
     invalid((c) => { c.harness.agentTimeoutSeconds = 1.5; }, /harness\.agentTimeoutSeconds: must be integer/);
     invalid((c) => { c.harness.corrections.incomplete = -1; }, /harness\.corrections\.incomplete: must be >= 0/);
     invalid((c) => { c.harness.corrections.incomplete = 1.5; }, /harness\.corrections\.incomplete: must be integer/);
+    invalid((c) => { c.harness.corrections.validation = -1; }, /harness\.corrections\.validation: must be >= 0/);
+    invalid((c) => { c.harness.gitNetworkTimeoutSeconds = 0; }, /harness\.gitNetworkTimeoutSeconds: must be >= 1/);
+    invalid((c) => { c.context.historyRuns = 0; }, /context\.historyRuns: must be >= 1/);
+    invalid((c) => { c.context.windowSize = 1; }, /context\.windowSize: unknown setting/);
+    invalid((c) => { delete c.tools; }, /tools: required/);
+    invalid((c) => { c.tools.readBytes.max = "big"; }, /tools\.readBytes\.max: must be integer/);
+    invalid((c) => { c.tools.git.maxCommits = 0; }, /tools\.git\.maxCommits: must be >= 1/);
+    invalid((c) => { c.tools.http.timeoutSeconds = 1.5; }, /tools\.http\.timeoutSeconds: must be integer/);
+    invalid((c) => { c.tools.browser.steps = 0; }, /tools\.browser\.steps: must be >= 1/);
+    invalid((c) => { c.slack.maxRetryAfterSeconds = 0; }, /slack\.maxRetryAfterSeconds: must be >= 1/);
     await validateStaticConfig(variant((c) => { c.harness.corrections.incomplete = 0; }));
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.heavyCommands = ["^(unclosed"]; })), /heavyCommands\[0\] is not a valid regular expression/);
     for (const disabled of [null, ""]) await validateStaticConfig(variant((c) => { c.actions.address_review.exhaustedLabel = disabled; }));
     invalid((c) => { c.actions.address_review.exhaustedLabel = 5; }, /actions\.address_review\.exhaustedLabel: must be string/);
+    await validateStaticConfig(variant((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 5, maxDelaySeconds: 5 }; }));
+    await validateStaticConfig(variant((c) => { c.actions.review_pr.retry = null; }));
+    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 30 }; })), /review_pr: retry\.maxDelaySeconds must be at least retry\.initialDelaySeconds/);
+    invalid((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 0, maxDelaySeconds: 30 }; }, /actions\.review_pr\.retry\.initialDelaySeconds: must be >= 1/);
+    invalid((c) => { c.harness.retryJitter = 2; }, /harness\.retryJitter: must be <= 1/);
     const lines = captureLogs();
     const toolResults = () => JSON.stringify(f.requests.findLast((entry) => entry.request.messages.some((message) => message.role === "tool")).request.messages.filter((message) => message.role === "tool"));
     const attempt = async (number, mode) => { f.addIssue(number, ["scrat"]); f.reset(number, mode); f.enqueue(number, "implement"); return run(); };
@@ -1836,6 +1882,7 @@ export const scenarios = {
       [{ actions: { implement: { model: "no-such-model" } } }, `implement: no Pi model ${provider}/no-such-model`],
       [{ actions: { implement: { skill: "skills/missing/SKILL.md" } } }, `implement: skill file not found: ${resolve("app/skills/missing/SKILL.md")}`],
       [{ workspace: { heavyCommands: ["^(unclosed"] } }, "workspace.heavyCommands[0] is not a valid regular expression"],
+      [{ actions: { implement: { retry: { initialDelaySeconds: 1, maxDelaySeconds: 2 } } } }, "implement: retry requires mode review"],
     ]) {
       assert.deepEqual(startup(overrides), { status: 1, message: `Invalid Scrat configuration:\n- ${problem}` }, problem);
       assert.equal(JSON.stringify([all(s.tasks), all(s.runs)]), before, "no task is claimed on a rejected start");
@@ -2225,6 +2272,9 @@ export const scenarios = {
     assert.ok(last.indexOf("report 11") < last.indexOf("report 10") && last.indexOf("report 10") < last.indexOf("report 3"), "newest first");
     assert.ok(!/report 1\b/.test(last), "the history keeps the newest ten runs");
     assert.equal((last.match(/^## /gm) ?? []).length, 10);
+    const { config } = await f.app("config.ts");
+    config.context.historyRuns = 3; await review(1);
+    assert.equal((seen.at(-1).match(/^## /gm) ?? []).length, 3); config.context.historyRuns = 10;
     const { r: huge, request } = await review(1);
     assert.match(request.context.files.history, /history\.md$/);
     rewrite(huge, "x".repeat(200 * 1024));
@@ -2232,6 +2282,14 @@ export const scenarios = {
     const capped = seen.at(-1);
     assert.ok(Buffer.byteLength(capped) <= 64 * 1024 && Buffer.byteLength(capped) > 60 * 1024, Buffer.byteLength(capped) + capped.slice(0, 300));
     assert.ok(capped.includes("## ") && !capped.includes("report 10"), "a report over the cap crowds out older ones");
+    config.context.historyBytes = 2048; await review(1);
+    assert.ok(Buffer.byteLength(seen.at(-1)) <= 2048 && Buffer.byteLength(seen.at(-1)) > 1500);
+    const { buildAgentInput } = await f.app("agent-input.ts"), sha = "a".repeat(40), evaluated = { revision: "r", baseBranch: "main", headSha: undefined, item: { number: 1, title: "t", body: "", url: "u" }, comments: [], commentRevisions: [] };
+    const build = async (paths) => JSON.parse((await buildAgentInput({ run: huge, task: f.row(s.tasks, huge.taskId), evaluated, diffBaseSha: sha, diffPaths: paths, mainSha: sha, headSha: sha, baseRef: "main", mergeInProgress: false, workspace: { path: "w", branch: null } })).prompt);
+    assert.deepEqual((await build(["a", "b", "c"])).diffPaths, ["a", "b", "c"]);
+    config.context.inlinePaths = 2;
+    const offloaded = await build(["a", "b", "c"]);
+    assert.equal(offloaded.diffPathCount, 3); assert.equal(offloaded.diffPaths, undefined); assert.equal(readFileSync(offloaded.files.diffPaths, "utf8"), "a\nb\nc\n");
   } },
   commit_hook: { title: "commit hooks cannot attach verification receipts to an unverified tree", run: async () => {
     f.addIssue(1); f.enqueue(1, "implement");
@@ -2551,6 +2609,9 @@ export const scenarios = {
     assert.deepEqual(merged.workspace.validate, defaults.workspace.validate);
 
     probe(undefined, ""); assert.equal(readFileSync(local, "utf8"), "{}\n");
+    const { validateStaticConfig: startupCheck } = await f.app("startup.ts"), narrow = structuredClone(f.config);
+    narrow.tools.readBytes.max = narrow.tools.readBytes.default - 1;
+    await assert.rejects(startupCheck(narrow), /tools\.readBytes\.max must not be less than tools\.readBytes\.default/);
     const { validateConfig } = await f.app("config-schema.ts");
     const check = (overrides, message) => assert.throws(() => validateConfig(buildConfig(defaults, overrides)), message);
     check({ harness: 8 }, /^Error: Invalid Scrat configuration:\n- harness: must be object$/);
@@ -2653,6 +2714,10 @@ export const scenarios = {
     const before = f.slack.calls.length; f.slack.rateLimitOnce = true;
     assert.ok(await postMessage({ channel: "C1", text: "after limit" }));
     assert.equal(f.slack.calls.length, before + 2);
+    const { config: slackConfig } = await f.app("config.ts");
+    slackConfig.slack.maxRetryAfterSeconds = 1; f.slack.rateLimitOnce = true; f.slack.retryAfter = "2";
+    await assert.rejects(postMessage({ channel: "C1", text: "too long" }), /rate limited \(retry-after 2\)/);
+    slackConfig.slack.maxRetryAfterSeconds = 30; f.slack.retryAfter = "0";
     f.slack.down = true;
     await assert.rejects(postMessage({ channel: "C1", text: "outage" }), /HTTP 503/);
     f.slack.down = false; f.slack.fail = "channel_not_found";
@@ -2773,7 +2838,7 @@ export const scenarios = {
 
     count = f.slack.calls.length; f.slack.rateLimitOnce = true;
     restarted.queueStatus({ subjectId: "issue-2", type: "run.completed", data: { stage: "after limit" } });
-    await until(() => posts().at(-1).body.text === "Completed at stage after limit");
+    await until(() => f.slack.calls.length === count + 2 && posts().at(-1).body.text === "Completed at stage after limit");
     assert.equal(f.slack.calls.length, count + 2); assert.equal(failures.length, 0);
 
     config.slack.channel = "C9999999999";
@@ -3240,6 +3305,17 @@ export const scenarios = {
       assert.deepEqual(asked, ["api.example.test"]);
     } finally { globalThis.fetch = stubbed; }
     assert.equal(f.external.length, seen);
+    const { config } = await f.app("config.ts"), { createReviewGitTool } = await f.app("review-git.ts");
+    config.tools.http.maxRequestBytes = 8;
+    const post = createHttpTool({ settings: { methods: ["POST"] }, binding: f.config.bindings.scout, runId: "run" });
+    await assert.rejects(post.execute("call", { method: "POST", url: "https://api.example.test/data", body: "123456789" }, undefined, undefined, {}), /Refused: body exceeds 8 bytes/);
+    const repository = resolve(f.config.github.repositoryPath);
+    writeFileSync(resolve(repository, "second.txt"), "second\n"); git(repository, "add", "."); commit(repository, "Second commit");
+    const tip = git(repository, "rev-parse", "HEAD");
+    assert.equal(git(repository, "rev-list", "--count", "HEAD"), "2");
+    config.tools.git.maxCommits = 1;
+    const history = await createReviewGitTool(repository, { head: tip }, new Set()).execute("call", { operation: "log" }, undefined, undefined, {});
+    assert.equal(history.content[0].text.split("\n").length, 1);
     const { readManifests } = await f.app("manifests.ts");
     for (const manifest of readManifests(resolve("app"))) assert.ok(!manifest.tools.some((tool) => ["http", "browser", "github_search"].includes(tool)) && !manifest.http && !manifest.browser, manifest.name);
   } },
@@ -3345,6 +3421,10 @@ export const scenarios = {
     await assert.rejects(act(slow, { action: "text" }), /limited to 1 seconds per session/);
     await assert.rejects(act(slow, { action: "goto", url: "https://shop.example.test/" }), /limited to 1 seconds per session/);
     assert.equal(slow.state.closed, true); assert.equal(slow.state.visited.length, 1);
+    const { config: liveConfig } = await f.app("config.ts"); liveConfig.tools.browser.steps = 2;
+    const configured = make();
+    for (let n = 0; n < 2; n++) await act(configured, { action: "goto", url: "https://shop.example.test/" });
+    await assert.rejects(act(configured, { action: "text" }), /limited to 2 actions per session/);
 
     const installed = await import("playwright-core").then(() => true, () => false);
     if (!installed) await assert.rejects(validateStaticConfig({ ...f.config, resolve: async () => publicAnswer }), /review_issue: The browser tool needs the optional playwright-core package, which is not installed/);

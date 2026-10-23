@@ -1,12 +1,9 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { posix } from "node:path";
 import { Type } from "typebox";
+import { config } from "./config.ts";
 import { blobSize, git, gitPage, type GitPage } from "./git.ts";
 
-export const defaultBytes = 32 * 1024;
-export const maxBytes = 64 * 1024;
-const maxCommits = 200;
-const maxScopeBytes = 1024 * 1024;
 const operations = ["diff_stat", "diff", "log", "show"];
 
 export function pageText(page: GitPage, offset: number, size = page.total) {
@@ -41,11 +38,11 @@ export function createReviewGitTool(cwd: string, revisions: Record<string, strin
     name: "git",
     label: "Read-only Git",
     description: [
-      "Inspect Git history without a shell. Output is capped at 64 KiB per call (default 32 KiB); when it is truncated the result says so and gives the offset for the next call.",
+      `Inspect Git history without a shell. Output is capped at ${config.tools.readBytes.max} bytes per call (default ${config.tools.readBytes.default}); when it is truncated the result says so and gives the offset for the next call.`,
       `Revisions are hex commit SHAs or: ${names.join(", ")}.`,
       "operation=diff_stat: change summary between `from` and `to` (optional `path` limits it to a file or directory).",
       "operation=diff: patch between `from` and `to` (optional `path` limits it to a file or directory).",
-      `operation=log: commit history ending at \`revision\` (default head), at most ${maxCommits} commits, optionally for \`path\`.`,
+      `operation=log: commit history ending at \`revision\` (default head), at most ${config.tools.git.maxCommits} commits, optionally for \`path\`.`,
       "operation=show: contents of `path` at `revision`.",
     ].join("\n"),
     parameters: Type.Object({
@@ -53,9 +50,9 @@ export function createReviewGitTool(cwd: string, revisions: Record<string, strin
       from: Type.Optional(Type.String()), to: Type.Optional(Type.String()), revision: Type.Optional(Type.String()),
       path: Type.Optional(Type.String()),
       offset: Type.Optional(Type.Integer({ minimum: 0, description: "Byte offset into the output, for paging" })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: maxBytes, description: `Maximum bytes to return (default ${defaultBytes})` })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: config.tools.readBytes.max, description: `Maximum bytes to return (default ${config.tools.readBytes.default})` })),
     }),
-    async execute(_id, { operation, from, to, revision, path: requestedPath, offset = 0, limit = defaultBytes }) {
+    async execute(_id, { operation, from, to, revision, path: requestedPath, offset = 0, limit = config.tools.readBytes.default }) {
       if (!operations.includes(operation)) throw new Error(`operation must be one of: ${operations.join(", ")}`);
       const path = repositoryPath(requestedPath, operation === "show");
       const scope: string[] = path ? [path] : [];
@@ -65,12 +62,12 @@ export function createReviewGitTool(cwd: string, revisions: Record<string, strin
         const options = ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"];
         page = await gitPage(cwd, [...options, ...(operation === "diff_stat" ? ["--stat=240,200"] : []), ...range, ...(path ? ["--", path] : [])], offset, limit);
         if (!path) {
-          const names = await gitPage(cwd, [...options, "--name-only", "-z", ...range], 0, maxScopeBytes);
+          const names = await gitPage(cwd, [...options, "--name-only", "-z", ...range], 0, config.tools.git.maxScopeBytes);
           scope.push(...(names.more ? ["."] : names.text.split("\0").filter(Boolean)));
         }
       } else if (operation === "log") {
         const end = await resolveRevision(revision ?? "head", "revision");
-        page = await gitPage(cwd, ["--literal-pathspecs", "log", "--no-color", "--no-decorate", `--max-count=${maxCommits}`,
+        page = await gitPage(cwd, ["--literal-pathspecs", "log", "--no-color", "--no-decorate", `--max-count=${config.tools.git.maxCommits}`,
           "--format=%H %cs %an: %s", end, ...(path ? ["--", path] : [])], offset, limit);
       } else {
         const object = `${await resolveRevision(revision, "revision")}:${path}`;

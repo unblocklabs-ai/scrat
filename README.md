@@ -382,4 +382,4 @@ When the action is enabled, startup calls Slack's `auth.test` with the token, an
 - `actions/` — one YAML manifest per action; `skills/` — action prompts.
 - `data/` — SQLite queue, run history, event journal, workspaces, and Pi sessions. Back it up alongside credentials before deployment.
 
-`deploy/install.sh` installs a staged release on the existing worker: it drains the service, backs up SQLite, applies schema updates, and switches to the selected release. It contains host-specific paths, so review it before reuse.
+`deploy/install.sh` installs a staged release on the existing worker: it drains the service, backs up SQLite, applies schema updates, and switches to the selected release. It refuses anything but a tagged release: the commit must be the one that its `package.json` version's `vX.Y.Z` tag points to, checked through the GitHub API before the service is touched. It contains host-specific paths, so review it before reuse.

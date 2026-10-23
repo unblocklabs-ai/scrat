@@ -2234,7 +2234,7 @@ export const scenarios = {
       f.addIssue(1, ["scrat"]); f.enqueue(1, "implement");
       const failed = await run();
       assert.ok(failed.error); assert.equal(failed.error.code, "COMMAND_OUT_OF_MEMORY"); assert.equal(failed.stage, "validating");
-      assert.match(failed.error.message, /workspace\.commandMemoryMax \(64M\).*out of memory/);
+      assert.match(failed.error.message, /workspace\.commandMemoryMax \(128M\).*out of memory/);
       assert.equal(f.requests.length, 2, "agent turn only");
       assert.equal(f.prs.length, 0);
       const { config: live } = await f.app("config.ts");

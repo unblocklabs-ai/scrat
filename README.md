@@ -161,7 +161,10 @@ restriction. Provision Node and the pinned pnpm version with Corepack first.
 `workspace.commandMemoryMax` (default `null`, off) is a systemd `MemoryMax=` value such as `"6G"`
 or `"50%"`; it requires `workspace.sandbox` and a systemd user session. Each sandboxed command
 then runs in its own transient scope with swap disabled, so a runaway check is killed alone and
-its run fails as out of memory (`COMMAND_OUT_OF_MEMORY`), without the agent being re-prompted.
+its run fails as out of memory (`COMMAND_OUT_OF_MEMORY`), without the agent being re-prompted. Only prepare, migrate and validate commands get that
+classification; the agent's bash tool and Git are bounded too, but a kill there surfaces as an
+ordinary failed command. The transient scopes live outside `scrat.service`'s cgroup, so the unit's
+`MemoryMax` and `KillMode` no longer cover them; bwrap's `--die-with-parent` ends them when Scrat exits.
 
 Commands get the workspace, their own persistent home, private `/tmp`, `/run` and
 process namespace, read-only system/Node/pnpm runtimes, read-only repository Git

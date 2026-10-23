@@ -1208,7 +1208,7 @@ export const scenarios = {
     const reviewed = await success();
     assert.equal(reviewed.headSha, newer);
     const { fetchPullRequestHead } = await f.app("git.ts");
-    assert.equal(await fetchPullRequestHead(resolve("checkout"), resolve("missing.git"), 201, newer), "refs/remotes/origin/pr/201", "A matching local ref needs no fetch");
+    assert.equal(await fetchPullRequestHead(resolve("checkout"), resolve("missing.git"), 201, newer), newer, "A matching local ref needs no fetch");
     await assert.rejects(fetchPullRequestHead(resolve("checkout"), resolve("missing.git"), 201, stale), /fetch/);
     const writes = f.writes.length;
     f.forced.set(201, "0".repeat(40)); tasks.enqueueManualTasks("review_pr", ["201"]);

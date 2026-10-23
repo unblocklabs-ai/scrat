@@ -1183,9 +1183,9 @@ export const scenarios = {
     const prompts = () => f.requests.filter((r) => r.request.messages.at(-1).role === "user" && JSON.stringify(r.request.messages.at(-1).content).includes("Your assessment was returned incomplete")).length;
     const publications = () => f.writes.length;
     f.reset(201, "incomplete-once"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Continue", input: {} });
-    const commentsBefore = f.comments.get(201).length; let writes = publications(); const continued = await success().finally(restoreLogs);
+    let writes = publications(); const continued = await success().finally(restoreLogs);
     assert.equal(lines.filter((l) => l.event === "pi.incomplete_continue").length, 3);
-    assert.equal(continued.result.outcome, "complete"); assert.ok(prompts() >= 3); assert.equal(f.comments.get(201).length, commentsBefore + 1);
+    assert.equal(continued.result.outcome, "complete"); assert.ok(prompts() >= 3); assert.equal(publications() - writes, 3);
     const published = f.comments.get(201).length;
     f.reset(201, "incomplete"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Never completes", input: {} });
     writes = publications(); const spent = prompts(); const exhausted = await run();

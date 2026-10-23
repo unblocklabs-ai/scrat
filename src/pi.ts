@@ -68,6 +68,17 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
       "Use dependency implementations from this workspace and its lockfile. Another checkout or a globally cached version is not evidence for this revision.",
       ...readOnly ? [] : [`Keep working notes in ${resolve(cwd, ".scrat/notes.md")} (Git-ignored, never committed or published): the plan, decisions and why, findings, checks run and their results, and what remains. Update it at each milestone, keep it short, and read it first, if it exists, when resuming or after context compaction.`,
         `Your final response is published as written after ${botName} validates, commits and pushes your changes; do not say the changes are uncommitted.`],
+      "Tool rules:",
+      ...tools.includes("git") ? [
+        "- git `show` needs both `path` and `revision`; `log` takes `revision`; `diff` and `diff_stat` need both `from` and `to`. `head`, `base` and `main` are accepted; there are no defaults for `show` or `diff`.",
+        "- A revision is a 7-40 char lowercase hex commit SHA or a named one (head, base, main, plus previousMain and previousHead when the input has `previous`). No `^`/`~` suffixes.",
+      ] : [],
+      "- Never repeat a failed call unchanged; read the error, change the argument, or switch tools.",
+      `- Before reading a path you have not seen listed, list it first (\`ls\`, \`find\`${readOnly ? ", or \`diffPaths\`" : ""}). Do not guess repo layouts or config names.`,
+      ...readOnly && (tools.includes("read_base") && baseSha || tools.includes("git")) ? [`- A path the PR deletes or renames is missing from the head checkout; read it with ${tools.includes("read_base") && baseSha ? "`read_base`" : "`git show` with revision=base"}${tools.includes("read_base") && baseSha && tools.includes("git") ? " if you have it, otherwise `git show` with revision=base" : ""}.`] : [],
+      "- Look inside `node_modules/<pkg>` only after listing it or reading its `package.json` `main`/`exports`.",
+      ...readOnly ? ["- Reviews have no shell and no `bash`."] : [],
+      "- `grep` is Rust regex: no lookahead or backreferences; set `literal: true` for exact text.",
       "End your final Markdown response with exactly one line: SCRAT_STATUS: complete, SCRAT_STATUS: incomplete, or SCRAT_STATUS: needs_decision. Complete means the assigned work is finished, not merely that this session ended. For reviews, a complete assessment may contain defects or find the issue unready; use incomplete only if the assessment itself cannot be completed. For implementation, partial work or unresolved blockers are not complete. The harness withholds incomplete implementations from publication. Put an issue's SCRAT_READY marker before the status line, only when warranted.",
     ],
   });
@@ -91,8 +102,8 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
     const targets = new Map<string, Record<string, unknown>>();
     session.subscribe((event) => {
       if (event.type === "tool_execution_start") {
-        const { path, pattern, operation, command } = event.args ?? {};
-        targets.set(event.toolCallId, { path: brief(path), pattern: brief(pattern), operation: brief(operation), command: brief(command) });
+        const { path, pattern, operation, command, revision, from, to } = event.args ?? {};
+        targets.set(event.toolCallId, { path: brief(path), pattern: brief(pattern), operation: brief(operation), command: brief(command), revision: brief(revision), from: brief(from), to: brief(to) });
         log.debug({ event: "pi.tool_started", tool: event.toolName, toolCallId: event.toolCallId });
       }
       if (event.type === "tool_execution_end") {

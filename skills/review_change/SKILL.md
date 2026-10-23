@@ -11,7 +11,7 @@ This session is read-only. Use the available read, search and git tools; do not 
 
 ## Scope
 
-`diffPaths` (or `files.diffPaths` when only `diffPathCount` is given) is the complete list of changed files. Start from the change itself: use the `git` tool (`diff_stat`, then targeted `diff` per path) and `read` for the head files, `read_base` or `git show` for the originals. Read the commit message in `item` for intent, then check the code against it.
+`diffPaths` (or `files.diffPaths` when only `diffPathCount` is given) is the complete list of changed files. Start from the change itself: use the `git` tool (`diff_stat`, then targeted `diff` per path) and `read` for the head files, `read_base` or `git` `show` with `revision=base` and the `path` for the originals. Read the commit message in `item` for intent, then check the code against it.
 
 Report only on this range:
 

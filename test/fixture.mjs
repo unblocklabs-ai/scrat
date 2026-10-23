@@ -92,6 +92,7 @@ export async function fixture(scenario, spec, layout) {
         { name: "git", args: { operation: "show", revision: "head", path: "/etc/passwd" } },
         { name: "git", args: { operation: "show", revision: "HEAD@{1}", path: "src/app.ts" } },
         { name: "git", args: { operation: "show", revision: ":/x", path: "src/app.ts" } },
+        { name: "git", args: { operation: "show", path: "src/app.ts" } },
         context.previous && { name: "git", args: { operation: "diff_stat", from: "previousMain", to: "main" } },
         consolidating && { name: "read", args: { path: dir + "/reviewer-1.md" } },
       ].filter(Boolean)[step - 2];

@@ -251,7 +251,7 @@ const staleBranch = async () => {
     branchOff("feature-c", "src/c.ts", "export const c = 1;\n"); needs("needed4.txt");
     addPr(303, "feature-c", "human"); await route();
     const workspaces = all(s.workspaces).length, unmasked = await run();
-    assert.match(unmasked.error.message, /ERR_MISSING needed4\.txt/); assert.equal(f.requests.length, calls);
+    assert.match(unmasked.error.stdout, /ERR_MISSING needed4\.txt/); assert.equal(f.requests.length, calls);
     assert.equal(all(s.workspaces).length, workspaces + 1, "no synthetic workspace is made");
   } else {
     await implement(1); await route(); drainExcept(201);
@@ -261,7 +261,7 @@ const staleBranch = async () => {
     assert.deepEqual(queuedFor(201), ["review_pr"], "a clean, behind branch is not updated before anything fails");
     const calls = f.requests.length, staleHead = remoteGit("rev-parse", pr.head.ref);
     const failed = await run();
-    assert.match(failed.error.message, /ERR_MISSING needed\.txt/); assert.equal(failed.stage, "preparing"); assert.equal(failed.headSha, staleHead);
+    assert.match(failed.error.stdout, /ERR_MISSING needed\.txt/); assert.equal(failed.stage, "preparing"); assert.equal(failed.headSha, staleHead);
     await route(); assert.deepEqual(queuedFor(201), ["resolve_conflicts"]);
     await route(); assert.deepEqual(queuedFor(201), ["resolve_conflicts"], "routing neither duplicates nor cancels the update");
     const update = await success();
@@ -1501,7 +1501,7 @@ export const scenarios = {
     assert.equal(check.status, "passed"); assert.equal(check.name, `${process.execPath} ${resolve("chatty.mjs")}`);
     assert.ok(Buffer.byteLength(check.tail) <= 2000); assert.match(check.tail, /final line \[redacted\]/);
     assert.ok(!JSON.stringify(r.verification).includes("ghs_fixture_sensitive"));
-    assert.equal(check.evidence.length, 1); assert.equal(check.evidence[0], resolve("data/runs", r.id, "checks", "validate-0.log"));
+    assert.equal(check.evidence.length, 1); assert.match(check.evidence[0], new RegExp(`^${resolve("data/checks", r.id)}/validate-0-\\d+\\.log$`)); assert.ok(!check.evidence[0].startsWith(resolve("data/runs", r.id)));
     assert.ok(statSync(check.evidence[0]).size > 20 * 1024 * 1024);
     const legacy = { headSha: r.verification.headSha, commands: [{ command: ["pnpm", "verify"], durationMs: 5, stdout: "old out", stderr: "old err" }] };
     db.update(s.runs).set({ verification: legacy }).where(eq(s.runs.id, r.id)).run();

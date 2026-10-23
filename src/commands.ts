@@ -12,15 +12,17 @@ import type { Check } from "./schema.ts";
 
 export async function runCommands(commands: string[][], cwd: string, environment: NodeJS.ProcessEnv, references: EventReferences & { runId: string }, stage: string) {
   const checks: Check[] = [];
-  const directory = resolve("data/runs", references.runId, "checks");
+  const directory = resolve("data/checks", references.runId);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   for (const [index, [file, ...args]] of commands.entries()) {
     await withOperation("workspace.command", { ...references, command: [file, ...args], cwd }, async (operation) => {
       const started = performance.now();
       const name = [file, ...args].join(" ");
-      const evidence = resolve(directory, `${stage}-${index}.log`);
+      const evidence = resolve(directory, `${stage}-${index}-${Date.now()}.log`);
       const command = sandboxCommand(cwd, file, args, environment, [], true);
       const log = createWriteStream(evidence, { mode: 0o600 });
+      let writeError: Error | undefined;
+      log.on("error", (error) => { writeError ??= error; });
       const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null; killed: boolean; tail: Buffer }>((done, fail) => {
         const child = spawn(command.file, command.args, { cwd, env: command.env, stdio: ["ignore", "pipe", "pipe"], timeout: config.harness.commandTimeoutSeconds * 1000, killSignal: "SIGKILL" });
         let tail = Buffer.alloc(0);
@@ -31,11 +33,12 @@ export async function runCommands(commands: string[][], cwd: string, environment
         for (const stream of [child.stdout, child.stderr]) { stream.on("data", keep); stream.pipe(log, { end: false }); }
         child.on("error", fail);
         child.on("close", (code, signal) => done({ code, signal, killed: child.killed, tail }));
-      }).finally(() => { log.end(); return finished(log).catch(() => undefined); });
+      }).catch(async (error) => { throw await reportMemoryKill(command.unit, error); }).finally(() => { log.end(); return finished(log).catch(() => undefined); });
+      if (writeError) throw new Error(`Could not write the output of ${name} to ${evidence}: ${writeError.message}`, { cause: writeError });
       const tail = redactSecrets(outcome.tail.toString("utf8"));
       const check: Check = { name, status: outcome.code === 0 ? "passed" : "failed", durationMs: Math.round(performance.now() - started), tail, evidence: [evidence] };
       if (check.status === "failed") {
-        const message = outcome.killed ? `Command timed out after ${config.harness.commandTimeoutSeconds} seconds: ${name}` : `Command failed: ${name}\n${tail}`;
+        const message = outcome.killed ? `Command timed out after ${config.harness.commandTimeoutSeconds} seconds: ${name}` : `Command failed: ${name}`;
         const error = Object.assign(new Error(message), { code: outcome.code, signal: outcome.signal, killed: outcome.killed, stdout: tail });
         throw await reportMemoryKill(command.unit, error);
       }

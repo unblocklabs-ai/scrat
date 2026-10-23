@@ -338,6 +338,11 @@ const validationFeedback = async () => {
       rmSync("kill-validation"); writeFileSync("exit-137", ""); f.addIssue(3, ["scrat"]); f.enqueue(3, "implement");
       const wrapped = await run();
       assert.equal(wrapped.error.exitCode, 137); assert.equal(f.requests.length, calls + 4, "agent turn only"); assert.equal(feedbackRequests().length, 2);
+      rmSync("exit-137"); const { config } = await f.app("config.ts"); config.harness.corrections.validation = 1;
+      f.addIssue(4, ["scrat"]); f.reset(4, "feedback-stubborn"); f.enqueue(4, "implement");
+      const limited = await run();
+      assert.equal(limited.error.exitCode, 7); assert.equal(feedbackRequests().length, 3);
+      assert.match(lastUser(feedbackRequests()[2]), /round 1 of 1/);
     }
   } finally { restoreLogs(); }
 };
@@ -1623,6 +1628,16 @@ export const scenarios = {
     invalid((c) => { c.harness.agentTimeoutSeconds = 1.5; }, /harness\.agentTimeoutSeconds: must be integer/);
     invalid((c) => { c.harness.corrections.incomplete = -1; }, /harness\.corrections\.incomplete: must be >= 0/);
     invalid((c) => { c.harness.corrections.incomplete = 1.5; }, /harness\.corrections\.incomplete: must be integer/);
+    invalid((c) => { c.harness.corrections.validation = -1; }, /harness\.corrections\.validation: must be >= 0/);
+    invalid((c) => { c.harness.gitNetworkTimeoutSeconds = 0; }, /harness\.gitNetworkTimeoutSeconds: must be >= 1/);
+    invalid((c) => { c.context.historyRuns = 0; }, /context\.historyRuns: must be >= 1/);
+    invalid((c) => { c.context.windowSize = 1; }, /context\.windowSize: unknown setting/);
+    invalid((c) => { delete c.tools; }, /tools: required/);
+    invalid((c) => { c.tools.readBytes.max = "big"; }, /tools\.readBytes\.max: must be integer/);
+    invalid((c) => { c.tools.git.maxCommits = 0; }, /tools\.git\.maxCommits: must be >= 1/);
+    invalid((c) => { c.tools.http.timeoutSeconds = 1.5; }, /tools\.http\.timeoutSeconds: must be integer/);
+    invalid((c) => { c.tools.browser.steps = 0; }, /tools\.browser\.steps: must be >= 1/);
+    invalid((c) => { c.slack.maxRetryAfterSeconds = 0; }, /slack\.maxRetryAfterSeconds: must be >= 1/);
     await validateStaticConfig(variant((c) => { c.harness.corrections.incomplete = 0; }));
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.heavyCommands = ["^(unclosed"]; })), /heavyCommands\[0\] is not a valid regular expression/);
     for (const disabled of [null, ""]) await validateStaticConfig(variant((c) => { c.actions.address_review.exhaustedLabel = disabled; }));
@@ -2225,6 +2240,9 @@ export const scenarios = {
     assert.ok(last.indexOf("report 11") < last.indexOf("report 10") && last.indexOf("report 10") < last.indexOf("report 3"), "newest first");
     assert.ok(!/report 1\b/.test(last), "the history keeps the newest ten runs");
     assert.equal((last.match(/^## /gm) ?? []).length, 10);
+    const { config } = await f.app("config.ts");
+    config.context.historyRuns = 3; await review(1);
+    assert.equal((seen.at(-1).match(/^## /gm) ?? []).length, 3); config.context.historyRuns = 10;
     const { r: huge, request } = await review(1);
     assert.match(request.context.files.history, /history\.md$/);
     rewrite(huge, "x".repeat(200 * 1024));
@@ -2232,6 +2250,8 @@ export const scenarios = {
     const capped = seen.at(-1);
     assert.ok(Buffer.byteLength(capped) <= 64 * 1024 && Buffer.byteLength(capped) > 60 * 1024, Buffer.byteLength(capped) + capped.slice(0, 300));
     assert.ok(capped.includes("## ") && !capped.includes("report 10"), "a report over the cap crowds out older ones");
+    config.context.historyBytes = 2048; await review(1);
+    assert.ok(Buffer.byteLength(seen.at(-1)) <= 2048 && Buffer.byteLength(seen.at(-1)) > 1500);
   } },
   commit_hook: { title: "commit hooks cannot attach verification receipts to an unverified tree", run: async () => {
     f.addIssue(1); f.enqueue(1, "implement");
@@ -2653,6 +2673,10 @@ export const scenarios = {
     const before = f.slack.calls.length; f.slack.rateLimitOnce = true;
     assert.ok(await postMessage({ channel: "C1", text: "after limit" }));
     assert.equal(f.slack.calls.length, before + 2);
+    const { config: slackConfig } = await f.app("config.ts");
+    slackConfig.slack.maxRetryAfterSeconds = 1; f.slack.rateLimitOnce = true; f.slack.retryAfter = "2";
+    await assert.rejects(postMessage({ channel: "C1", text: "too long" }), /rate limited \(retry-after 2\)/);
+    slackConfig.slack.maxRetryAfterSeconds = 30; f.slack.retryAfter = "0";
     f.slack.down = true;
     await assert.rejects(postMessage({ channel: "C1", text: "outage" }), /HTTP 503/);
     f.slack.down = false; f.slack.fail = "channel_not_found";
@@ -3240,6 +3264,17 @@ export const scenarios = {
       assert.deepEqual(asked, ["api.example.test"]);
     } finally { globalThis.fetch = stubbed; }
     assert.equal(f.external.length, seen);
+    const { config } = await f.app("config.ts"), { createReviewGitTool } = await f.app("review-git.ts");
+    config.tools.http.maxRequestBytes = 8;
+    const post = createHttpTool({ settings: { methods: ["POST"] }, binding: f.config.bindings.scout, runId: "run" });
+    await assert.rejects(post.execute("call", { method: "POST", url: "https://api.example.test/data", body: "123456789" }, undefined, undefined, {}), /Refused: body exceeds 8 bytes/);
+    const repository = resolve(f.config.github.repositoryPath);
+    writeFileSync(resolve(repository, "second.txt"), "second\n"); git(repository, "add", "."); commit(repository, "Second commit");
+    const tip = git(repository, "rev-parse", "HEAD");
+    assert.equal(git(repository, "rev-list", "--count", "HEAD"), "2");
+    config.tools.git.maxCommits = 1;
+    const history = await createReviewGitTool(repository, { head: tip }, new Set()).execute("call", { operation: "log" }, undefined, undefined, {});
+    assert.equal(history.content[0].text.split("\n").length, 1);
     const { readManifests } = await f.app("manifests.ts");
     for (const manifest of readManifests(resolve("app"))) assert.ok(!manifest.tools.some((tool) => ["http", "browser", "github_search"].includes(tool)) && !manifest.http && !manifest.browser, manifest.name);
   } },

@@ -13,10 +13,9 @@ import { childEnvironment } from "./secrets.ts";
 import { blobSize, gitPage } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { createBrowserTool, createGithubSearchTool, createHttpTool } from "./scoped-tools.ts";
-import { createReviewGitTool, defaultBytes, maxBytes, pageText } from "./review-git.ts";
+import { createReviewGitTool, pageText } from "./review-git.ts";
 import { sandboxCommand } from "./sandbox.ts";
 
-const heavyTimeoutSeconds = 45 * 60;
 
 type ScopedToolName = "http" | "browser" | "github_search";
 
@@ -90,7 +89,7 @@ export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, ba
         log.warn({ event: "pi.command_blocked", command: segment });
         throw new Error(`This command line runs a background job (a lone &, nohup, setsid or disown) and includes the heavy check \`${segment}\`. Run heavy checks in the foreground, in a command without background jobs, so ${botName} can queue them behind other heavy jobs.`);
       }
-      args[1] = { ...args[1], timeout: Math.min(args[1].timeout ?? heavyTimeoutSeconds, heavyTimeoutSeconds) };
+      args[1] = { ...args[1], timeout: Math.min(args[1].timeout ?? config.harness.commandTimeoutSeconds, config.harness.commandTimeoutSeconds) };
       const queuedAt = performance.now();
       return withValidationSlot(() => {
         log.info({ event: "pi.heavy_command", command: segment, waitedMs: Math.round(performance.now() - queuedAt) });
@@ -138,9 +137,9 @@ export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, ba
     parameters: Type.Object({
       path: Type.String(),
       offset: Type.Optional(Type.Integer({ minimum: 0, description: "Byte offset into the file, for paging" })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: maxBytes, description: `Maximum bytes to return (default ${defaultBytes})` })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: config.tools.readBytes.max, description: `Maximum bytes to return (default ${config.tools.readBytes.default})` })),
     }),
-    async execute(_id, { path, offset = 0, limit = defaultBytes }) {
+    async execute(_id, { path, offset = 0, limit = config.tools.readBytes.default }) {
       const object = `${baseSha}:${path}`, page = await gitPage(cwd, ["show", object], offset, limit);
       const size = page.more ? await blobSize(cwd, object) : undefined;
       basePaths.add(relative(cwd, resolve(cwd, path)));

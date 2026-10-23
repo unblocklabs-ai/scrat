@@ -3,19 +3,20 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
+import { config } from "./config.ts";
 import { childEnvironment } from "./secrets.ts";
 import { serialized } from "./single-flight.ts";
 import { inWorkspace, sandboxCommand } from "./sandbox.ts";
 
 const executeFile = promisify(execFile);
-const networkOptions = { timeout: 600_000, killSignal: "SIGKILL" } as const;
+const networkOptions = () => ({ timeout: config.harness.gitNetworkTimeoutSeconds * 1000, killSignal: "SIGKILL" }) as const;
 const repositoryFetches = new Map<string, Promise<unknown>>();
 
 const networkCommands = new Set(["fetch", "ls-remote", "push"]);
 
 function timedOut(label: string) {
   return (error: unknown) => {
-    if (error instanceof Error && "killed" in error && error.killed) error.message = `Git ${label} timed out after ${networkOptions.timeout / 1000} seconds`;
+    if (error instanceof Error && "killed" in error && error.killed) error.message = `Git ${label} timed out after ${config.harness.gitNetworkTimeoutSeconds} seconds`;
     throw error;
   };
 }
@@ -23,7 +24,7 @@ function timedOut(label: string) {
 export async function git(repositoryPath: string, args: string[], env = childEnvironment()) {
   const command = inWorkspace(repositoryPath) ? sandboxCommand(repositoryPath, "git", args, env)
     : { file: "git", args: ["-C", repositoryPath, ...args], env };
-  const { stdout } = await executeFile(command.file, command.args, { cwd: repositoryPath, env: command.env, maxBuffer: 16 * 1024 * 1024, ...(networkCommands.has(args[0]!) ? networkOptions : {}) }).catch(timedOut(args[0]!));
+  const { stdout } = await executeFile(command.file, command.args, { cwd: repositoryPath, env: command.env, maxBuffer: config.harness.maxOutputBytes, ...(networkCommands.has(args[0]!) ? networkOptions() : {}) }).catch(timedOut(args[0]!));
   return args.includes("-z") || args[0] === "show" ? stdout : stdout.trim();
 }
 
@@ -85,7 +86,7 @@ export async function fetchRepository(repositoryPath: string, remote: string, ba
   return serialized(repositoryFetches, repositoryPath, async () => {
     if (!existsSync(repositoryPath)) {
       await mkdir(dirname(repositoryPath), { recursive: true });
-      await executeFile("git", ["clone", "--single-branch", "--branch", baseBranch, "--", remote, repositoryPath], { env, ...networkOptions }).catch(timedOut("clone"));
+      await executeFile("git", ["clone", "--single-branch", "--branch", baseBranch, "--", remote, repositoryPath], { env, ...networkOptions() }).catch(timedOut("clone"));
     }
     await assertOrigin(repositoryPath, remote);
     await git(repositoryPath, ["config", "gc.auto", "0"]);

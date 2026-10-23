@@ -36,7 +36,6 @@ type Environment = Record<string, string | undefined>;
 type References = { subjectId: string; taskId: string; runId: string };
 type Acceptance = NonNullable<Manifest["acceptance"]>;
 
-const maxValidationCorrections = 2;
 
 const botAuthor = () => ({ name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com` });
 
@@ -59,7 +58,7 @@ async function asCheckFailure<T>(fn: () => Promise<T>) {
 function validationMessage(error: CheckFailure, round: number) {
   const { message, exitCode, stdout } = describeError(error.cause);
   const output = stdout?.trim() ? `\nOutput (tail):\n${stdout.trim()}\n` : "";
-  return `${botName}'s validation failed after your changes (round ${round} of ${maxValidationCorrections}).\n\nCommand: ${message.split("\n")[0].replace(/^Command failed: /, "")}\nExit code: ${exitCode ?? "unknown"}\n${output}\nFix only what is reported. ${botName} re-validates after your turn, so a full rerun of the failing check is not needed. Then end your turn with one or two sentences on what you changed to fix this (it is appended to your earlier handoff), and the usual SCRAT_STATUS footer (add SCRAT_READY if the change is still ready).`;
+  return `${botName}'s validation failed after your changes (round ${round} of ${config.harness.corrections.validation}).\n\nCommand: ${message.split("\n")[0].replace(/^Command failed: /, "")}\nExit code: ${exitCode ?? "unknown"}\n${output}\nFix only what is reported. ${botName} re-validates after your turn, so a full rerun of the failing check is not needed. Then end your turn with one or two sentences on what you changed to fix this (it is appended to your earlier handoff), and the usual SCRAT_STATUS footer (add SCRAT_READY if the change is still ready).`;
 }
 
 function stopBefore(stop: AbortSignal | undefined, next: string) {
@@ -341,7 +340,7 @@ async function validateStage(ctx: Ctx, p: Prepared) {
       catch (error) {
         if (!(error instanceof CheckFailure)) throw error;
         const sessionFile = getRun(run.id)!.piSessionFile ?? undefined;
-        if (validationOnly || !p.agentInput || !sessionFile || round > maxValidationCorrections) throw error.cause;
+        if (validationOnly || !p.agentInput || !sessionFile || round > config.harness.corrections.validation) throw error.cause;
         operation.log.warn({ event: "pi.validation_retry", round });
         updateRun(run.id, { stage: "agent" });
         const followUp = await executePi({ run, cwd: workspace.path, context: "", readOnly, tools: ctx.manifest.tools, scoped: ctx.manifest, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });

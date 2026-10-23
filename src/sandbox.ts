@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, statSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { execFile } from "node:child_process";
@@ -6,6 +6,8 @@ import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { config, getRepositoryPath } from "./config.ts";
+
+const packageStoreMount = "/home/scrat/.local/share/pnpm/store";
 
 export function inWorkspace(path: string) {
   const root = workspaceRoot();
@@ -17,7 +19,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   mkdirSync("data/workspaces", { recursive: true });
   const cwd = await mkdtemp(join(workspaceRoot(), "sandbox-preflight-"));
   try {
-    const command = sandboxCommand(cwd, "/bin/sh", ["-c", "node --version && pnpm --version && git --version"], {});
+    const command = sandboxCommand(cwd, "/bin/sh", ["-c", `node --version && pnpm --version && git --version${config.workspace?.packageStore ? ` && touch ${packageStoreMount}/.preflight && rm ${packageStoreMount}/.preflight` : ""}`], {});
     const { stdout } = await promisify(execFile)(command.file, command.args, { env: command.env, timeout: 30_000 });
     process.stdout.write(`Sandbox ready\n${stdout}`);
   } finally {
@@ -67,9 +69,15 @@ export function sandboxCommand(cwd: string, file: string, args: string[], enviro
   for (const path of readOnly) bind(realpathSync(path));
   bind(workspace, workspace, true);
   bind(home, "/home/scrat", true);
+  const store = config.workspace?.packageStore;
+  if (store) {
+    mkdirSync(store, { recursive: true, mode: 0o700 });
+    if (lstatSync(store).isSymbolicLink() || !statSync(store).isDirectory()) throw new Error("workspace.packageStore must be a real directory");
+    bind(realpathSync(store), packageStoreMount, true);
+  }
   const env = Object.fromEntries(Object.entries(environment).filter(([name]) =>
     !name.startsWith("XDG_") && !name.startsWith("GIT_CONFIG") && !["HOME", "PATH", "DOCKER_HOST", "TMPDIR", "TMP", "TEMP"].includes(name)));
-  Object.assign(env, { HOME: "/home/scrat", PATH: `${dirname(process.execPath)}:/opt/scrat-bin:/usr/local/bin:/usr/bin:/bin:/sbin`, TMPDIR: "/tmp", TMP: "/tmp", TEMP: "/tmp", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", COREPACK_DEFAULT_TO_LATEST: "0", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" });
+  Object.assign(env, store ? { npm_config_store_dir: packageStoreMount } : {}, { HOME: "/home/scrat", PATH: `${dirname(process.execPath)}:/opt/scrat-bin:/usr/local/bin:/usr/bin:/bin:/sbin`, TMPDIR: "/tmp", TMP: "/tmp", TEMP: "/tmp", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", COREPACK_DEFAULT_TO_LATEST: "0", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" });
   const bwrap = [...mounts, "--chdir", workspace, "--", file === "git" ? "/usr/bin/git" : file, ...args];
   if (!limit) return { file: "/usr/bin/bwrap", args: bwrap, env, unit: undefined };
   const unit = `scrat-${relative(workspaceRoot(), workspace).split("/")[0].replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 60)}-${randomBytes(6).toString("hex")}.scope`;

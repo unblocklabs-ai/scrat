@@ -13,6 +13,7 @@ export { thinkingLevels, type ThinkingLevel };
 type WorkspaceConfig = {
   sandbox?: boolean;
   commandMemoryMax?: string | null;
+  packageStore?: string | null;
   layout?: "worktree" | "clone";
   environment?: Record<string, string>;
   prepare?: string[][];

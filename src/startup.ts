@@ -1,4 +1,5 @@
-import { access } from "node:fs/promises";
+import { isAbsolute } from "node:path";
+import { access, mkdir } from "node:fs/promises";
 import { manifests } from "./actions.ts";
 import { type Resolver, publicAnswers, resolveHost, validateBindings } from "./bindings.ts";
 import { type ActionSettings, config, thinkingLevels } from "./config.ts";
@@ -16,7 +17,7 @@ type Entry = { provider: string; model: string; thinkingLevel: string };
 
 // @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: {
-  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number; corrections?: { incomplete?: number } }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; resolve?: Resolver; slack?: { enabled?: boolean; channel?: string }; workspace?: { heavyCommands?: string[]; sandbox?: boolean; layout?: string; commandMemoryMax?: string | null; validate?: string[][] };
+  harness?: { maxConcurrentValidations?: number; commandTimeoutSeconds?: number; agentTimeoutSeconds?: number; drainTimeoutSeconds?: number; corrections?: { incomplete?: number } }; github?: { auth?: string; botLogin?: string; botName?: string }; providers?: Record<string, { apiKey?: string }>; bindings?: Record<string, unknown>; resolve?: Resolver; slack?: { enabled?: boolean; channel?: string }; workspace?: { heavyCommands?: string[]; sandbox?: boolean; layout?: string; commandMemoryMax?: string | null; packageStore?: string | null; validate?: string[][] };
   actions: Record<string, Partial<ActionSettings>>;
 } = config) {
   const modelRuntime = await sharedModelRuntime();
@@ -33,6 +34,12 @@ export async function validateStaticConfig(settings: {
     if (typeof memoryMax !== "string" || !/^(?:[1-9]\d*[KMGT]?|(?:100|[1-9]\d?)%)$/.test(memoryMax)) problems.push("workspace.commandMemoryMax must be null or a size such as 6G or a percentage such as 50%");
     else if (!settings.workspace?.sandbox) problems.push("workspace.commandMemoryMax requires workspace.sandbox");
     else if (process.platform === "linux") await access("/usr/bin/systemd-run").catch(() => { problems.push("workspace.commandMemoryMax requires /usr/bin/systemd-run"); });
+  }
+  const store = settings.workspace?.packageStore;
+  if (store !== undefined && store !== null) {
+    if (typeof store !== "string" || !isAbsolute(store)) problems.push("workspace.packageStore must be null or an absolute path");
+    else if (!settings.workspace?.sandbox) problems.push("workspace.packageStore requires workspace.sandbox");
+    else if (process.platform === "linux") await mkdir(store, { recursive: true, mode: 0o700 }).catch(() => { problems.push(`workspace.packageStore ${store} cannot be created`); });
   }
   const checkEntry = (label: string, { provider, model, thinkingLevel }: Entry) => {
     if (!(thinkingLevels as readonly string[]).includes(thinkingLevel)) problems.push(`${label}: invalid thinking level ${thinkingLevel}`);

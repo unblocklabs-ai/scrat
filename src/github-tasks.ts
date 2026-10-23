@@ -11,7 +11,7 @@ import { observe, type ItemObservation } from "./observation.ts";
 import { remoteUrl } from "./repository.ts";
 import { labelName, reconcileLabels } from "./labels.ts";
 import { db } from "./db.ts";
-import { fetchPullRequestHead, fetchRepository, git, hasConflicts, isAncestor } from "./git.ts";
+import { fetchPullRequestHead, fetchRepository, prepareTarget } from "./git.ts";
 import { rateLimitLow, rateLimitState } from "./github-http.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
@@ -64,12 +64,9 @@ async function cleanupClosedItem(item: Item) {
 
 async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observation: ItemObservation, pr: GithubPullRequest, mainSha: string, routes: Routes): Promise<PrMaintenanceFacts> {
   const { repositoryPath, remote, env } = ctx;
-  const headRef = await fetchPullRequestHead(repositoryPath, remote, pr.number, pr.head.sha, env);
-  const headSha = await git(repositoryPath, ["rev-parse", headRef]);
-  const conflicts = await hasConflicts(repositoryPath, mainSha, headSha);
+  const { headSha, conflicts, behind } = await prepareTarget(repositoryPath, mainSha, await fetchPullRequestHead(repositoryPath, remote, pr.number, pr.head.sha, env));
   const lastRun = latestFinishedRun(item.id);
-  const stale = !conflicts && Boolean(lastRun?.error) && lastRun?.stage === "preparing" && lastRun.headSha === headSha
-    && !await isAncestor(repositoryPath, mainSha, headSha);
+  const stale = !conflicts && Boolean(lastRun?.error) && lastRun?.stage === "preparing" && lastRun.headSha === headSha && behind;
   const acknowledged = new Set(observation.own.flatMap((comment) => acknowledgedTaskIds(comment.body)));
   const handled = (routes.feedback ? runHistory(item.id, routes.feedback) : [])
     .filter(({ run, task }) => (!run.finishedAt && task.status === "running") || (run.finishedAt && !run.error)

@@ -10,7 +10,7 @@ import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
 import { describeError, type ErrorDetails } from "./errors.ts";
-import { behindCleanly, createMergeCommit, fetchPullRequestHead, fetchRepository, git, hasConflicts, hasPendingMerge, isAncestor, mergeBase } from "./git.ts";
+import { createMergeCommit, fetchPullRequestHead, fetchRepository, git, hasPendingMerge, mergeBase, prepareTarget } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { startOperation } from "./logging.ts";
@@ -84,7 +84,7 @@ async function validateAndCommit({ run, references, stop }: Ctx, p: Prepared, ki
   const message = /^[a-z]+(\([^)]*\))?!?: /.test(p.title) ? p.title : `fix: ${p.title}`;
   const commitSha = await commitWorkspace(workspace, message, botAuthor(), references);
   if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
-  if (kind === "conflict_free" && await hasConflicts(workspace.path, p.mainSha, commitSha)) {
+  if (kind === "conflict_free" && (await prepareTarget(workspace.path, p.mainSha, commitSha)).conflicts) {
     throw new Error(unresolvedConflict);
   }
   if (kind === "nonempty_diff" && !await git(workspace.path, ["diff", "--name-only", `${p.baseRef}...HEAD`])) {
@@ -153,10 +153,7 @@ async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
   }
   const validationOnly = run.stage === "validating";
   const baseRef = mainSha;
-  const headRef = pullRequest
-    ? await fetchPullRequestHead(repositoryPath, observation.remote, pullRequest.number, pullRequest.head.sha, gitEnvironment)
-    : baseRef;
-  const preparedHead = await git(repositoryPath, ["rev-parse", headRef]);
+  const preparedHead = pullRequest ? await fetchPullRequestHead(repositoryPath, observation.remote, pullRequest.number, pullRequest.head.sha, gitEnvironment) : baseRef;
   let workspace = !readOnly && item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
   if (workspace?.removedAt) throw new Error(`Workspace was removed: ${workspace.id}`);
   if (workspace) {
@@ -258,7 +255,9 @@ async function planAgent({ task, run, subject, readOnly, acceptance, repositoryP
 
 async function mergeBehind(ctx: Ctx, observed: Observed | undefined, p: Prepared) {
   const { run, acceptance } = ctx;
-  if (!observed || acceptance !== "conflict_free" || p.mergeInProgress || run.retryOfRunId || !await behindCleanly(p.workspace.path, p.mainSha, p.headSha)) return;
+  if (!observed || acceptance !== "conflict_free" || p.mergeInProgress || run.retryOfRunId) return;
+  const { behind, conflicts } = await prepareTarget(p.workspace.path, p.mainSha, p.headSha);
+  if (!behind || conflicts) return;
   const { baseBranch } = observed.observation;
   await mergeBase(p.workspace.path, p.mainSha, `Merge ${baseBranch} into ${observed.pullRequest!.head.ref}`, botAuthor());
   p.headSha = await git(p.workspace.path, ["rev-parse", "HEAD"]);
@@ -280,8 +279,10 @@ async function prepareCommands({ run, readOnly, repositoryPath, references, oper
   try { await prepareWorkspace(p.workspace, p.commandEnvironment, p.databaseConfig, references); }
   catch (error) {
     const humanReview = readOnly && !isBotLogin(context.item.user?.login);
-    if (!pullRequest || !(humanReview || !readOnly) || await isAncestor(p.workspace.path, p.mainSha, p.headSha)) throw error;
-    if (await hasConflicts(p.workspace.path, p.mainSha, p.headSha)) {
+    if (!pullRequest || !(humanReview || !readOnly)) throw error;
+    const { behind, conflicts } = await prepareTarget(p.workspace.path, p.mainSha, p.headSha);
+    if (!behind) throw error;
+    if (conflicts) {
       if (!readOnly) throw error;
       throw new Error(`PR branch is behind ${baseBranch} and does not merge cleanly; the author needs to update it`);
     }

@@ -8,7 +8,8 @@ import { scenarios } from "./scenario.mjs";
 
 const execute = promisify(execFile);
 
-for (const [scenario, { title, needsDocker, needsSandbox }] of Object.entries(scenarios)) {
+const registered = Object.entries(scenarios).flatMap(([name, spec]) => [[name, spec.title, spec], ...(spec.layouts ?? []).map((layout) => [`${name}@${layout}`, `${spec.title} (${layout} layout)`, spec])]);
+for (const [scenario, title, { needsDocker, needsSandbox }] of registered) {
   test(title, { timeout: 180_000 }, async (t) => {
     if (needsSandbox && (process.platform !== "linux" || !existsSync("/usr/bin/bwrap"))) { t.skip("Linux bubblewrap is required for OS isolation"); return; }
     if (needsDocker) {

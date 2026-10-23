@@ -25,6 +25,7 @@
   },
   "workspace": {
     "sandbox": false,
+    "layout": "worktree",
     "environment": {
       "VITEST_MAX_WORKERS": "1"
     },

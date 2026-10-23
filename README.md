@@ -149,7 +149,7 @@ Before relying on a new deployment, run it once against a disposable repository 
 
 ### Workspace
 
-On Linux, set `workspace.sandbox: true` in deployment overrides to run repository
+On Linux, set `workspace.sandbox: true` (which requires `workspace.layout: "clone"`) in deployment overrides to run repository
 preparation, validation, agent Bash and workspace Git (including hooks) inside
 Bubblewrap. Enabling it is fail-closed: missing namespaces or runtimes are errors,
 not a fallback to host execution. The installer checks the boundary before stopping
@@ -162,7 +162,8 @@ Commands get the workspace, their own persistent home, private `/tmp`, `/run` an
 process namespace, read-only system/Node/pnpm runtimes, read-only repository Git
 objects, and (for Bash) their own context directory. They do not get controller
 credentials/data, other workspaces, host process environments or the Docker socket.
-New sandboxed workspaces are independent Git clones; legacy linked workspaces are
+`workspace.layout` is `"worktree"` (default; linked worktrees of the shared repository) or `"clone"` (independent private clones); `"clone"` works on any OS without Bubblewrap.
+New workspaces in the clone layout are independent Git clones; legacy linked workspaces are
 converted in place with their index, merge state and working files retained. Old
 Git metadata/pointers remain under `data/private-git/` for recovery. The controller
 imports published commits through a checked Git bundle rather than executing Git

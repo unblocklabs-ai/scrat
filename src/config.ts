@@ -12,6 +12,7 @@ export { thinkingLevels, type ThinkingLevel };
 
 type WorkspaceConfig = {
   sandbox?: boolean;
+  layout?: "worktree" | "clone";
   environment?: Record<string, string>;
   prepare?: string[][];
   database?: { image: string; environment: string[]; migrate: string[] } | null;

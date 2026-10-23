@@ -34,7 +34,7 @@ export async function validateWorkspace(workspace: Workspace) {
 }
 
 export async function isolateWorkspace(workspace: Workspace) {
-  if (!config.workspace?.sandbox || (await lstat(resolve(workspace.path, ".git"))).isDirectory()) return;
+  if (config.workspace?.layout !== "clone" || (await lstat(resolve(workspace.path, ".git"))).isDirectory()) return;
   await validateWorkspace(workspace);
   const head = await git(workspace.path, ["rev-parse", "HEAD"]);
   const oldGit = await git(workspace.path, ["rev-parse", "--absolute-git-dir"]);
@@ -104,7 +104,7 @@ export async function createWorkspace(
     operation.stage("create_worktree");
     await mkdir(dirname(path), { recursive: true });
     path = resolve(await realpath(dirname(path)), workspaceId);
-    if (config.workspace?.sandbox) {
+    if (config.workspace?.layout === "clone") {
       await git(repositoryPath, ["clone", "--no-checkout", "--no-hardlinks", "--", repositoryPath, path]);
       await git(path, ["checkout", "-B", branch, baseSha]);
       await writeFile(resolve(path, ".git/info/exclude"), "/.scrat/\n");

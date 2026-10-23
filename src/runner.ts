@@ -162,7 +162,7 @@ async function acquireItemWorkspace(ctx: Ctx, observed: Observed) {
   if (workspace) {
     await validateWorkspace(workspace);
     await isolateWorkspace(workspace);
-    if (config.workspace?.sandbox) await git(workspace.path, ["fetch", "--no-tags", "--", `${repositoryPath}/.git`, preparedHead, mainSha]);
+    if (config.workspace?.layout === "clone") await git(workspace.path, ["fetch", "--no-tags", "--", `${repositoryPath}/.git`, preparedHead, mainSha]);
   }
   if (validationOnly) {
     if (!hasValidationCheckpoint(run)) throw new Error("No complete agent checkpoint to resume; use normal retry to repair");

@@ -2189,6 +2189,13 @@ export const scenarios = {
       assert.equal(git(resolve("remote.git"), "show", `${result.publication.commitSha}:src/app.ts`), "export const value = 13;");
       const workspace = f.row(s.workspaces, result.workspaceId);
       assert.ok(fs.lstatSync(resolve(workspace.path, ".git")).isDirectory());
+      const pr = result.publication.pullRequestNumber, prItem = all(s.items).find((i) => i.kind === "pr" && i.payload.number === pr);
+      f.script = [{ name: "bash", args: { command: `printf 'export const value = 14;\\n' > src/app.ts` } }];
+      tasks.enqueueTask({ subjectId: prItem.id, action: "address_pr_feedback", reason: "Publish onto the existing branch", input: {} });
+      f.reset(pr, "normal"); const followUp = await success();
+      assert.equal(followUp.publication.status, "published"); assert.notEqual(followUp.publication.commitSha, result.publication.commitSha);
+      assert.equal(git(resolve("remote.git"), "rev-parse", f.prs[0].head.ref), followUp.publication.commitSha);
+      assert.equal(git(resolve("remote.git"), "show", `${followUp.publication.commitSha}:src/app.ts`), "export const value = 14;");
       const proof = readFileSync(resolve(workspace.path, ".scrat/sandbox-proof.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
       assert.deepEqual([...new Set(proof.map((row) => row.phase))].sort(), ["bash", "hook", "prepare", "validate"]);
       assert.equal(existsSync("outside-write.txt"), false);

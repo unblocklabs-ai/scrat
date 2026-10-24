@@ -1414,7 +1414,7 @@ export const scenarios = {
     assert.equal(replacement.taskId, replaced.taskId); assert.ok(f.requests.length > replacementCalls);
     assert.equal(replacement.inferenceFromRunId, null);
   } },
-  retry: { title: "publication retries reconcile remote comments and labels without rerunning Pi, and follow-up issue reviews edit the one assessment comment with the previous assessment in hand while an unchanged one writes nothing", run: async () => {
+  retry: { title: "publication retries reconcile remote comments and labels without rerunning Pi, a not-ready issue review never removes the selection label, and follow-up issue reviews edit the one assessment comment with the previous assessment in hand while an unchanged one writes nothing", run: async () => {
     for (const [n, fault] of [[1, "label"], [2, "comment"]]) {
       f.addIssue(n, ["human-label"]); f.reset(n, "ready"); f.enqueue(n); f.faults[fault].add(n);
       const first = f.requests.length, failed = await run(); assert.ok(failed.error); const calls = f.requests.length;
@@ -1425,8 +1425,11 @@ export const scenarios = {
       assert.deepEqual(f.issues.get(n).labels.map((label) => label.name).sort(), ["human-label", "scrat"]);
     }
     f.reset(1, "normal"); f.enqueue(1); let written = f.writes.length; const followUp = await success();
-    assert.deepEqual(f.issues.get(1).labels.map((label) => label.name), ["human-label"]);
-    assert.deepEqual(f.writes.slice(written).map((w) => [w.type, w.method]), [["label", "DELETE"]], "The same text with a changed conclusion only moves the label");
+    assert.deepEqual(f.issues.get(1).labels.map((label) => label.name).sort(), ["human-label", "scrat"]);
+    assert.deepEqual(f.writes.slice(written), [], "A not-ready follow-up never removes the selection label");
+    f.addIssue(3); f.enqueue(3); f.onModel = () => { f.issues.get(3).labels = [{ name: "scrat" }]; };
+    await success(); f.onModel = undefined;
+    assert.deepEqual(f.issues.get(3).labels.map((label) => label.name), ["scrat"], "A review that ends not ready keeps a selection label added while it ran");
     assert.equal(f.comments.get(1).length, 1, "A second review keeps one assessment comment");
     f.reset(1, "revised"); f.enqueue(1); const before = f.requests.length; written = f.writes.length; const revised = await success();
     assert.equal(readFileSync(f.requests[before].context.files.previous_assessment, "utf8"), followUp.result.text);
@@ -2572,8 +2575,6 @@ export const scenarios = {
     const labels = (n) => f.issues.get(n).labels.map((label) => label.name);
     f.addIssue(3); f.reset(3, "ready"); f.enqueue(3, "review_issue"); await success();
     assert.deepEqual(labels(3), ["mocha-agent"]);
-    f.reset(3, "normal"); f.enqueue(3, "review_issue"); await success();
-    assert.deepEqual(labels(3), []);
     assert.equal(f.prs.length, 1); assert.match(f.prs[0].head.ref, /^mocha-agent\/[0-9a-f-]{36}$/);
     assert.deepEqual(labels(1), ["scrat"]);
   } },

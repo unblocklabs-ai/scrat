@@ -18,17 +18,7 @@ const changeMain = (path, text) => {
   writeFileSync(resolve("seed", path), text); git(resolve("seed"), "add", "."); commit(resolve("seed"), "Change " + path);
   git(resolve("seed"), "push", resolve("remote.git"), "main");
 };
-const pushSchema = (url = "./data/scrat.sqlite") => execFileSync(process.execPath, [resolve("app/node_modules/drizzle-kit/bin.cjs"), "push", "--dialect=sqlite", "--schema=./app/src/schema.ts", "--url=" + url], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-const rebuildRunsTable = (removed, prelude = "") => {
-  const create = db.$client.prepare("SELECT sql FROM sqlite_master WHERE name = 'runs'").get().sql;
-  const legacySql = create.split("\n").filter((line) => !removed.some((name) => line.includes("`" + name + "`"))).join("\n")
-    .replace("CREATE TABLE `runs`", "CREATE TABLE `legacy_runs`");
-  const columns = db.$client.prepare("PRAGMA table_info(runs)").all().map((column) => column.name).filter((name) => !removed.includes(name))
-    .map((name) => '"' + name + '"').join(", ");
-  db.$client.exec("PRAGMA foreign_keys = OFF");
-  db.$client.exec(`BEGIN; ${prelude}${legacySql}; INSERT INTO legacy_runs (${columns}) SELECT ${columns} FROM runs; DROP TABLE runs; ALTER TABLE legacy_runs RENAME TO runs; COMMIT;`);
-  db.$client.exec("PRAGMA foreign_keys = ON");
-};
+const pushSchema = (url = "./data/scrat.sqlite") => execFileSync(process.execPath, [resolve("app/node_modules/drizzle-kit/bin.cjs"), "push", "--dialect=sqlite", "--schema=./app/src/schema.ts", "--url=" + url, "--hints", JSON.stringify([{ type: "confirm_data_loss", kind: "column", entity: ["public", "items", "source"] }])], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 const writeSync = fs.writeSync;
 const captureLogs = () => {
   const lines = [];
@@ -910,7 +900,7 @@ export const scenarios = {
     assert.equal(kept.error.exitCode, 7); assert.equal(git(stuck.path, "rev-parse", "HEAD"), oldBase);
     assert.match(readFileSync(resolve(stuck.path, "src/app.ts"), "utf8"), /value = 12/); assert.equal(f.row(s.workspaces, stuck.id).baseSha, oldBase);
   } },
-  run_sequence: { title: "claims assign increasing run sequences and the backfill preserves journal order, is idempotent and survives schema push", run: async () => {
+  run_sequence: { title: "claims assign increasing run sequences that stay unique", run: async () => {
     for (let n = 1; n <= 5; n++) f.addIssue(n);
     f.enqueue(1); f.enqueue(2, "implement");
     const claims = [tasks.claimTask(), tasks.claimTask()];
@@ -921,30 +911,7 @@ export const scenarios = {
     const more = [tasks.claimTask(), tasks.claimTask(), tasks.claimTask()].map((c) => c.run);
     assert.deepEqual(more.map((r) => r.sequence), [3, 4, 5]);
     for (const r of more) tasks.finishRun(r.id, { status: "completed" });
-    const [r1, r2, r3, r4, r5] = all(s.runs).sort((a, b) => a.sequence - b.sequence);
     assert.throws(() => db.$client.exec("UPDATE runs SET sequence = 1 WHERE sequence = 2"), /UNIQUE/);
-    const swap = db.$client.prepare("UPDATE events SET id = ? WHERE id = ?");
-    const eventId = (r) => db.$client.prepare("SELECT id FROM events WHERE run_id = ? AND type = 'run.started'").get(r.id).id;
-    const [e1, e2] = [eventId(r1), eventId(r2)];
-    swap.run(100000, e1); swap.run(e1, e2); swap.run(e2, 100000);
-    db.$client.exec(`DELETE FROM events WHERE run_id IN ('${r4.id}', '${r5.id}') AND type = 'run.started'`);
-    db.update(s.runs).set({ startedAt: "2021-01-01T00:00:00Z" }).where(eq(s.runs.id, r5.id)).run();
-    db.update(s.runs).set({ startedAt: "2020-01-01T00:00:00Z" }).where(eq(s.runs.id, r4.id)).run();
-    rebuildRunsTable(["sequence"]);
-    pushSchema();
-    assert.deepEqual(db.$client.prepare("PRAGMA foreign_key_check").all(), []);
-    assert.equal(all(s.runs).length, 5); assert.ok(all(s.runs).every((r) => r.sequence === null));
-    assert.ok(db.$client.prepare("SELECT 1 FROM sqlite_master WHERE name = 'runs_sequence_unique'").get());
-    const { ensureRunSequences } = await f.app("tasks.ts");
-    assert.equal(ensureRunSequences(), 5);
-    const order = () => all(s.runs).sort((a, b) => a.sequence - b.sequence).map((r) => r.id);
-    assert.deepEqual(order(), [r4.id, r5.id, r2.id, r1.id, r3.id]);
-    assert.deepEqual(all(s.runs).map((r) => r.sequence).sort(), [1, 2, 3, 4, 5]);
-    const before = all(s.runs);
-    assert.equal(ensureRunSequences(), 0); assert.deepEqual(all(s.runs), before);
-    db.update(s.runs).set({ sequence: null }).where(eq(s.runs.id, r4.id)).run();
-    assert.equal(ensureRunSequences(), 1); assert.equal(f.row(s.runs, r4.id).sequence, 6);
-    f.enqueue(1); assert.equal(tasks.claimTask().run.sequence, 7);
   } },
   run_latest: { title: "latest-run decisions follow claim sequence, not startedAt, for issue baselines and Pi session continuation", run: async () => {
     changeMain("src/helper.ts", "export const helper = 1;\n");
@@ -1330,24 +1297,6 @@ export const scenarios = {
     assert.equal(replacement.taskId, replaced.taskId); assert.ok(f.requests.length > replacementCalls);
     assert.equal(replacement.inferenceFromRunId, null);
   } },
-  resume_migration: { title: "checkpoint schema updates preserve existing task and run history without inventing legacy checkpoints", seed: seedIgnore, configure: [configureResumePrepare, configureGuardsValidate], run: async () => {
-    f.addIssue(1); f.enqueue(1, "implement"); const first = await run(); assert.equal(first.error.exitCode, 7);
-    f.reset(1, "normal"); tasks.retryTask(first.taskId); const failed = await run();
-    assert.equal(failed.retryOfRunId, first.id);
-    const history = all(s.events);
-    const removed = ["agent_checkpoint", "inference_from_run_id"];
-    rebuildRunsTable(removed, "ALTER TABLE tasks DROP COLUMN retry_mode; ");
-    pushSchema();
-    assert.deepEqual(db.$client.prepare("PRAGMA foreign_key_check").all(), []);
-    const legacy = f.row(s.runs, failed.id);
-    assert.deepEqual(legacy.result, failed.result); assert.deepEqual(legacy.error, failed.error); assert.equal(legacy.piSessionId, failed.piSessionId);
-    assert.equal(legacy.agentCheckpoint, null); assert.equal(legacy.inferenceFromRunId, null);
-    assert.equal(legacy.retryOfRunId, first.id); assert.deepEqual(f.row(s.runs, first.id).result, first.result);
-    assert.equal(f.row(s.tasks, failed.taskId).retryMode, "repair"); assert.deepEqual(all(s.events), history);
-    assert.throws(() => tasks.retryTask(failed.taskId, "validation"), /complete agent checkpoint/);
-    unlinkSync("block-validation"); f.reset(1, "normal"); const calls = f.requests.length;
-    tasks.retryTask(failed.taskId); await success(); assert.ok(f.requests.length > calls);
-  } },
   retry: { title: "publication retries reconcile remote comments and labels without rerunning Pi", run: async () => {
     for (const [n, fault] of [[1, "label"], [2, "comment"]]) {
       f.addIssue(n, ["human-label"]); f.reset(n, "ready"); f.enqueue(n); f.faults[fault].add(n);
@@ -1526,7 +1475,7 @@ export const scenarios = {
   stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", configure: [configureStaleBranch], run: staleBranch },
   validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit", configure: [configureValidation], run: validationFeedback },
   validation_feedback_cap: { title: "validation feedback stops after two rounds and never applies to signal-killed commands", configure: [configureValidation], run: validationFeedback },
-  measured_checks: { title: "a chatty passing validation command stores a bounded tail, keeps its full output on disk and old receipts still read", configure: [configureChatty], run: async () => {
+  measured_checks: { title: "a chatty passing validation command stores a bounded tail and keeps its full output on disk", configure: [configureChatty], run: async () => {
     const r = await implement(1);
     const [check] = r.verification.commands;
     assert.equal(check.status, "passed"); assert.equal(check.name, `${process.execPath} ${resolve("chatty.mjs")}`);
@@ -1534,9 +1483,6 @@ export const scenarios = {
     assert.ok(!JSON.stringify(r.verification).includes("ghs_fixture_sensitive"));
     assert.equal(check.evidence.length, 1); assert.match(check.evidence[0], new RegExp(`^${resolve("data/checks", r.id)}/validate-0-\\d+\\.log$`)); assert.ok(!check.evidence[0].startsWith(resolve("data/runs", r.id)));
     assert.ok(statSync(check.evidence[0]).size > 20 * 1024 * 1024);
-    const legacy = { headSha: r.verification.headSha, commands: [{ command: ["pnpm", "verify"], durationMs: 5, stdout: "old out", stderr: "old err" }] };
-    db.update(s.runs).set({ verification: legacy }).where(eq(s.runs.id, r.id)).run();
-    assert.deepEqual(f.row(s.runs, r.id).verification, legacy);
     const { runHistory } = await f.app("run-history.ts");
     const [entry] = runHistory(f.row(s.tasks, r.taskId).subjectId, ["implement"]);
     assert.equal(entry.run.id, r.id); assert.ok(!("verification" in entry.run)); assert.deepEqual(Object.keys(entry.run.context).sort(), ["baseBranch", "commentRevisions", "revision"]);
@@ -1810,18 +1756,8 @@ export const scenarios = {
     assert.equal(rejections().length, 2); assert.equal(f.row(s.tasks, "bogus").status, "failed");
     tasks.finishRun(claim.run.id, { status: "completed" });
 
-    f.enqueue(3); const damaged = tasks.claimTask();
-    tasks.finishRun(damaged.run.id, { status: "failed", error: new Error("Interrupted") });
-    db.update(s.runs).set({ sequence: null }).where(eq(s.runs.id, damaged.run.id)).run();
-    assert.throws(() => tasks.retryTask(damaged.task.id, "validation"), /Validation-only retry requires/);
-    assert.throws(() => tasks.retryTask("bogus", "validation"), /Validation-only retry requires/);
-    tasks.retryTask(damaged.task.id); f.enqueue(4);
-    assert.equal(tasks.claimTask().task.subjectId, "issue-4");
-    assert.equal(f.row(s.tasks, damaged.task.id).status, "failed");
-    assert.match(rejections().at(-1).data.reason, /Missing run sequence/);
-    assert.equal(rejections().at(-1).taskId, damaged.task.id);
-    assert.equal(rejections().length, 3);
 
+    assert.throws(() => tasks.retryTask("bogus", "validation"), /Validation-only retry requires/);
 
     const { validateStaticConfig } = await f.app("startup.ts");
     await validateStaticConfig(f.config);
@@ -3101,9 +3037,9 @@ export const scenarios = {
     assert.deepEqual(migrate("legacy.sqlite"), { migrate: "subjects", result: "already_migrated" });
     const again = new DatabaseSync("legacy.sqlite"); assert.equal(dump(again), migrated); again.close();
 
-    const push = pushSchema("./legacy.sqlite");
-    assert.match(push, /No changes detected/);
-    const pushed = new DatabaseSync("legacy.sqlite"); assert.equal(dump(pushed), migrated); assert.deepEqual(rows(pushed, "PRAGMA foreign_key_check"), []); pushed.close();
+    pushSchema("./legacy.sqlite");
+    assert.match(pushSchema("./legacy.sqlite"), /No changes detected/);
+    const pushed = new DatabaseSync("legacy.sqlite"); assert.deepEqual(rows(pushed, "PRAGMA foreign_key_check"), []); pushed.close();
   } },
   manifests: { title: "every action is loaded from a validated manifest, malformed manifests are rejected with file and path, and local overrides reach the runtime", run: async () => {
     const { readManifests } = await f.app("manifests.ts");

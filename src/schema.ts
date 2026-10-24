@@ -18,13 +18,12 @@ export const subjects = sqliteTable("subjects", {
 
 export const items = sqliteTable("items", {
   id: text("id").primaryKey().references(() => subjects.id),
-  source: text("source", { enum: ["github"] }).notNull(),
   externalId: text("external_id").notNull(),
   kind: text("kind", { enum: ["issue", "pr"] }).notNull(),
   selfRepairCount: integer("self_repair_count").notNull().default(0),
   payload: text("payload", { mode: "json" })
     .$type<GithubItem>().notNull(),
-}, (table) => [unique().on(table.source, table.externalId)]);
+}, (table) => [unique().on(table.externalId)]);
 
 export const tasks = sqliteTable("tasks", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
@@ -70,7 +69,7 @@ export type Check = {
 export const runs = sqliteTable("runs", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
   taskId: text("task_id").notNull().references(() => tasks.id),
-  sequence: integer("sequence"),
+  sequence: integer("sequence").notNull(),
   retryOfRunId: text("retry_of_run_id").references((): AnySQLiteColumn => runs.id),
   inferenceFromRunId: text("inference_from_run_id").references((): AnySQLiteColumn => runs.id),
   input: text("input", { mode: "json" }).$type<Record<string, unknown>>().notNull().default({}),
@@ -100,7 +99,7 @@ export const runs = sqliteTable("runs", {
   }>(),
   verification: text("verification", { mode: "json" }).$type<{
     headSha: string;
-    commands: (Check | { command: string[]; durationMs: number; stdout: string; stderr: string })[];
+    commands: Check[];
   }>(),
   result: text("result", { mode: "json" }).$type<AgentResult>(),
   error: text("error", { mode: "json" }).$type<ErrorDetails>(),

@@ -25,7 +25,6 @@ function selectAssessment(history: History) {
       origin = parent;
     }
     const { sequence } = origin.run;
-    if (sequence === null || run.sequence === null) throw new Error(`Missing run sequence for PR assessment: ${run.id}`);
     if (!selected || sequence > selected.originSequence) {
       selected = { ...entry, result: run.result, originSequence: sequence, originId: origin.run.id };
     }
@@ -37,7 +36,7 @@ export function priorReviewTexts(subjectId: string) {
   const assessment = selectAssessment(runHistory(subjectId, actionsPublishing("pr_assessment")));
   if (!assessment) return undefined;
   const repair = runHistory(subjectId, actionsTriggeredBy("low_grade"))
-    .find(({ run }) => run.result?.outcome === "complete" && (run.sequence ?? 0) > assessment.run.sequence!)?.run.result?.text;
+    .find(({ run }) => run.result?.outcome === "complete" && run.sequence > assessment.run.sequence)?.run.result?.text;
   return { assessment: assessment.result.text, repair };
 }
 

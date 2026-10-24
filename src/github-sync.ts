@@ -19,8 +19,8 @@ export async function syncGitHub(repository = config.github.repository, queueTas
     const { issues, pullRequests } = await github.fetchOpenItems();
     operation.stage("persistence");
     db.transaction((transaction) => {
-      for (const payload of issues) upsertItem({ source: "github", externalId: payload.node_id, kind: "issue", payload }, transaction);
-      for (const payload of pullRequests) upsertItem({ source: "github", externalId: payload.node_id, kind: "pr", payload }, transaction);
+      for (const payload of issues) upsertItem({ externalId: payload.node_id, kind: "issue", payload }, transaction);
+      for (const payload of pullRequests) upsertItem({ externalId: payload.node_id, kind: "pr", payload }, transaction);
     });
     let queued = 0;
     if (queueTasks) {
@@ -35,9 +35,9 @@ export async function syncGitHub(repository = config.github.repository, queueTas
       for (const [index, previousItem] of missing.entries()) {
         const read = reads[index]!;
         if (read.status === "fulfilled") {
-          upsertItem({ source: "github", externalId: previousItem.externalId, kind: previousItem.kind, payload: read.value.item, state: read.value.item.state === "open" ? "open" : "closed" });
+          upsertItem({ externalId: previousItem.externalId, kind: previousItem.kind, payload: read.value.item, state: read.value.item.state === "open" ? "open" : "closed" });
         } else if (errorStatus(read.reason) === 404 || errorStatus(read.reason) === 410) {
-          upsertItem({ source: "github", externalId: previousItem.externalId, kind: previousItem.kind, payload: previousItem.payload, state: "closed" });
+          upsertItem({ externalId: previousItem.externalId, kind: previousItem.kind, payload: previousItem.payload, state: "closed" });
         } else {
           operation.log.warn({ event: "github.reconcile_failed", kind: previousItem.kind, number: previousItem.payload.number, err: read.reason });
         }

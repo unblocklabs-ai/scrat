@@ -9,6 +9,7 @@ export type ErrorDetails = {
   status?: number;
   code?: string;
   exitCode?: number;
+  evidence?: string;
   stdout?: string;
   stderr?: string;
   requestId?: string;
@@ -55,6 +56,7 @@ export function describeError(error: unknown, seen = new Set<unknown>()): ErrorD
     status: "status" in error && typeof error.status === "number" ? error.status : undefined,
     code: "code" in error && typeof error.code === "string" ? error.code : undefined,
     exitCode: "code" in error && typeof error.code === "number" ? error.code : undefined,
+    evidence: "evidence" in error && typeof error.evidence === "string" ? error.evidence : undefined,
     stdout: "stdout" in error && typeof error.stdout === "string" ? redactSecrets(error.stdout) : undefined,
     stderr: "stderr" in error && typeof error.stderr === "string" ? redactSecrets(error.stderr) : undefined,
     requestId: typeof requestId === "string" ? requestId : undefined,

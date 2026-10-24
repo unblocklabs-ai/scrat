@@ -86,7 +86,7 @@ Per-install systemd overrides (for example a lower `MemoryMax` than the unit's 2
 | `harness.maxConcurrency` | Maximum simultaneous tasks, not model sessions or test subprocesses. Each PR review starts two reviewer sessions within one task, and change-mode tasks run a database container and a validation suite, so size this to the host's memory. |
 | `harness.maxConcurrentValidations` | Maximum `workspace.validate` runs at once. Further runs wait in a FIFO queue; preparation does not take a slot. |
 | `harness.commandTimeoutSeconds` | Longest a `workspace.prepare`, database migrate or `workspace.validate` command may run. It is killed with SIGKILL and the run fails as infrastructure, eligible for validation-only retry, without re-prompting the agent. Heavy commands run by the agent use it as their ceiling too. |
-| `harness.commandOutputTailBytes` | Bounded tail of each workspace command's output kept in the run row and in the validation failure sent to the agent; the full output is streamed to `data/checks/<runId>/`. |
+| `harness.commandOutputTailBytes` | Bounded tail of each workspace command's output kept in the run row and in the validation failure sent to the agent; the full output is streamed to `data/checks/<runId>/`, and a failing command's run error also records the path of its full log as `evidence`. |
 | `harness.maxOutputBytes` | Output buffer shared by Scrat's internal git and docker calls. |
 | `harness.maxStderrBytes` | Stderr kept from a paged git read before further output is dropped. |
 | `harness.gitNetworkTimeoutSeconds` | Longest a git clone, fetch, ls-remote or push may run before it is killed. |

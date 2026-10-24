@@ -1267,6 +1267,8 @@ export const scenarios = {
     assert.equal(failed.error.exitCode, 7);
     assert.match(failed.error.stdout, /validation detail \[redacted\]/);
     assert.match(failed.error.stdout, /Verification failed/);
+    assert.match(failed.error.evidence, new RegExp(`^${RegExp.escape(resolve("data/checks", failed.id))}/validate-0-\\d+\\.log$`));
+    assert.match(readFileSync(failed.error.evidence, "utf8"), /Verification failed/);
     assert.ok(!JSON.stringify(failed.error).includes("ghs_fixture_sensitive"));
   } },
   validation_mutation: { title: "checks that change source cannot certify the resulting commit", configure: [configureCheck], run: async () => {

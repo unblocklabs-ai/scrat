@@ -38,7 +38,7 @@ export async function runCommands(commands: string[][], cwd: string, environment
       const check: Check = { name, status: outcome.code === 0 ? "passed" : "failed", durationMs: Math.round(performance.now() - started), tail, evidence: [evidence] };
       if (check.status === "failed") {
         const message = outcome.killed ? `Command timed out after ${config.harness.commandTimeoutSeconds} seconds: ${name}` : `Command failed: ${name}`;
-        throw await reportMemoryKill(command.unit, Object.assign(new Error(message, { cause: writeError }), { code: outcome.code, signal: outcome.signal, killed: outcome.killed, stdout: tail }));
+        throw await reportMemoryKill(command.unit, Object.assign(new Error(message, { cause: writeError }), { code: outcome.code, signal: outcome.signal, killed: outcome.killed, evidence, stdout: tail }));
       }
       if (writeError) throw await reportMemoryKill(command.unit, new Error(`Could not write the output of ${name} to ${evidence}: ${writeError.message}`, { cause: writeError }));
       operation.complete();

@@ -243,7 +243,9 @@ const staleBranch = async (variant) => {
     assert.deepEqual(f.prs[1].labels, []);
     const writes = f.writes.length;
     changeMain("src/other.ts", "export const other = 1;\n"); await route();
-    assert.deepEqual(queuedFor(302), []); assert.equal(f.writes.length, writes, "a base move neither queues nor comments");
+    assert.deepEqual(queuedFor(302), ["review_pr"], "a base move re-queues one review"); assert.equal(f.writes.length, writes, "a base move writes nothing");
+    assert.ok((await run()).error); await route();
+    assert.equal(notices().length, 1); assert.deepEqual(queuedFor(302), [], "a conflict on the new base blocks again");
     tasks.enqueueManualTasks("review_pr", ["302"]); await route();
     assert.deepEqual(queuedFor(302), ["review_pr"], "a manual request survives routing");
     assert.ok((await run()).error); await route();
@@ -339,11 +341,14 @@ const validationFeedback = async (variant) => {
     assert.match(f.prs[0].body, /Implemented the change\.[\s\S]*Fixed the validation failure\./);
     const turns = () => f.requests.filter((entry) => entry.request.messages.at(-1).role === "user").length - feedbackRequests().length;
     f.addIssue(2, ["scrat"]); f.reset(2, "feedback-fix"); f.enqueue(2, "implement");
+    f.comments.set(2, [humanComment(2, 9100, "Only the discussion file says this", "2026-10-19T01:00:00Z")]);
     const stop = new AbortController(); f.onModel = () => stop.abort();
     const cut = await f.runNextTask(stop.signal); f.onModel = undefined;
     assert.equal(cut.stage, "validating"); assert.equal(f.row(s.tasks, cut.taskId).retryMode, "validation");
     const started = turns(), asked = feedbackRequests().length, checked = validations();
-    const resumed = await success();
+    f.script = [undefined, undefined, { name: "read", args: { path: f.requests.at(-1).context.files.discussion } }, { name: "bash", args: { command: "rm -f fail-validation" } }];
+    const resumed = await success(); f.script = undefined;
+    assert.match(JSON.stringify(f.requests.at(-1).request.messages), /Only the discussion file says this/, "a resumed correction round can read the original context files");
     assert.equal(resumed.inferenceFromRunId, cut.id); assert.equal(resumed.piSessionId, cut.piSessionId);
     assert.equal(turns(), started, "the resumed run starts no new agent turn");
     assert.equal(feedbackRequests().length, asked + 1); assert.match(lastUser(feedbackRequests().at(-1)), /round 1 of 2/);
@@ -375,6 +380,10 @@ const validationFeedback = async (variant) => {
     const cut = await f.runNextTask(stop.signal); f.onModel = undefined; assert.equal(f.row(s.tasks, cut.taskId).status, "queued");
     await route(); assert.ok(!marked(5), "an interrupted task is not labelled");
     tasks.retryTask(limited.taskId); await route(); assert.ok(!marked(4), "a retried task clears the label"); assert.ok(marked(3));
+    f.issues.get(3).labels = f.issues.get(3).labels.filter(({ name }) => name !== "scrat"); await route();
+    assert.ok(!marked(3), "deselecting an issue clears the label"); assert.ok(marked(2));
+    config.actions.implement.enabled = false; f.addIssue(6, ["scrat"]); await route();
+    assert.deepEqual(all(s.tasks).filter((t) => t.subjectId === "issue-6" && t.action === "implement"), [], "a disabled action gets no task to fail and label");
   }
 };
 const commitReview = async (variant) => {
@@ -468,7 +477,7 @@ const commitReview = async (variant) => {
     const interrupted = f.row(s.runs, claim.run.id); assert.equal(interrupted.error.code, "RUN_INTERRUPTED");
     tasks.retryTask(interrupted.taskId);
     const done = await success();
-    assert.equal(done.retryOfRunId, interrupted.id); assert.equal(roots().length, 1); assert.equal(posts().length, 2);
+    assert.equal(done.retryOfRunId, null); assert.equal(roots().length, 1); assert.equal(posts().length, 2);
     assert.equal(posts()[1].body.thread_ts, ts); assert.equal(all(s.slackThreads).length, 1); assert.equal(done.publication.slackReplyTs, "1700000000.000002");
     assert.equal(reviewRequests().length, 4);
   } else if (variant === "isolation") {
@@ -720,7 +729,7 @@ export const scenarios = {
       };
       try {
         f.comments.set(201, [humanComment(201, 901, "Changed so reads are not 304", "2026-10-19T03:00:00Z", "c901")]);
-        await assert.rejects(route(), (error) => error.status === 404);
+        await assert.rejects(github.fetchItemContext("pr", 201), (error) => error.status === 404);
         assert.equal(active, 0, "A failed PR read must wait for its sibling reads");
         failing = false; await route();
       } finally { globalThis.fetch = original; }
@@ -747,7 +756,7 @@ export const scenarios = {
       await route(); assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
     } finally { release(); globalThis.fetch = fetch; }
   } },
-  routing_history: { title: "covered triggers and attempts skip unavailable review history without blocking later items", run: async () => {
+  routing_history: { title: "covered triggers and attempts skip unavailable review history, and an item whose routing throws is logged without blocking later items", run: async () => {
     f.addIssue(1); f.enqueue(1); const completed = await success();
     changeMain("src/app.ts", "export const value = 2;\n"); await route();
     db.update(s.runs).set({ mainSha: "f".repeat(40) }).where(eq(s.runs.id, completed.id)).run();
@@ -762,6 +771,11 @@ export const scenarios = {
     assert.equal(f.row(s.tasks, failed.taskId).input.triggerKey, undefined);
     const calls = f.requests.length; f.addIssue(4); await route();
     assert.ok(isQueued("issue-4")); assert.ok(!isQueued("issue-1")); assert.equal(f.requests.length, calls);
+    changeMain("src/app.ts", "export const value = 3;\n"); f.addIssue(5);
+    const lines = captureLogs();
+    try { await route(); } finally { restoreLogs(); }
+    assert.ok(isQueued("issue-5"), "an item whose history cannot be compared does not stop routing for the others");
+    assert.ok(lines.some((line) => line.event === "github.routing_failed" && line.subjectId === "issue-1"));
   } },
   acceptance: { title: "action postconditions reject empty implementations and unresolved conflicts but permit reply-only feedback", run: async () => {
     f.addIssue(1, ["scrat"]); f.enqueue(1, "implement"); f.reset(1, "no-change");
@@ -1392,7 +1406,7 @@ export const scenarios = {
     assert.equal(replacement.taskId, replaced.taskId); assert.ok(f.requests.length > replacementCalls);
     assert.equal(replacement.inferenceFromRunId, null);
   } },
-  retry: { title: "publication retries reconcile remote comments and labels without rerunning Pi, and follow-up issue reviews edit the one assessment comment with the previous assessment in hand while an unchanged one writes nothing", run: async () => {
+  retry: { title: "publication retries reconcile remote comments and labels without rerunning Pi, a not-ready issue review never removes the selection label, and follow-up issue reviews edit the one assessment comment with the previous assessment in hand while an unchanged one writes nothing", run: async () => {
     for (const [n, fault] of [[1, "label"], [2, "comment"]]) {
       f.addIssue(n, ["human-label"]); f.reset(n, "ready"); f.enqueue(n); f.faults[fault].add(n);
       const first = f.requests.length, failed = await run(); assert.ok(failed.error); const calls = f.requests.length;
@@ -1403,8 +1417,11 @@ export const scenarios = {
       assert.deepEqual(f.issues.get(n).labels.map((label) => label.name).sort(), ["human-label", "scrat"]);
     }
     f.reset(1, "normal"); f.enqueue(1); let written = f.writes.length; const followUp = await success();
-    assert.deepEqual(f.issues.get(1).labels.map((label) => label.name), ["human-label"]);
-    assert.deepEqual(f.writes.slice(written).map((w) => [w.type, w.method]), [["label", "DELETE"]], "The same text with a changed conclusion only moves the label");
+    assert.deepEqual(f.issues.get(1).labels.map((label) => label.name).sort(), ["human-label", "scrat"]);
+    assert.deepEqual(f.writes.slice(written), [], "A not-ready follow-up never removes the selection label");
+    f.addIssue(3); f.enqueue(3); f.onModel = () => { f.issues.get(3).labels = [{ name: "scrat" }]; };
+    await success(); f.onModel = undefined;
+    assert.deepEqual(f.issues.get(3).labels.map((label) => label.name), ["scrat"], "A review that ends not ready keeps a selection label added while it ran");
     assert.equal(f.comments.get(1).length, 1, "A second review keeps one assessment comment");
     f.reset(1, "revised"); f.enqueue(1); const before = f.requests.length; written = f.writes.length; const revised = await success();
     assert.equal(readFileSync(f.requests[before].context.files.previous_assessment, "utf8"), followUp.result.text);
@@ -1548,7 +1565,7 @@ export const scenarios = {
       reviewed = await success();
     }
   } },
-  stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or says once in its assessment comment that the merge conflicts and is not retried until its head changes or a review is requested by hand", configure: [configureStaleBranch], run: () => staleBranch("human") },
+  stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or says once in its assessment comment that the merge conflicts and is not retried until its head or base changes or a review is requested by hand", configure: [configureStaleBranch], run: () => staleBranch("human") },
   stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", configure: [configureStaleBranch], run: () => staleBranch("scrat") },
   validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit, including after a restart resumed it at validation", configure: [configureValidation], run: () => validationFeedback("fix") },
   validation_feedback_cap: { title: "validation feedback stops after two rounds and never applies to signal-killed commands, and sync labels each issue whose implementation failed for good until it is retried", configure: [configureValidation], run: () => validationFeedback("cap") },
@@ -1810,20 +1827,32 @@ export const scenarios = {
     }
     assert.equal(outbound(), ""); assert.equal(f.requests.length, modelRequests);
   } },
-  recovery: { title: "recover releases an abandoned claim without rewriting the saved result, and an interrupted commit review is recovered and retried with exactly one root and one reply", configure: [configureCommitSource], run: async () => {
+  recovery: { title: "recover releases an abandoned claim as an interruption without rewriting the saved result, and an interrupted commit review is recovered and retried with exactly one root and one reply", configure: [configureCommitSource], run: async () => {
     await commitReview("restart");
     f.addIssue(1); f.enqueue(1); const claim = tasks.claimTask();
     db.update(s.runs).set({ stage: "publishing", result: { text: "Saved", ready: false, paths: [], outcome: "complete" }, publication: { status: "pending", commentId: 123 } }).where(eq(s.runs.id, claim.run.id)).run();
     execFileSync(process.execPath, [resolve("app/src/recover.ts"), claim.run.id], { stdio: "pipe" });
     const r = f.row(s.runs, claim.run.id); assert.equal(r.error.code, "RUN_INTERRUPTED"); assert.equal(r.result.text, "Saved"); assert.equal(r.publication.commentId, 123);
-    tasks.retryTask(r.taskId); assert.ok(tasks.claimTask());
+    tasks.retryTask(r.taskId); const retried = await success();
+    assert.equal(retried.retryOfRunId, null); assert.ok(!("previousFailure" in f.requests.at(-1).context.files), "a recovered run is retried as an interruption, not as a failure to repair");
   } },
-  cleanup: { title: "cleanup failure cannot turn a published review into a failed task", run: async () => {
+  cleanup: { title: "cleanup failure cannot turn a published review or comment-only implementation into a failed task, and cleanup never removes a change workspace through a review that stopped early", run: async () => {
     f.addIssue(1); f.enqueue(1); f.faults.cleanup.add(1); const r = await success();
     assert.equal(f.row(s.tasks, r.taskId).status, "completed"); const w = f.row(s.workspaces, r.workspaceId);
     assert.equal(w.removedAt, null); assert.equal(readFileSync(w.path + "/keep.txt", "utf8"), "preserve\n");
     git(w.path, "reset", "--hard", w.baseSha); execFileSync(process.execPath, [resolve("app/src/cleanup.ts")], { stdio: "pipe" });
     assert.ok(f.row(s.workspaces, r.workspaceId).removedAt);
+    const implemented = await implement(2), pr = all(s.items).find((i) => i.kind === "pr");
+    tasks.enqueueTask({ subjectId: pr.id, action: "review_pr", reason: "Stopped before its workspace", input: { source: "github_items", kind: "manual", manual: true } });
+    const stop = new AbortController(); stop.abort(); assert.ok((await f.runNextTask(stop.signal)).error);
+    execFileSync(process.execPath, [resolve("app/src/cleanup.ts")], { stdio: "pipe" });
+    assert.equal(f.row(s.workspaces, implemented.workspaceId).removedAt, null, "cleanup keeps a PR workspace that a stopped review never used");
+    tasks.cancelQueuedTasks(pr.id, "Isolate the comment-only implementation");
+    f.addIssue(3, ["scrat"]); f.reset(3, "no-change"); f.faults.cleanup.add(3); f.enqueue(3, "implement");
+    const commented = await success(), kept = f.row(s.workspaces, commented.workspaceId);
+    assert.equal(commented.publication.status, "published"); assert.equal(f.comments.get(3).length, 1);
+    assert.equal(kept.removedAt, null, "a comment-only release that fails leaves the run completed and the workspace retained");
+    assert.equal(readFileSync(kept.path + "/keep.txt", "utf8"), "preserve\n");
   } },
   sync_missing_item: { title: "a deleted open item is marked closed and its failed read does not stop routing for the others", run: async () => {
     f.addIssue(1); f.addIssue(2); await route();
@@ -2545,8 +2574,6 @@ export const scenarios = {
     const labels = (n) => f.issues.get(n).labels.map((label) => label.name);
     f.addIssue(3); f.reset(3, "ready"); f.enqueue(3, "review_issue"); await success();
     assert.deepEqual(labels(3), ["mocha-agent"]);
-    f.reset(3, "normal"); f.enqueue(3, "review_issue"); await success();
-    assert.deepEqual(labels(3), []);
     assert.equal(f.prs.length, 1); assert.match(f.prs[0].head.ref, /^mocha-agent\/[0-9a-f-]{36}$/);
     assert.deepEqual(labels(1), ["scrat"]);
   } },

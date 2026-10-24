@@ -4,6 +4,7 @@ import { applyEffects, type EffectContext } from "./effects.ts";
 import type { EventReferences } from "./events.ts";
 import { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
+import { logger } from "./logging.ts";
 import { getRun, updateRun } from "./run-history.ts";
 import type { Run, Task, Subject } from "./schema.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
@@ -28,7 +29,8 @@ export async function publishRun(github: GitHubRepository, task: Task, run: Run,
   const effectContext = { ...receiptContext(run, references), github, task, run: { ...run, result, context }, current };
   if (run.publication.commentOnly) {
     await applyEffects(["comment"], effectContext);
-    await removeWorkspace(run.workspaceId!, references);
+    const { workspaceId } = run;
+    if (workspaceId) await removeWorkspace(workspaceId, references).catch(() => logger.warn({ event: "run.cleanup_pending", ...references, workspaceId }));
     return;
   }
   if (manifest.mode === "change") {

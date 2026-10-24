@@ -17,7 +17,4 @@ export function getActionConfig(action: string) {
 export const actionsPublishing = (effect: EffectName) => manifests.filter((manifest) => manifest.publish.includes(effect)).map((manifest) => manifest.name);
 
 export const matchingActions = (signal: Signal) => manifests.filter((manifest) => matches(manifest, signal)).map((manifest) => manifest.name);
-export const routeFor = (signal: Signal) => {
-  const found = matchingActions(signal);
-  return found.find(isActionEnabled) ?? found[0];
-};
+export const routeFor = (signal: Signal) => matchingActions(signal).find(isActionEnabled);

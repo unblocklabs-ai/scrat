@@ -46,19 +46,19 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
   await reconcileLabels(github, number, { current: labels, desired: kept, managed }, deliveryReferences);
   if (publication && !desired) throw new Error("Reviewed code changed or PR context changed; enqueue a fresh review");
 
+  let commentId: number | undefined;
   if (shown) {
     const body = desired ? reviewBody(desired.result.text, desired.task.id)
       : reviewBody(`This PR is behind ${observation.baseBranch} and does not merge cleanly; update the branch and ${botName} will review it.`, shown.task.id);
     const { run } = shown;
-    const commentId = await upsertComment(github, number, existing, body, deliveryReferences);
-    run.publication = { ...run.publication, commentId };
-    updateRun(run.id, { publication: run.publication });
+    commentId = await upsertComment(github, number, existing, body, deliveryReferences);
+    updateRun(run.id, { publication: { ...run.publication, commentId } });
   }
 
   await reconcileLabels(github, number, {
     current: kept, desired: gradeLabel, managed,
   }, deliveryReferences);
-  if (desired) updateRun(desired.run.id, { publication: { ...desired.run.publication, status: "published" } });
+  if (desired) updateRun(desired.run.id, { publication: { ...desired.run.publication, commentId, status: "published" } });
   if (publication && publication.run.id !== desired?.run.id) updateRun(publication.run.id, { publication: { ...publication.run.publication, status: "not_needed" } });
 }
 

@@ -13,6 +13,8 @@ export const updateRun = (id: string, patch: Partial<typeof runs.$inferInsert>, 
 export const getTask = (id: string, database: Database = db) =>
   database.select().from(tasks).where(eq(tasks.id, id)).get();
 
+export const inferenceRunOf = (run: Run): Run => run.inferenceFromRunId ? inferenceRunOf(getRun(run.inferenceFromRunId)!) : run;
+
 export const latestRunOfTask = (taskId: string, database: Database = db) =>
   database.select().from(runs).where(eq(runs.taskId, taskId))
     .orderBy(desc(runs.sequence)).limit(1).get();

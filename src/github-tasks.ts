@@ -100,13 +100,13 @@ async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation
 async function reconcileFailedLabels(ctx: SyncContext, item: Item) {
   const labelled = manifests.flatMap(({ name, trigger }) => {
     const label = config.actions[name]?.failedLabel;
-    return trigger.item === item.kind && label ? [{ name, label }] : [];
+    return trigger.item === item.kind && label ? [{ name, label, selected: trigger.kind !== "label" || hasScratLabel(item) }] : [];
   });
   if (!labelled.length) return;
   try {
     await reconcileLabels(ctx.github, item.payload.number, {
       current: item.payload.labels ?? [],
-      desired: labelled.filter(({ name }) => latestTask(item.id, name)?.status === "failed").map(({ label }) => label),
+      desired: labelled.filter(({ name, selected }) => selected && latestTask(item.id, name)?.status === "failed").map(({ label }) => label),
       managed: labelled.map(({ label }) => label),
     }, { subjectId: item.id });
   } catch (error) { ctx.log.warn({ event: "github.label_pending", subjectId: item.id, err: error }); }
@@ -199,10 +199,10 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
   const reviewable = ordered.filter((item) => item.state === "open" && item.kind === "issue" && !selects(item));
   const contexts = await github.fetchItemContexts(reviewable.map((item) => ({ kind: "issue", number: item.payload.number, item: item.payload })), { defer: true });
   const issueContexts = new Map(reviewable.map((item, index) => [item.id, contexts[index]]));
-  for (const item of ordered) {
+  const routeItem = async (item: Item) => {
     if (item.state === "closed") {
       await cleanupClosedItem(item);
-      continue;
+      return;
     }
     if (item.workspaceId && getWorkspace(item.workspaceId)?.removedAt) {
       db.update(subjects).set({ workspaceId: null }).where(eq(subjects.id, item.id)).run();
@@ -218,7 +218,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
         latest: latestOf(item.id, labelAction), updatedAt: item.payload.updated_at, mainSha: defaultBaseSha,
       });
       queued += applyDecisions(item.id, plan.decisions);
-      if (!plan.review) continue;
+      if (!plan.review) return;
       const context = issueContexts.get(item.id);
       if (context) queued += await routeObserved(ctx, item, context, defaultBaseSha);
       else deferred++;
@@ -228,6 +228,10 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
         return routeObserved(ctx, item, await github.fetchItemContext("pr", item.payload.number), defaultBaseSha);
       });
     }
+  };
+  for (const item of ordered) {
+    try { await routeItem(item); }
+    catch (error) { log.warn({ event: "github.routing_failed", subjectId: item.id, err: error }); }
   }
   if (deferred) log.warn({ event: "github.sync_deferred", deferred, ...rateLimitState() }, "GitHub rate limit is low; deferred item reads to the next sync");
   return queued;

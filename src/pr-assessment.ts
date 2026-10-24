@@ -52,7 +52,7 @@ export type PrReviewState =
 
 export async function resolvePrReview(history: History, now: ItemObservation, mainSha: string): Promise<PrReviewState> {
   const [latest] = history;
-  if (latest?.run.error?.code === branchConflictCode && "head" in now.item && latest.run.headSha === now.item.head.sha && latest.run.context?.baseBranch === now.baseBranch) return { kind: "blocked", attempt: latest };
+  if (latest?.run.error?.code === branchConflictCode && "head" in now.item && latest.run.headSha === now.item.head.sha && latest.run.mainSha === mainSha && latest.run.context?.baseBranch === now.baseBranch) return { kind: "blocked", attempt: latest };
   const assessment = selectAssessment(history);
   if (!assessment) return { kind: "missing" };
   if (now.item.state !== "open") return { kind: "stale", reason: "context", assessment, changedPaths: [] };

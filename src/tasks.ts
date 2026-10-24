@@ -138,7 +138,8 @@ export function claimTask() {
     const publicationResume = !validationOnly && hasPublicationSnapshot(retry) ? retry : undefined;
     const resume = validationOnly ? (hasValidationCheckpoint(retry) ? retry : undefined) : publicationResume;
     const prior = retry?.error?.name === "InterruptedError" && !resume ? undefined : retry;
-    const pinned = manifestOf(next.task.action).mode === "review" && !resume ? undefined : prior;
+    const review = manifestOf(next.task.action).mode === "review";
+    const pinned = review && !resume ? undefined : prior;
     const settings = pinned ?? actionSettings;
     const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? configuredReviewers(next.task.action, isBaseOnly(claimable.trigger));
     const { provider, model, thinkingLevel } = !resume && reviewers.length === 1 ? reviewers[0] : settings;
@@ -151,7 +152,7 @@ export function claimTask() {
       input: task.input,
       skill: settings.skill,
       provider, model, thinkingLevel, reviewers,
-      workspaceId: resume?.workspaceId ?? next.subject.workspaceId,
+      workspaceId: resume?.workspaceId ?? (review ? null : next.subject.workspaceId),
       stage: entryStage(retry, next.task.retryMode),
       ...(resume ? {
         context: resume.context, result: resume.result, mainSha: resume.mainSha, headSha: resume.headSha,

@@ -10,3 +10,4 @@ publish: [push, pull_request]
 skill: skills/implement/SKILL.md
 model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }
 priority: 60
+failedLabel: Scrat failed

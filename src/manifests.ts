@@ -39,6 +39,7 @@ const schema = Type.Object({
   start: Type.Optional(list(Type.Enum(startEffectNames))), publish: list(Type.Enum(effectNames), 1),
   skill: Type.String(), model, priority: Type.Integer(), retry: Type.Optional(retry),
   maxSelfRepairs: Type.Optional(Type.Integer({ minimum: 0 })), exhaustedLabel: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  failedLabel: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   channel: Type.Optional(Type.String()), maxRangeCommits: Type.Optional(Type.Integer({ minimum: 1 })), startMessage: Type.Optional(Type.String()),
 }, strict);
 
@@ -70,6 +71,7 @@ function crossChecks(m: Parsed) {
   need(t.grades === undefined || t.kind === "low_grade", "trigger.grades is only allowed with kind low_grade");
   need((m.maxSelfRepairs === undefined && m.exhaustedLabel === undefined) || t.kind === "low_grade", "maxSelfRepairs and exhaustedLabel are only allowed with kind low_grade");
   need(t.kind !== "low_grade" || m.maxSelfRepairs !== undefined, "kind low_grade requires maxSelfRepairs");
+  need(m.failedLabel === undefined || mode === "change", "failedLabel requires mode change");
   need(!commits || m.maxRangeCommits !== undefined, "source github_commits requires maxRangeCommits");
   need((m.channel === undefined && m.startMessage === undefined && m.maxRangeCommits === undefined) || commits, "channel, startMessage and maxRangeCommits are only allowed with source github_commits");
   need(!any(slack, ["slack_post", "slack_reply"]) || commits, "slack effects require source github_commits");
@@ -163,7 +165,7 @@ export function findTriggerConflicts(manifests: readonly Manifest[], enabled: (m
 export const skillPath = (manifest: Manifest, skill = manifest.skill) => resolve(manifest.root, skill);
 
 export function deploymentDefaults(m: Manifest) {
-  const optional = { branch: m.trigger.branch, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel, retry: m.retry };
+  const optional = { branch: m.trigger.branch, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel, failedLabel: m.failedLabel, retry: m.retry };
   return {
     enabled: m.enabled ?? true, priority: m.priority, skill: m.skill, ...m.model, agent: m.agent, reviewers: m.reviewers,
     ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== undefined)),

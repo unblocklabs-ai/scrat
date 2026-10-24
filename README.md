@@ -70,7 +70,7 @@ Use `--validation-only` for a transient validation failure after a mutating agen
 
 `scrat.config.json` holds the defaults and ships with each release. Settings specific to one deployment go in `scrat.local.json`, a gitignored file next to it that holds only the overrides, for example `{"harness":{"maxConcurrency":8}}`. If it is missing, Scrat creates it containing `{}`.
 
-- Plain objects merge recursively; arrays and primitives replace the default. `null` is accepted only where the schema allows it: `workspace.database` (`"workspace":{"database":null}` disables the database), `workspace.commandMemoryMax`, `workspace.packageStore` and an action's `exhaustedLabel`.
+- Plain objects merge recursively; arrays and primitives replace the default. `null` is accepted only where the schema allows it: `workspace.database` (`"workspace":{"database":null}` disables the database), `workspace.commandMemoryMax`, `workspace.packageStore`, and an action's `exhaustedLabel` or `failedLabel`.
 - The merged config is validated against one schema (`src/config-schema.ts`): an unknown key, a wrong type or an out-of-range number stops startup with the setting path, for example `harness.maxConcurency: unknown setting` or `harness.maxConcurrentValidations: must be >= 1`. `workspace.environment` (variable names) and `providers` are open: they accept keys the defaults do not show, so a provider can be overridden or added.
 - Relative paths in overrides resolve from the config directory, like the defaults.
 - Overrides live in `scrat.local.json`, linked into each release by the installer, which checks it before stopping the service; check an edit with `node src/config.ts`, then restart the service.
@@ -142,7 +142,7 @@ Example `scrat.local.json` for a PAT deployment (every key already exists in the
 ```json
 {
   "github": { "repository": "acme/widgets", "auth": "pat", "botLogin": "mocha-agent", "botName": "Mocha" },
-  "actions": { "address_review": { "exhaustedLabel": "Mocha repair exhausted" } }
+  "actions": { "address_review": { "exhaustedLabel": "Mocha repair exhausted" }, "implement": { "failedLabel": "Mocha failed" } }
 }
 ```
 
@@ -157,7 +157,7 @@ PAT notes:
 - Organizations that enforce SAML SSO need the token authorized for the organization, and organizations may restrict classic PATs by policy; either shows up as a 401 or 403.
 - `GITHUB_PAT` and the base64 `x-access-token:<PAT>` Git header are registered as secrets: they are redacted from logs and errors, refused in published content, and never inherited by workspace commands, hooks or the agent's Bash.
 
-Renaming the bot: the label (`github.botName` slug) and branch prefix apply to new work. Issues labelled with the old name stop being selected, existing branches and PRs keep their names, `actions.address_review.exhaustedLabel` is a separate setting, and a resumed Pi session keeps the old name in its history. Relabel open issues when renaming.
+Renaming the bot: the label (`github.botName` slug) and branch prefix apply to new work. Issues labelled with the old name stop being selected, existing branches and PRs keep their names, `actions.address_review.exhaustedLabel` and `actions.implement.failedLabel` are separate settings, and a resumed Pi session keeps the old name in its history. Relabel open issues when renaming.
 
 ### Workspace
 
@@ -251,6 +251,7 @@ Each action is one manifest, `actions/<name>.yaml`, validated at startup (`src/m
 | `maxSelfRepairs` | `address_review` only: most self-repair runs started for one PR; 0 disables self-repair; not enqueueable manually. A push makes the review stale and Scrat re-reviews; a reply-only repair is not retriggered for the same assessment. |
 | `retry` | Review-mode actions only, optional: `{ initialDelaySeconds, maxDelaySeconds }` (max not below initial). When every reviewer of a review (or its consolidation) fails at the agent stage with a transient provider error that survived Pi's own short retries (classified with `@earendil-works/pi-ai`: context overflow, quota/billing exhaustion, auth and setup errors, incomplete results and agent timeouts are excluded, and one permanent reviewer failure keeps the task failed), the failed run and its error are kept and the task is requeued with exponential backoff: `initialDelaySeconds`, doubled per attempt, capped at `maxDelaySeconds` (the delay is capped, not the attempt count), plus up to `harness.retryJitter` of random jitter. The retry count and next-attempt time are stored on the task; delayed tasks are not claimed until due and hold no worker slot, and the backoff survives restarts. A changed trigger or `npm run enqueue` resets the count and delay, `npm run retry -- <task-id>` on the delayed task makes it due now, and a successful run resets it. The `run.requeued` journal event carries `attempt` and `nextAttemptAt`, and the Slack status shows the time. A review restarted from the start uses the currently configured models and reviewers, not the failed run's, so changing a provider in `scrat.local.json` and restarting rescues delayed reviews. Omitted means no durable retries; `null` in `scrat.local.json` disables a shipped default. |
 | `exhaustedLabel` | `address_review` only, optional: label added to a Scrat PR whose current review is graded C or lower once `maxSelfRepairs` is reached, and removed when its current review grades better. `null` or `""` (e.g. in `scrat.local.json`) disables it; GitHub creates the label if it is missing. A repair counts toward `maxSelfRepairs` when it starts running, not when it is queued or cancelled. |
+| `failedLabel` | Change-mode actions only, optional (`implement` ships `Scrat failed`): label kept on the issue or PR while the latest task of this action there has failed for good, so `label:"Scrat failed"` lists every stuck item. Sync reconciles it from the database each round and writes only when it changes: the next sync removes it once that task is retried, superseded or cancelled, and restores it if a human removes it while the task is still failed. An interrupted or delayed task is queued, not failed, and is not labelled. `null` or `""` disables it; GitHub creates the label if it is missing. |
 
 ### Adding an action
 
@@ -261,7 +262,7 @@ A deployment adds or changes actions without a code release. Set `actions.direct
 ```
 
 - Every `*.yaml` directly in that directory is a manifest, loaded after the shipped `actions/*.yaml`. The file name must equal `name` (lowercase letters, digits and underscores; `directory` is reserved). A file whose `name` matches a shipped action replaces that whole manifest, which is how a deployment changes its `tools`, `files`, `context`, `publish` or `trigger`; any other name adds an action.
-- Overrides in `scrat.local.json` apply by name after both sets are merged: `enabled`, `priority`, `skill`, `provider`, `model`, `thinkingLevel`, `agent`, `reviewers`, `branch`, `channel`, `maxRangeCommits`, `startMessage`, `maxSelfRepairs`, `exhaustedLabel`, `retry`. Everything else (`trigger`, `mode`, `context`, `tools`, `files`, `acceptance`, `start`, `publish`) is structural and changes only by shipping a manifest.
+- Overrides in `scrat.local.json` apply by name after both sets are merged: `enabled`, `priority`, `skill`, `provider`, `model`, `thinkingLevel`, `agent`, `reviewers`, `branch`, `channel`, `maxRangeCommits`, `startMessage`, `maxSelfRepairs`, `exhaustedLabel`, `failedLabel`, `retry`. Everything else (`trigger`, `mode`, `context`, `tools`, `files`, `acceptance`, `start`, `publish`) is structural and changes only by shipping a manifest.
 - A relative `skill` resolves against the directory the manifest came from, so a deployment keeps `<directory>/skills/<name>/SKILL.md` beside its YAML. Absolute paths work too.
 - Routing picks the action whose `trigger` matches what sync observed: `source` and `kind`, then `item` (`issue` or `pr`), `author: bot` (the item is authored by `github.botLogin`), `grades` (for `low_grade`) and `branch` (the commit branch polled). `manual: false` stops `enqueue` by hand. An enabled match is preferred; a disabled one still queues its task and is refused when claimed.
 - Two enabled manifests may not share a trigger: startup fails naming both files. To give a trigger to a new action, disable the shipped one that owns it (`"review_issue": { "enabled": false }` above). The selection label still decides between the `label` and `item_changed` issue triggers.

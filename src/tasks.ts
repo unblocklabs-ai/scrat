@@ -23,7 +23,6 @@ export function latestTask(subjectId: string, action: Action) {
 const isKnownAction = (action: string) => getManifest(action) !== undefined;
 
 function checkClaimable({ task, subject }: { task: Task; subject: Subject }, database: Pick<typeof db, "select">) {
-  if (!isKnownAction(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   if (!isActionEnabled(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   let trigger;
   try { trigger = parseTriggerInput(task.input); }

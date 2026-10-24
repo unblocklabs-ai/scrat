@@ -182,7 +182,7 @@ export async function fixture(scenario, spec) {
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   const config = JSON.parse(readFileSync("app/scrat.config.json", "utf8"));
   const heavyCommands = config.workspace.heavyCommands;
-  if (scenario !== "config_overrides") config.workspace = scenario === "bash_guard" ? { heavyCommands: [...heavyCommands, "^touch \\.scrat/heavy-"], validate: [["true"]] } : { validate: [["true"]] };
+  if (scenario !== "config_overrides") config.workspace = { ...config.workspace, environment: {}, prepare: [], database: null, validate: [["true"]], heavyCommands: scenario === "bash_guard" ? [...heavyCommands, "^touch \\.scrat/heavy-"] : [] };
   config.harness.agentRetry = { maxRetries: 0, baseDelayMs: 0 }; config.slack.minimumGapMs = 0;
   config.harness.maxConcurrency = 6; config.github.repository = "fixture/project"; config.github.repositoryPath = resolve("checkout");
   config.providers = { fixture: { api: "openai-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: "fixture", models: [

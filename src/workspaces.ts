@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { eq } from "drizzle-orm";
 import { db } from "./db.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
-import { changedPaths, git, headOf, hasPendingMerge, identity, mergeHeadOf } from "./git.ts";
+import { changedPaths, commitOf, git, headOf, hasPendingMerge, identity, mergeHeadOf } from "./git.ts";
 import { botSlug } from "./identity.ts";
 import { withOperation } from "./logging.ts";
 import { runs, workspaces, type Run, type Workspace } from "./schema.ts";
@@ -31,11 +31,16 @@ export async function validateWorkspace(workspace: Workspace) {
   if (!(await lstat(resolve(path, ".git"))).isDirectory() || path !== top || await realpath(common) !== resolve(path, ".git") || branch !== workspace.branch) throw new Error("Workspace Git identity changed");
 }
 
+export async function stageTree(path: string) {
+  await git(path, ["add", "--all"]);
+  return git(path, ["write-tree"]);
+}
+
 export async function checkpointWorkspace(workspace: Workspace) {
-  await git(workspace.path, ["add", "--all"]);
+  const treeSha = await stageTree(workspace.path);
   return {
     headSha: await headOf(workspace.path),
-    treeSha: await git(workspace.path, ["write-tree"]),
+    treeSha,
     mergeHead: await mergeHeadOf(workspace.path),
   };
 }
@@ -164,7 +169,7 @@ export async function pushWorkspace(workspace: Workspace, remote: string, commit
   if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) throw new Error("Publication directory is not an owned directory");
   if (!existing) await mkdir(directory);
   const tip = `refs/heads/${workspace.branch}`;
-  const prerequisite = await git(workspace.repositoryPath, ["rev-parse", "--verify", "--quiet", `${pinRef(workspace.id)}^{commit}`]).catch(() => workspace.baseSha);
+  const prerequisite = await commitOf(workspace.repositoryPath, pinRef(workspace.id)) ?? workspace.baseSha;
   try {
     await git(workspace.path, ["bundle", "create", bundle, `${prerequisite}..${tip}`]);
     await git(workspace.repositoryPath, ["bundle", "verify", bundle]);

@@ -29,7 +29,7 @@ import { childEnvironment } from "./secrets.ts";
 import { recordEvent } from "./events.ts";
 import { claimTask, configuredReviewers, finishRun, interruptRun, retryTransientFailure } from "./tasks.ts";
 import { isBaseOnly, parseTriggerInput } from "./triggers.ts";
-import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, pinWorkspaceBase, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
+import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, pinWorkspaceBase, removeWorkspace, stageTree, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
 
 type DatabaseConfig = NonNullable<typeof config.workspace.database>;
 type Environment = Record<string, string | undefined>;
@@ -79,8 +79,7 @@ async function validateAndCommit({ run, task, references, stop }: Ctx, p: Change
   stopBefore(stop, "validation commands");
   const commands = await asCheckFailure(() => withValidationSlot(() => runCommands(config.workspace.validate, workspace.path, commandEnvironment, references, "validate"), references, stop)
     .catch((error) => { throw stop?.aborted && error === stop.reason ? new InterruptedError("Worker is stopping; run left waiting for a validation slot") : error; }));
-  await git(workspace.path, ["add", "--all"]);
-  if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
+  if (await stageTree(workspace.path) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
   await assertNoCommittedSecrets(workspace, p.validationOnly ? run.headSha ?? p.mainSha : p.startHeadSha, validationTree);
   const purpose = commitPurposes[task.action];
   const message = purpose ? `${purpose}: ${p.title}` : conventionalTitle(p.title);
@@ -91,7 +90,7 @@ async function validateAndCommit({ run, task, references, stop }: Ctx, p: Change
     if (conflicts) throw new Error(unresolvedConflict);
   }
   const commentOnly = kind === "nonempty_diff" && !await git(workspace.path, ["diff", "--name-only", `${p.mainSha}...HEAD`]);
-  updateRun(run.id, { headSha: commitSha, publication: { status: "pending", commitSha, ...commentOnly && { commentOnly } },verification: { headSha: commitSha, commands }, stage: "publishing" });
+  updateRun(run.id, { headSha: commitSha, publication: { status: "pending", commitSha, ...commentOnly && { commentOnly } }, verification: { headSha: commitSha, commands }, stage: "publishing" });
 }
 
 type Ctx = {

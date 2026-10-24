@@ -101,15 +101,17 @@ export async function fetchRepository(repositoryPath: string, remote: string, ba
   });
 }
 
+export const commitOf = (path: string, ref: string) => git(path, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).catch(() => undefined);
+
 export async function fetchPullRequestHead(repositoryPath: string, remote: string, number: number, expectedSha: string, env = childEnvironment()) {
   const ref = `refs/remotes/origin/pr/${number}`;
-  const resolved = () => git(repositoryPath, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).catch(() => "");
+  const resolved = () => commitOf(repositoryPath, ref);
   return serialized(repositoryFetches, resolve(repositoryPath), async () => {
     if (await resolved() === expectedSha) return expectedSha;
     await git(repositoryPath, ["fetch", "--", remote, `+refs/pull/${number}/head:${ref}`], env);
     if (await resolved() !== expectedSha) await git(repositoryPath, ["fetch", "--", remote, `+${expectedSha}:${ref}`], env).catch(() => undefined);
     const actual = await resolved();
-    if (actual !== expectedSha) throw new Error(`PR #${number} head ${expectedSha} could not be fetched; ${ref} resolves to ${actual || "nothing"}`);
+    if (actual !== expectedSha) throw new Error(`PR #${number} head ${expectedSha} could not be fetched; ${ref} resolves to ${actual ?? "nothing"}`);
     return expectedSha;
   });
 }
@@ -138,14 +140,10 @@ export async function branchContainsCommit(workspace: { path: string; repository
   if (remoteSha === commitSha) return true;
   await git(repositoryPath, ["fetch", "--no-write-fetch-head", "--", remote, remoteSha], env);
   let where = workspace.path;
-  try {
-    await git(where, ["cat-file", "-e", `${commitSha}^{commit}`]);
-    await git(where, ["cat-file", "-e", `${remoteSha}^{commit}`]).catch(async () => {
-      where = repositoryPath;
-      await git(where, ["cat-file", "-e", `${commitSha}^{commit}`]);
-    });
-  } catch {
-    return false;
+  if (!await commitOf(where, commitSha)) return false;
+  if (!await commitOf(where, remoteSha)) {
+    where = repositoryPath;
+    if (!await commitOf(where, commitSha)) return false;
   }
   return isAncestor(where, commitSha, remoteSha);
 }

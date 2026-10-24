@@ -1,5 +1,5 @@
 import { commitSettings, config, getRepositoryPath, isBotLogin } from "./config.ts";
-import { fetchRepository, git, gitList, isAncestor } from "./git.ts";
+import { commitOf, fetchRepository, git, gitList, isAncestor } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { type OperationScope } from "./logging.ts";
 import type { Manifest } from "./manifests.ts";
@@ -50,7 +50,7 @@ async function pollAction({ name: action, trigger }: Manifest, operation: Operat
   }
   operation.stage("range");
   let previousSha = cursor.value;
-  const known = await git(repositoryPath, ["cat-file", "-e", `${cursor.value}^{commit}`]).then(() => true, () => false);
+  const known = await commitOf(repositoryPath, cursor.value) !== undefined;
   if (!known || !await isAncestor(repositoryPath, cursor.value, tip)) {
     const base = known ? await git(repositoryPath, ["merge-base", cursor.value, tip]).catch(() => "") : "";
     if (!base || base === tip) {

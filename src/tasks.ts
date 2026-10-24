@@ -9,7 +9,7 @@ import { describeError, type ErrorDetails, errorCode, errorMessage, transientInf
 import { recordEvent, type JournalEvent } from "./events.ts";
 import { withOperationSync } from "./logging.ts";
 import { entryStage, hasPublicationSnapshot, hasValidationCheckpoint, InterruptedError } from "./results.ts";
-import { getRun, latestRunOfTask } from "./run-history.ts";
+import { getRun, getTask, latestRunOfTask } from "./run-history.ts";
 import { asItem } from "./items.ts";
 import { items, runs, type Run, subjects, tasks, type Task, type Subject } from "./schema.ts";
 import { isBaseOnly, isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
@@ -228,7 +228,7 @@ export function finishRun(runId: string, outcome: { status: "completed" } | { st
 
 export function retryTransientFailure(runId: string, error: unknown) {
   const run = getRun(runId);
-  const task = run && db.select().from(tasks).where(eq(tasks.id, run.taskId)).get();
+  const task = run && getTask(run.taskId);
   const retry = task && modeOf(task.action) === "review" ? config.actions[task.action]?.retry : undefined;
   if (!run || !retry || run.stage !== "agent" || errorCode(error) !== transientInferenceCode) return false;
   interruptRun(runId, error, retry);
@@ -238,7 +238,7 @@ export function retryTransientFailure(runId: string, error: unknown) {
 export function interruptRun(runId: string, error: unknown = new InterruptedError("Worker stopped before finishing this run"), retry?: { initialDelaySeconds: number; maxDelaySeconds: number }) {
   const details = describeError(error);
   const interrupted = db.transaction((transaction) => closeRun(transaction, runId, details, (run) => {
-    const own = transaction.select().from(tasks).where(eq(tasks.id, run.taskId)).get()!;
+    const own = getTask(run.taskId, transaction)!;
     const superseded = queuedTaskOf(transaction, own.subjectId, own.action);
     const retryMode = hasValidationCheckpoint(run) ? "validation" : "repair";
     const attempt = (own.retryCount ?? 0) + 1;

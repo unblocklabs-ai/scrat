@@ -4,10 +4,10 @@ import { getRepositoryPath } from "./config.ts";
 import type { EventReferences } from "./events.ts";
 import { git } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
-import type { GithubContext } from "./github-types.ts";
+import type { GithubComment, GithubContext } from "./github-types.ts";
 import { botName } from "./identity.ts";
 import { gradeLabels, reconcileLabels } from "./labels.ts";
-import { isIssueComment, issueCommentId, reviewMarker, taskMarker } from "./markers.ts";
+import { acknowledgedTaskIds, isIssueComment, issueCommentId, legacySummaryMarker, parseIssueCommentId, reviewMarker, taskMarker } from "./markers.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { resolvePrReview } from "./pr-assessment.ts";
 import { runHistory, updateRun } from "./run-history.ts";
@@ -18,6 +18,11 @@ const pendingReviews = new Map<string, Promise<unknown>>();
 
 function reviewBody(text: string, taskId: string) {
   return `${text}\n\n${reviewMarker}\n${taskMarker(taskId)}`;
+}
+
+function legacyAssessment(comment: GithubComment, assessmentTaskIds: Set<string>) {
+  if (comment.body.includes(legacySummaryMarker)) return true;
+  return !comment.body.includes(reviewMarker) && acknowledgedTaskIds(comment.body).some((taskId) => assessmentTaskIds.has(taskId));
 }
 
 function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeof runHistory>) {
@@ -32,6 +37,7 @@ function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeo
 async function reconcile(github: GitHubRepository, subjectId: string, number: number, references: EventReferences, publication?: { task: Task; run: Run }, observed?: GithubContext) {
   const current = observed ?? await github.fetchItemContext("pr", number);
   const reviews = runHistory(subjectId, actionsPublishing("pr_assessment"));
+  const assessmentTaskIds = new Set(reviews.map(({ task }) => task.id));
   const observation = observe(github.repository, current);
   const existing = canonicalComment(observation.own, reviews);
   const mainSha = await git(getRepositoryPath(), ["rev-parse", `refs/remotes/origin/${observation.baseBranch}`]);
@@ -54,6 +60,10 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
     const commentId = await upsertComment(github, number, existing, body, deliveryReferences);
     run.publication = { ...run.publication, commentId };
     updateRun(run.id, { publication: run.publication });
+    const canonicalId = issueCommentId(commentId);
+    for (const comment of observation.own.filter(isIssueComment)) {
+      if (comment.id !== canonicalId && legacyAssessment(comment, assessmentTaskIds)) await github.deleteComment(parseIssueCommentId(comment.id), deliveryReferences);
+    }
   }
 
   await reconcileLabels(github, number, {

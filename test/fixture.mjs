@@ -295,6 +295,14 @@ export async function fixture(scenario, spec) {
       comment.body = body.body; writes.push({ type: "comment_update", id: comment.id });
       return faults.comment.delete(number) ? reply({ message: "Lost update response" }, 502) : reply(comment);
     }
+    if (match && method === "DELETE") {
+      const id = Number(match[1]), number = [...comments].find(([, entries]) => entries.some((comment) => comment.id === id))?.[0];
+      if (number === undefined) return reply({ message: "Not Found" }, 404);
+      const token = bearer(options);
+      if (tokens.get(token)?.issues !== "write") return reply({ message: "Resource not accessible by integration" }, 403);
+      comments.set(number, comments.get(number).filter((comment) => comment.id !== id)); writes.push({ type: "comment_delete", id });
+      call.status = 204; return new Response(null, { status: 204, headers: { "x-ratelimit-remaining": String(rate.remaining) } });
+    }
     match = path.match(/\/issues\/(\d+)\/labels(?:\/(.+))?$/);
     if (match) {
       const n = Number(match[1]), item = issues.get(n) ?? prs.find((pr) => pr.number === n);

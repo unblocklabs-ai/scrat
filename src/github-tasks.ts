@@ -199,10 +199,10 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
   const reviewable = ordered.filter((item) => item.state === "open" && item.kind === "issue" && !selects(item));
   const contexts = await github.fetchItemContexts(reviewable.map((item) => ({ kind: "issue", number: item.payload.number, item: item.payload })), { defer: true });
   const issueContexts = new Map(reviewable.map((item, index) => [item.id, contexts[index]]));
-  for (const item of ordered) {
+  const routeItem = async (item: Item) => {
     if (item.state === "closed") {
       await cleanupClosedItem(item);
-      continue;
+      return;
     }
     if (item.workspaceId && getWorkspace(item.workspaceId)?.removedAt) {
       db.update(subjects).set({ workspaceId: null }).where(eq(subjects.id, item.id)).run();
@@ -218,7 +218,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
         latest: latestOf(item.id, labelAction), updatedAt: item.payload.updated_at, mainSha: defaultBaseSha,
       });
       queued += applyDecisions(item.id, plan.decisions);
-      if (!plan.review) continue;
+      if (!plan.review) return;
       const context = issueContexts.get(item.id);
       if (context) queued += await routeObserved(ctx, item, context, defaultBaseSha);
       else deferred++;
@@ -228,6 +228,10 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
         return routeObserved(ctx, item, await github.fetchItemContext("pr", item.payload.number), defaultBaseSha);
       });
     }
+  };
+  for (const item of ordered) {
+    try { await routeItem(item); }
+    catch (error) { log.warn({ event: "github.routing_failed", subjectId: item.id, err: error }); }
   }
   if (deferred) log.warn({ event: "github.sync_deferred", deferred, ...rateLimitState() }, "GitHub rate limit is low; deferred item reads to the next sync");
   return queued;

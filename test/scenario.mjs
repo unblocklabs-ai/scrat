@@ -718,7 +718,7 @@ export const scenarios = {
       };
       try {
         f.comments.set(201, [humanComment(201, 901, "Changed so reads are not 304", "2026-10-19T03:00:00Z", "c901")]);
-        await assert.rejects(route(), (error) => error.status === 404);
+        await assert.rejects(github.fetchItemContext("pr", 201), (error) => error.status === 404);
         assert.equal(active, 0, "A failed PR read must wait for its sibling reads");
         failing = false; await route();
       } finally { globalThis.fetch = original; }
@@ -745,7 +745,7 @@ export const scenarios = {
       await route(); assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
     } finally { release(); globalThis.fetch = fetch; }
   } },
-  routing_history: { title: "covered triggers and attempts skip unavailable review history without blocking later items", run: async () => {
+  routing_history: { title: "covered triggers and attempts skip unavailable review history, and an item whose routing throws is logged without blocking later items", run: async () => {
     f.addIssue(1); f.enqueue(1); const completed = await success();
     changeMain("src/app.ts", "export const value = 2;\n"); await route();
     db.update(s.runs).set({ mainSha: "f".repeat(40) }).where(eq(s.runs.id, completed.id)).run();
@@ -760,6 +760,11 @@ export const scenarios = {
     assert.equal(f.row(s.tasks, failed.taskId).input.triggerKey, undefined);
     const calls = f.requests.length; f.addIssue(4); await route();
     assert.ok(isQueued("issue-4")); assert.ok(!isQueued("issue-1")); assert.equal(f.requests.length, calls);
+    changeMain("src/app.ts", "export const value = 3;\n"); f.addIssue(5);
+    const lines = captureLogs();
+    try { await route(); } finally { restoreLogs(); }
+    assert.ok(isQueued("issue-5"), "an item whose history cannot be compared does not stop routing for the others");
+    assert.ok(lines.some((line) => line.event === "github.routing_failed" && line.subjectId === "issue-1"));
   } },
   acceptance: { title: "action postconditions reject empty implementations and unresolved conflicts but permit reply-only feedback", run: async () => {
     f.addIssue(1, ["scrat"]); f.enqueue(1, "implement"); f.reset(1, "no-change");

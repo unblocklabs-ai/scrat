@@ -17,7 +17,7 @@ export async function runCommands(commands: string[][], cwd: string, environment
   for (const [index, [file, ...args]] of commands.entries()) {
     await withOperation("workspace.command", { ...references, command: [file, ...args], cwd }, async (operation) => {
       const started = performance.now();
-      const name = [file, ...args].join(" ");
+      const name = redactSecrets([file, ...args].join(" "));
       const evidence = resolve(directory, `${stage}-${index}-${Date.now()}.log`);
       const command = sandboxCommand(cwd, file, args, environment, [], true);
       const log = createWriteStream(evidence, { mode: 0o600 });

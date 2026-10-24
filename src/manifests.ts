@@ -9,7 +9,7 @@ import { triggerKinds, triggerSource } from "./triggers.ts";
 
 export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const toolNames = ["read", "grep", "find", "ls", "git", "read_base", "bash", "edit", "write", "http", "browser", "github_search"] as const;
-const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "history", "triage", "issue"] as const;
+const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "history", "validation", "triage", "issue"] as const;
 const effectNames = ["push", "pull_request", "comment", "labels", "pr_assessment", "issue", "slack_reply"] as const;
 const startEffectNames = ["slack_post"] as const;
 export type ThinkingLevel = (typeof thinkingLevels)[number];

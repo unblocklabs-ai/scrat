@@ -9,8 +9,8 @@ import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
-import { describeError, type ErrorDetails } from "./errors.ts";
-import { createMergeCommit, fetchPullRequestHead, fetchRepository, git, headOf, hasPendingMerge, mergeBase, prepareTarget } from "./git.ts";
+import { branchConflictCode, describeError, type ErrorDetails } from "./errors.ts";
+import { conventionalTitle, createMergeCommit, fetchPullRequestHead, fetchRepository, git, headOf, hasPendingMerge, mergeBase, prepareTarget } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { startOperation } from "./logging.ts";
@@ -66,9 +66,11 @@ function stopBefore(stop: AbortSignal | undefined, next: string) {
 
 const unresolvedConflict = "PR still conflicts with its base branch after resolution";
 
-async function validateAndCommit({ run, references, stop }: Ctx, p: Change, kind: Acceptance) {
+const commitPurposes: Record<string, string> = { address_review: "Address review", address_pr_feedback: "Address feedback", resolve_conflicts: "Resolve conflicts" };
+
+async function validateAndCommit({ run, task, references, stop }: Ctx, p: Change, kind: Acceptance) {
   const { workspace, commandEnvironment } = p;
-  if (!p.validationOnly) updateRun(run.id, { agentCheckpoint: await checkpointWorkspace(workspace) });
+  updateRun(run.id, { agentCheckpoint: await checkpointWorkspace(workspace) });
   await asCheckFailure(() => prepareWorkspace(workspace, commandEnvironment, references, p.databaseConfig));
   const checkpoint = await checkpointWorkspace(workspace);
   updateRun(run.id, { agentCheckpoint: checkpoint });
@@ -79,7 +81,8 @@ async function validateAndCommit({ run, references, stop }: Ctx, p: Change, kind
   await git(workspace.path, ["add", "--all"]);
   if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
   await assertNoCommittedSecrets(workspace, p.validationOnly ? run.headSha ?? p.mainSha : p.startHeadSha, validationTree);
-  const message = /^[a-z]+(\([^)]*\))?!?: /.test(p.title) ? p.title : `fix: ${p.title}`;
+  const purpose = commitPurposes[task.action];
+  const message = purpose ? `${purpose}: ${p.title}` : conventionalTitle(p.title);
   const commitSha = await commitWorkspace(workspace, message, botAuthor(), references);
   if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
   if (kind === "conflict_free") {
@@ -198,7 +201,7 @@ async function prepareReviewCommands({ run, repositoryPath, references, operatio
     const { behind, conflicts } = await prepareTarget(review.workspace.path, review.mainSha, review.headSha);
     if (!behind) throw error;
     const { baseBranch } = observation;
-    if (conflicts) throw new Error(`PR branch is behind ${baseBranch} and does not merge cleanly; the author needs to update it`);
+    if (conflicts) throw Object.assign(new Error(`PR branch is behind ${baseBranch} and does not merge cleanly; the author needs to update it`), { code: branchConflictCode });
     const synthetic = await createMergeCommit(repositoryPath, review.mainSha, review.headSha, `Review merge of ${baseBranch} into the PR head`, botAuthor());
     cleanup.reviewWorkspace = undefined;
     await tryCleanup(operation, { workspaceId: review.workspace.id }, () => removeWorkspace(review.workspace.id, references));
@@ -334,7 +337,7 @@ async function validateStage(ctx: Ctx, p: Change, acceptance: Acceptance) {
       catch (error) {
         if (!(error instanceof CheckFailure)) throw error;
         const sessionFile = getRun(run.id)!.piSessionFile ?? undefined;
-        if (validationOnly || !p.agentInput || !sessionFile || round > config.harness.corrections.validation) throw error.cause;
+        if (!sessionFile || round > config.harness.corrections.validation) throw error.cause;
         operation.log.warn({ event: "pi.validation_retry", round });
         updateRun(run.id, { stage: "agent" });
         const followUp = await executePi({ run, cwd: workspace.path, context: "", tools: ctx.manifest.tools, scoped: ctx.manifest, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });

@@ -1,4 +1,5 @@
 import { actionsPublishing, actionsTriggeredBy } from "./actions.ts";
+import { branchConflictCode } from "./errors.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import type { ItemObservation } from "./observation.ts";
 import { hasPublicationSnapshot } from "./results.ts";
@@ -44,9 +45,12 @@ type Assessment = NonNullable<ReturnType<typeof selectAssessment>>;
 export type PrReviewState =
   | { kind: "missing" }
   | { kind: "stale"; reason: "context" | "base"; assessment: Assessment; changedPaths: string[] }
-  | { kind: "current"; assessment: Assessment };
+  | { kind: "current"; assessment: Assessment }
+  | { kind: "blocked"; attempt: History[number] };
 
 export async function resolvePrReview(history: History, now: ItemObservation, mainSha: string): Promise<PrReviewState> {
+  const [latest] = history;
+  if (latest?.run.error?.code === branchConflictCode && "head" in now.item && latest.run.headSha === now.item.head.sha && latest.run.context?.baseBranch === now.baseBranch) return { kind: "blocked", attempt: latest };
   const assessment = selectAssessment(history);
   if (!assessment) return { kind: "missing" };
   if (now.item.state !== "open") return { kind: "stale", reason: "context", assessment, changedPaths: [] };

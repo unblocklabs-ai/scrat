@@ -822,12 +822,15 @@ export const scenarios = {
     assert.equal(f.requests.length, calls); assert.equal(recovered.publication.commentId, original.id);
     f.reset(201, "grade-A");
     tasks.enqueueTask({ subjectId: f.row(s.tasks, lost.taskId).subjectId, action: "review_pr", reason: "New assessment", input: { source: "github_items", kind: "manual", manual: true } });
+    const labelWrites = (from) => f.writes.slice(from).filter((w) => w.type === "label").length;
+    const labelsBefore = f.writes.length;
     f.faults.comment.add(201); const lostUpdate = await run(); assert.ok(lostUpdate.error);
     assert.deepEqual(f.prs[0].labels, [], "A lost report-write response must not leave the old report's grade");
     const updateCalls = f.requests.length; tasks.retryTask(lostUpdate.taskId); const updated = await success();
     assert.equal(f.requests.length, updateCalls); assert.equal(updated.publication.commentId, original.id);
     assert.equal(f.comments.get(201).length, 2); assert.equal(f.comments.get(201)[1].body, feedback.body);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
+    assert.equal(labelWrites(labelsBefore), 2, "a changed grade removes the old label once and adds the new one once");
   } },
   deleted_review: { title: "deleted canonical comments are restored from the authoritative saved assessment", run: () => deletedReview("deleted") },
   unreceipted_review: { title: "older retries preserve a newer remote review even when its write receipt was lost", run: () => deletedReview("unreceipted") },
@@ -1223,7 +1226,7 @@ export const scenarios = {
     const publications = () => f.writes.length;
     f.reset(201, "incomplete-once"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Continue", input: { source: "github_items", kind: "manual", manual: true } });
     let writes = publications(); const continued = await success();
-    assert.equal(continued.result.outcome, "complete"); assert.ok(prompts() >= 3); assert.equal(publications() - writes, 3);
+    assert.equal(continued.result.outcome, "complete"); assert.ok(prompts() >= 3); assert.equal(publications() - writes, 1, "an unchanged grade writes only the comment");
     const published = f.comments.get(201).length;
     f.reset(201, "incomplete"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Never completes", input: { source: "github_items", kind: "manual", manual: true } });
     writes = publications(); const spent = prompts(); const exhausted = await run();

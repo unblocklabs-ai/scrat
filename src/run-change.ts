@@ -41,7 +41,7 @@ const unresolvedConflict = "PR still conflicts with its base branch after resolu
 
 const commitPurposes: Record<string, string> = { address_review: "Address review", address_pr_feedback: "Address feedback", resolve_conflicts: "Resolve conflicts" };
 
-async function validateAndCommit({ run, task, references, stop }: Ctx, p: Change, kind: Acceptance) {
+async function runChecks({ run, references, stop }: Ctx, p: Change) {
   const { workspace, commandEnvironment } = p;
   updateRun(run.id, { agentCheckpoint: await checkpointWorkspace(workspace) });
   await asCheckFailure(() => prepareWorkspace(workspace, commandEnvironment, references, p.databaseConfig));
@@ -52,6 +52,13 @@ async function validateAndCommit({ run, task, references, stop }: Ctx, p: Change
   const commands = await asCheckFailure(() => withValidationSlot(() => runCommands(config.workspace.validate, workspace.path, commandEnvironment, references, "validate"), references, stop)
     .catch((error) => { throw stop?.aborted && error === stop.reason ? new InterruptedError("Worker is stopping; run left waiting for a validation slot") : error; }));
   if (await stageTree(workspace.path) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
+  return { commands, validationTree };
+}
+
+async function validateAndCommit(ctx: Ctx, p: Change, kind: Acceptance) {
+  const { run, task, references } = ctx;
+  const { workspace } = p;
+  const { commands, validationTree } = await runChecks(ctx, p);
   await assertNoCommittedSecrets(workspace, p.validationOnly ? run.headSha ?? p.mainSha : p.startHeadSha, validationTree);
   const purpose = commitPurposes[task.action];
   const message = purpose ? `${purpose}: ${p.title}` : conventionalTitle(p.title);
@@ -70,6 +77,7 @@ type Change = {
   preparedHead: string; startHeadSha: string; headSha: string; title: string; deferred: boolean;
   target: Awaited<ReturnType<typeof prepareTarget>> | undefined;
   databaseConfig: DatabaseConfig | null | undefined;
+  database: Awaited<ReturnType<typeof createRunDatabase>> | undefined;
   environment: Environment; commandEnvironment: Environment;
   result: AgentResult | null; validated: boolean; validationFailure: ErrorDetails | undefined;
   agentInput: { contextDir: string; revisions: Record<string, string> } | undefined;
@@ -162,8 +170,20 @@ async function prepareChangeCommands({ references }: Ctx, observed: Observed, p:
   }
 }
 
+async function correctionRound({ run, operation, manifest, stop }: Ctx, p: Change, result: AgentResult, round: number, error: CheckFailure) {
+  const sessionFile = getRun(run.id)!.piSessionFile ?? undefined;
+  if (!sessionFile || round > config.harness.corrections.validation) throw error.cause;
+  operation.log.warn({ event: "pi.validation_retry", round });
+  updateRun(run.id, { stage: "agent" });
+  const followUp = await executePi({ run, cwd: p.workspace.path, context: "", tools: manifest.tools, scoped: manifest, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });
+  const corrected = { ...followUp, text: `${result.text}\n\n**Validation correction ${round}:** ${followUp.text}`, paths: [...new Set([...result.paths, ...followUp.paths])] };
+  updateRun(run.id, { result: corrected, stage: "validating" });
+  assertComplete(corrected);
+  return corrected;
+}
+
 async function validateStage(ctx: Ctx, p: Change, acceptance: Acceptance) {
-  const { run, operation, stop } = ctx;
+  const { run } = ctx;
   const { workspace, validationOnly } = p;
   let { result } = p;
   if (!result) throw new Error("No saved agent result to validate");
@@ -177,27 +197,15 @@ async function validateStage(ctx: Ctx, p: Change, acceptance: Acceptance) {
       try { await validateAndCommit(ctx, p, acceptance); break; }
       catch (error) {
         if (!(error instanceof CheckFailure)) throw error;
-        const sessionFile = getRun(run.id)!.piSessionFile ?? undefined;
-        if (!sessionFile || round > config.harness.corrections.validation) throw error.cause;
-        operation.log.warn({ event: "pi.validation_retry", round });
-        updateRun(run.id, { stage: "agent" });
-        const followUp = await executePi({ run, cwd: workspace.path, context: "", tools: ctx.manifest.tools, scoped: ctx.manifest, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });
-        result = { ...followUp, text: `${result.text}\n\n**Validation correction ${round}:** ${followUp.text}`, paths: [...new Set([...result.paths, ...followUp.paths])] };
-        updateRun(run.id, { result, stage: "validating" });
-        assertComplete(result);
+        result = await correctionRound(ctx, p, result, round, error);
       }
     }
   }
 }
 
-export async function changeRun(ctx: Ctx, observed: Observed) {
-  const { task, run, references, cleanup, stop, manifest } = ctx;
-  const acceptance = manifest.acceptance!;
-  const acquired = await acquireChangeWorkspace(ctx, observed);
-  const { workspace, validationOnly, mainSha, startHeadSha } = acquired;
-  if (!validationOnly) updateRun(run.id, { workspaceId: workspace.id, mainSha, headSha: startHeadSha });
+async function provisionDatabase({ run, references, cleanup }: Ctx) {
   const databaseConfig = config.workspace.database;
-  let database: Awaited<ReturnType<typeof createRunDatabase>> | undefined;
+  let database: Change["database"];
   if (databaseConfig) {
     cleanup.databaseRequested = true;
     database = await createRunDatabase(run.id, databaseConfig.image, references);
@@ -205,35 +213,47 @@ export async function changeRun(ctx: Ctx, observed: Observed) {
   const environment: Environment = { ...config.workspace.environment,
     ...Object.fromEntries((databaseConfig?.environment ?? []).map((name) => [name, database!.url])),
   };
+  return { databaseConfig, database, environment };
+}
+
+async function agentStage(ctx: Ctx, observed: Observed, p: Change, acceptance: Acceptance, { diffPaths, diffBaseSha }: Awaited<ReturnType<typeof readDiffScope>>) {
+  const { task, run, stop } = ctx;
+  const { workspace, mainSha, environment, database } = p;
+  const evaluated = evaluateContext(run, task, observed.observation);
+  updateRun(run.id, { context: evaluated });
+  const mergedBehind = await mergeBehind(ctx, observed, p, diffPaths, acceptance);
+  if (p.validated) return;
+  stopBefore(stop, "workspace preparation");
+  const merged = await prepareChangeCommands(ctx, observed, p) || mergedBehind;
+  stopBefore(stop, "the agent");
+  updateRun(run.id, { stage: "agent" });
+  const { result, contextDir, revisions } = await runAgent(ctx, {
+    environment, sessionFile: latestSessionRun(workspace.id, run.id)?.piSessionFile ?? undefined,
+    input: {
+      workspace, evaluated, diffBaseSha: merged ? mainSha : diffBaseSha, diffPaths, mainSha, headSha: p.headSha, baseRef: mainSha, mergeInProgress: p.mergeInProgress, validationFailure: p.validationFailure,
+      database: database ? { ...database, environment, schemaPrepared: !p.deferred, prepare: config.workspace.prepare, migrate: p.databaseConfig?.migrate } : undefined,
+    },
+  });
+  p.agentInput = { contextDir, revisions };
+  p.result = result;
+  updateRun(run.id, { result: p.result, stage: "validating" });
+}
+
+export async function changeRun(ctx: Ctx, observed: Observed) {
+  const { run, manifest } = ctx;
+  const acceptance = manifest.acceptance!;
+  const acquired = await acquireChangeWorkspace(ctx, observed);
+  const { workspace, validationOnly, mainSha, startHeadSha } = acquired;
+  if (!validationOnly) updateRun(run.id, { workspaceId: workspace.id, mainSha, headSha: startHeadSha });
+  const { databaseConfig, database, environment } = await provisionDatabase(ctx);
   const p: Change = {
-    ...acquired, headSha: startHeadSha, databaseConfig, environment,
+    ...acquired, headSha: startHeadSha, databaseConfig, database, environment,
     commandEnvironment: { ...childEnvironment(), ...environment }, result: run.result,
     validated: false, validationFailure: undefined, agentInput: undefined, target: undefined,
     deferred: acquired.mergeInProgress || Boolean(run.retryOfRunId) || acceptance === "conflict_free",
   };
-  let { diffPaths, diffBaseSha } = await readDiffScope(workspace.path, mainSha, p.preparedHead, Boolean(observed.pullRequest));
-  if (validationOnly) p.agentInput = { contextDir: contextDirOf(inferenceRunOf(run).id), revisions: { head: p.headSha, base: diffBaseSha, main: mainSha } };
-  else {
-    const evaluated = evaluateContext(run, task, observed.observation);
-    updateRun(run.id, { context: evaluated });
-    let merged = await mergeBehind(ctx, observed, p, diffPaths, acceptance);
-    if (!p.validated) {
-      stopBefore(stop, "workspace preparation");
-      merged = await prepareChangeCommands(ctx, observed, p) || merged;
-      if (merged) diffBaseSha = mainSha;
-      stopBefore(stop, "the agent");
-      updateRun(run.id, { stage: "agent" });
-      const { result, contextDir, revisions } = await runAgent(ctx, {
-        environment, sessionFile: latestSessionRun(workspace.id, run.id)?.piSessionFile ?? undefined,
-        input: {
-          workspace, evaluated, diffBaseSha, diffPaths, mainSha, headSha: p.headSha, baseRef: mainSha, mergeInProgress: p.mergeInProgress, validationFailure: p.validationFailure,
-          database: database ? { ...database, environment, schemaPrepared: !p.deferred, prepare: config.workspace.prepare, migrate: databaseConfig?.migrate } : undefined,
-        },
-      });
-      p.agentInput = { contextDir, revisions };
-      p.result = result;
-      updateRun(run.id, { result: p.result, stage: "validating" });
-    }
-  }
+  const scope = await readDiffScope(workspace.path, mainSha, p.preparedHead, Boolean(observed.pullRequest));
+  if (validationOnly) p.agentInput = { contextDir: contextDirOf(inferenceRunOf(run).id), revisions: { head: p.headSha, base: scope.diffBaseSha, main: mainSha } };
+  else await agentStage(ctx, observed, p, acceptance, scope);
   await validateStage(ctx, p, acceptance);
 }

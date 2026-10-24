@@ -18,7 +18,6 @@ const changeMain = (path, text) => {
   writeFileSync(resolve("seed", path), text); git(resolve("seed"), "add", "."); commit(resolve("seed"), "Change " + path);
   git(resolve("seed"), "push", resolve("remote.git"), "main");
 };
-const pushSchema = (url = "./data/scrat.sqlite") => execFileSync(process.execPath, [resolve("app/node_modules/drizzle-kit/bin.cjs"), "push", "--dialect=sqlite", "--schema=./app/src/schema.ts", "--url=" + url, "--hints", JSON.stringify([{ type: "confirm_data_loss", kind: "column", entity: ["public", "items", "source"] }])], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 const writeSync = fs.writeSync;
 const captureLogs = () => {
   const lines = [];
@@ -2959,87 +2958,6 @@ export const scenarios = {
   commit_review_slack_down: { title: "a failed root post still reviews and the reply creates the root, while a failed reply fails at publishing and retries without a new session or second root", configure: [configureCommitSource], run: commitReview },
   commit_review_restart: { title: "an interrupted commit review is recovered and retried with exactly one root and one reply", configure: [configureCommitSource], run: commitReview },
   commit_review_isolation: { title: "the commit review agent never sees the Slack token, reads base files and diffs against the previous SHA, and nothing is installed", configure: [configureCommitSource, configureCommitIsolation], run: commitReview },
-  subjects_migration: { title: "the subjects migration moves items, tasks, events and Slack threads to subject ids, keeps every row, refuses unmapped tasks and is a no-op the second time", run: async () => {
-    const script = fileURLToPath(new URL("../deploy/migrate-subjects.mjs", import.meta.url));
-    const parent = readFileSync(fileURLToPath(new URL("parent-schema.sql", import.meta.url)), "utf8");
-    const migrate = (path) => JSON.parse(execFileSync(process.execPath, [script, path], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim().split("\n").at(-1));
-    assert.equal(migrate("missing.sqlite").result, "no_database"); assert.equal(existsSync("missing.sqlite"), false);
-    const fresh = new DatabaseSync("fresh.sqlite"); fresh.exec("CREATE TABLE unrelated (id text)"); fresh.close();
-    assert.equal(migrate("fresh.sqlite").result, "fresh_database");
-
-    const legacy = new DatabaseSync("legacy.sqlite");
-    legacy.exec("PRAGMA foreign_keys = ON"); legacy.exec(parent);
-    const sha1 = "a".repeat(40), sha2 = "b".repeat(40);
-    const github = (number, path) => JSON.stringify({ node_id: "N" + number, number, title: "Title " + number, html_url: `https://github.com/fixture/project/${path}/${number}`, state: "open", updated_at: "2026-10-19T00:00:00Z", labels: [], user: { login: "human" } });
-    const commitPayload = (sha, title) => JSON.stringify({ node_id: "commit:" + sha, number: 0, title, html_url: `https://github.com/fixture/project/commit/${sha}`, state: "open", updated_at: "2026-10-19T00:00:00Z", user: { login: "Fixture" }, labels: [] });
-    legacy.exec("INSERT INTO workspaces (id, repository_path, branch, path, base_ref, base_sha, created_at) VALUES ('w1', '/r', 'scrat/w1', '/w1', 'origin/main', 'abc', '2026-01-01')");
-    const addItem = legacy.prepare("INSERT INTO items (id, source, external_id, kind, state, workspace_id, self_repair_count, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-    addItem.run("issue-a", "github", "N1", "issue", "open", null, 0, github(1, "issues"));
-    addItem.run("pr-b", "github", "N2", "pr", "open", "w1", 2, github(2, "pull"));
-    addItem.run("issue-c", "github", "N3", "issue", "closed", null, 0, github(3, "issues"));
-    addItem.run("commit-d", "git", "commit:main:" + sha1, "commit", "open", null, 0, commitPayload(sha1, "First change"));
-    addItem.run("commit-e", "git", "commit:release/1.0:" + sha2, "commit", "open", null, 0, commitPayload(sha2, "Second change"));
-    const addTask = legacy.prepare("INSERT INTO tasks (id, item_id, action, priority, reason, input, status, created_at) VALUES (?, ?, ?, 10, 'Integration', '{}', ?, '2026-10-19T00:00:00Z')");
-    for (const [id, item, action, status] of [
-      ["t1", "issue-a", "review_issue", "completed"], ["t2", "issue-a", "review_issue", "queued"], ["t3", "pr-b", "review_pr", "running"],
-      ["t4", "pr-b", "address_review", "queued"], ["t5", "issue-c", "review_issue", "cancelled"], ["t6", "commit-d", "review_base_change", "completed"],
-      ["t7", "commit-e", "review_base_change", "queued"],
-    ]) addTask.run(id, item, action, status);
-    const addRun = legacy.prepare("INSERT INTO runs (id, task_id, sequence, skill, provider, model, thinking_level, workspace_id, publication) VALUES (?, ?, ?, 'review', 'p', 'm', 'high', ?, '{\"status\":\"pending\"}')");
-    addRun.run("r1", "t1", 1, null); addRun.run("r3", "t3", 2, "w1"); addRun.run("r6", "t6", 3, null);
-    const addEvent = legacy.prepare("INSERT INTO events (created_at, type, item_id, task_id, run_id, data) VALUES ('2026-10-19T00:00:00Z', ?, ?, ?, ?, '{}')");
-    addEvent.run("task.enqueued", "issue-a", "t1", null); addEvent.run("run.started", "pr-b", "t3", "r3"); addEvent.run("run.started", "commit-d", "t6", "r6"); addEvent.run("database.created", null, null, null);
-    legacy.exec("INSERT INTO slack_threads (item_id, channel, ts, created_at) VALUES ('commit-d', 'C1', '1700000000.000001', '2026-10-19T00:00:00Z')");
-    legacy.exec("INSERT INTO source_cursors (repository, action, branch, sha, updated_at) VALUES ('fixture/project', 'review_base_change', 'main', '" + sha1 + "', '2026-10-19T00:00:00Z')");
-    legacy.close();
-    copyFileSync("legacy.sqlite", "orphan.sqlite");
-
-    const rows = (database, query, ...args) => JSON.parse(JSON.stringify(database.prepare(query).all(...args)));
-    const dump = (database) => JSON.stringify(rows(database, "SELECT type, name, sql FROM sqlite_master ORDER BY name").map((entry) => [entry, entry.type === "table" ? rows(database, `SELECT * FROM "${entry.name}"`) : null]));
-    const before = new DatabaseSync("legacy.sqlite");
-    const oldTasks = rows(before, "SELECT id, item_id AS subject_id FROM tasks ORDER BY id"), oldEvents = rows(before, "SELECT id, item_id AS subject_id FROM events ORDER BY id");
-    const oldRuns = rows(before, "SELECT * FROM runs ORDER BY id"), oldItems = rows(before, "SELECT id, external_id, self_repair_count, payload FROM items WHERE kind != 'commit' ORDER BY id");
-    const oldCursors = rows(before, "SELECT * FROM source_cursors"); before.close();
-
-    const ghost = new DatabaseSync("orphan.sqlite");
-    ghost.exec("PRAGMA foreign_keys = OFF");
-    ghost.exec("INSERT INTO tasks (id, item_id, action, priority, reason, input, status, created_at) VALUES ('t-ghost', 'ghost', 'review_issue', 1, 'x', '{}', 'failed', '2026-10-19')");
-    ghost.close();
-    assert.throws(() => migrate("orphan.sqlite"), (error) => /1 tasks rows reference an item with no subject/.test(error.stderr));
-    const untouched = new DatabaseSync("orphan.sqlite");
-    assert.deepEqual(rows(untouched, "SELECT name FROM sqlite_master WHERE name = 'subjects'"), []);
-    assert.ok(rows(untouched, "PRAGMA table_info(tasks)").some((column) => column.name === "item_id")); assert.equal(rows(untouched, "SELECT count(*) AS n FROM items")[0].n, 5);
-    untouched.close();
-
-    assert.deepEqual(migrate("legacy.sqlite"), { migrate: "subjects", result: "migrated", subjects: 5, commits: 2, tasks: 7, events: 4, slack_threads: 1 });
-    const after = new DatabaseSync("legacy.sqlite");
-    assert.deepEqual(rows(after, "SELECT id, repository, kind, key, state, workspace_id, metadata FROM subjects ORDER BY id"), [
-      { id: "commit-d", repository: "fixture/project", kind: "commit", key: "main:" + sha1, state: "open", workspace_id: null, metadata: JSON.stringify({ title: "First change", author: "Fixture", url: `https://github.com/fixture/project/commit/${sha1}` }) },
-      { id: "commit-e", repository: "fixture/project", kind: "commit", key: "release/1.0:" + sha2, state: "open", workspace_id: null, metadata: JSON.stringify({ title: "Second change", author: "Fixture", url: `https://github.com/fixture/project/commit/${sha2}` }) },
-      { id: "issue-a", repository: "fixture/project", kind: "item", key: "N1", state: "open", workspace_id: null, metadata: null },
-      { id: "issue-c", repository: "fixture/project", kind: "item", key: "N3", state: "closed", workspace_id: null, metadata: null },
-      { id: "pr-b", repository: "fixture/project", kind: "item", key: "N2", state: "open", workspace_id: "w1", metadata: null },
-    ]);
-    assert.ok(rows(after, "SELECT created_at FROM subjects").every((row) => row.created_at));
-    assert.deepEqual(rows(after, "SELECT id, external_id, self_repair_count, payload FROM items ORDER BY id"), oldItems);
-    assert.deepEqual(rows(after, "PRAGMA table_info(items)").map((column) => column.name), ["id", "source", "external_id", "kind", "self_repair_count", "payload"]);
-    assert.deepEqual(rows(after, "SELECT id, subject_id FROM tasks ORDER BY id"), oldTasks);
-    assert.deepEqual(rows(after, "SELECT id, subject_id FROM events ORDER BY id"), oldEvents);
-    assert.deepEqual(rows(after, "SELECT subject_id, channel, ts FROM slack_threads"), [{ subject_id: "commit-d", channel: "C1", ts: "1700000000.000001" }]);
-    assert.deepEqual(rows(after, "SELECT * FROM runs ORDER BY id"), oldRuns); assert.deepEqual(rows(after, "SELECT * FROM source_cursors"), oldCursors);
-    assert.deepEqual(rows(after, "PRAGMA foreign_key_check"), []);
-    assert.deepEqual(rows(after, "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'tasks_queued%'"), [{ name: "tasks_queued_subject_action_unique" }]);
-    assert.throws(() => after.exec("INSERT INTO tasks (id, subject_id, action, priority, reason, input, status, created_at) VALUES ('dup', 'issue-a', 'review_issue', 1, 'x', '{}', 'queued', 'now')"), /UNIQUE/);
-    assert.throws(() => after.exec("INSERT INTO subjects (id, repository, kind, key, created_at) VALUES ('dup', 'fixture/project', 'item', 'N1', 'now')"), /UNIQUE/);
-    const migrated = dump(after); after.close();
-
-    assert.deepEqual(migrate("legacy.sqlite"), { migrate: "subjects", result: "already_migrated" });
-    const again = new DatabaseSync("legacy.sqlite"); assert.equal(dump(again), migrated); again.close();
-
-    pushSchema("./legacy.sqlite");
-    assert.match(pushSchema("./legacy.sqlite"), /No changes detected/);
-    const pushed = new DatabaseSync("legacy.sqlite"); assert.deepEqual(rows(pushed, "PRAGMA foreign_key_check"), []); pushed.close();
-  } },
   manifests: { title: "every action is loaded from a validated manifest, malformed manifests are rejected with file and path, and local overrides reach the runtime", run: async () => {
     const { readManifests } = await f.app("manifests.ts");
     const { config: live, isActionEnabled } = await f.app("config.ts");

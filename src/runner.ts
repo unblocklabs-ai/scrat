@@ -27,8 +27,8 @@ import type { Item } from "./items.ts";
 import { subjects, workspaces, type Run, type Task, type Subject, type Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { recordEvent } from "./events.ts";
-import { claimTask, finishRun, interruptRun, retryTransientFailure } from "./tasks.ts";
-import { parseTriggerInput } from "./triggers.ts";
+import { claimTask, configuredReviewers, finishRun, interruptRun, retryTransientFailure } from "./tasks.ts";
+import { isBaseOnly, parseTriggerInput } from "./triggers.ts";
 import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, pinWorkspaceBase, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
 
 type DatabaseConfig = NonNullable<typeof config.workspace.database>;
@@ -141,6 +141,20 @@ async function assertRepairCurrent({ task }: Ctx, { item, observation, mainSha }
   }
 }
 
+async function settleReviewPlan(ctx: Ctx, { item, observation, mainSha }: Observed) {
+  const { run, task } = ctx;
+  if (run.reviewers.length !== 1) return;
+  const trigger = parseTriggerInput(run.input);
+  if (isBaseOnly(trigger)) {
+    const state = await resolvePrReview(runHistory(item.id, actionsPublishing("pr_assessment")), observation, mainSha);
+    if (state.kind === "stale" && state.reason === "base" && (state.assessment.run.mainSha ?? null) === (trigger.previousMainSha ?? null)
+      && (state.assessment.run.headSha ?? null) === (trigger.previousHeadSha ?? null)) return;
+  }
+  const { provider, model, thinkingLevel } = getActionConfig(task.action);
+  updateRun(run.id, { reviewers: configuredReviewers(task.action), provider, model, thinkingLevel });
+  ctx.run = getRun(run.id)!;
+}
+
 async function itemRevisions({ repositoryPath }: Ctx, { pullRequest, observation, gitEnvironment, mainSha }: Observed) {
   const headSha = pullRequest ? await fetchPullRequestHead(repositoryPath, observation.remote, pullRequest.number, pullRequest.head.sha, gitEnvironment) : mainSha;
   return { mainSha, headSha };
@@ -212,6 +226,7 @@ async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   if (observed) await prepareReviewCommands(ctx, observed, review, { ...childEnvironment(), ...environment });
   stopBefore(stop, "the agent");
   const changeContext = manifest.context === "change";
+  if (observed) await settleReviewPlan(ctx, observed);
   updateRun(run.id, { stage: "agent" });
   const { result } = await runAgent(ctx, {
     environment, baseSha: changeContext ? review.diffBaseSha : undefined,

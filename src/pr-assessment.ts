@@ -43,13 +43,13 @@ export function priorReviewTexts(subjectId: string) {
 type Assessment = NonNullable<ReturnType<typeof selectAssessment>>;
 export type PrReviewState =
   | { kind: "missing" }
-  | { kind: "stale"; assessment: Assessment; changedPaths: string[] }
+  | { kind: "stale"; reason: "context" | "base"; assessment: Assessment; changedPaths: string[] }
   | { kind: "current"; assessment: Assessment };
 
 export async function resolvePrReview(history: History, now: ItemObservation, mainSha: string): Promise<PrReviewState> {
   const assessment = selectAssessment(history);
   if (!assessment) return { kind: "missing" };
-  if (now.item.state !== "open") return { kind: "stale", assessment, changedPaths: [] };
+  if (now.item.state !== "open") return { kind: "stale", reason: "context", assessment, changedPaths: [] };
   const state = await freshness(savedEvaluation(assessment.run), { ...now, mainSha }, "relevant-paths");
-  return state.kind === "current" ? { kind: "current", assessment } : { kind: "stale", assessment, changedPaths: state.changedPaths };
+  return state.kind === "current" ? { kind: "current", assessment } : { kind: "stale", reason: state.reason, assessment, changedPaths: state.changedPaths };
 }

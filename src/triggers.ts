@@ -6,7 +6,7 @@ const items = <K extends string, F extends Record<string, TSchema>>(kind: K, fie
   Type.Object({ source: Type.Literal("github_items"), kind: Type.Literal(kind), manual: Type.Optional(Type.Boolean()), ...fields });
 
 const itemChanged = items("item_changed", {
-  triggerKey: text, revision: text, mainSha: text, changedPaths: Type.Optional(Type.Array(text)),
+  triggerKey: text, revision: text, mainSha: text, changedPaths: Type.Optional(Type.Array(text)), baseOnly: Type.Optional(Type.Boolean()),
   previousMainSha: Type.Optional(Type.Union([text, Type.Null()])), previousHeadSha: Type.Optional(Type.Union([text, Type.Null()])),
 });
 const label = items("label", { triggerKey: text, mainSha: text });
@@ -61,5 +61,7 @@ export function parseTriggerInput(input: unknown): TriggerInput {
 }
 
 export const triggerKeyOf = (input: Record<string, unknown>) => typeof input.triggerKey === "string" ? input.triggerKey : undefined;
+
+export const isBaseOnly = (input: TriggerInput): input is Static<typeof itemChanged> => input.kind === "item_changed" && input.baseOnly === true && !input.manual;
 
 export const isManual = (input: Record<string, unknown>) => input.manual === true;

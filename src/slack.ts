@@ -26,7 +26,7 @@ async function call(method: string, body: Record<string, unknown>): Promise<Reco
     }
     if (!response.ok) throw new Error(`Slack ${method} failed with HTTP ${response.status}`);
     const data = await response.json() as Record<string, unknown>;
-    if (data.ok !== true) throw new Error(`Slack ${method} failed: ${String(data.error)}`);
+    if (data.ok !== true) throw Object.assign(new Error(`Slack ${method} failed: ${String(data.error)}`), { slackError: String(data.error) });
     return data;
   }
 }
@@ -52,5 +52,14 @@ export function authTest() {
     const data = await call("auth.test", {});
     operation.complete({ team: data.team, user: data.user });
     return data;
+  });
+}
+
+export function addReaction({ channel, timestamp, name }: { channel: string; timestamp: string; name: string }) {
+  return withOperation("slack.add_reaction", { channel, timestamp, name }, async (operation) => {
+    operation.stage("request");
+    try { await call("reactions.add", { channel, timestamp, name }); }
+    catch (error) { if ((error as { slackError?: string }).slackError !== "already_reacted") throw error; }
+    operation.complete({ name });
   });
 }

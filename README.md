@@ -350,7 +350,7 @@ Scrat can post its work to Slack: one thread per issue or pull request, with eve
 Put that in `scrat.local.json`. `channel` is a channel ID, not a name. Both this and `review_base_change` post through one Slack bot:
 
 1. Create a Slack app in the workspace, from scratch.
-2. Under OAuth & Permissions, add the bot token scope `chat:write`, then install the app to the workspace.
+2. Under OAuth & Permissions, add the bot token scopes `chat:write` and `reactions:write` (review verdict reactions), then install the app to the workspace; an app installed before `reactions:write` was added must be reinstalled to pick up the new scope.
 3. Copy the Bot User OAuth Token (`xoxb-...`) into `.env` as `SLACK_BOT_TOKEN=xoxb-...`.
 4. Invite the bot to the channel (`/invite @<bot name>`).
 

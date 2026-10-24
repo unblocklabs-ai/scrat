@@ -18,6 +18,17 @@ const changeMain = (path, text) => {
   writeFileSync(resolve("seed", path), text); git(resolve("seed"), "add", "."); commit(resolve("seed"), "Change " + path);
   git(resolve("seed"), "push", resolve("remote.git"), "main");
 };
+const pushFile = (branch, path, text) => {
+  const remote = resolve("remote.git"), parent = git(remote, "rev-parse", branch), index = resolve("human-push.index"), env = { ...process.env, GIT_INDEX_FILE: index };
+  rmSync(index, { force: true });
+  execFileSync("git", ["-C", remote, "read-tree", parent], { env });
+  const blob = execFileSync("git", ["-C", remote, "hash-object", "-w", "--stdin"], { input: text, encoding: "utf8" }).trim();
+  execFileSync("git", ["-C", remote, "update-index", "--add", "--cacheinfo", `100644,${blob},${path}`], { env });
+  const tree = execFileSync("git", ["-C", remote, "write-tree"], { env, encoding: "utf8" }).trim();
+  const next = git(remote, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", tree, "-p", parent, "-m", "Human follow-up");
+  git(remote, "update-ref", "refs/heads/" + branch, next);
+  return next;
+};
 const writeSync = fs.writeSync;
 const captureLogs = () => {
   const lines = [];
@@ -427,6 +438,64 @@ const commitReview = async (variant) => {
   }
 };
 export const scenarios = {
+  base_only_review: { title: "a re-review caused only by relevant main changes runs the primary reviewer alone with a graded assessment, while every other trigger keeps the panel and retries keep the right plan", run: async () => {
+    const [primary, secondary] = f.config.actions.review_pr.reviewers.map((reviewer) => reviewer.model);
+    const sessions = (since) => {
+      const seen = f.requests.slice(since).filter((r) => r.context.action === "review_pr");
+      const count = (predicate) => seen.filter(predicate).length;
+      return { primary: count((r) => r.request.model === primary && !r.consolidating), secondary: count((r) => r.request.model === secondary), consolidation: count((r) => r.consolidating) };
+    };
+    const comments = () => f.comments.get(201).filter((c) => c.user.login !== "human").length;
+    const queued = () => all(s.tasks).filter((t) => t.status === "queued" && t.action === "review_pr");
+    const panelRun = (result, since) => {
+      const counts = sessions(since);
+      assert.equal(result.reviewers.length, 2); assert.ok(counts.primary && counts.secondary && counts.consolidation);
+    };
+    const singleRun = (result, since) => {
+      assert.equal(sessions(since).secondary, 0); assert.equal(sessions(since).consolidation, 0); assert.ok(sessions(since).primary);
+      assert.equal(result.reviewers.length, 1); assert.equal(result.reviewers[0].model, primary);
+      assert.equal(result.reviewers[0].result.outcome, "complete"); assert.ok(result.reviewers[0].piSessionId);
+      assert.equal(result.result.grade, "B"); assert.equal(result.result.text, result.reviewers[0].result.text);
+    };
+    await implement(1); await route(); let mark = f.requests.length;
+    const initial = await success(); panelRun(initial, mark);
+    const branch = f.prs[0].head.ref, subjectId = f.row(s.tasks, initial.taskId).subjectId;
+
+    changeMain("notes.md", "irrelevant\n"); await route(); assert.equal(queued().length, 0);
+
+    changeMain("src/app.ts", "export const value = 99;\n"); await route();
+    assert.equal(queued().length, 1); assert.equal(queued()[0].input.baseOnly, true);
+    mark = f.requests.length; const single = await success(); singleRun(single, mark);
+    assert.equal(comments(), 1); assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["B · Solid"]);
+
+    changeMain("src/app.ts", "export const value = 100;\n"); await route(); assert.equal(queued()[0].input.baseOnly, true);
+    pushFile(branch, "human-note.txt", "A follow-up change\n"); await route();
+    assert.equal(queued().length, 1); assert.equal(queued()[0].input.baseOnly, undefined, "coalescing with a head change drops the base-only reason");
+    mark = f.requests.length; panelRun(await success(), mark);
+
+    changeMain("src/app.ts", "export const value = 101;\n"); await route(); assert.equal(queued()[0].input.baseOnly, true);
+    tasks.enqueueTask({ subjectId, action: "review_pr", reason: "Manual review", input: { source: "github_items", kind: "manual", manual: true } });
+    mark = f.requests.length; panelRun(await success(), mark);
+
+    changeMain("src/app.ts", "export const value = 102;\n"); f.comments.get(201).push(humanComment(201, 9100, "Please look at the edge case", "2026-10-19T02:00:00Z")); await route();
+    assert.equal(queued()[0].input.baseOnly, undefined, "a context change with a main change is mixed");
+    mark = f.requests.length; panelRun(await success(), mark);
+
+    changeMain("src/app.ts", "export const value = 103;\n"); await route();
+    f.reset(201, "incomplete"); const failed = await run(); assert.equal(failed.error.code, "AGENT_INCOMPLETE"); assert.equal(failed.reviewers.length, 1);
+    f.reset(201, "normal"); mark = f.requests.length; tasks.retryTask(failed.taskId); singleRun(await success(), mark);
+
+    changeMain("src/app.ts", "export const value = 104;\n"); await route();
+    f.faults.comment.add(201); const lost = await run(); assert.equal(lost.stage, "publishing"); assert.ok(lost.error); assert.equal(lost.reviewers.length, 1);
+    mark = f.requests.length; tasks.retryTask(lost.taskId); const recovered = await success();
+    assert.equal(f.requests.length, mark); assert.deepEqual(recovered.reviewers, lost.reviewers); assert.equal(recovered.result.text, lost.result.text);
+    assert.equal(recovered.publication.status, "published");
+
+    changeMain("src/app.ts", "export const value = 105;\n"); await route();
+    f.reset(201, "incomplete"); const stale = await run(); assert.ok(stale.error);
+    pushFile(branch, "second-note.txt", "Another follow-up\n");
+    f.reset(201, "normal"); mark = f.requests.length; tasks.retryTask(stale.taskId); panelRun(await success(), mark);
+  } },
   queue: { title: "SQLite queue coalesces input, orders priorities, excludes busy workspaces and caps six tasks", run: async () => {
     for (let n = 1; n <= 9; n++) f.addIssue(n);
     f.enqueue(1); f.enqueue(2, "implement"); const first = f.enqueue(3, "review_pr", { source: "github_items", kind: "manual", version: 1 });
@@ -936,7 +1005,7 @@ export const scenarios = {
   } },
   grade_race: { title: "sync invalidation and publication reconcile one current PR grade under concurrent execution", run: async () => {
     await implement(1); await route(); const reviewed = await success();
-    tasks.enqueueTask({ subjectId: f.row(s.tasks, reviewed.taskId).subjectId, action: "review_pr", reason: "Fresh review", input: { source: "github_items", kind: "manual" } });
+    tasks.enqueueTask({ subjectId: f.row(s.tasks, reviewed.taskId).subjectId, action: "review_pr", reason: "Fresh review", input: { source: "github_items", kind: "manual", manual: true } });
     f.reset(201, "normal"); changeMain("src/app.ts", "export const value = 99;\n");
     let unblock, sawRemoval, sawPublicationContext;
     const blocked = new Promise((resolve) => { unblock = resolve; });
@@ -1890,17 +1959,6 @@ export const scenarios = {
   review_prior_assessment: { title: "a re-review of a Scrat PR after a pushed repair gives both panel reviewers and the consolidator the previous assessment and repair summary; a re-review of a human PR after a pushed file gets the previous assessment and head; first reviews get neither", run: async () => {
     const review = async (n, mode) => { f.reset(n, mode); await route(); return success(); };
     const filesOf = (number, assessmentId) => f.requests.filter((r) => r.context.action === "review_pr" && r.context.item.number === number && r.context.files.directory.includes(assessmentId));
-    const pushFile = (branch, path, text) => {
-      const remote = resolve("remote.git"), parent = git(remote, "rev-parse", branch), index = resolve("human-push.index"), env = { ...process.env, GIT_INDEX_FILE: index };
-      rmSync(index, { force: true });
-      execFileSync("git", ["-C", remote, "read-tree", parent], { env });
-      const blob = execFileSync("git", ["-C", remote, "hash-object", "-w", "--stdin"], { input: text, encoding: "utf8" }).trim();
-      execFileSync("git", ["-C", remote, "update-index", "--add", "--cacheinfo", `100644,${blob},${path}`], { env });
-      const tree = execFileSync("git", ["-C", remote, "write-tree"], { env, encoding: "utf8" }).trim();
-      const next = git(remote, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", tree, "-p", parent, "-m", "Human follow-up");
-      git(remote, "update-ref", "refs/heads/" + branch, next);
-      return next;
-    };
     await implement(1); const first = await review(201, "grade-C");
     const firstRequests = f.requests.filter((r) => r.context.action === "review_pr");
     assert.ok(firstRequests.some((r) => r.consolidating));

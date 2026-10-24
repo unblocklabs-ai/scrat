@@ -108,6 +108,7 @@ export function planReview(facts: ReviewFacts): RoutingDecision[] {
   }
   return queue(latest, action, completed ? "Relevant GitHub or base-branch changes" : "Initial GitHub review", {
     source: "github_items", kind: "item_changed", triggerKey, revision, mainSha, changedPaths,
+    ...facts.kind === "pr" && facts.state.kind === "stale" && facts.state.reason === "base" && { baseOnly: true },
     previousMainSha: completed?.mainSha ?? null, previousHeadSha: completed?.headSha ?? null,
   });
 }

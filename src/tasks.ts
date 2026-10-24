@@ -12,7 +12,7 @@ import { entryStage, hasPublicationSnapshot, hasValidationCheckpoint, Interrupte
 import { getRun, latestRunOfTask } from "./run-history.ts";
 import { asItem } from "./items.ts";
 import { items, runs, type Run, subjects, tasks, type Task, type Subject } from "./schema.ts";
-import { isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
+import { isBaseOnly, isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
 import { signalWork } from "./work-signal.ts";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -23,6 +23,11 @@ const queuedTaskOf = (transaction: Pick<typeof db, "select">, subjectId: string,
 export function latestTask(subjectId: string, action: Action) {
   return db.select().from(tasks).where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action)))
     .orderBy(desc(tasks.createdAt), desc(tasks.id)).limit(1).get();
+}
+
+export function configuredReviewers(action: Action, single = false) {
+  const reviewers = getActionConfig(action).reviewers.map(({ provider, model, thinkingLevel }) => ({ provider, model, thinkingLevel }));
+  return single ? reviewers.slice(0, 1) : reviewers;
 }
 
 const isKnownAction = (action: string) => getManifest(action) !== undefined;
@@ -147,8 +152,7 @@ export function claimTask() {
       provider: settings.provider,
       model: settings.model,
       thinkingLevel: settings.thinkingLevel,
-      reviewers: resume ? resume.reviewers : (pinned?.reviewers ?? actionSettings.reviewers)
-        .map(({ provider, model, thinkingLevel }) => ({ provider, model, thinkingLevel })),
+      reviewers: resume ? resume.reviewers : pinned?.reviewers ?? configuredReviewers(task.action, isBaseOnly(claimable.trigger)),
       workspaceId: resume?.workspaceId ?? next.subject.workspaceId,
       stage: entryStage(retry, next.task.retryMode),
       ...(resume ? {

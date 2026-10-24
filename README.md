@@ -6,7 +6,7 @@ Scrat is a GitHub coding agent built with TypeScript, [Pi](https://github.com/ea
 
 GitHub sync turns repository state into a persistent task queue:
 
-- **PR reviews:** two model sessions review independently. A fresh consolidation session combines their findings into one updatable comment and a grade label. This includes Scrat's own PRs.
+- **PR reviews:** two model sessions review independently. A fresh consolidation session combines their findings into one updatable comment and a grade label. This includes Scrat's own PRs. A re-review caused only by relevant changes on the base branch, with the PR head and discussion unchanged since the authoritative assessment and no manual request, runs one session with the first configured reviewer and no consolidation; it is rechecked against the observed state before inference, falls back to the full panel when it no longer holds, and the run's `reviewers` record which plan ran.
 - **Implementation and maintenance:** issues labelled `scrat` become implementation tasks. Conflicts and new external feedback on Scrat-authored PRs become separate repair tasks.
 - **Issue reviews:** Scrat assesses issues and applies the `scrat` label when it considers them ready for implementation.
 

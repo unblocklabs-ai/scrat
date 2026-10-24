@@ -283,6 +283,8 @@ const staleBranch = async (variant) => {
     needs("needed3.txt"); changeMain("needed3.txt", "ok\n");
     tasks.enqueueTask({ subjectId: prItem(204).id, action: "address_pr_feedback", reason: "Exercise self-heal", input: { source: "github_items", kind: "manual", manual: true } });
     f.reset(204, "normal"); const healed = await success();
+    const healedRequest = f.requests.findLast((r) => r.context.action === "address_pr_feedback" && r.context.item.number === 204);
+    assert.equal(healedRequest.context.diffBaseSha, mainHead(), "the agent diffs against the main it was merged with");
     const head4 = remoteGit("rev-parse", f.prs[3].head.ref);
     remoteGit("merge-base", "--is-ancestor", mainHead(), head4);
     assert.equal(healed.publication.publishedCommitSha, head4); assert.equal(remoteGit("show", head4 + ":src/app.ts"), "export const value = 214;");

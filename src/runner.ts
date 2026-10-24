@@ -295,8 +295,8 @@ async function mergeBehindBase(p: Change, { observation, pullRequest }: Observed
 
 async function mergeBehind(ctx: Ctx, observed: Observed, p: Change, diffPaths: string[], acceptance: Acceptance) {
   const { run } = ctx;
-  if (acceptance !== "conflict_free" || p.mergeInProgress || run.retryOfRunId) return;
-  if (!await mergeBehindBase(p, observed)) return;
+  if (acceptance !== "conflict_free" || p.mergeInProgress || run.retryOfRunId) return false;
+  if (!await mergeBehindBase(p, observed)) return false;
   const { baseBranch } = observed.observation;
   p.result = { text: `Merged ${baseBranch} (${p.mainSha.slice(0, 7)}) into this branch; no conflicts`, ready: false, paths: [...new Set(diffPaths)], outcome: "complete" };
   updateRun(run.id, { result: p.result, stage: "validating" });
@@ -307,14 +307,16 @@ async function mergeBehind(ctx: Ctx, observed: Observed, p: Change, diffPaths: s
     if (!(error instanceof CheckFailure) && !(error instanceof Error && error.message === unresolvedConflict)) throw error;
     p.validationFailure = describeError(error instanceof CheckFailure ? error.cause : error);
   }
+  return true;
 }
 
 async function prepareChangeCommands({ references }: Ctx, observed: Observed, p: Change) {
-  if (p.deferred) return;
-  try { await prepareWorkspace(p.workspace, p.commandEnvironment, references, p.databaseConfig); }
+  if (p.deferred) return false;
+  try { await prepareWorkspace(p.workspace, p.commandEnvironment, references, p.databaseConfig); return false; }
   catch (error) {
     if (!observed.pullRequest || !await mergeBehindBase(p, observed, error)) throw error;
     await prepareWorkspace(p.workspace, p.commandEnvironment, references, p.databaseConfig);
+    return true;
   }
 }
 
@@ -369,18 +371,18 @@ async function changeRun(ctx: Ctx, observed: Observed) {
   };
   if (!validationOnly) {
     const evaluated = evaluateContext(run, task, observed.observation);
-    const { diffPaths, diffBaseSha } = await readDiffScope(workspace.path, mainSha, p.preparedHead, Boolean(observed.pullRequest));
+    const { diffPaths, diffBaseSha: unmergedBaseSha } = await readDiffScope(workspace.path, mainSha, p.preparedHead, Boolean(observed.pullRequest));
     updateRun(run.id, { context: evaluated });
-    await mergeBehind(ctx, observed, p, diffPaths, acceptance);
+    let merged = await mergeBehind(ctx, observed, p, diffPaths, acceptance);
     if (!p.validated) {
       stopBefore(stop, "workspace preparation");
-      await prepareChangeCommands(ctx, observed, p);
+      merged = await prepareChangeCommands(ctx, observed, p) || merged;
       stopBefore(stop, "the agent");
       updateRun(run.id, { stage: "agent" });
       const { result, contextDir, revisions } = await runAgent(ctx, {
         environment, sessionFile: latestSessionRun(workspace.id, run.id)?.piSessionFile ?? undefined,
         input: {
-          workspace, evaluated, diffBaseSha, diffPaths, mainSha, headSha: p.headSha, baseRef: mainSha, mergeInProgress: p.mergeInProgress, validationFailure: p.validationFailure,
+          workspace, evaluated, diffBaseSha: merged ? mainSha : unmergedBaseSha, diffPaths, mainSha, headSha: p.headSha, baseRef: mainSha, mergeInProgress: p.mergeInProgress, validationFailure: p.validationFailure,
           database: database ? { ...database, environment, schemaPrepared: !p.deferred, prepare: config.workspace.prepare, migrate: databaseConfig?.migrate } : undefined,
         },
       });

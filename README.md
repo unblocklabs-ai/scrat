@@ -53,7 +53,7 @@ npm run knip                     # Unused files, exports, and dependencies
 npm test                         # Integration/E2E tests; PostgreSQL case needs Docker
 ```
 
-When the final validation fails because a command exited nonzero (including preparation commands), the failure is sent back into the same Pi session, up to two rounds, before the run fails. Commands killed by a signal (an out-of-memory kill or a timeout), tree mutation, secret-scan and acceptance failures are not sent back and fail the run as before; use `--validation-only` for the infrastructure cases.
+When the final validation fails because a command exited nonzero (including preparation commands), the failure is sent back into the same Pi session, up to `harness.corrections.validation` rounds, before the run fails. Commands killed by a signal (an out-of-memory kill or a timeout), tree mutation, secret-scan and acceptance failures are not sent back and fail the run as before; use `--validation-only` for the infrastructure cases.
 
 Change sessions are told to keep working notes in `.scrat/notes.md` inside their workspace, so plans and findings survive context compaction, retries and validation feedback. Scrat adds `/.scrat/` to the clone's shared Git exclude file, so the notes are never committed or published; they are removed with the workspace.
 
@@ -74,7 +74,7 @@ Use `--validation-only` for a transient validation failure after a mutating agen
 - Relative paths in overrides resolve from the config directory, like the defaults.
 - Overrides live in `scrat.local.json`, linked into each release by the installer, which checks it before stopping the service; check an edit with `node src/config.ts`, then restart the service.
 
-Per-install systemd overrides go in a `scrat.service.d/local.conf` drop-in, which the installer keeps across deploys.
+Per-install systemd overrides (for example a lower `MemoryMax` than the unit's 20G on a smaller host) go in `~/.config/systemd/user/scrat.service.d/local.conf`. The installer keeps it across deploys; apply an edit with `systemctl --user daemon-reload && systemctl --user restart scrat.service`.
 
 `deploy/install.sh` installs a staged release on the existing worker: it drains the service, backs up SQLite, applies schema updates, and switches to the selected release. It refuses anything but a tagged release: the commit must be the one that its `package.json` version's `vX.Y.Z` tag points to, checked through the GitHub API before the service is touched. It contains host-specific paths, so review it before reuse.
 
@@ -169,7 +169,7 @@ the old service. On Ubuntu 24.04, an administrator installs `bubblewrap`, instal
 `apparmor_parser -r /etc/apparmor.d/scrat-bwrap`. Do not disable the global userns
 restriction. Provision Node and the pinned pnpm version with Corepack first.
 
-`workspace.packageStore` is an absolute directory, not a symlink, that is bind-mounted read-write at pnpm's store
+`workspace.packageStore` (off unless set) is an absolute directory, not a symlink, that is bind-mounted read-write at pnpm's store
 location in every sandboxed command, with a `storeDir` entry written to the sandbox home's pnpm `config.yaml` so
 pnpm uses it. A lockfile's packages are then downloaded once per install instead of once per workspace. It requires
 `workspace.sandbox`, and the installer's preflight writes to it. This is opt-in and meant for repositories whose
@@ -180,7 +180,7 @@ would close that and is a possible follow-up. Nothing else is shared: each works
 runs its own `prepare`. The store and the workspace are different mounts, so pnpm copies files instead of hardlinking:
 the saving is download time and the per-run sandbox home, not disk in `node_modules`.
 
-`workspace.commandMemoryMax` is a systemd `MemoryMax=` value such as `"6G"`
+`workspace.commandMemoryMax` (off unless set) is a systemd `MemoryMax=` value such as `"6G"`
 or `"50%"`; it requires `workspace.sandbox` and a systemd user session. Each sandboxed command
 then runs in its own transient scope with swap disabled, so a runaway check is killed alone and
 its run fails as out of memory (`COMMAND_OUT_OF_MEMORY`), without the agent being re-prompted. Only prepare, migrate and validate commands get that
@@ -267,7 +267,7 @@ A deployment adds or changes actions without a code release. Set `actions.direct
 - `tools` is the list of agent tools (`read`, `grep`, `find`, `ls`, `git`, `read_base`, `bash`, `edit`, `write`) and the scoped tools `http`, `browser` and `github_search` (see Scoped tools below); `review` manifests get no write tools and `change` manifests no `git` or `read_base`. `files` lists the optional context files written for the run (`discussion`, `review`, `previous_assessment`, `previous_repair`, `history`); `history` is opt-in. `publish` lists effects (`push`, `pull_request`, `comment`, `labels`, `pr_assessment`, `issue`, `slack_reply`). An unknown name or key stops startup with the file and path.
 - Manifests are read once at startup: restart the service to apply a change. The supervised repository never contributes manifests.
 
-A `schedule` trigger runs a `review` action on a cron expression instead of on a GitHub event. `error_sweep.yaml` in the actions directory sweeps logs every six hours and opens an issue for each problem it reports :
+A `schedule` trigger runs a `review` action on a cron expression instead of on a GitHub event. `error_sweep.yaml` in the actions directory sweeps logs every six hours and opens an issue for each problem it reports:
 
 ```yaml
 name: error_sweep
@@ -314,7 +314,7 @@ PLAYWRIGHT_BROWSERS_PATH=$HOME/.local/share/scrat-v2/browsers npx playwright-cor
 sudo env PLAYWRIGHT_BROWSERS_PATH=$HOME/.local/share/scrat-v2/browsers npx playwright-core install-deps chromium   # system libraries, once, as root
 ```
 
-Run the service with the same `PLAYWRIGHT_BROWSERS_PATH`. Chromium is launched with its sandbox enabled (`chromiumSandbox: true`); if the host cannot support that unprivileged, fix the host rather than disabling it.
+Run the service with the same `PLAYWRIGHT_BROWSERS_PATH`. `npm ci` (run by the installer on each deploy) removes packages installed with `--no-save`, so repeat the first command after each release. Chromium is launched with its sandbox enabled (`chromiumSandbox: true`); if the host cannot support that unprivileged, fix the host rather than disabling it.
 
 When a session's browser starts, each allowed host is resolved and Chromium is launched with `--host-resolver-rules` mapping it to that address (`~NOTFOUND` when it does not resolve); the browser tool refuses the run if any host resolves to a private address. A network namespace with no route to private ranges is the stronger boundary and belongs to the VM deployment, not the code.
 
@@ -362,7 +362,7 @@ Posting is best effort. It runs after the database write, one message at a time,
 
 ### Base branch review
 
-`review_base_change` reviews each update to `github.baseBranch` and reports the review in Slack. It runs on the `github.fetchIntervalSeconds` interval, and at startup, and queues one review per push range by default, or one per commit with `granularity: commit`, and can filter commits by `author` or `message` (see `github_commits` above). Scrat's own merged commits are reviewed unless filtered out.
+`review_base_change` reviews each update to `github.baseBranch` and reports the review in Slack. It runs on the `github.fetchIntervalSeconds` interval and at startup. It queues one review per push range by default, or one per commit with `granularity: commit`. Commits can be filtered by `author` or `message` (see `github_commits` above), and Scrat's own merged commits are reviewed unless filtered out.
 
 For each review, Scrat posts `startMessage` to the channel as the opening message, then replies in that thread with the review: a one-line verdict followed by at most five bullets, highest consequence first, and at most 3,000 characters.
 
@@ -375,9 +375,9 @@ The agent receives the commit messages, the changed paths and the diff for the r
 | `reviewers` | Required with exactly two entries when `agent` is `panel`; each takes `provider`, `model` and `thinkingLevel`. |
 | `branch` | Branch to watch, the manifest's `trigger.branch` by default; must not be empty. |
 | `channel` | Slack channel ID to post in. Required when enabled, and the bot must be a member of it. |
-| `maxRangeCommits` | A range with more first-parent commits is recorded on its task as `truncated`. The review still covers the whole range. |
+| `maxRangeCommits` | Range granularity: a range with more first-parent commits is recorded as `truncated` and still reviewed whole. Commit granularity: most commits queued per poll. |
 | `startMessage` | Opening message template. Variables: `{{sha}}` (tip commit), `{{short_sha}}`, `{{author}}` (commit author name), `{{title}}` (commit subject), `{{url}}`, `{{branch}}`, `{{count}}` (commits in the range) and `{{bot}}` (`github.botName`). Any other `{{name}}` stops startup. |
-| `priority`, `skill`, `provider`, `model`, `thinkingLevel` | As in the table above.  |
+| `priority`, `skill`, `provider`, `model`, `thinkingLevel` | As in the table above. |
 
 Author and title are escaped for Slack. Messages do not unfurl links or ping users by name.
 

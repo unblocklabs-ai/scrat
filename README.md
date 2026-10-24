@@ -51,7 +51,7 @@ npm run enqueue -- <action> <number|item-id>... [--priority N]  # Queue work for
 npm run cleanup                  # Retry finished-run resource cleanup
 npm run typecheck                # Strict TypeScript and Node type-erasure compatibility
 npm run knip                     # Unused files, exports, and dependencies
-npm test                         # Integration/E2E tests; PostgreSQL case needs Docker
+npm test                         # Integration/E2E tests, 4 scenarios at a time (SCRAT_TEST_CONCURRENCY=N to change), about 2 minutes; PostgreSQL case needs Docker
 ```
 
 When the final validation fails because a command exited nonzero (including preparation commands), the failure is sent back into the same Pi session, up to `harness.corrections.validation` rounds, before the run fails. Commands killed by a signal (an out-of-memory kill or a timeout), tree mutation, secret-scan and acceptance failures are not sent back and fail the run as before; use `--validation-only` for the infrastructure cases.

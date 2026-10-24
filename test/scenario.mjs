@@ -907,7 +907,7 @@ export const scenarios = {
     const system = ({ request }) => JSON.stringify(request.messages.filter((m) => m.role === "system" || m.role === "developer"));
     const change = f.requests.filter((entry) => entry.context.action === "implement");
     assert.ok(change.length && change.every((entry) => system(entry).includes(notes.replaceAll("\\", "\\\\"))), "Every change request carries the notes path");
-    assert.ok(change.every((entry) => system(entry).includes("do not say the changes are uncommitted")));
+    assert.ok(change.every((entry) => system(entry).includes("its validation or the commit state")));
     assert.equal(readFileSync(notes, "utf8"), "Plan: change value\n");
     const commit = r.publication.publishedCommitSha;
     assert.deepEqual(git(resolve("remote.git"), "ls-tree", "-r", "--name-only", commit).split("\n").filter((path) => path.startsWith(".scrat")), []);

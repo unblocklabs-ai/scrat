@@ -1,15 +1,15 @@
+import { db } from "./db.ts";
 import { and, eq, inArray, isNotNull, isNull, notExists } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import { temporaryWorkspaceActions } from "./actions.ts";
 import { config } from "./config.ts";
-import { db } from "./db.ts";
 import { listRunDatabases, removeRunDatabase } from "./databases.ts";
-import { logger } from "./logging.ts";
 import { getRun } from "./run-history.ts";
 import { runs, tasks, workspaces } from "./schema.ts";
 import { removeWorkspace } from "./workspaces.ts";
+import { runCommand } from "./cli.ts";
 
-try {
+await runCommand("Cleanup command failed", async () => {
   const active = alias(runs, "active_run");
   const pending = db.selectDistinct({ workspace: workspaces }).from(workspaces)
     .innerJoin(runs, eq(runs.workspaceId, workspaces.id)).innerJoin(tasks, eq(runs.taskId, tasks.id))
@@ -27,9 +27,4 @@ try {
       catch { process.exitCode = 1; }
     }
   }
-} catch (error) {
-  logger.error({ err: error }, "Cleanup command failed");
-  process.exitCode = 1;
-} finally {
-  db.$client.close();
-}
+});

@@ -1,13 +1,13 @@
+import { db } from "./db.ts";
 import { isNull } from "drizzle-orm";
 import { config } from "./config.ts";
 import { removeRunDatabase } from "./databases.ts";
-import { db } from "./db.ts";
 import { logger } from "./logging.ts";
 import { runs } from "./schema.ts";
 import { finishRun } from "./tasks.ts";
-import { drainStatus } from "./slack-status.ts";
+import { runCommand } from "./cli.ts";
 
-try {
+await runCommand("Run recovery failed", async () => {
   for (const run of db.select().from(runs).where(isNull(runs.finishedAt)).all()) {
     try {
       finishRun(run.id, { status: "failed", error: Object.assign(new Error("Worker stopped before finishing this run"), { code: "RUN_INTERRUPTED" }) });
@@ -17,7 +17,4 @@ try {
       logger.error({ err: error, event: "run.recovery_failed", runId: run.id, taskId: run.taskId }, "Run recovery failed");
     }
   }
-} finally {
-  await drainStatus();
-  db.$client.close();
-}
+});

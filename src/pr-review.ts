@@ -2,7 +2,7 @@ import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { Logger } from "pino";
 import { describeError, errorCode, transientInferenceCode } from "./errors.ts";
-import { InterruptedError } from "./results.ts";
+import { InterruptedError, mergePaths } from "./results.ts";
 import type { Manifest, ToolName } from "./manifests.ts";
 import { executePi, saveReviewer } from "./pi.ts";
 import { type Run } from "./schema.ts";
@@ -40,5 +40,5 @@ export async function reviewPullRequest(run: Run, cwd: string, context: string, 
     `Consolidate the two independent reviews below (full reports are files listed in independentReviews) into one source-verified PR review. Both reviewers assessed the same snapshot. Recheck disputed findings against source; agreement alone is not proof. Deduplicate findings, preserve every defensible issue and material uncertainty, and reject false positives with concrete reasons. Do not invent changes to reach consensus.${requireGrade ? " Grade only from findings you re-verified and kept, per the review skill's rubric; do not adopt the lower reviewer grade by default. If no verified P3-or-higher defect introduced by the PR remains, the grade is A or B." : ""} Return one concise Markdown assessment, not two pasted reports.${requireGrade ? " For a complete assessment, include SCRAT_GRADE: X (X is S, A, B, C, D, or F) immediately before the required final SCRAT_STATUS line." : ""}`,
     reviewContext, "Read each report file in independentReviews before deciding; its text is the reviewer's full assessment.\n" + JSON.stringify({ independentReviews }, null, 2),
   ].join("\n\n"), tools, scoped, log, baseSha, contextDir, revisions, requireGrade, stop });
-  return { ...consolidated, paths: [...new Set([...consolidated.paths, ...reviews.flatMap((review) => review.result.paths)])] };
+  return { ...consolidated, paths: mergePaths(consolidated.paths, ...reviews.map((review) => review.result.paths)) };
 }

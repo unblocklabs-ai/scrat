@@ -123,3 +123,7 @@ export function parseResult(output: string, paths: string[], { requireGrade = fa
   if (requireGrade && outcome === "complete" && !grade) throw new ResultFormatError("A complete consolidated PR review must include SCRAT_GRADE");
   return { text, ready, paths, outcome, grade, issues: issues.length ? issues : undefined };
 }
+
+export function mergePaths(...lists: string[][]) {
+  return [...new Set(lists.flat())];
+}

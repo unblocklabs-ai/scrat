@@ -65,6 +65,7 @@ const seedUnicodeScope = () => writeFileSync("seed/src/a b.ts", "export const sp
 const seedUnicodeNfd = () => writeFileSync("seed/src/caf\u00e9.ts", "export const unicode = 1;\n");
 const seedLockfile = () => {
   seedIgnore();
+  mkdirSync("seed/assets/.vite", { recursive: true }); writeFileSync("seed/assets/.vite/manifest.json", "{}\n");
   writeFileSync("seed/package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "1.0.0" } }));
   writeFileSync("seed/pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: old}\n  unrelated@1.0.0:\n    resolution: {integrity: old}\n");
 };
@@ -146,7 +147,7 @@ const configureSchedule = (config) => {
 const configureCommitSource = (config) => Object.assign(config.actions.review_base_change, { enabled: true, channel: "C0123456789" });
 const configureCommitPanel = (config) => Object.assign(config.actions.review_base_change, { agent: "panel", reviewers: structuredClone(config.actions.review_pr.reviewers) });
 const configureNoStart = () => writeFileSync("app/actions/review_base_change.yaml", readFileSync("app/actions/review_base_change.yaml", "utf8").replace("start: [slack_post]\n", ""));
-const configureHistory = () => writeFileSync("app/actions/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace("files: [discussion]", "files: [discussion, history]"));
+const configureHistory = () => writeFileSync("app/actions/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace("files: [discussion, previous_assessment]", "files: [discussion, previous_assessment, history]"));
 const configureScoped = (config) => {
   config.bindings = { scout: { secret: "${SCOUT_TOKEN}", hosts: ["api.example.test", "other.example.test"], header: "Authorization", prefix: "Bearer " } };
   const scopedTools = { scoped_http: ["[read, grep, http]", "http: { binding: scout, methods: [GET] }"], bindings_startup: ["[read, grep, http]", "http: { binding: scout }"], scoped_github_search: ["[read, grep, github_search]", ""],
@@ -1413,17 +1414,28 @@ export const scenarios = {
     assert.equal(replacement.taskId, replaced.taskId); assert.ok(f.requests.length > replacementCalls);
     assert.equal(replacement.inferenceFromRunId, null);
   } },
-  retry: { title: "publication retries reconcile remote comments and labels without rerunning Pi", run: async () => {
+  retry: { title: "publication retries reconcile remote comments and labels without rerunning Pi, and follow-up issue reviews edit the one assessment comment with the previous assessment in hand while an unchanged one writes nothing", run: async () => {
     for (const [n, fault] of [[1, "label"], [2, "comment"]]) {
       f.addIssue(n, ["human-label"]); f.reset(n, "ready"); f.enqueue(n); f.faults[fault].add(n);
-      const failed = await run(); assert.ok(failed.error); const calls = f.requests.length;
+      const first = f.requests.length, failed = await run(); assert.ok(failed.error); const calls = f.requests.length;
+      assert.ok(!("previous_assessment" in f.requests[first].context.files), "A first issue review has no previous assessment");
       tasks.retryTask(failed.taskId); const completed = await success();
       assert.equal(completed.retryOfRunId, failed.id); assert.equal(f.requests.length, calls);
       assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === n).length, 1);
       assert.deepEqual(f.issues.get(n).labels.map((label) => label.name).sort(), ["human-label", "scrat"]);
     }
-    f.reset(1, "normal"); f.enqueue(1); await success();
+    f.reset(1, "normal"); f.enqueue(1); let written = f.writes.length; const followUp = await success();
     assert.deepEqual(f.issues.get(1).labels.map((label) => label.name), ["human-label"]);
+    assert.deepEqual(f.writes.slice(written).map((w) => [w.type, w.method]), [["label", "DELETE"]], "The same text with a changed conclusion only moves the label");
+    assert.equal(f.comments.get(1).length, 1, "A second review keeps one assessment comment");
+    f.reset(1, "revised"); f.enqueue(1); const before = f.requests.length; written = f.writes.length; const revised = await success();
+    assert.equal(readFileSync(f.requests[before].context.files.previous_assessment, "utf8"), followUp.result.text);
+    assert.deepEqual(f.writes.slice(written).map((w) => w.type), ["comment_update"], "A changed assessment edits the comment in place");
+    assert.equal(f.comments.get(1).length, 1); assert.equal(f.comments.get(1)[0].body, `${revised.result.text}\n\n<!-- scrat-review -->`);
+    assert.equal(revised.publication.commentId, f.comments.get(1)[0].id);
+    f.reset(1, "revised"); f.enqueue(1); written = f.writes.length; const unchanged = await success();
+    assert.deepEqual(f.writes.slice(written), [], "An unchanged follow-up makes no GitHub write");
+    assert.equal(unchanged.publication.commentId, revised.publication.commentId); assert.equal(unchanged.publication.status, "published");
   } },
   ambiguous_pr: { title: "a lost PR response is reconciled without another PR, inference or revalidation, resuming at the publishing stage", configure: [configureValidation], run: async () => {
     const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
@@ -1471,10 +1483,13 @@ export const scenarios = {
     const relevant = await freshness(saved, { ...now, mainSha: codeSha }, "relevant-paths");
     assert.equal(relevant.kind, "stale"); assert.equal(relevant.reason, "base"); assert.ok(relevant.changedPaths.includes("src/app.ts"));
   } },
-  relevance: { title: "root searches and unrelated development dependencies do not trigger re-review", seed: seedLockfile, configure: [configureLockfile], run: async () => {
+  relevance: { title: "root searches, unrelated development dependencies and ignored generated paths do not trigger re-review", seed: seedLockfile, configure: [configureLockfile, (config) => { config.relevance.ignoredPaths = ["^assets/\\.vite/"]; }], run: async () => {
     f.addIssue(1); f.reset(1, "grep"); await route(); const r = await success();
     assert.ok(r.result.paths.includes("src/app.ts")); assert.ok(!r.result.paths.includes("."));
+    assert.ok(r.result.paths.includes("assets/.vite/manifest.json"), "The review read the generated manifest");
     changeMain("notes.md", "new docs\n"); await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
+    changeMain("assets/.vite/manifest.json", '{"app":"app-2.js"}\n'); await route();
+    assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "A push touching only ignored paths queues no review");
     changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "2.0.0" } }));
     changeMain("pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: old}\n  unrelated@2.0.0:\n    resolution: {integrity: new}\n");
     await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "Unrelated dev dependencies must not trigger review");
@@ -2632,6 +2647,7 @@ export const scenarios = {
     await validateStaticConfig(variant((c) => { c.workspace.commandMemoryMax = null; c.workspace.packageStore = null; }));
     await startup((c) => { c.tools.readBytes.max = c.tools.readBytes.default - 1; }, /tools\.readBytes\.max must not be less than tools\.readBytes\.default/);
     await startup((c) => { c.workspace.heavyCommands = ["^(unclosed"]; }, /heavyCommands\[0\] is not a valid regular expression/);
+    await startup((c) => { c.relevance.ignoredPaths = ["^assets/", "^(unclosed"]; }, /relevance\.ignoredPaths\[1\] is not a valid regular expression/);
     await startup((c) => { c.workspace.validate = []; }, /workspace\.validate is empty but address_pr_feedback, address_review, implement, resolve_conflicts publish commits.*\[\["true"\]\]/);
     await validateStaticConfig(variant((c) => { c.workspace.validate = []; for (const name of ["implement", "address_review", "address_pr_feedback", "resolve_conflicts"]) c.actions[name].enabled = false; }));
     await startup((c) => { c.actions.implement.agent = "panel"; }, /implement: mode change requires source github_items and agent: single/);
@@ -3001,7 +3017,7 @@ export const scenarios = {
     broken("review_pr", (text) => text.replace("[pr_assessment]", "[teleport]"), /actions\/review_pr\.yaml: \/publish\/0/);
     broken("implement", (text) => text.replace("nonempty_diff", "sometimes"), /actions\/implement\.yaml: \/acceptance/);
     broken("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, teleport]"), /actions\/review_issue\.yaml: \/tools\/1/);
-    broken("review_issue", (text) => text.replace("files: [discussion]", "files: [secrets]"), /actions\/review_issue\.yaml: \/files\/0/);
+    broken("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [secrets]"), /actions\/review_issue\.yaml: \/files\/0/);
     broken("review_issue", (text) => text.replace("name: review_issue", "name: Review-Issue"), /actions\/review_issue\.yaml: \/name/);
     broken("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, bash]"), /mode review forbids the bash, edit and write tools/);
     f.addIssue(1); f.enqueue(1);
@@ -3015,6 +3031,7 @@ export const scenarios = {
     const { validateStaticConfig } = await f.app("startup.ts");
     assert.deepEqual(manifests().map((m) => m.name).sort(), ["address_pr_feedback", "address_review", "implement", "my_pr_review", "resolve_conflicts", "review_base_change", "review_issue", "review_pr", "review_triage"]);
     await validateStaticConfig(f.config);
+    await assert.rejects(validateStaticConfig({ ...f.config, actions: { ...f.config.actions, review_issue: { ...f.config.actions.review_issue, enabled: true } } }), /review_issue, review_triage would share one review comment on each issue; enable only one/);
     const issue = { source: "github_items", kind: "item_changed", item: "issue", author: "other" };
     assert.equal(routeFor(issue), "review_triage"); assert.equal(routeFor({ ...issue, item: "pr" }), "my_pr_review");
     assert.equal(routeFor({ ...issue, kind: "pr_conflicts", item: "pr", author: "other" }), undefined);
@@ -3074,8 +3091,10 @@ export const scenarios = {
     rejects("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, git, read_base]"), /read_base requires a review with agent: panel or context: change/);
     rejects("review_pr", (text) => text.replace("[discussion, previous_assessment, previous_repair, validation, issue]", "[history]"), /files: history is not allowed with the pr_assessment effect/);
     rejects("review_pr", (text) => text.replace("validation, issue]", "validation, triage]"), /files: triage requires trigger.item issue/);
-    rejects("review_issue", (text) => text.replace("files: [discussion]", "files: [issue]"), /files: issue requires trigger.item pr/);
-    rejects("review_issue", (text) => text.replace("files: [discussion]", "files: [review]"), /files: review requires trigger.kind low_grade/);
+    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [issue]"), /files: issue requires trigger.item pr/);
+    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [review]"), /files: review requires trigger.kind low_grade/);
+    rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [labels]"), /files: previous_assessment requires the pr_assessment effect or a review that publishes comment/);
+    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [discussion, previous_repair]"), /files: previous_repair requires the pr_assessment effect/);
     rejects("implement", (text) => text.replace("[read, grep, find, ls, bash, edit, write]", "[read, git]"), /mode change forbids the git and read_base tools/);
     rejects("implement", (text) => text.replace("item: issue", "item: pr"), /trigger.kind label requires item: issue/);
     rejects("review_issue", (text) => text + "failedLabel: Scrat failed\n", /rule_check\.yaml: failedLabel requires mode change/);

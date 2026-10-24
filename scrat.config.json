@@ -41,6 +41,9 @@
     "historyRuns": 10,
     "historyBytes": 65536
   },
+  "relevance": {
+    "ignoredPaths": []
+  },
   "tools": {
     "readBytes": { "default": 32768, "max": 65536 },
     "git": { "maxCommits": 200, "maxScopeBytes": 1048576 },

@@ -4,7 +4,7 @@ mode: review
 agent: single
 context: all
 tools: [read, grep, find, ls, git]
-files: [discussion]
+files: [discussion, previous_assessment]
 publish: [comment, labels]
 skill: skills/review_issue/SKILL.md
 model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }

@@ -1,4 +1,5 @@
 import { eq } from "drizzle-orm";
+import { manifestOf } from "./actions.ts";
 import { postCommitReply } from "./commit-review.ts";
 import { upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
@@ -11,7 +12,7 @@ import { botSlug } from "./identity.ts";
 import type { EffectName } from "./manifests.ts";
 import { upsertItem } from "./items.ts";
 import { reconcileLabels } from "./labels.ts";
-import { fingerprintMarker, isIssueComment, taskMarker } from "./markers.ts";
+import { fingerprintMarker, isIssueComment, reviewMarker, taskMarker } from "./markers.ts";
 import { observe } from "./observation.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
 import { remoteUrl } from "./repository.ts";
@@ -98,7 +99,7 @@ const pullRequest = {
 const comment = {
   receipted: (publication) => Boolean(publication.commentId),
   async apply({ github, task, run, current, references, saveReceipt }) {
-    const marker = taskMarker(task.id);
+    const marker = manifestOf(task.action).mode === "review" ? reviewMarker : taskMarker(task.id);
     const observation = observe(github.repository, current);
     const existing = observation.own.findLast((candidate) => isIssueComment(candidate) && candidate.body.trimEnd().endsWith(marker));
     const commentId = await upsertComment(github, run.context.item.number, existing, `${run.result.text}\n\n${validationLine(run)}${marker}`, references);

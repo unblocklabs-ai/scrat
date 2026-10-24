@@ -6,7 +6,7 @@ import { syncGitHub } from "./github-sync.ts";
 import { logger } from "./logging.ts";
 import { runNextTask } from "./runner.ts";
 import { pollSchedules } from "./schedule-source.ts";
-import { prepareService } from "./startup.ts";
+import { validateStaticConfig } from "./startup.ts";
 import { signalWork, waitForWork, workGeneration } from "./work-signal.ts";
 
 const shutdown = new AbortController();
@@ -40,7 +40,7 @@ async function worker() {
   }
 }
 await runCommand("Serve failed", async () => {
-  await prepareService();
+  await validateStaticConfig();
   logger.info({ event: "worker.started", concurrency: config.harness.maxConcurrency });
   await pollSources();
   await Promise.all([poll(), ...Array.from({ length: config.harness.maxConcurrency }, worker)]);

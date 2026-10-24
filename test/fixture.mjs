@@ -54,7 +54,7 @@ export async function fixture(scenario, spec) {
   if (scenario.startsWith("commit_review") || scenario === "recovery" || scenario === "isolation" || scenario.startsWith("slack_status") || scenario === "publish_effects") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
   const modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
-  const faults = { label: new Set(), comment: new Set(), commentDelete: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set() };
+  const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set() };
   const tokens = new Map(patMode ? [[pat, { issues: "write", pull_requests: "write", contents: "write" }]] : []);
   const transient = { failures: 0, seen: new Map() };
   let onModel, script, nextCommentId = 1000, nextIssueNumber = 500;
@@ -295,15 +295,6 @@ export async function fixture(scenario, spec) {
       if (!comment) return reply({ message: "Not Found" }, 404);
       comment.body = body.body; writes.push({ type: "comment_update", id: comment.id });
       return faults.comment.delete(number) ? reply({ message: "Lost update response" }, 502) : reply(comment);
-    }
-    if (match && method === "DELETE") {
-      const id = Number(match[1]), number = [...comments].find(([, entries]) => entries.some((comment) => comment.id === id))?.[0];
-      if (number === undefined) return reply({ message: "Not Found" }, 404);
-      const token = bearer(options);
-      if (tokens.get(token)?.issues !== "write") return reply({ message: "Resource not accessible by integration" }, 403);
-      if (faults.commentDelete.has(id)) return reply({ message: "Server Error" }, 500);
-      comments.set(number, comments.get(number).filter((comment) => comment.id !== id)); writes.push({ type: "comment_delete", id });
-      call.status = 204; return new Response(null, { status: 204, headers: { "x-ratelimit-remaining": String(rate.remaining) } });
     }
     match = path.match(/\/issues\/(\d+)\/labels(?:\/(.+))?$/);
     if (match) {

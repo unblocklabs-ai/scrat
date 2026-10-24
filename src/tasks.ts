@@ -1,8 +1,8 @@
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, count, desc, eq, isNotNull, isNull, lte, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
-import { type Action, getManifest, manifests } from "./actions.ts";
-import { config, getActionConfig, isActionEnabled } from "./config.ts";
+import { getActionConfig, manifestOf, manifests } from "./actions.ts";
+import { config, isActionEnabled } from "./config.ts";
 import { itemsInRepository, sameRepository } from "./repository.ts";
 import { db } from "./db.ts";
 import { describeError, type ErrorDetails, errorCode, errorMessage, transientInferenceCode } from "./errors.ts";
@@ -17,20 +17,20 @@ import { signalWork } from "./work-signal.ts";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
-const queuedTaskOf = (transaction: Pick<typeof db, "select">, subjectId: string, action: Action) =>
+const queuedTaskOf = (transaction: Pick<typeof db, "select">, subjectId: string, action: string) =>
   transaction.select().from(tasks).where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action), eq(tasks.status, "queued"))).get();
 
-export function latestTask(subjectId: string, action: Action) {
+export function latestTask(subjectId: string, action: string) {
   return db.select().from(tasks).where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action)))
     .orderBy(desc(tasks.createdAt), desc(tasks.id)).limit(1).get();
 }
 
-export function configuredReviewers(action: Action, single = false) {
+export function configuredReviewers(action: string, single = false) {
   const reviewers = getActionConfig(action).reviewers.map(({ provider, model, thinkingLevel }) => ({ provider, model, thinkingLevel }));
   return single ? reviewers.slice(0, 1) : reviewers;
 }
 
-const isKnownAction = (action: string) => getManifest(action) !== undefined;
+const modeOf = (action: string) => manifests.find(({ name }) => name === action)?.mode;
 
 function checkClaimable({ task, subject }: { task: Task; subject: Subject }, database: Pick<typeof db, "select">) {
   if (!isActionEnabled(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
@@ -38,7 +38,6 @@ function checkClaimable({ task, subject }: { task: Task; subject: Subject }, dat
   try { trigger = parseTriggerInput(task.input); }
   catch (error) { return { ok: false as const, reason: `Invalid trigger input for ${task.action}: ${errorMessage(error)}` }; }
   const { repository } = subject;
-  if (!repository) return { ok: false as const, reason: "Subject has no parseable repository" };
   if (!sameRepository(repository, config.github.repository)) return { ok: false as const, reason: `Subject belongs to ${repository}, not ${config.github.repository}` };
   const previousRun = latestRunOfTask(task.id, database);
   return { ok: true as const, previousRun, trigger };
@@ -46,7 +45,7 @@ function checkClaimable({ task, subject }: { task: Task; subject: Subject }, dat
 
 export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | "action" | "priority" | "reason"> & { input: TriggerInput }) {
   return withOperationSync("task.enqueue", { subjectId: task.subjectId, action: task.action }, (operation) => {
-    if (!isKnownAction(task.action)) throw new Error(`Unknown action: ${task.action}`);
+    manifestOf(task.action);
     const queued = db.transaction((transaction) => {
       const previous = queuedTaskOf(transaction, task.subjectId, task.action);
       const input = isManual(task.input) && previous ? { ...previous.input, manual: true }
@@ -89,8 +88,8 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | 
 type ManualEnqueueResult = { target: string; number?: number; itemId?: string; taskId?: string; error?: string };
 
 export function enqueueManualTasks(action: string, targets: string[], priority?: number): ManualEnqueueResult[] {
-  const manifest = getManifest(action);
-  if (!manifest) throw new Error(`Unknown action: ${action}; expected one of ${manifests().map(({ name }) => name).join(", ")}`);
+  const manifest = manifests.find(({ name }) => name === action);
+  if (!manifest) throw new Error(`Unknown action: ${action}; expected one of ${manifests.map(({ name }) => name).join(", ")}`);
   if (manifest.trigger.manual === false) throw new Error(`${action} is queued automatically by sync and cannot be enqueued by hand`);
   const needs = manifest.trigger.item;
   if (!needs) throw new Error(`${action} is not triggered by an issue or PR`);
@@ -139,7 +138,7 @@ export function claimTask() {
     const publicationResume = !validationOnly && hasPublicationSnapshot(retry) ? retry : undefined;
     const resume = validationOnly ? (hasValidationCheckpoint(retry) ? retry : undefined) : publicationResume;
     const prior = retry?.error?.name === "InterruptedError" && !resume ? undefined : retry;
-    const pinned = getManifest(next.task.action)?.mode === "review" && !resume ? undefined : prior;
+    const pinned = manifestOf(next.task.action).mode === "review" && !resume ? undefined : prior;
     const settings = pinned ?? actionSettings;
     const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? configuredReviewers(next.task.action, isBaseOnly(claimable.trigger));
     const { provider, model, thinkingLevel } = !resume && reviewers.length === 1 ? reviewers[0] : settings;
@@ -191,7 +190,7 @@ export function retryTask(taskId: string, mode: Task["retryMode"] = "repair") {
       if (queued) throw new Error(`A queued task already exists for this subject/action: ${queued.id}`);
       if (mode === "validation") {
         const previous = latestRunOfTask(taskId, transaction);
-        if (getManifest(failed.action)?.mode !== "change" || !hasValidationCheckpoint(previous)
+        if (modeOf(failed.action) !== "change" || !hasValidationCheckpoint(previous)
           || !isDeepStrictEqual(previous.input, failed.input)) {
           throw new Error("Validation-only retry requires an unchanged task input and a complete agent checkpoint from a failed validation; use normal retry to repair");
         }
@@ -230,7 +229,7 @@ export function finishRun(runId: string, outcome: { status: "completed" } | { st
 export function retryTransientFailure(runId: string, error: unknown) {
   const run = getRun(runId);
   const task = run && db.select().from(tasks).where(eq(tasks.id, run.taskId)).get();
-  const retry = task && getManifest(task.action)?.mode === "review" ? config.actions[task.action]?.retry : undefined;
+  const retry = task && modeOf(task.action) === "review" ? config.actions[task.action]?.retry : undefined;
   if (!run || !retry || run.stage !== "agent" || errorCode(error) !== transientInferenceCode) return false;
   interruptRun(runId, error, retry);
   return true;

@@ -4,6 +4,7 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { config } from "./config.ts";
+import { errorExitCode } from "./errors.ts";
 import { childEnvironment } from "./secrets.ts";
 import { serialized } from "./single-flight.ts";
 import { inWorkspace, sandboxCommand } from "./sandbox.ts";
@@ -125,7 +126,7 @@ export async function hasPendingMerge(repositoryPath: string) {
 
 export const mergeHeadOf = async (repositoryPath: string) => await hasPendingMerge(repositoryPath) ? git(repositoryPath, ["rev-parse", "MERGE_HEAD"]) : null;
 
-const exitsOne = (command: Promise<unknown>) => command.then(() => false, (error: unknown) => { if (error instanceof Error && "code" in error && error.code === 1) return true; throw error; });
+const exitsOne = (command: Promise<unknown>) => command.then(() => false, (error: unknown) => { if (errorExitCode(error) === 1) return true; throw error; });
 
 const hasConflicts = (repositoryPath: string, base: string, head: string) => exitsOne(git(repositoryPath, ["merge-tree", "--write-tree", base, head]));
 

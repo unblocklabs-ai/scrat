@@ -2,10 +2,7 @@ name: review_base_change
 enabled: false
 trigger: { source: github_commits, kind: commit, branch: main }
 mode: review
-agent: single
-reviewers: []
 context: change
-tools: [read, grep, find, ls, git, read_base]
 files: [discussion, history]
 start: [slack_post]
 publish: [slack_reply]

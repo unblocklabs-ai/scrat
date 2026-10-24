@@ -41,12 +41,7 @@ export async function publishRun(github: GitHubRepository, task: Task, run: Run,
   return applyEffects(manifest.publish, effectContext);
 }
 
-export function publishCommit(subject: Subject, task: Task, run: Run) {
-  const saved = getRun(run.id)!;
-  return applyEffects(manifestOf(task.action).publish, { ...receiptContext(saved, {}), subject, task, run });
-}
-
-export function publishWindow(subject: Subject, task: Task, run: Run, references: EventReferences) {
+export function publishSubject(subject: Subject, task: Task, run: Run, references: EventReferences) {
   const saved = getRun(run.id)!;
   return applyEffects(manifestOf(task.action).publish, { ...receiptContext(saved, references), github: new GitHubRepository(subject.repository), subject, task, run: saved });
 }

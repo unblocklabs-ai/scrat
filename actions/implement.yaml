@@ -1,9 +1,6 @@
 name: implement
 trigger: { source: github_items, kind: label, item: issue }
 mode: change
-agent: single
-context: all
-tools: [read, grep, find, ls, bash, edit, write]
 files: [discussion, triage]
 acceptance: nonempty_diff
 publish: [push, pull_request]

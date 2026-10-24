@@ -1,11 +1,11 @@
 import { config } from "./config.ts";
 import { logger } from "./logging.ts";
 import { runNextTask } from "./runner.ts";
-import { prepareService } from "./startup.ts";
+import { validateStaticConfig } from "./startup.ts";
 import { runCommand } from "./cli.ts";
 
 await runCommand("Work failed", async () => {
-  await prepareService();
+  await validateStaticConfig();
   const workers = Array.from({ length: config.harness.maxConcurrency }, async () => {
     while (true) {
       const run = await runNextTask();

@@ -193,10 +193,10 @@ export class GitHubRepository {
     return { item, comments };
   }
 
-  async fetchItemContexts(items: readonly { kind: "issue" | "pr"; number: number; item?: GithubItem }[], options: { comments?: boolean; defer?: boolean } = {}) {
+  async fetchItemContexts(items: readonly { kind: "issue" | "pr"; number: number; item?: GithubItem }[], options: { defer?: boolean } = {}) {
     const contexts = new Array<GithubContext | undefined>(items.length);
     await mapConcurrent(items, async ({ kind, number, item }, index) => {
-      contexts[index] = await this.fetchItemContext(kind, number, { comments: options.comments, item });
+      contexts[index] = await this.fetchItemContext(kind, number, { item });
     }, () => options.defer === true && rateLimitLow());
     return contexts;
   }
@@ -279,13 +279,6 @@ export class GitHubRepository {
         event: { type: "github.comment_updated", data: { repository: this.repository, commentId: data.id, url: data.html_url } },
         details: { commentId: data.id },
       }),
-    });
-  }
-
-  async deleteComment(commentId: number, references: EventReferences = {}): Promise<void> {
-    await this.write("github.delete_comment", { commentId }, references, "write", {
-      request: ({ github, owner, repo }) => github.rest.issues.deleteComment({ owner, repo, comment_id: commentId }),
-      journal: () => ({ details: { commentId } }),
     });
   }
 

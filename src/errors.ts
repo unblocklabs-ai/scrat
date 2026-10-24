@@ -32,6 +32,10 @@ export function errorCode(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }
 
+export function errorExitCode(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && typeof error.code === "number" ? error.code : undefined;
+}
+
 export const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export const ifMissing = <T, F>(promise: Promise<T>, fallback: F) => promise.catch((error: unknown) => { if (errorCode(error) !== "ENOENT") throw error; return fallback; });
@@ -54,9 +58,9 @@ export function describeError(error: unknown, seen = new Set<unknown>()): ErrorD
     name: redactSecrets(error.name),
     message: redactSecrets(message),
     stack: error.stack ? redactSecrets(error.stack.replace(error.message, message)) : undefined,
-    status: "status" in error && typeof error.status === "number" ? error.status : undefined,
-    code: "code" in error && typeof error.code === "string" ? error.code : undefined,
-    exitCode: "code" in error && typeof error.code === "number" ? error.code : undefined,
+    status: errorStatus(error),
+    code: errorCode(error),
+    exitCode: errorExitCode(error),
     evidence: "evidence" in error && typeof error.evidence === "string" ? error.evidence : undefined,
     stdout: "stdout" in error && typeof error.stdout === "string" ? redactSecrets(error.stdout) : undefined,
     stderr: "stderr" in error && typeof error.stderr === "string" ? redactSecrets(error.stderr) : undefined,

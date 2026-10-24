@@ -263,12 +263,13 @@ A deployment adds or changes actions without a code release. Set `actions.direct
 ```
 
 - Every `*.yaml` directly in that directory is a manifest, loaded after the shipped `actions/*.yaml`. The file name must equal `name` (lowercase letters, digits and underscores; `directory` is reserved). A file whose `name` matches a shipped action replaces that whole manifest, which is how a deployment changes its `tools`, `files`, `context`, `publish` or `trigger`; any other name adds an action.
-- Overrides in `scrat.local.json` apply by name after both sets are merged: `enabled`, `priority`, `skill`, `provider`, `model`, `thinkingLevel`, `agent`, `reviewers`, `branch`, `channel`, `maxRangeCommits`, `startMessage`, `maxSelfRepairs`, `exhaustedLabel`, `failedLabel`, `retry`. Everything else (`trigger`, `mode`, `context`, `tools`, `files`, `acceptance`, `start`, `publish`) is structural and changes only by shipping a manifest.
+- Overrides in `scrat.local.json` apply by name after both sets are merged: `enabled`, `priority`, `skill`, `provider`, `model`, `thinkingLevel`, `reviewers`, `branch`, `channel`, `maxRangeCommits`, `startMessage`, `maxSelfRepairs`, `exhaustedLabel`, `failedLabel`, `retry`. Everything else (`trigger`, `mode`, `agent`, `context`, `tools`, `files`, `acceptance`, `start`, `publish`) is structural and changes only by shipping a manifest.
 - A relative `skill` resolves against the directory the manifest came from, so a deployment keeps `<directory>/skills/<name>/SKILL.md` beside its YAML. Absolute paths work too.
 - Routing picks the action whose `trigger` matches what sync observed: `source` and `kind`, then `item` (`issue` or `pr`), `author: bot` (the item is authored by `github.botLogin`), `grades` (for `low_grade`) and `branch` (the commit branch polled). `manual: false` stops `enqueue` by hand. An enabled match is preferred; a disabled one still queues its task and is refused when claimed.
 - Two enabled manifests may not share a trigger: startup fails naming both files. To give a trigger to a new action, disable the shipped one that owns it (`"review_issue": { "enabled": false }` above). The selection label still decides between the `label` and `item_changed` issue triggers.
 - At most one enabled `review` manifest per `trigger.item` may publish `comment`, because they would share that item's one assessment comment; startup fails naming them.
 - `tools` is the list of agent tools (`read`, `grep`, `find`, `ls`, `git`, `read_base`, `bash`, `edit`, `write`) and the scoped tools `http`, `browser` and `github_search` (see Scoped tools below); `review` manifests get no write tools and `change` manifests no `git` or `read_base`. `files` lists the optional context files written for the run (`discussion`, `review`, `previous_assessment`, `previous_repair`, `history`, `validation`, `triage`, `issue`); `history` and `validation` are opt-in. `validation` lists the checks Scrat ran on the reviewed head (name, status, duration), when one of its own change runs published that head. Published PR bodies and address comments end with a harness-written `Validated on <sha>: <checks> passed.` line. `triage` (issue triggers) is the issue's latest completed review by an action that publishes `labels`, written only when that review marked the issue ready. `issue` (PR triggers) is the title and body of the issue whose implementation run opened the PR; a PR Scrat did not open gets none. `publish` lists effects (`push`, `pull_request`, `comment`, `labels`, `pr_assessment`, `issue`, `slack_reply`). In a `review` manifest `comment` keeps one assessment comment per item, marked `<!-- scrat-review -->` and edited in place, and `previous_assessment` then holds the action's last completed assessment; in a `change` manifest each task posts its own comment. An unknown name or key stops startup with the file and path.
+- Omitted, `agent` is `single` (`panel` needs exactly two `reviewers`), `context` is `all`, and `tools` is `read`, `grep`, `find`, `ls`, `bash`, `edit`, `write` for a `change` manifest or `read`, `grep`, `find`, `ls`, `git` for a `review` one, plus `read_base` for a panel or `context: change`.
 - Manifests are read once at startup: restart the service to apply a change. The supervised repository never contributes manifests.
 
 A `schedule` trigger runs a `review` action on a cron expression instead of on a GitHub event. `error_sweep.yaml` in the actions directory sweeps logs every six hours and opens an issue for each problem it reports:
@@ -277,8 +278,6 @@ A `schedule` trigger runs a `review` action on a cron expression instead of on a
 name: error_sweep
 trigger: { source: schedule, kind: tick, cron: "0 */6 * * *", window: 6h }
 mode: review
-agent: single
-context: all
 tools: [read, grep, find, ls, http]
 files: [history]
 publish: [issue]
@@ -375,8 +374,7 @@ The agent receives the commit messages, the changed paths and the diff for the r
 | Setting under `actions.review_base_change` | Purpose |
 | --- | --- |
 | `enabled` | Ships `false`; set `true` in `scrat.local.json` to turn the action on. |
-| `agent` | `single` runs one review session. `panel` runs the two `reviewers` as in PR review, and `provider` and `model` consolidate them into one reply. |
-| `reviewers` | Required with exactly two entries when `agent` is `panel`; each takes `provider`, `model` and `thinkingLevel`. |
+| `reviewers` | Required with exactly two entries when the manifest sets `agent: panel` (the shipped manifest runs one session, and `provider` and `model` consolidate a panel into one reply); each takes `provider`, `model` and `thinkingLevel`. |
 | `branch` | Branch to watch, the manifest's `trigger.branch` by default; must not be empty. |
 | `channel` | Slack channel ID to post in. Required when enabled, and the bot must be a member of it. |
 | `maxRangeCommits` | Range granularity: a range with more first-parent commits is recorded as `truncated` and still reviewed whole. Commit granularity: most commits queued per poll. |

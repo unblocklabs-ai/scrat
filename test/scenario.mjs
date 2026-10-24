@@ -282,6 +282,7 @@ const staleBranch = async (variant) => {
     const repaired = await success(); assert.equal(repaired.taskId, fallback.id);
     const request = f.requests.findLast((r) => r.context.action === "resolve_conflicts" && r.context.item.number === 202);
     assert.match(readFileSync(request.context.files.validationFailure, "utf8"), /bad\.txt must not exist/);
+    assert.equal(request.context.diffBaseSha, mainHead(), "the agent diffs against the main it was merged with");
     assert.equal(request.context.workspace.mergeInProgress, false);
     assert.equal(parents(f.row(s.workspaces, repaired.workspaceId).path, request.context.workspace.headSha).length, 2, "the agent starts from the merge commit");
     const head2 = remoteGit("rev-parse", f.prs[1].head.ref);
@@ -301,6 +302,8 @@ const staleBranch = async (variant) => {
     needs("needed3.txt"); changeMain("needed3.txt", "ok\n");
     tasks.enqueueTask({ subjectId: prItem(204).id, action: "address_pr_feedback", reason: "Exercise self-heal", input: { source: "github_items", kind: "manual", manual: true } });
     f.reset(204, "normal"); const healed = await success();
+    const healedRequest = f.requests.findLast((r) => r.context.action === "address_pr_feedback" && r.context.item.number === 204);
+    assert.equal(healedRequest.context.diffBaseSha, mainHead(), "the agent diffs against the main it was merged with");
     const head4 = remoteGit("rev-parse", f.prs[3].head.ref);
     remoteGit("merge-base", "--is-ancestor", mainHead(), head4);
     assert.equal(healed.publication.publishedCommitSha, head4); assert.equal(remoteGit("show", head4 + ":src/app.ts"), "export const value = 214;");

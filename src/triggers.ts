@@ -41,16 +41,9 @@ export const triggerKinds = Object.keys(members).filter((kind) => kind !== "manu
 export const triggerSource = (kind: ManifestKind) => members[kind].source;
 
 function classify(input: Record<string, unknown>): Kind {
-  if (input.kind !== undefined) {
-    if (typeof input.kind !== "string" || !Object.hasOwn(members, input.kind)) throw new Error(`Unknown trigger kind: ${JSON.stringify(input.kind)}`);
-    return input.kind as Kind;
-  }
-  if (input.commentRevisions !== undefined) return "pr_feedback";
-  if (input.assessmentRunId !== undefined) return "low_grade";
-  if (input.mainSha !== undefined && input.headSha !== undefined) return "pr_conflicts";
-  if (input.revision !== undefined) return "item_changed";
-  if (input.mainSha !== undefined) return "label";
-  return "manual";
+  if (typeof input.kind !== "string") throw new Error("Trigger input is missing its kind");
+  if (!Object.hasOwn(members, input.kind)) throw new Error(`Unknown trigger kind: ${JSON.stringify(input.kind)}`);
+  return input.kind as Kind;
 }
 
 export function parseTriggerInput(input: unknown): TriggerInput {
@@ -58,8 +51,8 @@ export function parseTriggerInput(input: unknown): TriggerInput {
   const record = input as Record<string, unknown>;
   const kind = classify(record);
   const { source, schema } = members[kind];
-  if (record.source !== undefined && record.source !== source) throw new Error(`Unknown trigger source for ${kind}: ${JSON.stringify(record.source)}`);
-  const normalized = { ...record, source, kind };
+  if (record.source !== source) throw new Error(`Unknown trigger source for ${kind}: ${JSON.stringify(record.source)}`);
+  const normalized = { ...record, kind };
   if (!Value.Check(schema, normalized)) {
     const [error] = Value.Errors(schema, normalized);
     throw new Error(`Invalid ${source}/${kind} trigger input${error ? ` at ${error.instancePath || "/"}: ${error.message}` : ""}`);

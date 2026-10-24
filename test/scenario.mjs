@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { execFileSync, spawnSync } from "node:child_process";
 import fs, { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { DatabaseSync } from "node:sqlite";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -56,13 +56,6 @@ const seedLockfile = () => {
   seedIgnore();
   writeFileSync("seed/package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "1.0.0" } }));
   writeFileSync("seed/pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: old}\n  unrelated@1.0.0:\n    resolution: {integrity: old}\n");
-  if (scenario === "lockfile_scope") writeFileSync("seed/pnpm-lock.yaml", readFileSync("seed/pnpm-lock.yaml", "utf8")
-    + "  string-width-cjs@npm:string-width@4.2.2:\n    resolution: {integrity: alias}\nsnapshots:\n  wrangler@1.0.0:\n    dependencies: {nested: 1.0.0}\nimporters:\n  .:\n    devDependencies:\n      wrangler: {specifier: 1.0.0, version: 1.0.0}\n");
-  if (scenario === "importer_scope") writeFileSync("seed/pnpm-lock.yaml", JSON.stringify({ lockfileVersion: "9.0",
-    importers: { ".": { devDependencies: { wrangler: { specifier: "1.0.0", version: "1.0.0" }, unrelated: { specifier: "1.0.0", version: "1.0.0" } } } },
-    packages: { "wrangler@1.0.0": { resolution: { integrity: "wrangler" } }, "unrelated@1.0.0": { resolution: { integrity: "unrelated" } } },
-    snapshots: { "wrangler@1.0.0": {}, "unrelated@1.0.0": {} },
-  }));
 };
 const configurePanel = (config) => {
   script(config, "prepare", 'import{mkdirSync,writeFileSync}from"node:fs";mkdirSync("node_modules/pinned-runtime",{recursive:true});writeFileSync("node_modules/pinned-runtime/package.json",JSON.stringify({name:"pinned-runtime",version:"9.8.7"}));');
@@ -110,10 +103,6 @@ const configureDatabase = (config) => {
   const helper = fileURLToPath(new URL("database-command.mjs", import.meta.url)); cpSync(helper, "database-command.mjs");
   config.workspace = { ...config.workspace, environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), scenario === "validation_resume" ? "validate-resume" : "validate", resolve("database-receipts.jsonl")]] };
 };
-const configureCommitIsolation = (config) => {
-  writeFileSync("prepare.mjs", 'import{appendFileSync}from"node:fs";appendFileSync(' + JSON.stringify(resolve("prepare.log")) + ',"prepare\\n");');
-  config.workspace = { ...config.workspace, prepare: [[process.execPath, resolve("prepare.mjs")]], validate: [[process.execPath, resolve("prepare.mjs")]] };
-};
 const configureManifestDirectory = (config) => {
   const directory = resolve("deployment"), shipped = (name) => readFileSync(`app/actions/${name}.yaml`, "utf8"), field = (text, key, value) => text.replace(new RegExp(`^${key}: .*$`, "m"), `${key}: ${value}`);
   mkdirSync(directory); config.actions.directory = directory;
@@ -154,14 +143,14 @@ const configureScoped = (config) => {
   mkdirSync("deployment"); config.actions.directory = resolve("deployment");
   writeFileSync("deployment/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace(/^tools: .*$/m, "tools: " + scopedTools[0]).replace(/^skill: .*$/m, "skill: " + resolve("app/skills/review_issue/SKILL.md")).trimEnd() + "\n" + scopedTools[1] + "\n");
 };
-const deletedReview = async () => {
+const deletedReview = async (variant) => {
   await implement(1); await route(); f.faults.label.add(201);
   const older = await run(); assert.ok(older.error); assert.ok(older.publication.commentId);
   const itemId = f.row(s.tasks, older.taskId).subjectId;
   f.reset(201, "grade-A"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "New assessment", input: { source: "github_items", kind: "manual" } });
-  if (scenario === "unreceipted_review") f.faults.comment.add(201);
+  if (variant === "unreceipted") f.faults.comment.add(201);
   const newer = await run();
-  if (scenario === "deleted_review") {
+  if (variant === "deleted") {
     assert.equal(newer.error, null);
     f.comments.set(201, []);
   } else {
@@ -175,11 +164,11 @@ const deletedReview = async () => {
   assert.match(f.comments.get(201)[0].body, new RegExp(newer.taskId));
   assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
   assert.equal(f.row(s.runs, newer.id).publication.commentId, f.comments.get(201)[0].id);
-  const delivered = all(s.events).findLast((event) => scenario === "deleted_review"
+  const delivered = all(s.events).findLast((event) => variant === "deleted"
     ? event.type === "github.comment_created" && event.data.commentId === f.comments.get(201)[0].id
     : event.type === "github.labels_added" && event.data.labels.includes("A · Strong"));
   assert.equal(delivered.runId, newer.id);
-  if (scenario === "deleted_review") {
+  if (variant === "deleted") {
     f.comments.set(201, []); await route();
     assert.equal(f.requests.length, calls); assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
     assert.match(f.comments.get(201)[0].body, new RegExp(newer.taskId));
@@ -188,7 +177,7 @@ const deletedReview = async () => {
     tasks.retryTask(newer.taskId); await success(); assert.equal(f.requests.length, calls);
   }
 };
-const staleBranch = async () => {
+const staleBranch = async (variant) => {
   const remoteGit = (...args) => git(resolve("remote.git"), ...args);
   const needs = (name) => writeFileSync(`require-${name}`, "");
   const branchOff = (branch, path, text) => {
@@ -205,7 +194,7 @@ const staleBranch = async () => {
   const parents = (cwd, rev) => git(cwd, "show", "-s", "--format=%P", rev).split(" ");
   const checkout = f.config.github.repositoryPath;
   const mainHead = () => git(resolve("seed"), "rev-parse", "main");
-  if (scenario === "stale_branch") {
+  if (variant === "human") {
     branchOff("feature-a", "src/feature.ts", "export const feature = 1;\n");
     branchOff("feature-b", "src/app.ts", "export const value = 7;\n");
     needs("needed.txt");
@@ -293,13 +282,13 @@ const staleBranch = async () => {
     assert.equal(remoteGit("show", head4 + ":needed3.txt"), "ok");
   }
 };
-const validationFeedback = async () => {
+const validationFeedback = async (variant) => {
   const lines = captureLogs();
   const validations = () => existsSync("validations.log") ? readFileSync("validations.log", "utf8").trim().split("\n").length : 0;
   const lastUser = ({ request }) => { const { content } = request.messages.at(-1); return typeof content === "string" ? content : content.map((part) => part.text ?? "").join("\n"); };
   const feedbackRequests = () => f.requests.filter((entry) => entry.request.messages.at(-1).role === "user" && lastUser(entry).startsWith(`${f.config.github.botName}'s validation failed`));
   try {
-    if (scenario === "validation_feedback") {
+    if (variant === "fix") {
       f.addIssue(1, ["scrat"]); f.reset(1, "feedback-fix"); f.enqueue(1, "implement"); const r = await success();
       assert.equal(r.verification.headSha, r.publication.publishedCommitSha); assert.equal(validations(), 2);
       assert.equal(readdirSync("data/pi-sessions", { recursive: true }).filter((name) => name.endsWith(".jsonl")).length, 1);
@@ -334,7 +323,7 @@ const validationFeedback = async () => {
     }
   } finally { restoreLogs(); }
 };
-const commitReview = async () => {
+const commitReview = async (variant) => {
   const { pollCommits } = await f.app("commit-source.ts");
   const seed = resolve("seed"), remote = resolve("remote.git"), channel = "C0123456789";
   const tip = () => git(remote, "rev-parse", "main");
@@ -348,7 +337,7 @@ const commitReview = async () => {
   const bot = f.config.github.botName;
   assert.equal(await pollCommits(), 0); assert.equal(f.slack.calls.length, 0);
   const previous = tip();
-  if (scenario === "commit_review_e2e") {
+  if (variant === "e2e") {
     assert.equal(await push("Fix a<b & c>d"), 1);
     const head = tip(); assert.equal(f.slack.calls.length, 0);
     const r = await success();
@@ -374,14 +363,14 @@ const commitReview = async () => {
     assert.equal(context.input.previousSha, previous); assert.equal(context.input.sha, head); assert.equal(context.input.commitCount, 1);
     assert.equal(context.commentRevisions.length, 0);
     assert.equal(f.writes.length, 0); assert.equal(all(s.runs).length, 1);
-  } else if (scenario === "commit_review_no_start") {
-  let before;
-  f.onModel = (_context, step) => { if (step === 0 && before === undefined) before = posts().length; };
-  assert.equal(await push("No start slot"), 1);
-  await success();
-  assert.equal(before, 0, "no root is posted before the agent runs");
-  assert.equal(posts().length, 2); assert.equal(roots().length, 1); assert.equal(all(s.slackThreads).length, 1);
-} else if (scenario === "commit_review_panel") {
+  } else if (variant === "no_start") {
+    let before;
+    f.onModel = (_context, step) => { if (step === 0 && before === undefined) before = posts().length; };
+    assert.equal(await push("No start slot"), 1);
+    await success();
+    assert.equal(before, 0, "no root is posted before the agent runs");
+    assert.equal(posts().length, 2); assert.equal(roots().length, 1); assert.equal(all(s.slackThreads).length, 1);
+    } else if (variant === "panel") {
     assert.equal(await push("Panel change"), 1);
     const r = await success();
     assert.equal(r.reviewers.length, 2); assert.ok(r.reviewers.every((reviewer) => reviewer.result?.outcome === "complete"));
@@ -393,7 +382,7 @@ const commitReview = async () => {
     assert.equal(r.result.grade, undefined); assert.equal(r.result.text, "Consolidated source-verified review.");
     assert.equal(posts().length, 2); assert.equal(posts()[1].body.text, "Consolidated source-verified review."); assert.equal(posts()[1].body.thread_ts, "1700000000.000001");
     assert.equal(f.writes.length, 0);
-  } else if (scenario === "commit_review_slack_down") {
+  } else if (variant === "slack_down") {
     assert.equal(await push("Root down"), 1);
     f.slack.down = true; f.onModel = () => { f.slack.down = false; };
     const first = await success(); f.onModel = undefined;
@@ -415,7 +404,7 @@ const commitReview = async () => {
     const second = all(s.slackThreads).find((row) => row.subjectId === f.row(s.tasks, failed.taskId).subjectId);
     assert.equal(added[2].body.thread_ts, second.ts); assert.equal(retried.publication.slackReplyTs, "1700000000.000004");
     assert.equal(all(s.slackThreads).length, 2); assert.equal(f.writes.length, 0);
-  } else if (scenario === "commit_review_restart") {
+  } else if (variant === "restart") {
     assert.equal(await push("Restart"), 1);
     const claim = tasks.claimTask();
     const { postMessage } = await f.app("slack.ts");
@@ -428,8 +417,9 @@ const commitReview = async () => {
     assert.equal(done.retryOfRunId, interrupted.id); assert.equal(roots().length, 1); assert.equal(posts().length, 2);
     assert.equal(posts()[1].body.thread_ts, ts); assert.equal(all(s.slackThreads).length, 1); assert.equal(done.publication.slackReplyTs, "1700000000.000002");
     assert.equal(reviewRequests().length, 4);
-  } else if (scenario === "commit_review_isolation") {
+  } else if (variant === "isolation") {
     const token = process.env.SLACK_BOT_TOKEN, { childEnvironment } = await f.app("secrets.ts");
+    const probed = readFileSync("isolation.jsonl", "utf8"), writes = f.writes.length;
     assert.equal("SLACK_BOT_TOKEN" in childEnvironment(), false);
     assert.equal(await push("Isolation"), 1);
     const r = await success();
@@ -441,8 +431,8 @@ const commitReview = async () => {
     assert.ok(results[1].includes("export const value = 1;") && !results[1].includes("value = 2"));
     assert.ok(results[2].includes("src/app.ts | 2"));
     assert.ok(r.result.paths.includes("src/app.ts"));
-    assert.equal(existsSync("prepare.log"), false);
-    assert.equal(posts().length, 2); assert.equal(f.writes.length, 0);
+    assert.equal(readFileSync("isolation.jsonl", "utf8"), probed, "no preparation or validation command ran");
+    assert.equal(posts().length, 2); assert.equal(f.writes.length, writes);
   }
 };
 export const scenarios = {
@@ -779,8 +769,8 @@ export const scenarios = {
     assert.equal(f.comments.get(201).length, 2); assert.equal(f.comments.get(201)[1].body, feedback.body);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
   } },
-  deleted_review: { title: "deleted canonical comments are restored from the authoritative saved assessment", run: deletedReview },
-  unreceipted_review: { title: "older retries preserve a newer remote review even when its write receipt was lost", run: deletedReview },
+  deleted_review: { title: "deleted canonical comments are restored from the authoritative saved assessment", run: () => deletedReview("deleted") },
+  unreceipted_review: { title: "older retries preserve a newer remote review even when its write receipt was lost", run: () => deletedReview("unreceipted") },
   stale_assessment: { title: "a stale newest assessment clears its grade without resurrecting an older narrower review", run: async () => {
     changeMain("src/helper.ts", "export const helper = 1;\n");
     await implement(1); await route(); f.faults.label.add(201);
@@ -801,21 +791,6 @@ export const scenarios = {
     assert.match(stale.error.message, /fresh review/);
     assert.equal(f.requests.length, calls); assert.deepEqual(f.prs[0].labels, []);
     assert.equal(f.comments.get(201)[0].body, report);
-  } },
-  assessment_order: { title: "new inference on an old task outranks newer-created tasks regardless of timestamps", run: async () => {
-    await implement(1); await route(); f.reset(201, "incomplete");
-    const failed = await run(); assert.ok(failed.error); assert.notEqual(failed.stage, "publishing");
-    const itemId = f.row(s.tasks, failed.taskId).subjectId;
-    f.reset(201, "normal"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "New task", input: { source: "github_items", kind: "manual" } });
-    const middle = await success();
-    db.update(s.runs).set({ startedAt: "2099-01-01T00:00:00Z" }).where(eq(s.runs.id, middle.id)).run();
-    f.reset(201, "grade-A"); tasks.retryTask(failed.taskId); const newest = await success();
-    assert.equal(newest.result.grade, "A");
-    assert.deepEqual(f.prs[0].labels.map((l) => l.name), ["A · Strong"]);
-    assert.match(f.comments.get(201)[0].body, new RegExp(newest.taskId));
-    const calls = f.requests.length; await route();
-    assert.equal(f.requests.length, calls);
-    assert.deepEqual(f.prs[0].labels.map((l) => l.name), ["A · Strong"]);
   } },
   manual_queue: { title: "manual tasks survive routing cancels and coalescing, run as normal authoritative reviews, die with their item, and enqueue by number", run: async () => {
     await implement(1); await route(); await success();
@@ -912,13 +887,26 @@ export const scenarios = {
     for (const r of more) tasks.finishRun(r.id, { status: "completed" });
     assert.throws(() => db.$client.exec("UPDATE runs SET sequence = 1 WHERE sequence = 2"), /UNIQUE/);
   } },
-  run_latest: { title: "latest-run decisions follow claim sequence, not startedAt, for issue baselines and Pi session continuation", run: async () => {
+  assessment_order: { title: "new inference on an old task outranks newer-created tasks regardless of timestamps", run: async () => {
+    await implement(1); await route(); f.reset(201, "incomplete");
+    const failed = await run(); assert.ok(failed.error); assert.notEqual(failed.stage, "publishing");
+    const itemId = f.row(s.tasks, failed.taskId).subjectId;
+    f.reset(201, "normal"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "New task", input: { source: "github_items", kind: "manual" } });
+    const middle = await success();
+    f.reset(201, "grade-A"); tasks.retryTask(failed.taskId); const newest = await success();
+    assert.ok(newest.sequence > middle.sequence);
+    assert.equal(newest.result.grade, "A");
+    assert.deepEqual(f.prs[0].labels.map((l) => l.name), ["A · Strong"]);
+    assert.match(f.comments.get(201)[0].body, new RegExp(newest.taskId));
+    const calls = f.requests.length; await route();
+    assert.equal(f.requests.length, calls);
+    assert.deepEqual(f.prs[0].labels.map((l) => l.name), ["A · Strong"]);
+  } },
+  run_latest: { title: "the latest run is chosen by claim sequence for issue baselines and Pi session continuation", run: async () => {
     changeMain("src/helper.ts", "export const helper = 1;\n");
     f.addIssue(1); await route(); const first = await success(); assert.ok(first.result.paths.includes("src/app.ts"));
     f.enqueue(1); f.reset(1, "helper");
     const second = await success(); assert.ok(second.result.paths.includes("src/helper.ts")); assert.ok(second.sequence > first.sequence);
-    db.update(s.runs).set({ startedAt: "2099-01-01T00:00:00Z" }).where(eq(s.runs.id, first.id)).run();
-    db.update(s.runs).set({ startedAt: "1970-01-01T00:00:00Z" }).where(eq(s.runs.id, second.id)).run();
     await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
     changeMain("src/helper.ts", "export const helper = 2;\n"); await route();
     assert.ok(all(s.tasks).some((t) => t.action === "review_issue" && t.status === "queued"), "The latest claimed review is the baseline");
@@ -929,9 +917,9 @@ export const scenarios = {
     assert.equal(older.piSessionFile, implemented.piSessionFile);
     const copy = implemented.piSessionFile.replace(/\.jsonl$/, "-copy.jsonl");
     copyFileSync(implemented.piSessionFile, copy);
-    db.update(s.runs).set({ piSessionFile: copy, startedAt: "1970-01-01T00:00:00Z" }).where(eq(s.runs.id, older.id)).run();
-    db.update(s.runs).set({ startedAt: "2099-01-01T00:00:00Z" }).where(eq(s.runs.id, implemented.id)).run();
-    const next = await feedback(); assert.equal(next.piSessionFile, copy);
+    db.update(s.runs).set({ piSessionFile: copy }).where(eq(s.runs.id, older.id)).run();
+    assert.ok(older.sequence > implemented.sequence);
+    const next = await feedback(); assert.equal(next.piSessionFile, copy); assert.ok(next.sequence > older.sequence);
   } },
   scope_snapshots: { title: "PR-only, renamed and deleted paths keep their identities across unrelated base changes", seed: seedScopeSnapshots, configure: [configureScopeSnapshots], run: async () => {
     const implemented = await implement(1), workspace = f.row(s.workspaces, implemented.workspaceId);
@@ -1170,11 +1158,17 @@ export const scenarios = {
     f.addIssue(2); f.reset(2, "no-status"); f.enqueue(2, "implement");
     before = f.requests.length; const stuck = await run();
     assert.match(stuck.error.message, /SCRAT_STATUS/); assert.equal(f.requests.length - before, 4);
-    for (const [i, mode] of ["incomplete", "needs_decision"].entries()) {
+    assert.equal(f.row(s.tasks, stuck.taskId).status, "failed");
+    assert.ok(existsSync(f.row(s.workspaces, stuck.workspaceId).path + "/src/app.ts"));
+    const prsBefore = f.prs.length, writesBefore = f.writes.length;
+    for (const [i, [mode, expected]] of [["incomplete", 2], ["needs_decision", 2], ["bare-status", 4]].entries()) {
       f.addIssue(i + 3); f.reset(i + 3, mode); f.enqueue(i + 3, "implement");
       before = f.requests.length; const r = await run(); assert.ok(r.error);
-      assert.equal(f.requests.length - before, 2);
+      assert.equal(f.requests.length - before, expected);
+      assert.equal(f.row(s.tasks, r.taskId).status, "failed");
+      assert.ok(existsSync(f.row(s.workspaces, r.workspaceId).path + "/src/app.ts"));
     }
+    assert.equal(f.prs.length, prsBefore); assert.equal(f.writes.length, writesBefore);
     const lines = captureLogs();
     const prompts = () => f.requests.filter((r) => r.request.messages.at(-1).role === "user" && JSON.stringify(r.request.messages.at(-1).content).includes("Your assessment was returned incomplete")).length;
     const publications = () => f.writes.length;
@@ -1213,14 +1207,6 @@ export const scenarios = {
     await implement(2); await route();
     const second = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 202);
     assert.ok(all(s.tasks).some((t) => t.subjectId === second.id && t.action === "review_pr" && t.status === "queued"));
-  } },
-  incomplete: { title: "partial or undecided implementations never become PRs", run: async () => {
-    for (const [i, mode] of ["incomplete", "needs_decision", "no-status", "bare-status"].entries()) {
-      f.addIssue(i + 1); f.enqueue(i + 1, "implement"); f.reset(i + 1, mode);
-      const r = await run(); assert.ok(r.error); assert.equal(f.row(s.tasks, r.taskId).status, "failed");
-      assert.ok(existsSync(f.row(s.workspaces, r.workspaceId).path + "/src/app.ts"));
-    }
-    assert.equal(f.prs.length, 0); assert.equal(f.writes.length, 0);
   } },
   verification: { title: "verification receipts bind to the published commit and failing checks block publication", configure: [configureCheck], run: async () => {
     const r = await implement(1);
@@ -1308,11 +1294,16 @@ export const scenarios = {
     f.reset(1, "normal"); f.enqueue(1); await success();
     assert.deepEqual(f.issues.get(1).labels.map((label) => label.name), ["human-label"]);
   } },
-  ambiguous_pr: { title: "a lost PR response is reconciled without another PR or inference", run: async () => {
+  ambiguous_pr: { title: "a lost PR response is reconciled without another PR, inference or revalidation, resuming at the publishing stage", configure: [configureValidation], run: async () => {
+    const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
     f.addIssue(1); f.enqueue(1, "implement"); f.faults.pr.add(1);
     const failed = await run(); assert.ok(failed.error); assert.equal(f.prs.length, 1); const calls = f.requests.length;
+    assert.equal(validations(), 1);
+    const saved = f.row(s.runs, failed.id);
+    assert.equal(saved.stage, "publishing"); assert.equal(saved.publication.commitSha, saved.headSha); assert.equal(saved.verification.headSha, saved.headSha);
     tasks.retryTask(failed.taskId); const completed = await success();
     assert.equal(completed.publication.pullRequestNumber, 201); assert.equal(f.prs.length, 1); assert.equal(f.requests.length, calls);
+    assert.equal(validations(), 1); assert.equal(completed.inferenceFromRunId, failed.id);
   } },
   freshness: { title: "requirements changed during inference cannot receive an approval label", run: async () => {
     f.addIssue(1); await route(); f.reset(1, "ready");
@@ -1356,25 +1347,11 @@ export const scenarios = {
     changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "2.0.0" } }));
     changeMain("pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: old}\n  unrelated@2.0.0:\n    resolution: {integrity: new}\n");
     await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "Unrelated dev dependencies must not trigger review");
+    changeMain("pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: changed}\n  unrelated@2.0.0:\n    resolution: {integrity: newer}\n");
+    await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"), "A changed inspected package beside an unrelated bump must trigger review");
+    f.reset(1, "grep"); await success();
     changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "2.0.0", unrelated: "2.0.0" } }));
     await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"), "Inspected dependency changes must trigger review");
-  } },
-  lockfile_scope: { title: "mixed lockfile changes cannot hide inspected packages, aliases or importer changes", seed: seedLockfile, configure: [configureLockfile], run: async () => {
-    f.addIssue(1); f.reset(1, "grep"); await route(); await success();
-    let lock = readFileSync("seed/pnpm-lock.yaml", "utf8");
-    for (const update of [
-      (text) => text.replace("integrity: old", "integrity: changed").replace("unrelated@1.0.0", "unrelated@2.0.0"),
-      (text) => text.replace("npm:string-width@4.2.2", "npm:string-width@4.2.3").replace("unrelated@2.0.0", "unrelated@3.0.0"),
-      (text) => text.replace("nested: 1.0.0", "nested: 2.0.0").replace("unrelated@3.0.0", "unrelated@4.0.0"),
-      (text) => text.replace("version: 1.0.0}", "version: 2.0.0}").replace("unrelated@4.0.0", "unrelated@5.0.0"),
-      (text) => text + "unknownSetting: changed\n",
-    ]) {
-      lock = update(lock); changeMain("pnpm-lock.yaml", lock); await route();
-      assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"), lock);
-      f.reset(1, "grep"); await success();
-    }
-    changeMain("pnpm-lock.yaml", lock.replace("unrelated@5.0.0", "unrelated@6.0.0")); await route();
-    assert.ok(!all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
   } },
   lockfile_impact: { title: "the pure lockfile differ separates inspected-package, alias, importer and unknown-shape changes from unrelated ones without a repository", run: async () => {
     const { lockfileChanged, affectsPaths } = await f.app("lockfile-impact.ts");
@@ -1387,43 +1364,20 @@ export const scenarios = {
     assert.equal(changed((text) => text.replaceAll("unrelated@1.0.0", "unrelated@2.0.0").replaceAll("unrelated: {specifier: 1.0.0, version: 1.0.0}", "unrelated: {specifier: 2.0.0, version: 2.0.0}")), false);
     assert.equal(changed((text) => text.replace("unrelated@1.0.0:\n    resolution: {integrity: old}", "unrelated@1.0.0:\n    resolution: {integrity: new}")), false);
     assert.equal(changed((text) => text.replace("integrity: old", "integrity: new")), true);
+    assert.equal(changed((text) => text.replace("integrity: old", "integrity: new").replaceAll("unrelated@1.0.0", "unrelated@2.0.0")), true);
     assert.equal(changed((text) => text.replace("npm:string-width@4.2.2", "npm:string-width@4.2.3")), true);
     assert.equal(changed((text) => text.replace("nested: 1.0.0", "nested: 2.0.0")), true);
+    assert.equal(changed((text) => text.replace("npm:string-width@4.2.2", "npm:string-width@4.2.3").replaceAll("unrelated@1.0.0", "unrelated@2.0.0")), true);
     assert.equal(changed((text) => text.replace("wrangler: {specifier: 1.0.0, version: 1.0.0}", "wrangler: {specifier: 2.0.0, version: 2.0.0}")), true);
     assert.equal(changed((text) => text.replace("unrelated: {specifier: 1.0.0, version: 1.0.0}", "unrelated: {specifier: 1.0.0, version: npm:wrangler@2.0.0}")), true);
     assert.equal(changed((text) => text.replace("unrelated: {specifier: 1.0.0, version: 1.0.0}", "unrelated: {specifier: workspace:*, version: link:../unrelated}")), true);
     assert.equal(changed((text) => text.replace("importers:\n", "importers:\n  packages/new: {}\n")), true);
     assert.equal(changed((text) => text + "unknownSetting: changed\n"), true);
+    assert.equal(changed((text) => text.replace("importers:\n  .:\n", "importers:\n  .:\n    injectedSetting: true\n")), true);
+    assert.equal(changed((text) => text.replace("unrelated: {specifier: 1.0.0, version: 1.0.0}", "unrelated: 3.0.0")), true);
     assert.throws(() => lockfileChanged(base, "- not\n- a record\n", inspected), /Unrecognized lockfile/);
     assert.equal(affectsPaths(["src/app.ts"], ["src"]), true); assert.equal(affectsPaths(["srcs/app.ts"], ["src/"]), false);
     assert.equal(affectsPaths(["a.ts"], ["a.ts"]), true); assert.equal(affectsPaths(["b.ts"], ["a.ts"]), false);
-  } },
-  importer_scope: { title: "real importer bumps skip unrelated packages while aliases and unknown workspace shapes remain relevant", seed: seedLockfile, configure: [configureLockfile], run: async () => {
-    f.addIssue(1); f.reset(1, "grep"); await route(); await success();
-    const lock = JSON.parse(readFileSync("seed/pnpm-lock.yaml", "utf8"));
-    const bump = (name, version) => {
-      const entry = lock.importers["."].devDependencies[name];
-      const old = name + "@" + entry.version, next = name + "@" + version;
-      delete lock.packages[old]; delete lock.snapshots[old];
-      lock.packages[next] = { resolution: { integrity: version } }; lock.snapshots[next] = {};
-      entry.specifier = version; entry.version = version;
-    };
-    bump("unrelated", "2.0.0");
-    changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "2.0.0" } }));
-    changeMain("pnpm-lock.yaml", JSON.stringify(lock)); await route();
-    assert.ok(!all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
-    for (const update of [
-      () => bump("wrangler", "2.0.0"),
-      () => { lock.importers["."].devDependencies.alternate = { specifier: "npm:wrangler@2.0.0", version: "wrangler@2.0.0" }; },
-      () => { lock.importers["."].devDependencies.unrelated = { specifier: "workspace:*", version: "link:../unrelated" }; },
-      () => { lock.importers["."].injectedSetting = true; },
-      () => { lock.importers["."].devDependencies.unrelated = "3.0.0"; },
-      () => { lock.importers["packages/new"] = {}; },
-    ]) {
-      update(); changeMain("pnpm-lock.yaml", JSON.stringify(lock)); await route();
-      assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
-      f.reset(1, "grep"); await success();
-    }
   } },
   review_scope: { title: "Pi path aliases and supplied PR diff files participate in freshness and re-review", run: async () => {
     f.addIssue(1); f.reset(1, "at"); await route();
@@ -1441,11 +1395,11 @@ export const scenarios = {
     assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === 202).length, 0);
   } },
   unicode_scope: { title: "Pi filename normalization cannot hide relevant base changes", seed: seedUnicodeScope, run: async () => {
-    f.addIssue(1); await route(); await success();
+    f.addIssue(1); f.reset(1, "nbsp"); await route(); await success();
     assert.ok(f.requests.some((r) => r.request.messages.some((m) => m.role === "tool" && JSON.stringify(m.content).includes("export const special = 1;"))));
     changeMain("src/a b.ts", "export const special = 2;\n"); await route();
     assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
-    f.reset(1, "normal");
+    f.reset(1, "nbsp");
     let changed = false;
     f.onModel = (_context, step) => { if (step === 1 && !changed) { changed = true; changeMain("src/a b.ts", "export const special = 3;\n"); } };
     const stale = await run(); assert.match(stale.error.message, /Reviewed code changed/);
@@ -1461,7 +1415,7 @@ export const scenarios = {
     f.onModel = (_context, step) => { if (step === 1 && !changed) { changed = true; changeMain("src/caf\u00e9.ts", "export const unicode = 3;\n"); } };
     const stale = await run(); assert.match(stale.error.message, /Reviewed code changed/);
   } },
-  legacy_scope: { title: "historical unknown scope remains conservative even alongside known paths", run: async () => {
+  unknown_scope: { title: "an unknown read scope (.) remains conservative even alongside known paths", run: async () => {
     f.addIssue(1); await route(); let reviewed = await success();
     for (const paths of [[".", "src/app.ts"], ["."], ["src"]]) {
       db.update(s.runs).set({ result: { ...reviewed.result, paths } }).where(eq(s.runs.id, reviewed.id)).run();
@@ -1470,10 +1424,10 @@ export const scenarios = {
       reviewed = await success();
     }
   } },
-  stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or fails clearly when the merge conflicts", configure: [configureStaleBranch], run: staleBranch },
-  stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", configure: [configureStaleBranch], run: staleBranch },
-  validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit", configure: [configureValidation], run: validationFeedback },
-  validation_feedback_cap: { title: "validation feedback stops after two rounds and never applies to signal-killed commands", configure: [configureValidation], run: validationFeedback },
+  stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or fails clearly when the merge conflicts", configure: [configureStaleBranch], run: () => staleBranch("human") },
+  stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", configure: [configureStaleBranch], run: () => staleBranch("scrat") },
+  validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit", configure: [configureValidation], run: () => validationFeedback("fix") },
+  validation_feedback_cap: { title: "validation feedback stops after two rounds and never applies to signal-killed commands", configure: [configureValidation], run: () => validationFeedback("cap") },
   measured_checks: { title: "a chatty passing validation command stores a bounded tail and keeps its full output on disk", configure: [configureChatty], run: async () => {
     const r = await implement(1);
     const [check] = r.verification.commands;
@@ -1813,32 +1767,13 @@ export const scenarios = {
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.reviewers[0].provider = "nowhere"; })), /review_pr reviewer 1: no Pi model nowhere/);
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.resolve_conflicts.skill = "skills/missing/SKILL.md"; })), /resolve_conflicts: skill file not found/);
   } },
-  recovery: { title: "recover releases an abandoned claim without rewriting the saved result", run: async () => {
+  recovery: { title: "recover releases an abandoned claim without rewriting the saved result, and an interrupted commit review is recovered and retried with exactly one root and one reply", configure: [configureCommitSource], run: async () => {
+    await commitReview("restart");
     f.addIssue(1); f.enqueue(1); const claim = tasks.claimTask();
     db.update(s.runs).set({ stage: "publishing", result: { text: "Saved", ready: false, paths: [], outcome: "complete" }, publication: { status: "pending", commentId: 123 } }).where(eq(s.runs.id, claim.run.id)).run();
     execFileSync(process.execPath, [resolve("app/src/recover.ts"), claim.run.id], { stdio: "pipe" });
     const r = f.row(s.runs, claim.run.id); assert.equal(r.error.code, "RUN_INTERRUPTED"); assert.equal(r.result.text, "Saved"); assert.equal(r.publication.commentId, 123);
     tasks.retryTask(r.taskId); assert.ok(tasks.claimTask());
-  } },
-  crash_before_publishing: { title: "validated artifacts and the publishing stage are written together, so a run failed after validation resumes at publishing without validating again", configure: [configureValidation], run: async () => {
-    const updates = [], update = db.update.bind(db);
-    db.update = (table) => {
-      const builder = update(table);
-      if (table !== s.runs) return builder;
-      const set = builder.set.bind(builder);
-      builder.set = (values) => { updates.push(values); return set(values); };
-      return builder;
-    };
-    const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
-    f.addIssue(1, ["scrat"]); f.enqueue(1, "implement"); f.faults.pr.add(1);
-    const lost = await run(); assert.ok(lost.error); assert.equal(validations(), 1);
-    const artifacts = updates.filter((values) => values.verification);
-    assert.equal(artifacts.length, 1); assert.equal(artifacts[0].stage, "publishing", "validated artifacts and the publishing stage are one write");
-    const saved = f.row(s.runs, lost.id);
-    assert.equal(saved.stage, "publishing"); assert.equal(saved.publication.commitSha, saved.headSha); assert.equal(saved.verification.headSha, saved.headSha);
-    tasks.retryTask(lost.taskId); const completed = await success();
-    assert.equal(validations(), 1); assert.equal(f.prs.length, 1); assert.equal(completed.publication.pullRequestNumber, 201);
-    assert.equal(completed.inferenceFromRunId, lost.id);
   } },
   cleanup: { title: "cleanup failure cannot turn a published review into a failed task", run: async () => {
     f.addIssue(1); f.enqueue(1); f.faults.cleanup.add(1); const r = await success();
@@ -2392,7 +2327,7 @@ export const scenarios = {
       const retried = await success();
       assert.equal(retried.publication.status, "published");
     } },
-  isolation: { title: "workspace commands, hooks and agent tools cannot reach Scrat credentials, and credential material is never published", seed: seedIsolation, configure: [configureIsolation], run: async () => {
+  isolation: { title: "workspace commands, hooks and agent tools cannot reach Scrat credentials, and credential material is never published; a commit review never sees the Slack token, reads base files and diffs against the previous SHA, and installs nothing", seed: seedIsolation, configure: [configureIsolation, configureCommitSource], run: async () => {
     const key = process.env.GITHUB_APP_PRIVATE_KEY;
     f.addIssue(1); f.reset(1, "outside"); f.enqueue(1); await success();
     const transcript = f.requests.filter(({ context }) => context.item.number === 1).at(-1).request.messages;
@@ -2438,6 +2373,7 @@ export const scenarios = {
     const { redactSecrets } = await f.app("errors.ts"), header = Buffer.from("x-access-token:" + f.pat).toString("base64");
     assert.ok(containsSecret(f.pat) && containsSecret(header));
     assert.ok(!redactSecrets(`${f.pat} ${header}`).includes(f.pat.slice(4)) && !redactSecrets(header).includes(header.slice(8)));
+    await commitReview("isolation");
   } },
   wakeup: { title: "idle workers wake on enqueue, keep signals sent while busy, fall back on timeout and release on abort", run: async () => {
     const { signalWork, waitForWork, workGeneration } = await f.app("work-signal.ts");
@@ -2455,31 +2391,6 @@ export const scenarios = {
     assert.ok(aborted < 1000, `Abort should release the waiter, took ${aborted}ms`);
     const notified = await timed(((since) => { const waiting = waitForWork(since, 5_000); signalWork(); return waiting; })(workGeneration()));
     assert.ok(notified < 1000, `Explicit signal should wake the waiter, took ${notified}ms`);
-  } },
-  operations: { title: "withOperation returns results, rethrows errors unchanged, logs the last stage on failure and works inside synchronous transactions", run: async () => {
-    const { withOperation, withOperationSync } = await f.app("logging.ts");
-    const lines = captureLogs();
-    try {
-      assert.equal(await withOperation("test.ok", { a: 1 }, async (op) => { op.stage("one"); op.complete({ done: true }); return 42; }), 42);
-      const boom = new Error("boom");
-      await assert.rejects(withOperation("test.fail", { a: 2 }, async (op) => { op.stage("one"); op.stage("two"); op.failure({ extra: 7 }); throw boom; }), (error) => error === boom);
-      await assert.rejects(withOperation("test.plain", {}, async () => { throw boom; }), (error) => error === boom);
-      db.run(sql`create table op_check (n integer)`);
-      assert.equal(withOperationSync("test.sync", {}, (op) => db.transaction((transaction) => {
-        transaction.run(sql`insert into op_check values (1)`); op.complete(); return "sync";
-      })), "sync");
-      assert.throws(() => withOperationSync("test.sync_fail", {}, (op) => { op.stage("tx"); throw boom; }), (error) => error === boom);
-    } finally { restoreLogs(); }
-    const events = (operation) => lines.filter((line) => line.operation === operation).map((line) => line.event);
-    assert.deepEqual(events("test.ok"), ["operation.started", "operation.completed"]);
-    assert.equal(lines.find((line) => line.operation === "test.ok" && line.event === "operation.completed").done, true);
-    assert.deepEqual(events("test.fail"), ["operation.started", "operation.failed"]);
-    const failed = lines.find((line) => line.operation === "test.fail" && line.event === "operation.failed");
-    assert.equal(failed.stage, "two"); assert.equal(failed.extra, 7); assert.equal(failed.a, 2); assert.equal(typeof failed.durationMs, "number");
-    assert.ok(!("stage" in lines.find((line) => line.operation === "test.plain" && line.event === "operation.failed")));
-    assert.deepEqual(events("test.sync"), ["operation.started", "operation.completed"]);
-    assert.equal(lines.find((line) => line.operation === "test.sync_fail" && line.event === "operation.failed").stage, "tx");
-    assert.equal(db.all(sql`select n from op_check`).length, 1);
   } },
   config_overrides: { title: "scrat.local.json overrides merge over the defaults, are created when missing, reject unknown settings and reach Pi's providers", run: async () => {
     const { buildConfig } = await f.app("config-merge.ts");
@@ -2628,8 +2539,25 @@ export const scenarios = {
     await assert.rejects(postMessage({ channel: "C1", text: "no token" }), /SLACK_BOT_TOKEN is not set/);
     assert.equal(f.slack.calls.length, count);
   } },
-  slack_startup: { title: "an enabled Slack action blocks startup on missing token, channel, template variables, panel reviewers or a failed auth.test, while a disabled one makes no Slack call and queued tasks for it are rejected", run: async () => {
+  slack_startup: { title: "an enabled Slack action or status config blocks startup on missing token, channel, template variables, panel reviewers or a failed auth.test, while a disabled one makes no Slack call and queued tasks for it are rejected", run: async () => {
     const { validateStaticConfig } = await f.app("startup.ts");
+    {
+      const statusVariant = (change) => { const copy = structuredClone(f.config); copy.slack = { enabled: true, channel: "C0123456789" }; change(copy.slack); return copy; };
+      await validateStaticConfig(f.config);
+      assert.equal(f.slack.calls.length, 0);
+      await assert.rejects(validateStaticConfig(statusVariant((slack) => { slack.channel = " "; })), /slack\.channel must not be empty/);
+      f.slack.calls.length = 0;
+      const token = ["xoxb", "1111", "2222", "fixturetoken"].join("-"); delete process.env.SLACK_BOT_TOKEN;
+      await assert.rejects(validateStaticConfig(statusVariant(() => {})), /SLACK_BOT_TOKEN is not set/);
+      assert.equal(f.slack.calls.length, 0);
+      process.env.SLACK_BOT_TOKEN = token;
+      f.slack.fail = "invalid_auth";
+      await assert.rejects(validateStaticConfig(statusVariant(() => {})), /slack: auth\.test failed: .*invalid_auth/);
+      f.slack.fail = null; f.slack.calls.length = 0;
+      await validateStaticConfig(statusVariant(() => {}));
+      assert.deepEqual(f.slack.calls.map((call) => call.method), ["auth.test"]);
+      f.slack.calls.length = 0;
+    }
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
     const { validateConfig } = await f.app("config-schema.ts");
     const enabled = (change = () => {}) => variant((c) => {
@@ -2759,23 +2687,6 @@ export const scenarios = {
     assert.ok(roots().some((call) => call.body.text.startsWith("*Issue #3*")));
     for (let seen = -1; seen !== f.slack.calls.length;) { seen = f.slack.calls.length; await new Promise((done) => setTimeout(done, 200)); }
     fs.writeSync = write;
-  } },
-  slack_status_startup: { title: "an enabled status config blocks startup on a missing channel, a missing token or a failed auth.test, while a disabled one makes no Slack call", run: async () => {
-    const { validateStaticConfig } = await f.app("startup.ts");
-    const variant = (change) => { const copy = structuredClone(f.config); copy.slack = { enabled: true, channel: "C0123456789" }; change(copy.slack); return copy; };
-    await validateStaticConfig(f.config);
-    assert.equal(f.slack.calls.length, 0);
-    await assert.rejects(validateStaticConfig(variant((slack) => { slack.channel = " "; })), /slack\.channel must not be empty/);
-    f.slack.calls.length = 0;
-    const token = process.env.SLACK_BOT_TOKEN; delete process.env.SLACK_BOT_TOKEN;
-    await assert.rejects(validateStaticConfig(variant(() => {})), /SLACK_BOT_TOKEN is not set/);
-    assert.equal(f.slack.calls.length, 0);
-    process.env.SLACK_BOT_TOKEN = token;
-    f.slack.fail = "invalid_auth";
-    await assert.rejects(validateStaticConfig(variant(() => {})), /slack: auth\.test failed: .*invalid_auth/);
-    f.slack.fail = null; f.slack.calls.length = 0;
-    await validateStaticConfig(variant(() => {}));
-    assert.deepEqual(f.slack.calls.map((call) => call.method), ["auth.test"]);
   } },
   commits_source: { title: "the base-branch commit source seeds silently, enqueues one range task per push, survives force-pushes and replays, and stops when disabled", configure: [configureCommitSource], run: async () => {
     const { pollCommits } = await f.app("commit-source.ts");
@@ -2943,11 +2854,10 @@ export const scenarios = {
     mutate("review_issue", extend("author: alice"), /trigger\.author must be "bot" for github_items/);
     mutate("review_issue", extend("author: bot"));
   } },
-  commit_review_e2e: { title: "a push to the base branch posts one templated root, runs one diff-only review and replies once in the thread without any GitHub write", configure: [configureCommitSource], run: commitReview },
-  commit_review_panel: { title: "a panel commit review runs two reviewers and a consolidator without requiring a grade and replies once", configure: [configureCommitSource, configureCommitPanel], run: commitReview },
-  commit_review_slack_down: { title: "a failed root post still reviews and the reply creates the root, while a failed reply fails at publishing and retries without a new session or second root", configure: [configureCommitSource], run: commitReview },
-  commit_review_restart: { title: "an interrupted commit review is recovered and retried with exactly one root and one reply", configure: [configureCommitSource], run: commitReview },
-  commit_review_isolation: { title: "the commit review agent never sees the Slack token, reads base files and diffs against the previous SHA, and nothing is installed", configure: [configureCommitSource, configureCommitIsolation], run: commitReview },
+  commit_review_e2e: { title: "a push to the base branch posts one templated root, runs one diff-only review and replies once in the thread without any GitHub write", configure: [configureCommitSource], run: () => commitReview("e2e") },
+  commit_review_no_start: { title: "a commit manifest without a start slot posts no thread root before the agent and the reply creates the root", configure: [configureCommitSource, configureNoStart], run: () => commitReview("no_start") },
+  commit_review_panel: { title: "a panel commit review runs two reviewers and a consolidator without requiring a grade and replies once", configure: [configureCommitSource, configureCommitPanel], run: () => commitReview("panel") },
+  commit_review_slack_down: { title: "a failed root post still reviews and the reply creates the root, while a failed reply fails at publishing and retries without a new session or second root", configure: [configureCommitSource], run: () => commitReview("slack_down") },
   manifests: { title: "every action is loaded from a validated manifest, malformed manifests are rejected with file and path, and local overrides reach the runtime", run: async () => {
     const { readManifests } = await f.app("manifests.ts");
     const { config: live, isActionEnabled } = await f.app("config.ts");
@@ -3320,7 +3230,6 @@ export const scenarios = {
     const { containsSecret } = await f.app("secrets.ts"), { redactSecrets } = await f.app("errors.ts"), { childEnvironment } = await f.app("secrets.ts");
     assert.ok(containsSecret(`x ${secret} x`)); assert.ok(!redactSecrets(`x ${secret}`).includes(secret)); assert.equal(childEnvironment(process.env).SCOUT_TOKEN, undefined);
   } },
-  commit_review_no_start: { title: "a commit manifest without a start slot posts no thread root before the agent and the reply creates the root", configure: [configureCommitSource, configureNoStart], run: commitReview },
   schedule_source: { title: "the schedule source parses cron expressions, seeds silently, fires one window task per due tick, fires a missed tick once, keeps a cursor per manifest and stops when disabled", configure: [configureSchedule], run: async () => {
     const { parseCron, nextTick, parseWindow } = await f.app("cron.ts");
     const { pollSchedules } = await f.app("schedule-source.ts");

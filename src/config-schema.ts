@@ -17,7 +17,7 @@ const schema = Type.Object({
   }, strict),
   github: Type.Object({
     repository: Type.String(), repositoryPath: Type.String(), baseBranch: Type.String(), auth: Type.Enum(["app", "pat"]), botLogin: Type.String(), botName: Type.String(),
-    appId: positive, installationId: positive, fetchIntervalSeconds: positive,
+    appId: positive, installationId: positive, fetchIntervalSeconds: positive, readConcurrency: positive,
   }, strict),
   bindings: Type.Record(Type.String(), Type.Object({ secret: Type.String(), hosts: Type.Array(Type.String()), header: Type.String(), prefix: Type.Optional(Type.String()) }, strict)),
   context: Type.Object({ inlinePaths: positive, historyRuns: positive, historyBytes: positive }, strict),

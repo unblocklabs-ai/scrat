@@ -22,7 +22,8 @@
     "botName": "Scrat",
     "appId": 5017746,
     "installationId": 163420479,
-    "fetchIntervalSeconds": 300
+    "fetchIntervalSeconds": 300,
+    "readConcurrency": 4
   },
   "bindings": {},
   "context": {

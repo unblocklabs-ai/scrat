@@ -1,7 +1,7 @@
 import { config } from "./config.ts";
 import { errorStatus } from "./errors.ts";
 import { db } from "./db.ts";
-import { GitHubRepository } from "./github.ts";
+import { GitHubRepository, mapConcurrent } from "./github.ts";
 import { routeGithubTasks } from "./github-tasks.ts";
 import { upsertItem } from "./items.ts";
 import { assertConfiguredRepository, itemsInRepository } from "./repository.ts";
@@ -28,15 +28,10 @@ export async function syncGitHub(repository = config.github.repository, queueTas
       const openIds = new Set([...issues, ...pullRequests].map((payload) => payload.node_id));
       const missing = previousItems.filter((item) => item.state === "open" && !openIds.has(item.externalId));
       const reads = new Array<PromiseSettledResult<GithubContext>>(missing.length);
-      let next = 0;
-      await Promise.all(Array.from({ length: Math.min(4, missing.length) }, async () => {
-        while (next < missing.length) {
-          const index = next++;
-          const item = missing[index]!;
-          try { reads[index] = { status: "fulfilled", value: await github.fetchItemContext(item.kind, item.payload.number, { comments: false }) }; }
-          catch (reason) { reads[index] = { status: "rejected", reason }; }
-        }
-      }));
+      await mapConcurrent(missing, async (item, index) => {
+        try { reads[index] = { status: "fulfilled", value: await github.fetchItemContext(item.kind, item.payload.number, { comments: false }) }; }
+        catch (reason) { reads[index] = { status: "rejected", reason }; }
+      });
       for (const [index, previousItem] of missing.entries()) {
         const read = reads[index]!;
         if (read.status === "fulfilled") {

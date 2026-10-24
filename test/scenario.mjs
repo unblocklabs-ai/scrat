@@ -1457,7 +1457,7 @@ export const scenarios = {
     f.onModel = (_context, step) => { if (step === 1 && !changed) { changed = true; changeMain("src/caf\u00e9.ts", "export const unicode = 3;\n"); } };
     const stale = await run(); assert.match(stale.error.message, /Reviewed code changed/);
   } },
-  legacy_scope: { title: "historical unknown scope remains conservative even alongside known paths", run: async () => {
+  unknown_scope: { title: "an unknown read scope (.) remains conservative even alongside known paths", run: async () => {
     f.addIssue(1); await route(); let reviewed = await success();
     for (const paths of [[".", "src/app.ts"], ["."], ["src"]]) {
       db.update(s.runs).set({ result: { ...reviewed.result, paths } }).where(eq(s.runs.id, reviewed.id)).run();

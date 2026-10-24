@@ -3,7 +3,7 @@ import { postCommitReply } from "./commit-review.ts";
 import { upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
-import { branchContainsCommit } from "./git.ts";
+import { branchContainsCommit, conventionalTitle } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { isBotLogin } from "./config.ts";
@@ -78,7 +78,7 @@ const pullRequest = {
     let pr = await github.findPullRequest(workspace.branch, evaluated.baseBranch);
     if (pr?.state === "closed") throw new Error("The workspace PR was already closed");
     pr ??= await github.createPullRequest({
-      title: `fix: ${evaluated.item.title}`, body: `${result.text}\n\nCloses #${evaluated.item.number}\n\n${taskMarker(task.id)}`,
+      title: conventionalTitle(evaluated.item.title), body: `${result.text}\n\nCloses #${evaluated.item.number}\n\n${taskMarker(task.id)}`,
       head: workspace.branch, base: evaluated.baseBranch,
     }, references);
     const publishedPr = pr;

@@ -13,7 +13,7 @@ const all = (table) => db.select().from(table).all();
 const route = async () => (await f.app("github-sync.ts")).syncGitHub();
 const run = async () => { const r = await f.runNextTask(); assert.ok(r); return r; };
 const success = async () => { const r = await run(); assert.equal(r.error, null, JSON.stringify(r.error)); return r; };
-const implement = async (n) => { f.addIssue(n, ["scrat"]); f.enqueue(n, "implement"); return success(); };
+const implement = async (n, title) => { f.addIssue(n, ["scrat"], title); f.enqueue(n, "implement"); return success(); };
 const changeMain = (path, text) => {
   writeFileSync(resolve("seed", path), text); git(resolve("seed"), "add", "."); commit(resolve("seed"), "Change " + path);
   git(resolve("seed"), "push", resolve("remote.git"), "main");
@@ -278,7 +278,7 @@ const staleBranch = async (variant) => {
     const head3 = remoteGit("rev-parse", f.prs[2].head.ref);
     assert.equal(parents(resolve("remote.git"), head3).length, 2);
     assert.equal(remoteGit("show", head3 + ":src/app.ts"), "export const value = 300;"); assert.equal(resolved.publication.publishedCommitSha, head3);
-    assert.equal(remoteGit("log", "-1", "--format=%s", head3), f.prs[2].title, "A PR's commit keeps its title's single conventional prefix");
+    assert.match(remoteGit("log", "-1", "--format=%s", head3), /^Merge/, "A conflict-resolving merge keeps its merge message");
     await implement(4); drainExcept(204);
     needs("needed3.txt"); changeMain("needed3.txt", "ok\n");
     tasks.enqueueTask({ subjectId: prItem(204).id, action: "address_pr_feedback", reason: "Exercise self-heal", input: { source: "github_items", kind: "manual", manual: true } });
@@ -287,6 +287,10 @@ const staleBranch = async (variant) => {
     remoteGit("merge-base", "--is-ancestor", mainHead(), head4);
     assert.equal(healed.publication.publishedCommitSha, head4); assert.equal(remoteGit("show", head4 + ":src/app.ts"), "export const value = 214;");
     assert.equal(remoteGit("show", head4 + ":needed3.txt"), "ok");
+    assert.equal(remoteGit("log", "-1", "--format=%s", head4), `Address feedback: ${f.prs[3].title}`, "A repair commit says what it repairs, not just the PR title");
+    await implement(5, "fix(auth): x"); await implement(6, "Bug: y");
+    assert.deepEqual([f.prs[4].title, f.prs[5].title], ["fix(auth): x", "fix: Bug: y"]);
+    assert.deepEqual([4, 5].map((i) => remoteGit("log", "-1", "--format=%s", f.prs[i].head.ref)), ["fix(auth): x", "fix: Bug: y"]);
   }
 };
 const validationFeedback = async (variant) => {

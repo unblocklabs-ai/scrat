@@ -1969,6 +1969,8 @@ export const scenarios = {
     for (const request of firstRequests) assert.ok(!("previous_assessment" in request.context.files) && !("previous_repair" in request.context.files), "A first review has no prior state");
     await route(); f.reset(201, "normal"); const repair = await success();
     assert.equal(repair.taskId, all(s.tasks).find((t) => t.action === "address_review").id); assert.ok(repair.result.text.includes("Implemented the change"));
+    const repaired201 = f.prs.find((pr) => pr.number === 201);
+    assert.equal(git(resolve("remote.git"), "log", "-1", "--format=%s", repaired201.head.ref), `Address review: ${repaired201.title}`);
     await route(); f.reset(201, "normal"); const second = await success();
     assert.notEqual(second.id, first.id);
     const secondRequests = filesOf(201, second.id);

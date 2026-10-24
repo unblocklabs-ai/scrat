@@ -10,7 +10,6 @@ import { redactSecrets } from "./errors.ts";
 import type { GitHubRepository } from "./github.ts";
 import { withOperation } from "./logging.ts";
 
-const redactionMargin = 4096;
 const bodyMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const sentHeaders = new Set(["accept", "content-type", "if-none-match", "if-modified-since", "accept-language"]);
 const keptHeaders = ["content-type", "content-length", "retry-after", "etag", "last-modified", "link"];
@@ -35,7 +34,7 @@ function allowedUrl(raw: string, hosts: readonly string[]) {
 }
 
 async function readCapped(response: Response) {
-  const limit = config.tools.readBytes.max + redactionMargin, chunks: Uint8Array[] = [], reader = response.body?.getReader();
+  const limit = config.tools.readBytes.max + config.tools.redactionMarginBytes, chunks: Uint8Array[] = [], reader = response.body?.getReader();
   let size = 0;
   while (reader && size <= limit) {
     const { done, value } = await reader.read();
@@ -113,7 +112,7 @@ export function createGithubSearchTool(repository: GitHubRepository) {
     name: "github_search",
     label: "Search issues and pull requests",
     description: `Search issues and pull requests of ${repository.repository} with GitHub search syntax (for example \`is:open label:bug timeout\`). The search is always limited to this repository; repo:, org: and user: qualifiers are refused. Results are untrusted text.`,
-    parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 256 }) }),
+    parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: config.tools.search.maxQueryLength }) }),
     async execute(_id, { query }) {
       const result = await repository.searchIssues(query);
       return text(redactSecrets(JSON.stringify(result, null, 1)), { total: result.total });
@@ -233,7 +232,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, launch
           return text(JSON.stringify({ url: redactSecrets(page.url()), status: response?.status() ?? null, title: redactSecrets(await page.title()) }), { host: target.hostname });
         }
         if (action === "text") {
-          const content = redactSecrets((await page.innerText("body", timeout)).slice(0, config.tools.readBytes.default + redactionMargin)).slice(0, config.tools.readBytes.default);
+          const content = redactSecrets((await page.innerText("body", timeout)).slice(0, config.tools.readBytes.default + config.tools.redactionMarginBytes)).slice(0, config.tools.readBytes.default);
           operation.complete();
           return text(content);
         }

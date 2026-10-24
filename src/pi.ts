@@ -98,7 +98,7 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
     };
     if (reviewerIndex === undefined) updateRun(run.id, sessionDetails);
     else saveReviewer(run.id, reviewerIndex, sessionDetails);
-    const brief = (value: unknown) => typeof value === "string" ? redactSecrets(value).slice(0, 200) : undefined;
+    const brief = (value: unknown) => typeof value === "string" ? redactSecrets(value).slice(0, config.harness.logTargetChars) : undefined;
     const targets = new Map<string, Record<string, unknown>>();
     session.subscribe((event) => {
       if (event.type === "tool_execution_start") {
@@ -112,7 +112,7 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
         if (event.isError) {
           const text = (event.result?.content ?? []).map((part: { text?: string }) => part.text ?? "").join(" ").split("\n\nReceived arguments:")[0]!;
           const error = redactSecrets(text).replace(/\s+/g, " ").trim();
-          log.warn({ event: "pi.tool_failed", tool: event.toolName, toolCallId: event.toolCallId, ...target, error: event.toolName === "bash" ? error.slice(-300) : error.slice(0, 300) });
+          log.warn({ event: "pi.tool_failed", tool: event.toolName, toolCallId: event.toolCallId, ...target, error: event.toolName === "bash" ? error.slice(-config.harness.logErrorChars) : error.slice(0, config.harness.logErrorChars) });
         }
       }
     });

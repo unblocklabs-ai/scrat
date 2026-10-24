@@ -47,7 +47,7 @@ export function gitPage(repositoryPath: string, args: string[], offset: number, 
     const child = spawn(command.file, command.args, { cwd: repositoryPath, env: command.env, stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
     let position = 0, kept = 0, stderr = "", stopped = false;
-    child.stderr.on("data", (data: Buffer) => { if (stderr.length < 8192) stderr += data.toString(); });
+    child.stderr.on("data", (data: Buffer) => { if (stderr.length < config.harness.maxStderrBytes) stderr += data.toString(); });
     child.stdout.on("data", (data: Buffer) => {
       if (stopped) return;
       const start = Math.max(0, offset - position), take = data.subarray(start, start + limit + 1 - kept);

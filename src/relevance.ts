@@ -1,12 +1,11 @@
 import { isDeepStrictEqual } from "node:util";
+import { config } from "./config.ts";
 import { changedPaths, git } from "./git.ts";
 import { affectsPaths, lockfileChanged } from "./lockfile-impact.ts";
 import { reviewScope } from "./review-paths.ts";
 
 type Review = { paths: string[]; relevant: boolean; degraded?: true };
 
-const reviewCacheLimit = 256;
-const treeCacheLimit = 8;
 const reviewCache = new Map<string, Promise<Review>>();
 const treeCache = new Map<string, Promise<string>>();
 
@@ -27,12 +26,12 @@ function memoize<T>(cache: Map<string, Promise<T>>, limit: number, key: string, 
 }
 
 function listTree(repository: string, sha: string) {
-  return memoize(treeCache, treeCacheLimit, JSON.stringify([repository, sha]), () => git(repository, ["ls-tree", "-r", "--name-only", "-z", sha]));
+  return memoize(treeCache, config.harness.treeCacheLimit, JSON.stringify([repository, sha]), () => git(repository, ["ls-tree", "-r", "--name-only", "-z", sha]));
 }
 
 export async function reviewChanges(repository: string, before: string, after: string, scope: string[]) {
   const key = JSON.stringify([repository, before, after, [...new Set(scope)].sort()]);
-  const pending = memoize(reviewCache, reviewCacheLimit, key, () => computeReview(repository, before, after, scope));
+  const pending = memoize(reviewCache, config.harness.reviewCacheLimit, key, () => computeReview(repository, before, after, scope));
   const review = await pending;
   if (review.degraded && reviewCache.get(key) === pending) reviewCache.delete(key);
   return { paths: [...review.paths], relevant: review.relevant };

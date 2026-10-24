@@ -1,15 +1,15 @@
 import { eq } from "drizzle-orm";
-import { actionsPublishing, manifestOf } from "./actions.ts";
+import { getActionConfig, manifestOf } from "./actions.ts";
 import { buildAgentInput, evaluateContext, readDiffScope } from "./agent-input.ts";
 import { commitInput, describeCommit, startCommitThread } from "./commit-review.ts";
 import { describeWindow } from "./window-review.ts";
-import { config, getActionConfig, getRepositoryPath, isBotLogin } from "./config.ts";
+import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import type { Manifest } from "./manifests.ts";
 import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
-import { branchConflictCode, describeError, type ErrorDetails } from "./errors.ts";
+import { branchConflictCode, describeError, type ErrorDetails, errorExitCode } from "./errors.ts";
 import { conventionalTitle, createMergeCommit, fetchPullRequestHead, fetchRepository, git, headOf, hasPendingMerge, mergeBase, prepareTarget } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
@@ -18,10 +18,10 @@ import type { GithubContext, GithubPullRequest } from "./github-types.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { assertConfiguredRepository, remoteUrl } from "./repository.ts";
 import { executePi } from "./pi.ts";
-import { resolvePrReview } from "./pr-assessment.ts";
-import { getRun, latestSessionRun, runHistory, updateRun } from "./run-history.ts";
+import { currentPrReview } from "./pr-assessment.ts";
+import { getRun, latestSessionRun, updateRun } from "./run-history.ts";
 import { reviewPullRequest } from "./pr-review.ts";
-import { publishCommit, publishRun, publishWindow } from "./publication.ts";
+import { publishRun, publishSubject } from "./publication.ts";
 import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint, InterruptedError } from "./results.ts";
 import type { Item } from "./items.ts";
 import { subjects, workspaces, type Run, type Task, type Subject, type Workspace } from "./schema.ts";
@@ -29,7 +29,7 @@ import { childEnvironment } from "./secrets.ts";
 import { recordEvent } from "./events.ts";
 import { claimTask, configuredReviewers, finishRun, interruptRun, retryTransientFailure } from "./tasks.ts";
 import { isBaseOnly, parseTriggerInput } from "./triggers.ts";
-import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, pinWorkspaceBase, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
+import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, pinWorkspaceBase, removeWorkspace, stageTree, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
 
 type DatabaseConfig = NonNullable<typeof config.workspace.database>;
 type Environment = Record<string, string | undefined>;
@@ -46,7 +46,8 @@ async function prepareWorkspace(workspace: Workspace, environment: Environment, 
 async function asCheckFailure<T>(fn: () => Promise<T>) {
   try { return await fn(); }
   catch (error) {
-    if (error instanceof Error && "code" in error && typeof error.code === "number" && error.code <= 128
+    const code = errorExitCode(error);
+    if (error instanceof Error && code !== undefined && code <= 128
       && !("signal" in error && error.signal) && !("killed" in error && error.killed)) {
       throw new CheckFailure(error.message, { cause: error });
     }
@@ -78,8 +79,7 @@ async function validateAndCommit({ run, task, references, stop }: Ctx, p: Change
   stopBefore(stop, "validation commands");
   const commands = await asCheckFailure(() => withValidationSlot(() => runCommands(config.workspace.validate, workspace.path, commandEnvironment, references, "validate"), references, stop)
     .catch((error) => { throw stop?.aborted && error === stop.reason ? new InterruptedError("Worker is stopping; run left waiting for a validation slot") : error; }));
-  await git(workspace.path, ["add", "--all"]);
-  if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
+  if (await stageTree(workspace.path) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
   await assertNoCommittedSecrets(workspace, p.validationOnly ? run.headSha ?? p.mainSha : p.startHeadSha, validationTree);
   const purpose = commitPurposes[task.action];
   const message = purpose ? `${purpose}: ${p.title}` : conventionalTitle(p.title);
@@ -90,7 +90,7 @@ async function validateAndCommit({ run, task, references, stop }: Ctx, p: Change
     if (conflicts) throw new Error(unresolvedConflict);
   }
   const commentOnly = kind === "nonempty_diff" && !await git(workspace.path, ["diff", "--name-only", `${p.mainSha}...HEAD`]);
-  updateRun(run.id, { headSha: commitSha, publication: { status: "pending", commitSha, ...commentOnly && { commentOnly } },verification: { headSha: commitSha, commands }, stage: "publishing" });
+  updateRun(run.id, { headSha: commitSha, publication: { status: "pending", commitSha, ...commentOnly && { commentOnly } }, verification: { headSha: commitSha, commands }, stage: "publishing" });
 }
 
 type Ctx = {
@@ -136,7 +136,7 @@ async function connect({ subject, item, repositoryPath }: Ctx): Promise<Observed
 async function assertRepairCurrent({ task }: Ctx, { item, observation, mainSha }: Observed) {
   const trigger = parseTriggerInput(task.input);
   if (trigger.kind !== "low_grade") return;
-  const state = await resolvePrReview(runHistory(item.id, actionsPublishing("pr_assessment")), observation, mainSha);
+  const state = await currentPrReview(item.id, observation, mainSha);
   if (state.kind !== "current" || state.assessment.originId !== trigger.assessmentRunId) {
     throw new Error("The review this repair addresses is no longer the current assessment");
   }
@@ -147,7 +147,7 @@ async function settleReviewPlan(ctx: Ctx, { item, observation, mainSha }: Observ
   if (run.reviewers.length !== 1) return;
   const trigger = parseTriggerInput(run.input);
   if (isBaseOnly(trigger)) {
-    const state = await resolvePrReview(runHistory(item.id, actionsPublishing("pr_assessment")), observation, mainSha);
+    const state = await currentPrReview(item.id, observation, mainSha);
     if (state.kind === "stale" && state.reason === "base" && (state.assessment.run.mainSha ?? null) === (trigger.previousMainSha ?? null)
       && (state.assessment.run.headSha ?? null) === (trigger.previousHeadSha ?? null)) return;
   }
@@ -231,7 +231,7 @@ async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   updateRun(run.id, { stage: "agent" });
   const { result } = await runAgent(ctx, {
     environment, baseSha: changeContext ? review.diffBaseSha : undefined,
-    panel: getActionConfig(task.action).agent === "panel" ? { baseSha: review.diffBaseSha, requireGrade: !changeContext } : undefined,
+    panel: manifest.agent === "panel" ? { baseSha: review.diffBaseSha, requireGrade: !changeContext } : undefined,
     input: { workspace: review.workspace, evaluated, diffBaseSha: review.diffBaseSha, diffPaths, mainSha: review.mainSha, headSha: review.headSha, baseRef: review.mainSha, mergeInProgress: false },
   });
   updateRun(run.id, { result, stage: "validating" });
@@ -397,7 +397,7 @@ async function changeRun(ctx: Ctx, observed: Observed) {
 }
 
 async function publishStage({ task, run, subject, references, manifest, repositoryPath }: Ctx, observed: Observed | undefined) {
-  if (!observed) return subject.kind === "window" ? publishWindow(subject, task, run, references) : publishCommit(subject, task, run);
+  if (!observed) return publishSubject(subject, task, run, references);
   const { repository, github, context, item, observation, mainSha } = observed;
   const review = manifest.mode === "review";
   const evaluatedRun = getRun(run.id)!;
@@ -416,7 +416,7 @@ async function publishStage({ task, run, subject, references, manifest, reposito
     : await fetchRepository(repositoryPath, observation.remote, current.baseBranch, await github.getGitEnvironment()) : undefined;
   if (manifest.publish.includes("pr_assessment")) await currentMainSha?.();
   else {
-    const state = await freshness(savedEvaluation(evaluatedRun), { ...current, mainSha: currentMainSha }, "relevant-paths", { unknownBase: "current" });
+    const state = await freshness(savedEvaluation(evaluatedRun), { ...current, mainSha: currentMainSha }, "relevant-paths", true);
     if (state.kind === "stale") throw new Error(state.reason === "context"
       ? "GitHub task context changed; enqueue a fresh task instead of retrying publication"
       : "Reviewed code changed; enqueue a fresh review instead of retrying publication");

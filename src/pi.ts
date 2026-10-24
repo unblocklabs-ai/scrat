@@ -3,7 +3,8 @@ import { resolve } from "node:path";
 import { isContextOverflow, isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { Logger } from "pino";
-import { config, type ThinkingLevel } from "./config.ts";
+import { config } from "./config.ts";
+import type { ThinkingLevel } from "./manifests.ts";
 import { db } from "./db.ts";
 import { botName, withBotName } from "./identity.ts";
 import { getRun, updateRun } from "./run-history.ts";
@@ -118,7 +119,7 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
         if (event.isError) {
           const text = (event.result?.content ?? []).map((part: { text?: string }) => part.text ?? "").join(" ").split("\n\nReceived arguments:")[0]!;
           const error = redactSecrets(text).replace(/\s+/g, " ").trim();
-          log.warn({ event: "pi.tool_failed", tool: event.toolName, toolCallId: event.toolCallId, ...target, error: event.toolName === "bash" ? error.slice(-config.harness.logErrorChars) : error.slice(0, config.harness.logErrorChars) });
+          log.warn({ event: "pi.tool_failed", tool: event.toolName, toolCallId: event.toolCallId, ...target, err: event.toolName === "bash" ? error.slice(-config.harness.logErrorChars) : error.slice(0, config.harness.logErrorChars) });
         }
       }
     });
@@ -163,7 +164,7 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
         ])] };
       } catch (error) {
         if (!(error instanceof ResultFormatError) || corrections >= config.harness.corrections.format) throw error;
-        log.warn({ event: "pi.format_retry", attempt: corrections + 1, error: error.message });
+        log.warn({ event: "pi.format_retry", attempt: corrections + 1, err: error });
         await prompt(correctionMessage(error.message, requireGrade));
       }
     }

@@ -22,7 +22,7 @@ export function pollSource(operationName: string, source: string, repository: st
   return withOperation(operationName, { repository }, async (operation) => {
     assertConfiguredRepository(repository);
     let queued = 0;
-    for (const manifest of manifests()) {
+    for (const manifest of manifests) {
       if (manifest.trigger.source === source) queued += await perAction(manifest, operation, repository);
     }
     operation.complete({ queued });

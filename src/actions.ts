@@ -1,21 +1,22 @@
-import { isActionEnabled, loadedManifests } from "./config.ts";
-import { type EffectName, type Manifest, matches, type Signal } from "./manifests.ts";
+import { isActionEnabled, config, loadedManifests } from "./config.ts";
+import { matches, skillPath, type EffectName, type Signal } from "./manifests.ts";
 
-export type Action = string;
-
-export const manifests = () => loadedManifests;
-export const getManifest = (action: string) => loadedManifests.find((manifest) => manifest.name === action);
+export const manifests = loadedManifests;
 export function manifestOf(action: string) {
-  const manifest = getManifest(action);
+  const manifest = manifests.find((candidate) => candidate.name === action);
   if (!manifest) throw new Error(`Unknown action: ${action}`);
   return manifest;
 }
-export const temporaryWorkspaceActions = () => loadedManifests.filter((manifest) => manifest.mode === "review").map((manifest) => manifest.name);
 
-export const actionsPublishing = (effect: EffectName) => loadedManifests.filter((manifest) => manifest.publish.includes(effect)).map((manifest) => manifest.name);
-export const actionsTriggeredBy = (kind: Manifest["trigger"]["kind"]) => loadedManifests.filter((manifest) => manifest.trigger.kind === kind).map((manifest) => manifest.name);
+export function getActionConfig(action: string) {
+  const actionConfig = config.actions[action];
+  if (!actionConfig) throw new Error(`Unknown action: ${action}`);
+  return { ...actionConfig, skill: skillPath(manifestOf(action), actionConfig.skill) };
+}
 
-export const matchingActions = (signal: Signal) => loadedManifests.filter((manifest) => matches(manifest, signal)).map((manifest) => manifest.name);
+export const actionsPublishing = (effect: EffectName) => manifests.filter((manifest) => manifest.publish.includes(effect)).map((manifest) => manifest.name);
+
+export const matchingActions = (signal: Signal) => manifests.filter((manifest) => matches(manifest, signal)).map((manifest) => manifest.name);
 export const routeFor = (signal: Signal) => {
   const found = matchingActions(signal);
   return found.find(isActionEnabled) ?? found[0];

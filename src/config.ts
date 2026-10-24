@@ -4,11 +4,10 @@ import { isAbsolute, resolve } from "node:path";
 import settings from "../scrat.config.json" with { type: "json" };
 import { buildConfig, type Json } from "./config-merge.ts";
 import { configError, validateConfig } from "./config-schema.ts";
-import { deploymentDefaults, findTriggerConflicts, readManifests, skillPath, type ThinkingLevel } from "./manifests.ts";
+import { deploymentDefaults, findTriggerConflicts, readManifests } from "./manifests.ts";
 
 const configUrl = new URL("../scrat.config.json", import.meta.url);
 const localConfigUrl = new URL("../scrat.local.json", import.meta.url);
-export { type ThinkingLevel };
 
 const isObject = (value: unknown): value is Json => typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -49,16 +48,6 @@ export function commitSettings(action: string) {
   const { enabled, branch, maxRangeCommits, channel, startMessage } = config.actions[action] ?? {};
   if (!branch || !maxRangeCommits) throw new Error(`${action} is not a commit action`);
   return { enabled: enabled !== false, branch, maxRangeCommits, channel: channel ?? "", startMessage: startMessage ?? "" };
-}
-
-export function getActionConfig(action: string) {
-  const manifest = loadedManifests.find((candidate) => candidate.name === action), actionConfig = config.actions[action];
-  if (!manifest || !actionConfig) throw new Error(`Unknown action: ${action}`);
-  return {
-    ...actionConfig,
-    skill: skillPath(manifest, actionConfig.skill),
-    reviewers: actionConfig.reviewers ?? [],
-  };
 }
 
 export const isBotLogin = (login: string | null | undefined) => login?.toLowerCase() === config.github.botLogin.toLowerCase();

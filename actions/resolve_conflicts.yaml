@@ -1,9 +1,6 @@
 name: resolve_conflicts
 trigger: { source: github_items, kind: pr_conflicts, item: pr, author: bot }
 mode: change
-agent: single
-context: all
-tools: [read, grep, find, ls, bash, edit, write]
 files: [discussion]
 acceptance: conflict_free
 publish: [push, comment]

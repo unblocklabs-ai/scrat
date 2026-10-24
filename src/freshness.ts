@@ -15,12 +15,11 @@ export const savedEvaluation = (run: Pick<Run, "mainSha" | "result"> & { context
   revision: run.context?.revision, baseBranch: run.context?.baseBranch, mainSha: run.mainSha, paths: run.result?.paths ?? [],
 });
 
-export async function freshness(saved: SavedEvaluation, now: Current, mode: "exact" | "relevant-paths",
-  { unknownBase = "stale" }: { unknownBase?: "stale" | "current" } = {}): Promise<Freshness> {
+export async function freshness(saved: SavedEvaluation, now: Current, mode: "exact" | "relevant-paths", unknownBaseIsCurrent = false): Promise<Freshness> {
   const stale = (reason: "context" | "base", changedPaths: string[] = []): Freshness => ({ kind: "stale", reason, changedPaths });
   if (saved.revision !== now.revision || saved.baseBranch !== now.baseBranch) return stale("context");
   if (now.mainSha === undefined) return { kind: "current", baseMoved: false };
-  if (!saved.mainSha) return unknownBase === "current" ? { kind: "current", baseMoved: false } : stale("context");
+  if (!saved.mainSha) return unknownBaseIsCurrent ? { kind: "current", baseMoved: false } : stale("context");
   const mainSha = typeof now.mainSha === "string" ? now.mainSha : await now.mainSha();
   if (saved.mainSha === mainSha) return { kind: "current", baseMoved: false };
   if (mode === "exact") return stale("base");

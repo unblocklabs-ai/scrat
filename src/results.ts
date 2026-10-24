@@ -20,7 +20,7 @@ export function entryStage(previousRun: Run | undefined, retryMode: "repair" | "
   return retryMode === "validation" ? "validating" : hasPublicationSnapshot(previousRun) ? "publishing" : "preparing";
 }
 
-const prGrades = ["S", "A", "B", "C", "D", "F"] as const;
+export const prGrades = ["S", "A", "B", "C", "D", "F"] as const;
 export type PrGrade = typeof prGrades[number];
 
 type ReportedIssue = { title: string; body: string; fingerprint: string };

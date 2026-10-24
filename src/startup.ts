@@ -51,6 +51,11 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
       try { new RegExp(pattern); } catch { problems.push(`${key}[${index}] is not a valid regular expression`); }
     });
   }
+  const reviewComments = manifests().filter((manifest) => manifest.mode === "review" && manifest.publish.includes("comment") && resolvedEntry(manifest).enabled !== false);
+  for (const item of ["issue", "pr"] as const) {
+    const sharing = reviewComments.filter((manifest) => manifest.trigger.item === item).map((manifest) => manifest.name);
+    if (sharing.length > 1) problems.push(`${sharing.join(", ")} would share one review comment on each ${item}; enable only one`);
+  }
   const changeActions = manifests().filter((manifest) => manifest.mode === "change" && resolvedEntry(manifest).enabled !== false).map((manifest) => manifest.name);
   if (changeActions.length && !settings.workspace?.validate?.length) {
     problems.push(`workspace.validate is empty but ${changeActions.join(", ")} publish commits; list the target repository's check commands, or use [["true"]] if it has nothing to check`);

@@ -31,7 +31,7 @@ If the issue is ready, finish with one unquoted line containing exactly `SCRAT_R
 
 Use `input.changedPaths` (or `files.changedPaths` when only `input.changedPathCount` is given), the discussion file, any prior assessment and, when `previous` is present, the `git` tool (`diff_stat` and targeted `diff` from `previousMain` to `main`) to focus on actual requirement/source changes. Recheck affected conclusions against current source; prior evidence is context, not proof of newer code. Do not repeat unchanged investigation without a concrete reason.
 
-On a follow-up whose conclusion is unchanged, return only what changed and that the conclusion stands, in at most three sentences, then the markers.
+On a follow-up whose conclusion is unchanged and whose cited evidence is still accurate on the current snapshot, return the text of `files.previous_assessment` exactly as written, with no added summary, then the usual `SCRAT_READY` (only if still ready) and `SCRAT_STATUS` lines; the file does not contain them. Otherwise lead with what changed.
 
 Return concise Markdown for the person deciding what to do next:
 - A conclusion and main reason, leading with what changed on a follow-up.

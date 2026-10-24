@@ -80,14 +80,15 @@ export async function buildAgentInput(options: {
   const failure = run.retryOfRunId ? getRun(run.retryOfRunId)?.error : undefined;
   const listed = manifestOf(action).files;
   const history = listed.includes("history") ? historyReport(completedRunsOfActionInRepository(config.github.repository, action, config.context.historyRuns), action) : undefined;
-  const prior = manifestOf(action).publish.includes("pr_assessment") ? priorReviewTexts(task.subjectId)
-    : { assessment: listed.includes("previous_assessment") ? completedRunsOfAction(task.subjectId, action, 1)[0]?.result?.text : undefined, repair: undefined };
+  const assessesPr = manifestOf(action).publish.includes("pr_assessment");
+  const prior = assessesPr ? priorReviewTexts(task.subjectId) : undefined;
+  const previousAssessment = assessesPr ? prior?.assessment : listed.includes("previous_assessment") ? completedRunsOfAction(task.subjectId, action, 1)[0]?.result?.text : undefined;
   const found = listed.includes("validation") ? verificationOfCommit(headSha) : undefined, verification = found?.commands.length ? found : undefined;
   await Promise.all([
     verification && writeContext("validation", "validation.md", `# Validation run by ${botName} on ${headSha}\n\n${verification.commands.map((check) => `- ${check.name}: ${check.status} (${(check.durationMs / 1000).toFixed(1)}s)`).join("\n")}\n`),
     listed.includes("discussion") && writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),
     listed.includes("review") && report && writeContext("review", "review.md", report),
-    listed.includes("previous_assessment") && prior?.assessment && writeContext("previous_assessment", "previous-assessment.md", prior.assessment),
+    listed.includes("previous_assessment") && previousAssessment && writeContext("previous_assessment", "previous-assessment.md", previousAssessment),
     listed.includes("previous_repair") && prior?.repair && writeContext("previous_repair", "previous-repair.md", prior.repair),
     history && writeContext("history", "history.md", history),
     failure && writeContext("previousFailure", "previous-failure.json", JSON.stringify(failure, null, 2)),

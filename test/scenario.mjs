@@ -231,11 +231,29 @@ const staleBranch = async (variant) => {
     assert.equal(f.requests.length, calls); assert.equal(remoteGit("for-each-ref", "refs/heads"), heads2);
     assert.equal(f.comments.get(302)?.length ?? 0, 0);
     assert.ok(all(s.workspaces).every((w) => w.removedAt));
+    const notices = () => (f.comments.get(302) ?? []).filter((c) => /does not merge cleanly/.test(c.body));
+    await route(); await route();
+    assert.equal(notices().length, 1); assert.match(notices()[0].body, /behind main/); assert.deepEqual(queuedFor(302), []);
+    assert.deepEqual(f.prs[1].labels, []);
+    const writes = f.writes.length;
+    changeMain("src/other.ts", "export const other = 1;\n"); await route();
+    assert.deepEqual(queuedFor(302), []); assert.equal(f.writes.length, writes, "a base move neither queues nor comments");
+    tasks.enqueueManualTasks("review_pr", ["302"]); await route();
+    assert.deepEqual(queuedFor(302), ["review_pr"], "a manual request survives routing");
+    assert.ok((await run()).error); await route();
+    assert.equal(notices().length, 1); assert.equal(f.comments.get(302).length, 1); assert.deepEqual(queuedFor(302), []);
+    branchOff("release", "release.txt", "release\n"); f.prs[1].base.ref = "release"; await route();
+    assert.deepEqual(queuedFor(302), ["review_pr"], "a retargeted PR is no longer blocked");
+    f.prs[1].base.ref = "main"; await route(); assert.deepEqual(queuedFor(302), []);
+    pushFile("feature-b", "src/app.ts", "export const value = 9;\n"); f.prs[1].head.sha = remoteGit("rev-parse", "feature-b"); await route();
+    assert.deepEqual(queuedFor(302), ["review_pr"]);
+    await success(); await route();
+    assert.equal(f.comments.get(302).length, 1); assert.equal(notices().length, 0); assert.equal(f.prs[1].labels.length, 1);
     f.prs[1].state = "closed"; await route();
     branchOff("feature-c", "src/c.ts", "export const c = 1;\n"); needs("needed4.txt");
     addPr(303, "feature-c", "human"); await route();
-    const workspaces = all(s.workspaces).length, unmasked = await run();
-    assert.match(unmasked.error.stdout, /ERR_MISSING needed4\.txt/); assert.equal(f.requests.length, calls);
+    const workspaces = all(s.workspaces).length, requests = f.requests.length, unmasked = await run();
+    assert.match(unmasked.error.stdout, /ERR_MISSING needed4\.txt/); assert.equal(f.requests.length, requests);
     assert.equal(all(s.workspaces).length, workspaces + 1, "no synthetic workspace is made");
   } else {
     await implement(1); await route(); drainExcept(201);
@@ -1474,7 +1492,7 @@ export const scenarios = {
       reviewed = await success();
     }
   } },
-  stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or fails clearly when the merge conflicts", configure: [configureStaleBranch], run: () => staleBranch("human") },
+  stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or says once in its assessment comment that the merge conflicts and is not retried until its head changes or a review is requested by hand", configure: [configureStaleBranch], run: () => staleBranch("human") },
   stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", configure: [configureStaleBranch], run: () => staleBranch("scrat") },
   validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit", configure: [configureValidation], run: () => validationFeedback("fix") },
   validation_feedback_cap: { title: "validation feedback stops after two rounds and never applies to signal-killed commands", configure: [configureValidation], run: () => validationFeedback("cap") },

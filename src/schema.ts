@@ -107,6 +107,7 @@ export const runs = sqliteTable("runs", {
     status: "pending" | "published" | "not_needed";
     commentId?: number;
     commitSha?: string;
+    commentOnly?: true;
     publishedCommitSha?: string;
     pullRequestNumber?: number;
     issues?: Record<string, number>;

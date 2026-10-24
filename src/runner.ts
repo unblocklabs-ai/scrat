@@ -89,10 +89,8 @@ async function validateAndCommit({ run, task, references, stop }: Ctx, p: Change
     const { conflicts } = await targetOf(p, commitSha);
     if (conflicts) throw new Error(unresolvedConflict);
   }
-  if (kind === "nonempty_diff" && !await git(workspace.path, ["diff", "--name-only", `${p.mainSha}...HEAD`])) {
-    throw new Error("Implementation produced no changes against the base branch");
-  }
-  updateRun(run.id, { headSha: commitSha, publication: { status: "pending", commitSha }, verification: { headSha: commitSha, commands }, stage: "publishing" });
+  const commentOnly = kind === "nonempty_diff" && !await git(workspace.path, ["diff", "--name-only", `${p.mainSha}...HEAD`]);
+  updateRun(run.id, { headSha: commitSha, publication: { status: "pending", commitSha, ...commentOnly && { commentOnly } },verification: { headSha: commitSha, commands }, stage: "publishing" });
 }
 
 type Ctx = {

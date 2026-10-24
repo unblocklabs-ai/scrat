@@ -17,7 +17,7 @@
     "cleanup": "node --env-file=.env src/cleanup.ts",
     "recover": "node --env-file=.env src/recover.ts",
     "serve": "node --env-file=.env src/serve.ts",
-    "test": "node --test --test-concurrency=1 test/integration.test.mjs",
+    "test": "SCRAT_TEST_CONCURRENCY=${SCRAT_TEST_CONCURRENCY:-4} node --test test/integration.test.mjs",
     "typecheck": "tsc --project tsconfig.json",
     "knip": "knip"
   },

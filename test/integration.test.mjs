@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { describe } from "node:test";
 import { strict as assert } from "node:assert";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -10,6 +10,7 @@ const execute = promisify(execFile);
 let dockerProbe;
 const dockerAvailable = () => dockerProbe ??= execute("docker", ["info"], { timeout: 10_000 }).then(() => true, () => false);
 
+describe("scenarios", { concurrency: Number(process.env.SCRAT_TEST_CONCURRENCY ?? 1) }, () => {
 for (const [scenario, { title, needsDocker, needsSandbox, needsSystemd }] of Object.entries(scenarios)) {
   test(title, { timeout: 180_000 }, async (t) => {
     if (needsSandbox && (process.platform !== "linux" || !existsSync("/usr/bin/bwrap"))) { t.skip("Linux bubblewrap is required for OS isolation"); return; }
@@ -24,3 +25,4 @@ for (const [scenario, { title, needsDocker, needsSandbox, needsSystemd }] of Obj
     }
   });
 }
+});

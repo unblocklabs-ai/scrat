@@ -100,13 +100,13 @@ async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation
 async function reconcileFailedLabels(ctx: SyncContext, item: Item) {
   const labelled = manifests().flatMap(({ name, trigger }) => {
     const label = config.actions[name]?.failedLabel;
-    return trigger.item === item.kind && label ? [{ name, label }] : [];
+    return trigger.item === item.kind && label ? [{ name, label, selected: trigger.kind !== "label" || hasScratLabel(item) }] : [];
   });
   if (!labelled.length) return;
   try {
     await reconcileLabels(ctx.github, item.payload.number, {
       current: item.payload.labels ?? [],
-      desired: labelled.filter(({ name }) => latestTask(item.id, name)?.status === "failed").map(({ label }) => label),
+      desired: labelled.filter(({ name, selected }) => selected && latestTask(item.id, name)?.status === "failed").map(({ label }) => label),
       managed: labelled.map(({ label }) => label),
     }, { subjectId: item.id });
   } catch (error) { ctx.log.warn({ event: "github.failed_label_pending", subjectId: item.id, err: error }); }

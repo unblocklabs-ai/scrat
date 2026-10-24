@@ -373,6 +373,8 @@ const validationFeedback = async (variant) => {
     const cut = await f.runNextTask(stop.signal); f.onModel = undefined; assert.equal(f.row(s.tasks, cut.taskId).status, "queued");
     await route(); assert.ok(!marked(5), "an interrupted task is not labelled");
     tasks.retryTask(limited.taskId); await route(); assert.ok(!marked(4), "a retried task clears the label"); assert.ok(marked(3));
+    f.issues.get(3).labels = f.issues.get(3).labels.filter(({ name }) => name !== "scrat"); await route();
+    assert.ok(!marked(3), "deselecting an issue clears the label"); assert.ok(marked(2));
     config.actions.implement.enabled = false; f.addIssue(6, ["scrat"]); await route();
     assert.deepEqual(all(s.tasks).filter((t) => t.subjectId === "issue-6" && t.action === "implement"), [], "a disabled action gets no task to fail and label");
   }

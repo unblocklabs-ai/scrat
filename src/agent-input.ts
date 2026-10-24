@@ -1,13 +1,13 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { manifestOf } from "./actions.ts";
+import { actionsPublishing, manifestOf } from "./actions.ts";
 import { config } from "./config.ts";
 import type { ErrorDetails } from "./errors.ts";
 import { changedPaths, git } from "./git.ts";
 import { commentKey, parseCommentKey } from "./markers.ts";
 import type { ItemObservation } from "./observation.ts";
 import { priorReviewTexts } from "./pr-assessment.ts";
-import { completedRunsOfActionInRepository, getRun } from "./run-history.ts";
+import { completedRunsOfAction, completedRunsOfActionInRepository, getRun, issueImplementedBy } from "./run-history.ts";
 import type { Run, Task } from "./schema.ts";
 import { parseTriggerInput } from "./triggers.ts";
 
@@ -80,11 +80,15 @@ export async function buildAgentInput(options: {
   const listed = manifestOf(action).files;
   const history = listed.includes("history") ? historyReport(completedRunsOfActionInRepository(config.github.repository, action, config.context.historyRuns), action) : undefined;
   const prior = manifestOf(action).publish.includes("pr_assessment") ? priorReviewTexts(task.subjectId) : undefined;
+  const triage = listed.includes("triage") ? completedRunsOfAction(task.subjectId, actionsPublishing("labels"), 1)[0]?.result : undefined;
+  const issue = listed.includes("issue") ? issueImplementedBy(config.github.repository, evaluated.item.number) : undefined;
   await Promise.all([
     listed.includes("discussion") && writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),
     listed.includes("review") && report && writeContext("review", "review.md", report),
     listed.includes("previous_assessment") && prior && writeContext("previous_assessment", "previous-assessment.md", prior.assessment),
     listed.includes("previous_repair") && prior?.repair && writeContext("previous_repair", "previous-repair.md", prior.repair),
+    triage?.ready && writeContext("triage", "triage.md", triage.text),
+    issue && writeContext("issue", "issue.md", `# ${issue.title} (#${issue.number})\n\n${issue.body ?? ""}\n`),
     history && writeContext("history", "history.md", history),
     failure && writeContext("previousFailure", "previous-failure.json", JSON.stringify(failure, null, 2)),
     options.validationFailure && writeContext("validationFailure", "validation-failure.json", JSON.stringify(options.validationFailure, null, 2)),

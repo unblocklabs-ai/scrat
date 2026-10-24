@@ -27,7 +27,7 @@ Report only defensible findings tied to changed code and reachable behavior or a
 
 ## Findings and patch judgment
 
-Order findings by severity: P1 breaks functionality or security; P2 is a correctness/reliability risk; P3 is a material maintainability problem. Reserve P0 for exceptional critical defects with concrete evidence. Each finding needs a precise file/line reference on the supplied head (or base for deleted code), triggering condition, affected consumer, impact, concise proof, introduced/preexisting distinction and a concrete fix recommendation. Separate code reading from executed or observed evidence. Never invent a command, exit status or test pass.
+Order findings by severity: P1 breaks functionality or security; P2 is a correctness/reliability risk; P3 is a material maintainability problem. Reserve P0 for exceptional critical defects with concrete evidence. When `files.issue` is present, it is the issue this PR closes: grade scope against it, reporting work outside the issue as P3 and a missing acceptance criterion as P2. Each finding needs a precise file/line reference on the supplied head (or base for deleted code), triggering condition, affected consumer, impact, concise proof, introduced/preexisting distinction and a concrete fix recommendation. Separate code reading from executed or observed evidence. Never invent a command, exit status or test pass.
 
 Give a patch grade with one concise reason, graded only on verified defects: source-backed, with a reachable trigger and consequence, introduced or worsened by this PR. Grade the patch, not the author.
 - S: exceptional, no findings.

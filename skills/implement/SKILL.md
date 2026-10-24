@@ -20,7 +20,7 @@ Think like a systems designer, not a code generator. Optimize for abstractions t
 
 ## Implementation and validation
 
-Find the smallest correct change. Inspect the owning source, actual callers and existing patterns before choosing the repair. Routine choices supported by those patterns do not need human signoff. Name a genuine unresolved requirement or product/security/compatibility decision rather than inventing an answer or broadening the change.
+When `files.triage` is present, follow its cause, solution and validation plan unless the source contradicts it. Find the smallest correct change. Inspect the owning source, actual callers and existing patterns before choosing the repair. Routine choices supported by those patterns do not need human signoff. Name a genuine unresolved requirement or product/security/compatibility decision rather than inventing an answer or broadening the change.
 
 When the supplied session/workspace contains prior work or the previous failure file (`files.previousFailure`), continue it and address the actual failure (`previous`, when present, holds the base and head SHAs of the last handled state); do not rebuild from scratch or discard partial work.
 

@@ -28,10 +28,16 @@ export const runHistory = (subjectId: string, actions: Action | readonly Action[
     .where(and(eq(tasks.subjectId, subjectId), inArray(tasks.action, typeof actions === "string" ? [actions] : [...actions])))
     .orderBy(desc(runs.sequence)).all();
 
-export const completedRunsOfAction = (subjectId: string, action: Action, limit = Number.MAX_SAFE_INTEGER): Run[] =>
+export const completedRunsOfAction = (subjectId: string, actions: Action | readonly Action[], limit = Number.MAX_SAFE_INTEGER): Run[] =>
   db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
+    .where(and(eq(tasks.subjectId, subjectId), inArray(tasks.action, typeof actions === "string" ? [actions] : [...actions]), eq(tasks.status, "completed"), isNull(runs.error)))
     .orderBy(desc(runs.sequence)).limit(limit).all().map(({ run }) => run);
+
+export const issueImplementedBy = (repository: string, pullRequestNumber: number) =>
+  db.select({ payload: items.payload }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
+    .innerJoin(subjects, eq(tasks.subjectId, subjects.id)).innerJoin(items, eq(items.id, subjects.id))
+    .where(and(eq(subjects.repository, repository), eq(items.kind, "issue"), sql`json_extract(${runs.publication}, '$.pullRequestNumber') = ${pullRequestNumber}`))
+    .get()?.payload;
 
 export const completedRunsOfActionInRepository = (repository: string, action: Action, limit: number): { run: Run; subject: Subject; number?: number }[] =>
   db.select({ run: runs, subject: subjects, payload: items.payload }).from(runs)

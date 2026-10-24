@@ -7,7 +7,7 @@ reviewers:
   - { provider: codex-lb, model: deepseek/deepseek-v4.1-flash, thinkingLevel: high }
 context: all
 tools: [read, grep, find, ls, git, read_base]
-files: [discussion, previous_assessment, previous_repair]
+files: [discussion, previous_assessment, previous_repair, issue]
 publish: [pr_assessment]
 skill: skills/review_pr/SKILL.md
 model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }

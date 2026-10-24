@@ -1931,6 +1931,7 @@ export const scenarios = {
     assert.equal(repair.taskId, repairs(201)[0].id);
     const request = f.requests.findLast((r) => r.context.action === "address_review");
     assert.match(readFileSync(request.context.files.review, "utf8"), /Consolidated source-verified review/);
+    assert.equal(readFileSync(request.context.files.issue, "utf8"), "# Issue 1 (#1)\n\nInspect app.ts\n");
     assert.equal(f.comments.get(201).length, 2); assert.match(f.comments.get(201)[1].body, /Implemented the change/);
     await route(); assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 0, "A reply-only repair leaves the assessment current and cannot retrigger");
     assert.equal(repairs(201).length, 1); assert.equal(count(201), 1);
@@ -2004,13 +2005,20 @@ export const scenarios = {
     const moved = await run(); assert.equal(moved.taskId, repair9.id); assert.equal(moved.error.message, guarded);
     assert.equal(f.requests.length, calls9); assert.equal(git(resolve("remote.git"), "rev-parse", branch9), head9);
   } },
-  review_prior_assessment: { title: "a re-review of a Scrat PR after a pushed repair gives both panel reviewers and the consolidator the previous assessment and repair summary; a re-review of a human PR after a pushed file gets the previous assessment and head; first reviews get neither", run: async () => {
+  review_prior_assessment: { title: "a re-review of a Scrat PR after a pushed repair gives both panel reviewers and the consolidator the previous assessment and repair summary; a re-review of a human PR after a pushed file gets the previous assessment and head; first reviews get neither; implementation gets its issue's latest review when that review was ready, and reviews of a Scrat PR get the issue it implements while a human PR naming that issue does not", run: async () => {
     const review = async (n, mode) => { f.reset(n, mode); await route(); return success(); };
     const filesOf = (number, assessmentId) => f.requests.filter((r) => r.context.action === "review_pr" && r.context.item.number === number && r.context.files.directory.includes(assessmentId));
-    await implement(1); const first = await review(201, "grade-C");
+    const implementFiles = () => f.requests.findLast((r) => r.context.action === "implement").context.files;
+    f.addIssue(1); f.reset(1, "ready"); f.enqueue(1); const triage = await success(); assert.ok(triage.result.ready);
+    f.reset(1, "normal"); f.enqueue(1, "implement"); await success();
+    assert.equal(readFileSync(implementFiles().triage, "utf8"), triage.result.text, "Implementation gets the ready triage");
+    const first = await review(201, "grade-C");
     const firstRequests = f.requests.filter((r) => r.context.action === "review_pr");
     assert.ok(firstRequests.some((r) => r.consolidating));
-    for (const request of firstRequests) assert.ok(!("previous_assessment" in request.context.files) && !("previous_repair" in request.context.files), "A first review has no prior state");
+    for (const request of firstRequests) {
+      assert.ok(!("previous_assessment" in request.context.files) && !("previous_repair" in request.context.files), "A first review has no prior state");
+      assert.equal(readFileSync(request.context.files.issue, "utf8"), "# Issue 1 (#1)\n\nInspect app.ts\n", "A Scrat PR review gets the issue it implements");
+    }
     await route(); f.reset(201, "normal"); const repair = await success();
     assert.equal(repair.taskId, all(s.tasks).find((t) => t.action === "address_review").id); assert.ok(repair.result.text.includes("Implemented the change"));
     const repaired201 = f.prs.find((pr) => pr.number === 201);
@@ -2024,7 +2032,8 @@ export const scenarios = {
       assert.equal(readFileSync(request.context.files.previous_assessment, "utf8"), first.result.text);
       assert.equal(readFileSync(request.context.files.previous_repair, "utf8"), repair.result.text);
     }
-    await implement(2); f.prs.find((pr) => pr.number === 202).user.login = "human";
+    await implement(2); assert.ok(!("triage" in implementFiles()), "An unreviewed issue has no triage");
+    f.prs.find((pr) => pr.number === 202).user.login = "human";
     const humanFirst = await review(202, "grade-C");
     const humanFirstRequests = f.requests.filter((r) => r.context.item.number === 202 && r.context.action === "review_pr");
     assert.ok(humanFirstRequests.length && humanFirstRequests.every((r) => !("previous_assessment" in r.context.files) && !("previous_repair" in r.context.files)), "A human PR's first review has no prior state");
@@ -2039,6 +2048,16 @@ export const scenarios = {
       assert.equal(readFileSync(request.context.files.previous_assessment, "utf8"), humanFirst.result.text);
       assert.ok(!("previous_repair" in request.context.files), "A human PR has no repair summary");
     }
+    git(resolve("remote.git"), "branch", "human-feature", "main"); const humanFeature = pushFile("human-feature", "src/human.ts", "export const human = 1;\n");
+    git(resolve("remote.git"), "update-ref", "refs/pull/303/head", humanFeature);
+    f.prs.push({ id: 303, node_id: "PR_303", number: 303, title: "Human change", body: "Closes #1", state: "open", html_url: "https://github.com/fixture/project/pull/303", labels: [], updated_at: "2026-10-19T00:00:00Z",
+      user: { login: "human" }, head: { ref: "human-feature", sha: humanFeature, repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } } });
+    await route(); await success();
+    const humanPrRequests = f.requests.filter((r) => r.context.action === "review_pr" && r.context.item.number === 303);
+    assert.ok(humanPrRequests.length && humanPrRequests.every((r) => !("issue" in r.context.files)), "A human PR naming an issue gets no issue file");
+    f.addIssue(3); f.reset(3, "ready"); f.enqueue(3); await success(); f.reset(3, "normal"); f.enqueue(3); await success();
+    f.reset(3, "normal"); f.enqueue(3, "implement"); await success();
+    assert.ok(!("triage" in implementFiles()), "A later review that is not ready supersedes the ready triage");
   } },
   issue_effect: { title: "SCRAT_ISSUE footer blocks parse only at the end of the report, and the issue effect creates each fingerprint once, skips receipted and marker-matched issues, and creates nothing when any block leaks a secret", run: async () => {
     const { applyEffects } = await f.app("effects.ts");
@@ -3009,7 +3028,9 @@ export const scenarios = {
     };
     rejects("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, bash]"), /rule_check\.yaml: mode review forbids the bash, edit and write tools/);
     rejects("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, git, read_base]"), /read_base requires a review with agent: panel or context: change/);
-    rejects("review_pr", (text) => text.replace("[discussion, previous_assessment, previous_repair]", "[history]"), /files: history is not allowed with the pr_assessment effect/);
+    rejects("review_pr", (text) => text.replace("[discussion, previous_assessment, previous_repair, issue]", "[history]"), /files: history is not allowed with the pr_assessment effect/);
+    rejects("review_pr", (text) => text.replace("previous_repair, issue]", "previous_repair, triage]"), /files: triage requires trigger.item issue/);
+    rejects("review_issue", (text) => text.replace("files: [discussion]", "files: [issue]"), /files: issue requires trigger.item pr/);
     rejects("review_issue", (text) => text.replace("files: [discussion]", "files: [review]"), /files: review requires trigger.kind low_grade/);
     rejects("implement", (text) => text.replace("[read, grep, find, ls, bash, edit, write]", "[read, git]"), /mode change forbids the git and read_base tools/);
     rejects("implement", (text) => text.replace("item: issue", "item: pr"), /trigger.kind label requires item: issue/);

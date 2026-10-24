@@ -4,7 +4,7 @@ mode: change
 agent: single
 context: all
 tools: [read, grep, find, ls, bash, edit, write]
-files: [discussion]
+files: [discussion, triage]
 acceptance: nonempty_diff
 publish: [push, pull_request]
 skill: skills/implement/SKILL.md

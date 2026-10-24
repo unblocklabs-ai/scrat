@@ -242,6 +242,9 @@ const staleBranch = async (variant) => {
     assert.deepEqual(queuedFor(302), ["review_pr"], "a manual request survives routing");
     assert.ok((await run()).error); await route();
     assert.equal(notices().length, 1); assert.equal(f.comments.get(302).length, 1); assert.deepEqual(queuedFor(302), []);
+    branchOff("release", "release.txt", "release\n"); f.prs[1].base.ref = "release"; await route();
+    assert.deepEqual(queuedFor(302), ["review_pr"], "a retargeted PR is no longer blocked");
+    f.prs[1].base.ref = "main"; await route(); assert.deepEqual(queuedFor(302), []);
     pushFile("feature-b", "src/app.ts", "export const value = 9;\n"); f.prs[1].head.sha = remoteGit("rev-parse", "feature-b"); await route();
     assert.deepEqual(queuedFor(302), ["review_pr"]);
     await success(); await route();

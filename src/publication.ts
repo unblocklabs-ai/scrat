@@ -6,7 +6,7 @@ import { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { getRun, updateRun } from "./run-history.ts";
 import type { Run, Task, Subject } from "./schema.ts";
-import { getWorkspace } from "./workspaces.ts";
+import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 
 function receiptContext(run: Run, references: EventReferences): EffectContext {
   let publication = run.publication;
@@ -26,7 +26,11 @@ export async function publishRun(github: GitHubRepository, task: Task, run: Run,
   if (result.outcome !== "complete") throw new Error("Incomplete agent work cannot be published");
   const manifest = manifestOf(task.action);
   const effectContext = { ...receiptContext(run, references), github, task, run: { ...run, result, context }, current };
-  if (run.publication.commentOnly) return applyEffects(["comment"], effectContext);
+  if (run.publication.commentOnly) {
+    await applyEffects(["comment"], effectContext);
+    await removeWorkspace(run.workspaceId!, references);
+    return;
+  }
   if (manifest.mode === "change") {
     const workspace = run.workspaceId ? getWorkspace(run.workspaceId) : undefined;
     if (!workspace || workspace.removedAt) throw new Error("Publication workspace is no longer active");

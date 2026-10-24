@@ -764,6 +764,11 @@ export const scenarios = {
     assert.equal(f.comments.get(1).length, 1); assert.match(f.comments.get(1)[0].body, /^Implemented the change\./);
     assert.ok(f.comments.get(1)[0].body.trimEnd().endsWith(`<!-- scrat-task:${empty.taskId} -->`));
     await route(); assert.deepEqual(all(s.tasks).filter((t) => t.subjectId === "issue-1").map((t) => t.status), ["completed"]);
+    assert.ok(f.row(s.workspaces, empty.workspaceId).removedAt); assert.equal(f.row(s.subjects, "issue-1").workspaceId, null);
+    f.issues.get(1).labels = []; await route(); f.issues.get(1).labels = [{ name: "scrat" }]; await route();
+    const requeued = all(s.tasks).filter((t) => t.subjectId === "issue-1" && t.status === "queued");
+    assert.deepEqual(requeued.map((t) => t.action), ["implement"]);
+    f.issues.get(1).labels = []; await route(); assert.deepEqual(all(s.tasks).filter((t) => t.subjectId === "issue-1" && t.action === "implement" && t.status === "queued"), []);
     let calls = f.requests.length;
     const implemented = await implement(2); const head = f.prs[0].head.sha;
     changeMain("src/app.ts", "export const value = 99;\n"); await route();

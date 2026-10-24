@@ -10,7 +10,7 @@ import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
 import { describeError, type ErrorDetails } from "./errors.ts";
-import { createMergeCommit, fetchPullRequestHead, fetchRepository, git, hasPendingMerge, mergeBase, prepareTarget } from "./git.ts";
+import { createMergeCommit, fetchPullRequestHead, fetchRepository, git, headOf, hasPendingMerge, mergeBase, prepareTarget } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { startOperation } from "./logging.ts";
@@ -243,7 +243,7 @@ async function acquireChangeWorkspace(ctx: Ctx, observed: Observed) {
     } else {
       try {
         await git(workspace.path, ["merge", "--ff-only", preparedHead]);
-        if (await git(workspace.path, ["rev-parse", "HEAD"]) === preparedHead) {
+        if (await headOf(workspace.path) === preparedHead) {
           await pinWorkspaceBase(workspace, preparedHead);
           db.update(workspaces).set({ baseSha: preparedHead }).where(eq(workspaces.id, workspace.id)).run();
         }
@@ -252,7 +252,7 @@ async function acquireChangeWorkspace(ctx: Ctx, observed: Observed) {
       }
     }
   }
-  const startHeadSha = await git(workspace.path, ["rev-parse", "HEAD"]);
+  const startHeadSha = await headOf(workspace.path);
   return { workspace, validationOnly, mergeInProgress, mainSha, preparedHead, startHeadSha, title: context.item.title };
 }
 
@@ -263,7 +263,7 @@ async function mergeBehind(ctx: Ctx, { observation, pullRequest }: Observed, p: 
   if (!behind || conflicts) return;
   const { baseBranch } = observation;
   await mergeBase(p.workspace.path, p.mainSha, `Merge ${baseBranch} into ${pullRequest!.head.ref}`, botAuthor());
-  p.headSha = await git(p.workspace.path, ["rev-parse", "HEAD"]);
+  p.headSha = await headOf(p.workspace.path);
   p.result = { text: `Merged ${baseBranch} (${p.mainSha.slice(0, 7)}) into this branch; no conflicts`, ready: false, paths: [...new Set(diffPaths)], outcome: "complete" };
   updateRun(run.id, { result: p.result, stage: "validating" });
   try {
@@ -284,7 +284,7 @@ async function prepareChangeCommands({ references }: Ctx, { pullRequest, observa
     if (!behind || conflicts) throw error;
     const { baseBranch } = observation;
     await mergeBase(p.workspace.path, p.mainSha, `Merge ${baseBranch} into ${pullRequest.head.ref}`, botAuthor()).catch(() => { throw error; });
-    p.headSha = await git(p.workspace.path, ["rev-parse", "HEAD"]);
+    p.headSha = await headOf(p.workspace.path);
     await prepareWorkspace(p.workspace, p.commandEnvironment, references, p.databaseConfig);
   }
 }
@@ -296,7 +296,7 @@ async function validateStage(ctx: Ctx, p: Change, acceptance: Acceptance) {
   if (!result) throw new Error("No saved agent result to validate");
   assertComplete(result);
   const unchanged = acceptance === "complete" && !p.validated && !validationOnly
-    && p.startHeadSha === p.preparedHead && !p.mergeInProgress && await git(workspace.path, ["rev-parse", "HEAD"]) === p.startHeadSha
+    && p.startHeadSha === p.preparedHead && !p.mergeInProgress && await headOf(workspace.path) === p.startHeadSha
     && !await git(workspace.path, ["status", "--porcelain"]);
   if (unchanged) updateRun(run.id, { publication: { status: "pending", commitSha: p.startHeadSha }, stage: "publishing" });
   else if (!p.validated) {

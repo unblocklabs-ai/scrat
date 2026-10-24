@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { manifestOf } from "./actions.ts";
 import { config } from "./config.ts";
 import type { ErrorDetails } from "./errors.ts";
-import { git } from "./git.ts";
+import { changedPaths, git } from "./git.ts";
 import { commentKey, parseCommentKey } from "./markers.ts";
 import type { ItemObservation } from "./observation.ts";
 import { priorReviewTexts } from "./pr-assessment.ts";
@@ -31,7 +31,7 @@ function historyReport(entries: ReturnType<typeof completedRunsOfActionInReposit
 export async function readDiffScope(workspacePath: string, mainSha: string, preparedHead: string, isPullRequest: boolean) {
   const [diffBaseSha, diffPaths] = await Promise.all([
     isPullRequest ? git(workspacePath, ["merge-base", mainSha, preparedHead]) : mainSha,
-    isPullRequest ? git(workspacePath, ["diff", "--name-only", "--no-renames", "-z", `${mainSha}...${preparedHead}`]).then((output) => output.split("\0").filter(Boolean)) : [],
+    isPullRequest ? changedPaths(workspacePath, `${mainSha}...${preparedHead}`) : [],
   ]);
   return { diffBaseSha, diffPaths };
 }

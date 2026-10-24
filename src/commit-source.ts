@@ -2,7 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { manifests } from "./actions.ts";
 import { commitSettings, config, getRepositoryPath, isBotLogin } from "./config.ts";
 import { db } from "./db.ts";
-import { fetchRepository, git, isAncestor } from "./git.ts";
+import { fetchRepository, git, gitList, isAncestor } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { type OperationScope, withOperation } from "./logging.ts";
 import type { Manifest } from "./manifests.ts";
@@ -34,8 +34,8 @@ function commitMatches({ author, message }: CommitTrigger, commit: RangeCommit) 
 }
 
 async function rangeCommits(repositoryPath: string, previousSha: string, tip: string): Promise<RangeCommit[]> {
-  const log = await git(repositoryPath, ["log", "--first-parent", "--reverse", "-z", "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%s%x1f%B", `${previousSha}..${tip}`]);
-  return log.split("\0").filter(Boolean).map((entry) => {
+  const log = await gitList(repositoryPath, ["log", "--first-parent", "--reverse", "-z", "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%s%x1f%B", `${previousSha}..${tip}`]);
+  return log.map((entry) => {
     const [sha = "", parents = "", author = "", email = "", title = "", ...message] = entry.split("\x1f");
     return { sha: sha.trim(), parent: parents.split(" ")[0] ?? "", author, email, title, message: message.join("\x1f") };
   });

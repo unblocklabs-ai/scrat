@@ -30,6 +30,15 @@ export function errorCode(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }
 
+export const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+export async function ifMissing<T, F>(promise: Promise<T>, fallback: F) {
+  try { return await promise; } catch (error) {
+    if (errorCode(error) === "ENOENT") return fallback;
+    throw error;
+  }
+}
+
 export function errorStatus(error: unknown) {
   return typeof error === "object" && error !== null && "status" in error && typeof error.status === "number" ? error.status : undefined;
 }

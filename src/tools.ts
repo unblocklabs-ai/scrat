@@ -8,7 +8,7 @@ import { backgroundsWork, heavyCommand, withValidationSlot } from "./commands.ts
 import { config } from "./config.ts";
 import type { Manifest, ToolName } from "./manifests.ts";
 import { botName } from "./identity.ts";
-import { errorCode, redactSecrets } from "./errors.ts";
+import { errorCode, ifMissing, redactSecrets } from "./errors.ts";
 import { childEnvironment } from "./secrets.ts";
 import { blobSize, gitPage } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
@@ -36,10 +36,7 @@ export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, ba
     return real;
   }
   async function confine(path: string, allowed: string[]) {
-    const real = await realpath(path).catch((error: unknown) => {
-      if (errorCode(error) === "ENOENT") return resolve(path);
-      throw error;
-    });
+    const real = await ifMissing(realpath(path), resolve(path));
     return assertInside(real, path, allowed);
   }
   async function confineWrite(path: string) {

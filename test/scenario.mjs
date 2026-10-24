@@ -1686,6 +1686,7 @@ export const scenarios = {
       const pending = attempt(3, "heavy-fg");
       for (let n = 0; n < 600 && !(waiting = lines.find((line) => line.event === "validation.waiting")); n++) await new Promise((done) => setTimeout(done, 50));
       heavyBeforeRelease = lines.filter((line) => line.event === "pi.heavy_command").length;
+      await new Promise((done) => setTimeout(done, 20));
       release(); await holder; foreground = await pending;
     } finally { release?.(); restoreLogs(); }
     const workspaceOf = (r) => f.row(s.workspaces, r.workspaceId).path;

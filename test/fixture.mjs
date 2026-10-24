@@ -51,7 +51,7 @@ export async function fixture(scenario, spec) {
   if (patMode || scenario === "isolation") process.env.GITHUB_PAT = pat;
   const scoped = ["scoped_http", "scoped_github_search", "scoped_browser", "bindings_startup"].includes(scenario);
   if (scoped) process.env.SCOUT_TOKEN = "scout-" + "k9Xq2LmPz7".repeat(3);
-  if (scenario.startsWith("commit_review") || scenario.startsWith("slack_status") || scenario === "publish_effects") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
+  if (scenario.startsWith("commit_review") || scenario === "recovery" || scenario === "isolation" || scenario.startsWith("slack_status") || scenario === "publish_effects") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
   const modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set() };
@@ -84,12 +84,12 @@ export async function fixture(scenario, spec) {
     onModel?.(context, step);
     const review = context.action.startsWith("review");
     let tool;
-    if (review && step === 0) tool = mode === "grep" ? { name: "grep", args: { pattern: "value" } } : { name: "read", args: { path: scenario === "unicode_scope" ? "src/a\u00a0b.ts" : scenario === "panel" ? "node_modules/pinned-runtime/package.json" : mode.startsWith("helper") ? "src/helper.ts" : mode === "at" ? "@src/app.ts" : "src/app.ts" } };
+    if (review && step === 0) tool = mode === "grep" ? { name: "grep", args: { pattern: "value" } } : { name: "read", args: { path: mode === "nbsp" ? "src/a\u00a0b.ts" : scenario === "panel" ? "node_modules/pinned-runtime/package.json" : mode.startsWith("helper") ? "src/helper.ts" : mode === "at" ? "@src/app.ts" : "src/app.ts" } };
     if (review && scenario === "unicode_nfd" && step === 0) tool = { name: "read", args: { path: existsSync("seed/src/cafe\u0301.ts") ? "src/cafe\u0301.ts" : "src/caf\u00e9.ts" } };
     if (review && mode === "grep" && step === 1) tool = { name: "read", args: { path: "src/app.ts" } };
     if (review && scenario === "relevance" && step >= 2 && step <= 4) tool = { name: "read", args: { path: ["package.json", "pnpm-lock.yaml", "node_modules/wrangler/package.json"][step - 2] } };
-    if (review && scenario.startsWith("commit_review") && step === 1) tool = { name: "read_base", args: { path: "src/app.ts" } };
-    if (review && scenario.startsWith("commit_review") && step === 2) tool = { name: "git", args: { operation: "diff_stat", from: "base", to: "head" } };
+    if (review && context.action === "review_base_change" && step === 1) tool = { name: "read_base", args: { path: "src/app.ts" } };
+    if (review && context.action === "review_base_change" && step === 2) tool = { name: "git", args: { operation: "diff_stat", from: "base", to: "head" } };
     if (review && scenario === "panel" && step === 1) tool = { name: "read_base", args: { path: "src/app.ts" } };
     if (review && scenario === "panel" && step >= 2) {
       const dir = context.files.directory;

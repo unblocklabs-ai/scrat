@@ -334,11 +334,14 @@ const validationFeedback = async (variant) => {
     assert.match(f.prs[0].body, /Implemented the change\.[\s\S]*Fixed the validation failure\./);
     const turns = () => f.requests.filter((entry) => entry.request.messages.at(-1).role === "user").length - feedbackRequests().length;
     f.addIssue(2, ["scrat"]); f.reset(2, "feedback-fix"); f.enqueue(2, "implement");
+    f.comments.set(2, [humanComment(2, 9100, "Only the discussion file says this", "2026-10-19T01:00:00Z")]);
     const stop = new AbortController(); f.onModel = () => stop.abort();
     const cut = await f.runNextTask(stop.signal); f.onModel = undefined;
     assert.equal(cut.stage, "validating"); assert.equal(f.row(s.tasks, cut.taskId).retryMode, "validation");
     const started = turns(), asked = feedbackRequests().length, checked = validations();
-    const resumed = await success();
+    f.script = [undefined, undefined, { name: "read", args: { path: f.requests.at(-1).context.files.discussion } }, { name: "bash", args: { command: "rm -f fail-validation" } }];
+    const resumed = await success(); f.script = undefined;
+    assert.match(JSON.stringify(f.requests.at(-1).request.messages), /Only the discussion file says this/, "a resumed correction round can read the original context files");
     assert.equal(resumed.inferenceFromRunId, cut.id); assert.equal(resumed.piSessionId, cut.piSessionId);
     assert.equal(turns(), started, "the resumed run starts no new agent turn");
     assert.equal(feedbackRequests().length, asked + 1); assert.match(lastUser(feedbackRequests().at(-1)), /round 1 of 2/);

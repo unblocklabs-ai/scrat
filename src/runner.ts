@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { actionsPublishing, manifestOf } from "./actions.ts";
-import { buildAgentInput, evaluateContext, readDiffScope } from "./agent-input.ts";
+import { buildAgentInput, contextDirOf, evaluateContext, readDiffScope } from "./agent-input.ts";
 import { commitInput, describeCommit, startCommitThread } from "./commit-review.ts";
 import { describeWindow } from "./window-review.ts";
 import { config, getActionConfig, getRepositoryPath, isBotLogin } from "./config.ts";
@@ -19,7 +19,7 @@ import { observe, type ItemObservation } from "./observation.ts";
 import { assertConfiguredRepository, remoteUrl } from "./repository.ts";
 import { executePi } from "./pi.ts";
 import { resolvePrReview } from "./pr-assessment.ts";
-import { getRun, latestSessionRun, runHistory, updateRun } from "./run-history.ts";
+import { getRun, inferenceRunOf, latestSessionRun, runHistory, updateRun } from "./run-history.ts";
 import { reviewPullRequest } from "./pr-review.ts";
 import { publishCommit, publishRun, publishWindow } from "./publication.ts";
 import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint, InterruptedError } from "./results.ts";
@@ -370,9 +370,10 @@ async function changeRun(ctx: Ctx, observed: Observed) {
     validated: false, validationFailure: undefined, agentInput: undefined, target: undefined,
     deferred: acquired.mergeInProgress || Boolean(run.retryOfRunId) || acceptance === "conflict_free",
   };
-  if (!validationOnly) {
+  let { diffPaths, diffBaseSha } = await readDiffScope(workspace.path, mainSha, p.preparedHead, Boolean(observed.pullRequest));
+  if (validationOnly) p.agentInput = { contextDir: contextDirOf(inferenceRunOf(run).id), revisions: { head: p.headSha, base: diffBaseSha, main: mainSha } };
+  else {
     const evaluated = evaluateContext(run, task, observed.observation);
-    let { diffPaths, diffBaseSha } = await readDiffScope(workspace.path, mainSha, p.preparedHead, Boolean(observed.pullRequest));
     updateRun(run.id, { context: evaluated });
     let merged = await mergeBehind(ctx, observed, p, diffPaths, acceptance);
     if (!p.validated) {

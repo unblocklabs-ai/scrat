@@ -51,6 +51,8 @@ export function evaluateContext(run: Run, task: Task, observation: ItemObservati
   };
 }
 
+export const contextDirOf = (runId: string) => resolve("data/runs", runId);
+
 export async function buildAgentInput(options: {
   run: Run; task: Task; evaluated: ReturnType<typeof evaluateContext>; diffBaseSha: string; diffPaths: string[];
   mainSha: string; headSha: string; baseRef: string; mergeInProgress: boolean;
@@ -67,7 +69,7 @@ export async function buildAgentInput(options: {
   if (trigger.source === "github_items") delete input.kind;
   const changedPaths = trigger.kind === "item_changed" ? trigger.changedPaths ?? [] : [];
   if (changedPaths.length > config.context.inlinePaths) { delete input.changedPaths; input.changedPathCount = changedPaths.length; }
-  const contextDir = resolve("data/runs", run.id);
+  const contextDir = contextDirOf(run.id);
   await mkdir(contextDir, { recursive: true });
   const files: Record<string, string> = { directory: contextDir };
   const writeContext = async (key: string, name: string, content: string) => {

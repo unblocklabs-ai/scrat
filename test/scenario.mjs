@@ -1846,12 +1846,17 @@ export const scenarios = {
     const r = f.row(s.runs, claim.run.id); assert.equal(r.error.code, "RUN_INTERRUPTED"); assert.equal(r.result.text, "Saved"); assert.equal(r.publication.commentId, 123);
     tasks.retryTask(r.taskId); assert.ok(tasks.claimTask());
   } },
-  cleanup: { title: "cleanup failure cannot turn a published review into a failed task", run: async () => {
+  cleanup: { title: "cleanup failure cannot turn a published review into a failed task, and cleanup never removes a change workspace through a review that stopped early", run: async () => {
     f.addIssue(1); f.enqueue(1); f.faults.cleanup.add(1); const r = await success();
     assert.equal(f.row(s.tasks, r.taskId).status, "completed"); const w = f.row(s.workspaces, r.workspaceId);
     assert.equal(w.removedAt, null); assert.equal(readFileSync(w.path + "/keep.txt", "utf8"), "preserve\n");
     git(w.path, "reset", "--hard", w.baseSha); execFileSync(process.execPath, [resolve("app/src/cleanup.ts")], { stdio: "pipe" });
     assert.ok(f.row(s.workspaces, r.workspaceId).removedAt);
+    const implemented = await implement(2), pr = all(s.items).find((i) => i.kind === "pr");
+    tasks.enqueueTask({ subjectId: pr.id, action: "review_pr", reason: "Stopped before its workspace", input: { source: "github_items", kind: "manual", manual: true } });
+    const stop = new AbortController(); stop.abort(); assert.ok((await f.runNextTask(stop.signal)).error);
+    execFileSync(process.execPath, [resolve("app/src/cleanup.ts")], { stdio: "pipe" });
+    assert.equal(f.row(s.workspaces, implemented.workspaceId).removedAt, null, "cleanup keeps a PR workspace that a stopped review never used");
   } },
   sync_missing_item: { title: "a deleted open item is marked closed and its failed read does not stop routing for the others", run: async () => {
     f.addIssue(1); f.addIssue(2); await route();

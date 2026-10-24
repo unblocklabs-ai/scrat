@@ -759,9 +759,12 @@ export const scenarios = {
   } },
   acceptance: { title: "action postconditions reject empty implementations and unresolved conflicts but permit reply-only feedback", run: async () => {
     f.addIssue(1, ["scrat"]); f.enqueue(1, "implement"); f.reset(1, "no-change");
-    const empty = await run(); assert.match(empty.error.message, /no changes/); assert.equal(f.prs.length, 0);
-    let calls = f.requests.length; tasks.retryTask(empty.taskId, "validation");
-    const stillEmpty = await run(); assert.match(stillEmpty.error.message, /no changes/); assert.equal(f.requests.length, calls);
+    const empty = await success(); assert.equal(f.prs.length, 0); assert.equal(empty.publication.status, "published");
+    assert.equal(empty.publication.publishedCommitSha, undefined); assert.equal(f.row(s.tasks, empty.taskId).status, "completed");
+    assert.equal(f.comments.get(1).length, 1); assert.match(f.comments.get(1)[0].body, /^Implemented the change\./);
+    assert.ok(f.comments.get(1)[0].body.trimEnd().endsWith(`<!-- scrat-task:${empty.taskId} -->`));
+    await route(); assert.deepEqual(all(s.tasks).filter((t) => t.subjectId === "issue-1").map((t) => t.status), ["completed"]);
+    let calls = f.requests.length;
     const implemented = await implement(2); const head = f.prs[0].head.sha;
     changeMain("src/app.ts", "export const value = 99;\n"); await route();
     const prItem = all(s.items).find((i) => i.kind === "pr");
@@ -1635,11 +1638,11 @@ export const scenarios = {
       release(); await holder; foreground = await pending;
     } finally { release?.(); }
     const workspaceOf = (r) => f.row(s.workspaces, r.workspaceId).path;
-    assert.ok(nohup.error);
+    assert.equal(nohup.publication.commentOnly, true);
     for (const seen of [nohupSeen, backgroundSeen]) assert.match(seen, /runs a background job/);
     assert.match(nohupSeen, /foreground/);
     assert.ok(!existsSync(resolve(workspaceOf(nohup), "log")), "the backgrounded command must not run");
-    assert.ok(background.error);
+    assert.equal(background.publication.commentOnly, true);
     assert.ok(!existsSync(resolve(workspaceOf(background), ".scrat/heavy-bg")), "the backgrounded command must not run");
     assert.equal(foreground.error, null, JSON.stringify(foreground.error));
     assert.ok(existsSync(resolve(workspaceOf(foreground), ".scrat/heavy-fg")));

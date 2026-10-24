@@ -26,6 +26,7 @@ export async function publishRun(github: GitHubRepository, task: Task, run: Run,
   if (result.outcome !== "complete") throw new Error("Incomplete agent work cannot be published");
   const manifest = manifestOf(task.action);
   const effectContext = { ...receiptContext(run, references), github, task, run: { ...run, result, context }, current };
+  if (run.publication.commentOnly) return applyEffects(["comment"], effectContext);
   if (manifest.mode === "change") {
     const workspace = run.workspaceId ? getWorkspace(run.workspaceId) : undefined;
     if (!workspace || workspace.removedAt) throw new Error("Publication workspace is no longer active");

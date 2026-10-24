@@ -2373,7 +2373,7 @@ export const scenarios = {
   package_store: { title: "a configured package store is shared read-write across sandboxed workspaces", needsSandbox: true,
     configure: [(config) => {
       const store = "/home/scrat/.local/share/pnpm/store";
-      config.workspace = { ...config.workspace, sandbox: true, packageStore: resolve("shared-store"), prepare: [["sh", "-c", `pnpm store path > ${store}/path && if [ -f ${store}/marker ]; then touch ${store}/seen; else touch ${store}/marker; fi`]] };
+      config.workspace = { ...config.workspace, sandbox: true, validate: [], packageStore: resolve("shared-store"), prepare: [["sh", "-c", `pnpm store path > ${store}/path && if [ -f ${store}/marker ]; then touch ${store}/seen; else touch ${store}/marker; fi`]] };
     }],
     run: async () => {
       for (const number of [1, 2]) {

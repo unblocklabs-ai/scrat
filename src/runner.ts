@@ -40,7 +40,7 @@ const botAuthor = () => ({ name: config.github.botLogin, email: `${config.github
 
 async function prepareWorkspace(workspace: Workspace, environment: Environment, references: References, databaseConfig?: DatabaseConfig | null) {
   await runCommands(config.workspace.prepare, workspace.path, environment, references, "prepare");
-  if (databaseConfig) await runCommands([databaseConfig?.migrate], workspace.path, environment, references, "migrate");
+  if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, environment, references, "migrate");
 }
 
 async function asCheckFailure<T>(fn: () => Promise<T>) {

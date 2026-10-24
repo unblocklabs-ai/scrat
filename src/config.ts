@@ -57,7 +57,7 @@ export function getActionConfig(action: string) {
   return {
     ...actionConfig,
     skill: skillPath(manifest, actionConfig.skill),
-    reviewers: (actionConfig.reviewers ?? []),
+    reviewers: actionConfig.reviewers ?? [],
   };
 }
 

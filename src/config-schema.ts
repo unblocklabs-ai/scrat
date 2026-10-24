@@ -23,6 +23,7 @@ const schema = Type.Object({
   }, strict),
   bindings: Type.Record(Type.String(), Type.Object({ secret: Type.String(), hosts: Type.Array(Type.String()), header: Type.String(), prefix: Type.Optional(Type.String()) }, strict)),
   context: Type.Object({ inlinePaths: positive, historyRuns: positive, historyBytes: positive }, strict),
+  relevance: Type.Object({ ignoredPaths: Type.Array(Type.String()) }, strict),
   tools: Type.Object({
     readBytes: Type.Object({ default: positive, max: positive }, strict),
     git: Type.Object({ maxCommits: positive, maxScopeBytes: positive }, strict),

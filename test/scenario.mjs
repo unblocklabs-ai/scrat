@@ -65,6 +65,7 @@ const seedUnicodeScope = () => writeFileSync("seed/src/a b.ts", "export const sp
 const seedUnicodeNfd = () => writeFileSync("seed/src/caf\u00e9.ts", "export const unicode = 1;\n");
 const seedLockfile = () => {
   seedIgnore();
+  mkdirSync("seed/assets/.vite", { recursive: true }); writeFileSync("seed/assets/.vite/manifest.json", "{}\n");
   writeFileSync("seed/package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "1.0.0" } }));
   writeFileSync("seed/pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: old}\n  unrelated@1.0.0:\n    resolution: {integrity: old}\n");
 };
@@ -1443,10 +1444,13 @@ export const scenarios = {
     const relevant = await freshness(saved, { ...now, mainSha: codeSha }, "relevant-paths");
     assert.equal(relevant.kind, "stale"); assert.equal(relevant.reason, "base"); assert.ok(relevant.changedPaths.includes("src/app.ts"));
   } },
-  relevance: { title: "root searches and unrelated development dependencies do not trigger re-review", seed: seedLockfile, configure: [configureLockfile], run: async () => {
+  relevance: { title: "root searches, unrelated development dependencies and ignored generated paths do not trigger re-review", seed: seedLockfile, configure: [configureLockfile, (config) => { config.relevance.ignoredPaths = ["^assets/\\.vite/"]; }], run: async () => {
     f.addIssue(1); f.reset(1, "grep"); await route(); const r = await success();
     assert.ok(r.result.paths.includes("src/app.ts")); assert.ok(!r.result.paths.includes("."));
+    assert.ok(r.result.paths.includes("assets/.vite/manifest.json"), "The review read the generated manifest");
     changeMain("notes.md", "new docs\n"); await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
+    changeMain("assets/.vite/manifest.json", '{"app":"app-2.js"}\n'); await route();
+    assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "A push touching only ignored paths queues no review");
     changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "2.0.0" } }));
     changeMain("pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: old}\n  unrelated@2.0.0:\n    resolution: {integrity: new}\n");
     await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "Unrelated dev dependencies must not trigger review");
@@ -2576,6 +2580,7 @@ export const scenarios = {
     await validateStaticConfig(variant((c) => { c.workspace.commandMemoryMax = null; c.workspace.packageStore = null; }));
     await startup((c) => { c.tools.readBytes.max = c.tools.readBytes.default - 1; }, /tools\.readBytes\.max must not be less than tools\.readBytes\.default/);
     await startup((c) => { c.workspace.heavyCommands = ["^(unclosed"]; }, /heavyCommands\[0\] is not a valid regular expression/);
+    await startup((c) => { c.relevance.ignoredPaths = ["^assets/", "^(unclosed"]; }, /relevance\.ignoredPaths\[1\] is not a valid regular expression/);
     await startup((c) => { c.workspace.validate = []; }, /workspace\.validate is empty but address_pr_feedback, address_review, implement, resolve_conflicts publish commits.*\[\["true"\]\]/);
     await validateStaticConfig(variant((c) => { c.workspace.validate = []; for (const name of ["implement", "address_review", "address_pr_feedback", "resolve_conflicts"]) c.actions[name].enabled = false; }));
     await startup((c) => { c.actions.implement.agent = "panel"; }, /implement: mode change requires source github_items and agent: single/);

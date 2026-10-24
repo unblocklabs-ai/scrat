@@ -106,6 +106,7 @@ Per-install systemd overrides (for example a lower `MemoryMax` than the unit's 2
 | `context.inlinePaths` | Most changed paths put inline in the agent's input; beyond it they go to a context file. |
 | `context.historyRuns` | How many earlier completed runs of an action feed its `history` context. |
 | `context.historyBytes` | Size cap of the `history` context. |
+| `relevance.ignoredPaths` | Regular expressions matched against each repository-relative path changed on the base branch, for generated output such as build manifests. A push whose changed paths all match is relevant to no review, and matching paths are left out of the changed paths given to the agent. The default `[]` ignores nothing. |
 | `tools.readBytes.default` / `tools.readBytes.max` | Bytes returned by one call of a tool that reads text (the review git tool, `read_base`, the browser's page text) / the cap on its `limit` parameter and on HTTP responses. |
 | `tools.git.maxCommits` | Most commits one review git `log` call lists. |
 | `tools.git.maxScopeBytes` | Most bytes of file names the review git tool reads to scope a diff. |

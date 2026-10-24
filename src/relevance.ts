@@ -38,7 +38,8 @@ export async function reviewChanges(repository: string, before: string, after: s
 }
 
 async function computeReview(repository: string, before: string, after: string, scope: string[]): Promise<Review> {
-  const paths = await changedPaths(repository, before, after);
+  const ignored = config.relevance.ignoredPaths.map((pattern) => new RegExp(pattern));
+  const paths = (await changedPaths(repository, before, after)).filter((path) => !ignored.some((pattern) => pattern.test(path)));
   if (!scope.length || scope.includes(".")) return { paths, relevant: paths.length > 0 };
   const tracked = await Promise.all([before, after].map((sha) => listTree(repository, sha)));
   const observed = reviewScope(scope, tracked.flatMap((files) => files.split("\0").filter(Boolean)));

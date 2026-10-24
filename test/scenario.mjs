@@ -560,6 +560,7 @@ export const scenarios = {
       assert.ok(count(since, new RegExp(`/issues/${number}/comments`)) <= 1);
     }
     since = f.calls.length; await route();
+    assert.ok(reads(since).length > 0);
     assert.deepEqual(reads(since).filter((call) => call.status !== 304), []);
     const remaining = f.rate.remaining; await route(); assert.equal(f.rate.remaining, remaining, "304s do not consume the rate limit");
     f.comments.set(202, [humanComment(202, 900, "Please rename this", "2026-10-19T02:00:00Z", "c900")]);
@@ -1073,15 +1074,17 @@ export const scenarios = {
     const invalid = await run(); assert.match(invalid.error.message, /grade/i);
     assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
   } },
-  review_retry: { title: "a review whose reviewers all fail transiently is held until due and publishes once after recovery, while a mixed panel stays failed", configure: [(config) => { config.harness.agentRetry.maxRetries = 1; }], run: async () => {
+  review_retry: { title: "a review whose reviewers all fail transiently is held until due and publishes once after recovery, while a mixed panel stays failed", configure: [(config) => { config.harness.agentRetry.maxRetries = 1; config.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 100 }; }], run: async () => {
     await implement(2); await route(); f.transient.failures = 4; f.reset(202, "transient");
     let failed = await run(); const task = () => f.row(s.tasks, failed.taskId);
-    assert.equal(failed.error.code, "TRANSIENT_INFERENCE"); assert.equal(task().status, "queued");
+    const delay = () => (Date.parse(task().availableAt) - Date.parse(f.row(s.runs, failed.id).finishedAt)) / 1000;
+    assert.equal(failed.error.code, "TRANSIENT_INFERENCE"); assert.equal(task().status, "queued"); const first = delay();
     assert.equal(await f.runNextTask(), undefined, "a requeued review is not claimed before it is due");
     const id = task().id; await route();
     assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 1); assert.equal(await f.runNextTask(), undefined);
     tasks.retryTask(id); assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 1);
     failed = await run(); assert.equal(failed.error.code, "TRANSIENT_INFERENCE"); assert.equal(task().status, "queued");
+    const second = delay(); assert.ok(second >= 1.5 * first, `backoff grows: ${first} then ${second}`); assert.ok(second <= 100.1, `backoff stays within maxDelaySeconds: ${second}`);
     assert.equal(await f.runNextTask(), undefined, "a second failure is also held until due");
     assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
     tasks.enqueueTask({ subjectId: task().subjectId, action: "review_pr", reason: "Changed", input: { source: "github_items", kind: "manual" } });
@@ -1114,7 +1117,7 @@ export const scenarios = {
   format_retry: { title: "malformed final footers are corrected inside the same Pi session up to a cap, while implementations and undecided outcomes are not, and an incomplete review is continued within its budget", run: async () => {
     f.addIssue(1, ["scrat"]); f.reset(1, "format-once"); f.enqueue(1, "implement");
     let before = f.requests.length; const implemented = await success();
-    assert.ok(f.requests.length - before >= 2, "the malformed footer was sent back to the agent");
+    assert.ok(f.requests.length - before >= 2 && f.requests.length - before <= 4, "the malformed footer was sent back to the agent once");
     assert.equal(implemented.result.outcome, "complete");
     const reviewCounts = () => {
       const counts = {};
@@ -1128,18 +1131,18 @@ export const scenarios = {
       const start = reviewCounts(); f.reset(201, mode);
       tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Review again", input: { source: "github_items", kind: "manual" } });
       const reviewed = await success(); const end = reviewCounts();
-      for (const k of Object.keys(normal)) assert.ok(end[k] - (start[k] ?? 0) >= normal[k] + (k === target ? 1 : 0), `${mode} ${k}`);
+      for (const k of Object.keys(normal)) assert.ok(end[k] - (start[k] ?? 0) >= normal[k] + (k === target ? 1 : 0) && end[k] - (start[k] ?? 0) <= normal[k] + 2, `${mode} ${k}`);
       assert.equal(reviewed.result.grade, "B");
       assert.ok(reviewed.result.paths.includes("src/app.ts"));
       assert.ok(reviewed.reviewers.every((r) => !r.error));
     }
     f.addIssue(2); f.reset(2, "no-status"); f.enqueue(2, "implement");
     before = f.requests.length; const stuck = await run();
-    assert.match(stuck.error.message, /SCRAT_STATUS/); assert.ok(f.requests.length - before >= 2);
+    assert.match(stuck.error.message, /SCRAT_STATUS/); assert.ok(f.requests.length - before >= 2 && f.requests.length - before <= 4);
     assert.equal(f.row(s.tasks, stuck.taskId).status, "failed");
     assert.ok(existsSync(f.row(s.workspaces, stuck.workspaceId).path + "/src/app.ts"));
     const prsBefore = f.prs.length, writesBefore = f.writes.length;
-    for (const [i, [mode, least, most]] of [["incomplete", 0, 2], ["needs_decision", 0, 2], ["bare-status", 2, Infinity]].entries()) {
+    for (const [i, [mode, least, most]] of [["incomplete", 0, 2], ["needs_decision", 0, 2], ["bare-status", 2, 4]].entries()) {
       f.addIssue(i + 3); f.reset(i + 3, mode); f.enqueue(i + 3, "implement");
       before = f.requests.length; const r = await run(); assert.ok(r.error);
       assert.ok(f.requests.length - before >= least && f.requests.length - before <= most, mode);
@@ -1462,8 +1465,8 @@ export const scenarios = {
     let release; const holder = withValidationSlot(() => new Promise((done) => { release = done; }));
     f.addIssue(4, ["scrat"]); f.enqueue(4, "implement");
     const waiting = new AbortController(), counted = validations();
-    f.onModel = () => { setTimeout(() => waiting.abort(), 500); };
-    let slotted; try { slotted = await f.runNextTask(waiting.signal); } finally { f.onModel = undefined; release(); await holder; }
+    const hold = setInterval(() => { if (all(s.runs).some((r) => r.stage === "validating" && !r.finishedAt)) waiting.abort(); }, 10);
+    let slotted; try { slotted = await f.runNextTask(waiting.signal); } finally { clearInterval(hold); release(); await holder; }
     assert.equal(slotted.error.code, "RUN_INTERRUPTED"); assert.equal(slotted.stage, "validating"); assert.equal(validations(), counted);
     assert.equal(f.row(s.tasks, slotted.taskId).status, "queued"); assert.equal(f.row(s.tasks, slotted.taskId).retryMode, "validation");
   } },
@@ -1502,7 +1505,7 @@ export const scenarios = {
     const attempt = async (number, mode) => { f.addIssue(number, ["scrat"]); f.reset(number, mode); f.enqueue(number, "implement"); return run(); };
     const { withValidationSlot } = await f.app("commands.ts"), { config: live } = await f.app("config.ts");
     const heavyFiles = () => all(s.workspaces).filter((w) => existsSync(resolve(w.path, ".scrat/heavy-fg")));
-    let nohup, background, foreground, nohupSeen, backgroundSeen, heldFiles, release;
+    let nohup, background, foreground, nohupSeen, backgroundSeen, heldFiles, heldRequests, release;
     try {
       nohup = await attempt(1, "heavy"); nohupSeen = toolResults(); background = await attempt(2, "heavy-bg"); backgroundSeen = toolResults();
       live.harness.maxConcurrentValidations = 1;
@@ -1511,7 +1514,7 @@ export const scenarios = {
       const pending = attempt(3, "heavy-fg");
       for (let n = 0; n < 600 && f.requests.length === asked; n++) await new Promise((done) => setTimeout(done, 50));
       await new Promise((done) => setTimeout(done, 500));
-      heldFiles = heavyFiles().length;
+      heldFiles = heavyFiles().length; heldRequests = f.requests.length - asked;
       release(); await holder; foreground = await pending;
     } finally { release?.(); }
     const workspaceOf = (r) => f.row(s.workspaces, r.workspaceId).path;
@@ -1524,6 +1527,7 @@ export const scenarios = {
     assert.equal(foreground.error, null, JSON.stringify(foreground.error));
     assert.ok(existsSync(resolve(workspaceOf(foreground), ".scrat/heavy-fg")));
     assert.equal(heldFiles, 0, "the heavy command must not run while another run holds the only slot");
+    assert.equal(heldRequests, 1, "the agent gets no tool result while the command waits");
   } },
   validation_slots: { title: "validation waits for a configured number of slots, which a failing validation releases", configure: [configureValidation], run: async () => {
     const { config } = await f.app("config.ts");
@@ -2434,6 +2438,8 @@ export const scenarios = {
     schema((c) => { c.harness.maxConcurrentValidations = "3"; }, /harness\.maxConcurrentValidations: must be integer/);
     schema((c) => { c.harness.agentTimeoutSeconds = 1.5; }, /harness\.agentTimeoutSeconds: must be integer/);
     schema((c) => { c.harness = 8; }, /harness: must be object/);
+    schema((c) => { c.harness = null; }, /harness: must be object/);
+    schema((c) => { c.harness.toString = 1; }, /harness\.toString: unknown setting/);
     schema((c) => { c.actions.address_review.exhaustedLabel = 5; }, /actions\.address_review\.exhaustedLabel: must be string/);
     schema((c) => { c.harness.maxConcurrentValidations = 0; }, /^Error: Invalid Scrat configuration:\n- harness\.maxConcurrentValidations: must be >= 1$/);
     schema((c) => { c.harness.corrections.incomplete = -1; }, /harness\.corrections\.incomplete: must be >= 0/);
@@ -2478,6 +2484,7 @@ export const scenarios = {
     const enabled = (change = () => {}) => variant((c) => {
       Object.assign(c.actions.review_base_change, { enabled: true, channel: "C0123456789", skill: "skills/review_issue/SKILL.md" }); change(c.actions.review_base_change);
     });
+    delete process.env.SLACK_BOT_TOKEN;
     await assert.rejects(validateStaticConfig(status(() => {})), /SLACK_BOT_TOKEN is not set/);
     await assert.rejects(validateStaticConfig(enabled()), /review_base_change: SLACK_BOT_TOKEN is not set/);
     process.env.SLACK_BOT_TOKEN = token;
@@ -2502,10 +2509,17 @@ export const scenarios = {
     await binds((b) => { b.scout.secret = "${MISSING_SCOUT_VAR}"; }, /bindings\.scout: \$\{MISSING_SCOUT_VAR\} is not set in the environment/);
     await binds((b) => { b.scout.secret = "literal-secret-value"; }, /bindings\.scout: secret must be a "\$\{VAR\}" placeholder/);
     await binds((b) => { b.scout.hosts = []; }, /bindings\.scout: hosts must be a non-empty list/);
-    await binds((b) => { b.scout.hosts = ["api.example.test", "10.0.0.1"]; }, /bindings\.scout: hosts: .*IP address/);
-    await binds((b) => { b.scout.hosts = ["api.example.test", "localhost"]; }, /bindings\.scout: hosts: .*local or metadata/);
-    await binds((b) => { b.scout.hosts = ["api.example.test", "*.example.test"]; }, /bindings\.scout: hosts: .*exact public hostname/);
+    await binds((b) => { delete b.scout.hosts; }, /bindings\.scout: hosts must be a non-empty list/);
+    for (const [host, why] of [["10.0.0.1", "IP address"], ["[::1]", "IP address"], ["::1", "IP address"], ["localhost", "local or metadata"], ["metadata.google.internal", "local or metadata"],
+      ["db.internal", "local or metadata"], ["*.example.test", "exact public hostname"], ["example", "exact public hostname"], ["Api.Example.test", "exact public hostname"], ["0x7f.1", "exact public hostname"]]) {
+      await binds((b) => { b.scout.hosts = ["api.example.test", host]; }, new RegExp(`bindings\\.scout: hosts: .*${why}`));
+    }
+    for (const address of ["127.0.0.1", "169.254.169.254", "100.64.0.1", "::ffff:192.168.0.1"]) {
+      await assert.rejects(validateStaticConfig({ ...bound(() => {}), resolve: async (host) => host === "other.example.test" ? [{ address, family: address.includes(":") ? 6 : 4 }] : publicAnswer }),
+        new RegExp(`bindings\\.scout: hosts: other\\.example\\.test resolves to private address ${address.replace(/\./g, "\\.")}`));
+    }
     await binds((b) => { b.scout.header = "Host"; }, /bindings\.scout: header must be a permitted header name/);
+    await binds((b) => { b.scout.header = "Bad Header"; }, /header must be a permitted header name/);
     await binds((b) => { b.scout.prefix = "Bearer \nX: y"; }, /prefix must be a single-line string/);
     await binds((b) => { b.scout.extra = 1; }, /bindings\.scout: unknown key extra/);
     await binds((b) => { b.Bad_Name = binding(); }, /bindings\.Bad_Name: name must be lowercase/);

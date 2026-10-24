@@ -9,8 +9,8 @@ export async function runCommand(failureMessage: string, body: () => Promise<voi
     logger.error({ err: error, ...fields }, failureMessage);
     process.exitCode = 1;
   } finally {
-    await drainStatus();
-    db.$client.close();
+    try { await drainStatus(); }
+    finally { db.$client.close(); }
   }
 }
 

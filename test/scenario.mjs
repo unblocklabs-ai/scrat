@@ -1756,7 +1756,6 @@ export const scenarios = {
     assert.equal(rejections().length, 2); assert.equal(f.row(s.tasks, "bogus").status, "failed");
     tasks.finishRun(claim.run.id, { status: "completed" });
 
-
     assert.throws(() => tasks.retryTask("bogus", "validation"), /Validation-only retry requires/);
 
     const { validateStaticConfig } = await f.app("startup.ts");

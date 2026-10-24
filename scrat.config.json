@@ -9,6 +9,12 @@
     "idlePollSeconds": 30,
     "agentTimeoutSeconds": 3600,
     "drainTimeoutSeconds": 900,
+    "maxStderrBytes": 8192,
+    "logTargetChars": 200,
+    "logErrorChars": 300,
+    "reviewCacheLimit": 256,
+    "treeCacheLimit": 8,
+    "databaseHealthRetries": 30,
     "retryJitter": 0.1,
     "corrections": { "incomplete": 1, "validation": 2, "format": 2 },
     "agentRetry": { "maxRetries": 3, "baseDelayMs": 2000 },
@@ -24,7 +30,10 @@
     "appId": 5017746,
     "installationId": 163420479,
     "fetchIntervalSeconds": 300,
-    "readConcurrency": 4
+    "readConcurrency": 4,
+    "maxCachedResponses": 2000,
+    "maxCachedChars": 67108864,
+    "rateLimitLowFraction": 0.1
   },
   "bindings": {},
   "context": {
@@ -36,13 +45,16 @@
     "readBytes": { "default": 32768, "max": 65536 },
     "git": { "maxCommits": 200, "maxScopeBytes": 1048576 },
     "http": { "timeoutSeconds": 30, "maxRequestBytes": 65536 },
-    "browser": { "steps": 40, "sessionSeconds": 300, "stepSeconds": 30 }
+    "browser": { "steps": 40, "sessionSeconds": 300, "stepSeconds": 30 },
+    "search": { "pageSize": 20, "excerptChars": 300, "maxQueryLength": 256 },
+    "redactionMarginBytes": 4096
   },
   "slack": {
     "enabled": false,
     "channel": "",
     "maxRetryAfterSeconds": 30,
-    "minimumGapMs": 1000
+    "minimumGapMs": 1000,
+    "maxErrorLength": 300
   },
   "workspace": {
     "sandbox": false,

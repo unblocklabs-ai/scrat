@@ -22,7 +22,7 @@ export async function createRunDatabase(runId: string, image: string, references
     await docker(["create", "--name", container, "--label", `${runLabel}=${runId}`,
       "--publish", "127.0.0.1::5432", "--env", `POSTGRES_PASSWORD=${password}`, "--env", "POSTGRES_DB=scrat_test",
       "--health-cmd", "pg_isready -h 127.0.0.1 -U postgres -d scrat_test",
-      "--health-interval", "1s", "--health-timeout", "3s", "--health-retries", "30", image]);
+      "--health-interval", "1s", "--health-timeout", "3s", "--health-retries", String(config.harness.databaseHealthRetries), image]);
     await docker(["start", container]);
     while (true) {
       const [state, health] = (await docker(["inspect", "--format", "{{.State.Status}} {{.State.Health.Status}}", container])).split(" ");

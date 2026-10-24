@@ -1,10 +1,11 @@
+import { config } from "./config.ts";
+
 const etags = new Map<string, { etag: string; body: string; headers: [string, string][] }>();
-const maxCachedResponses = 2000, maxCachedChars = 64 * 1024 * 1024;
 let cachedChars = 0;
 const rateLimit = { remaining: Infinity, limit: 5000, reset: 0 };
 
 export function rateLimitLow() {
-  return Date.now() < rateLimit.reset * 1000 && rateLimit.remaining < rateLimit.limit * 0.1;
+  return Date.now() < rateLimit.reset * 1000 && rateLimit.remaining < rateLimit.limit * config.github.rateLimitLowFraction;
 }
 export const rateLimitState = () => ({ remaining: rateLimit.remaining, limit: rateLimit.limit, resetsAt: new Date(rateLimit.reset * 1000).toISOString() });
 
@@ -44,12 +45,12 @@ export async function conditionalFetch(input: string | URL | Request, init: Requ
       const data: unknown = JSON.parse(body);
       full = Array.isArray(data) && data.length >= Number(new URL(key).searchParams.get("per_page") ?? 30);
     } catch { }
-    if (!full && body.length <= maxCachedChars) {
+    if (!full && body.length <= config.github.maxCachedChars) {
       forget(key);
       etags.set(key, { etag, body, headers: [...response.headers].filter(([name]) => name !== "content-length" && name !== "content-encoding") });
       cachedChars += body.length;
       for (const [oldest] of etags) {
-        if (etags.size <= maxCachedResponses && cachedChars <= maxCachedChars) break;
+        if (etags.size <= config.github.maxCachedResponses && cachedChars <= config.github.maxCachedChars) break;
         forget(oldest);
       }
     }

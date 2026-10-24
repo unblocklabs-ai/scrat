@@ -107,6 +107,11 @@ The installer keeps this file across deploys (any other drop-in is moved into th
 | `harness.corrections.format` | How many times the agent is re-prompted when its final answer is not in the required result format (default 2, a non-negative integer; 0 disables). |
 | `harness.maxConcurrentValidations` | Maximum `workspace.validate` runs at once (default 3, a positive integer). Further runs wait in a FIFO queue; preparation does not take a slot. |
 | `harness.agentRetry` | Retries for a failed model request inside a Pi session: `maxRetries` (default 3) and `baseDelayMs` (default 2000), both non-negative integers; 0 retries fails the request at once. |
+| `harness.maxStderrBytes` | Stderr kept from a paged git read before further output is dropped (default 8192, a positive integer). |
+| `harness.logTargetChars` | Longest path, pattern, command or revision shown in tool log lines (default 200, a positive integer). |
+| `harness.logErrorChars` | Longest tool error shown in a `pi.tool_failed` log line (default 300, a positive integer). |
+| `harness.reviewCacheLimit` / `harness.treeCacheLimit` | Entries kept in the review-relevance cache and the tree-listing cache (defaults 256 / 8, positive integers). |
+| `harness.databaseHealthRetries` | Failed health checks, one second apart, before a run's database container is declared unhealthy (default 30, a positive integer). |
 | `harness.logLevel` | Pino log verbosity, such as `info` or `debug`. |
 | `context.inlinePaths` | Most changed paths put inline in the agent's input; beyond it they go to a context file (default 200, a positive integer). |
 | `context.historyRuns` | How many earlier completed runs of an action feed its `history` context (default 10, a positive integer). |
@@ -116,8 +121,11 @@ The installer keeps this file across deploys (any other drop-in is moved into th
 | `tools.git.maxScopeBytes` | Most bytes of file names the review git tool reads to scope a diff (default 1048576, a positive integer). |
 | `tools.http.timeoutSeconds` / `tools.http.maxRequestBytes` | Per-request timeout and request body cap of the `http` tool (defaults 30 / 65536, positive integers). |
 | `tools.browser.steps` / `tools.browser.sessionSeconds` / `tools.browser.stepSeconds` | Browser actions allowed per agent session, session length, and timeout of one action (defaults 40 / 300 / 30, positive integers). |
+| `tools.search.pageSize` / `tools.search.excerptChars` / `tools.search.maxQueryLength` | Results per `github_search` call, characters of each result's body excerpt, and longest query the agent may send (defaults 20 / 300 / 256, positive integers). |
+| `tools.redactionMarginBytes` | Extra bytes read beyond a tool's output limit so a secret straddling the cut is still redacted (default 4096, a positive integer). |
 | `slack.minimumGapMs` | Least time between Slack posts in milliseconds (default 1000, a non-negative integer; 0 posts back to back). |
 | `slack.maxRetryAfterSeconds` | Longest `Retry-After` Scrat waits out once on a Slack 429; a longer one drops the post (default 30, a positive integer). |
+| `slack.maxErrorLength` | Longest run failure message quoted in a Slack status post (default 300, a positive integer). |
 | `github.repository` | Target GitHub repository as `owner/repo`. |
 | `github.repositoryPath` | Local repository clone; relative paths resolve from the config directory. `SCRAT_REPOSITORY_PATH` overrides it. |
 | `github.baseBranch` | Default base branch for issues and implementations. Existing PRs use their own base branch. |
@@ -128,6 +136,8 @@ The installer keeps this file across deploys (any other drop-in is moved into th
 | `github.installationId` | App installation granting access to the target repository (ignored in PAT mode). |
 | `github.fetchIntervalSeconds` | Delay between service syncs, in seconds. The service also syncs on startup. |
 | `github.readConcurrency` | Maximum concurrent GitHub item reads, in sync reconciliation and task routing (default 4). |
+| `github.maxCachedResponses` / `github.maxCachedChars` | Most GitHub responses, and total characters of them, kept for conditional requests (defaults 2000 / 67108864, positive integers). |
+| `github.rateLimitLowFraction` | Fraction (0 to 1, default 0.1) of the hourly GitHub quota below which the rate limit counts as low. |
 
 ### GitHub authentication
 

@@ -6,15 +6,13 @@ import { logger } from "./logging.ts";
 import { items, slackThreads, subjects, type Subject } from "./schema.ts";
 import { escapeSlack, postMessage } from "./slack.ts";
 
-const maxErrorLength = 300;
-
 const link = (url: string, label: string) => `<${url}|${escapeSlack(label)}>`;
 
 function messageFor(event: JournalEvent, subject: Pick<Subject, "repository">): string | undefined {
   switch (event.type) {
     case "run.started": return `Started ${escapeSlack(event.data.action)} with ${escapeSlack(event.data.skill)}`;
     case "run.completed": return `Completed at stage ${escapeSlack(event.data.stage)}`;
-    case "run.failed": return `Failed at stage ${escapeSlack(event.data.stage)}: ${escapeSlack(event.data.error.message.slice(0, maxErrorLength))}`;
+    case "run.failed": return `Failed at stage ${escapeSlack(event.data.stage)}: ${escapeSlack(event.data.error.message.slice(0, config.slack.maxErrorLength))}`;
     case "run.requeued": return `Requeued at stage ${escapeSlack(event.data.stage)} for a ${event.data.retryMode} round${event.data.nextAttemptAt ? `; retry ${event.data.attempt} at ${escapeSlack(event.data.nextAttemptAt)}` : ""}`;
     case "task.retried": return `Retrying ${escapeSlack(event.data.action)} for a ${event.data.mode} round`;
     case "github.comment_created": return `Posted ${link(event.data.url, "a comment")}`;

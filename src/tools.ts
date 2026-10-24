@@ -80,7 +80,7 @@ export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, ba
     async execute(...args) {
       const hit = heavyCommand(args[1].command, heavy);
       if (!hit) return sdkBash.execute(...args);
-      const segment = redactSecrets(hit).slice(0, 200);
+      const segment = redactSecrets(hit).slice(0, config.harness.logTargetChars);
       if (backgroundsWork(args[1].command)) {
         log.warn({ event: "pi.command_blocked", command: segment });
         throw new Error(`This command line runs a background job (a lone &, nohup, setsid or disown) and includes the heavy check \`${segment}\`. Run heavy checks in the foreground, in a command without background jobs, so ${botName} can queue them behind other heavy jobs.`);

@@ -13,7 +13,7 @@ export const updateRun = (id: string, patch: Partial<typeof runs.$inferInsert>, 
 
 export const latestRunOfTask = (taskId: string, database: Database = db) =>
   database.select().from(runs).where(eq(runs.taskId, taskId))
-    .orderBy(sql`${runs.sequence} is null desc`, desc(runs.sequence)).limit(1).get();
+    .orderBy(desc(runs.sequence)).limit(1).get();
 
 type RunContext = NonNullable<Run["context"]>;
 type HistoryRun = Omit<Run, "context" | "verification"> & { context: Pick<RunContext, "revision" | "baseBranch" | "commentRevisions"> | null };

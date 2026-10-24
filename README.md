@@ -63,7 +63,7 @@ Normal retries rerun Pi for pre-publication failures, reusing the workspace/sess
 
 Use `--validation-only` for a transient validation failure after a mutating agent returned complete. It requires a saved checkpoint with unchanged task input, workspace identity, HEAD, source tree, merge state, GitHub context, and base SHA. Scrat skips Pi, creates a fresh disposable database when configured, reruns preparation/migrations and all checks, and still enforces action postconditions before publication. Ignored files are outside the source checkpoint; configured preparation must restore any required dependency/generated state. Changed or incomplete work requires a normal repair retry.
 
-When upgrading an existing installation, run `npm run db:push` before starting the new code (the installer does this). Databases created before subjects existed are first moved with `node deploy/migrate-subjects.mjs [path]`, which the installer runs ahead of `db:push`; it is one transaction and a no-op on a migrated or fresh database. Old run history is preserved, but runs without checkpoints cannot use validation-only retry. No validation is bypassed, and a failed validation is retried only through the in-session feedback above.
+When upgrading an existing installation, run `npm run db:push` before starting the new code (the installer does this). Databases created before subjects existed are first moved with `node deploy/migrate-subjects.mjs [path]`, which the installer runs ahead of `db:push`; it is one transaction and a no-op on a migrated or fresh database. No validation is bypassed, and a failed validation is retried only through the in-session feedback above.
 
 For project review, run `typecheck`, `knip`, and the integration/E2E tests after `npm ci` (including dev dependencies). TypeScript checks `src/` and the Drizzle config without emitting JavaScript. Knip includes the CLI, deployment-only recovery, and subprocess-driven test entrypoints; ordinary source modules remain eligible for unused-code detection. Review findings before removing code or adding exceptions.
 
@@ -133,7 +133,7 @@ The installer keeps this file across deploys (any other drop-in is moved into th
 
 Two modes are supported; `github.auth` picks one.
 
-- **App (default).** A GitHub App installation token, minted per repository and per permission set. Nothing changes for existing deployments.
+- **App (default).** A GitHub App installation token, minted per repository and per permission set.
 - **PAT.** A classic personal access token from a dedicated account that has write access to the repository (an outside collaborator is enough). Put `GITHUB_PAT=ghp_...` in `.env`; `GITHUB_APP_PRIVATE_KEY`, `appId` and `installationId` are not used.
 
 Example `scrat.local.json` for a PAT deployment (every key already exists in the defaults, so the override loader accepts it):
@@ -214,7 +214,7 @@ This is OS isolation, not a guarantee against kernel exploits, resource exhausti
 or exfiltration of workspace content over permitted internet access. The service
 account should have no sudo; administration belongs to a separately verified login.
 
-Workspace commands are argument arrays, not shell strings: `["pnpm", "verify"]`. Command lists execute sequentially inside the workspace; a failing command stops the run. Each run stores a measured check per command (name, status, duration, a bounded tail, and the path of the file holding the full output) in `runs.verification`, not the raw output. Runs recorded before this change keep their `stdout` and `stderr` fields.
+Workspace commands are argument arrays, not shell strings: `["pnpm", "verify"]`. Command lists execute sequentially inside the workspace; a failing command stops the run. Each run stores a measured check per command (name, status, duration, a bounded tail, and the path of the file holding the full output) in `runs.verification`, not the raw output.
 
 | Setting | Purpose |
 | --- | --- |
@@ -246,7 +246,7 @@ Each `providers.<name>` entry registers an endpoint and models with Pi. Actions 
 
 ### Actions
 
-Each action is one manifest, `actions/<name>.yaml`, validated at startup (`src/manifests.ts`): `review_issue`, `review_pr`, `implement`, `resolve_conflicts`, `address_pr_feedback`, `address_review`, and `review_base_change`. A manifest fixes the trigger, mode, acceptance rule, `tools` the agent session gets, context `files`, and publish effects, all from closed lists; an unknown key or value stops startup with the file and path. `scrat.config.json` no longer has an `actions` block: the settings below are the manifest's deployment-level keys, and `scrat.local.json` overrides them by action name.
+Each action is one manifest, `actions/<name>.yaml`, validated at startup (`src/manifests.ts`): `review_issue`, `review_pr`, `implement`, `resolve_conflicts`, `address_pr_feedback`, `address_review`, and `review_base_change`. A manifest fixes the trigger, mode, acceptance rule, `tools` the agent session gets, context `files`, and publish effects, all from closed lists; an unknown key or value stops startup with the file and path. The settings below are the manifest's deployment-level keys, and `scrat.local.json` overrides them by action name.
 
 | Setting under `actions.<action>` | Purpose |
 | --- | --- |

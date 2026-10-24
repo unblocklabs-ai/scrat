@@ -83,7 +83,7 @@ const pullRequest = {
     }, references);
     const publishedPr = pr;
     db.transaction((transaction) => {
-      const created = upsertItem({ source: "github", externalId: publishedPr.node_id, kind: "pr", payload: publishedPr }, transaction);
+      const created = upsertItem({ externalId: publishedPr.node_id, kind: "pr", payload: publishedPr }, transaction);
       transaction.update(subjects).set({ workspaceId: workspace.id }).where(eq(subjects.id, created.id)).run();
       context.saveReceipt({ pullRequestNumber: publishedPr.number }, transaction);
     });

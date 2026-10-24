@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 export const bearer = (options) => new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");
+const githubItem = (kind, number, extra) => ({ id: number, node_id: `${kind === "pr" ? "PR" : "ISSUE"}_${number}`, number, state: "open", html_url: `https://github.com/fixture/project/${kind === "pr" ? "pull" : "issues"}/${number}`, updated_at: "2026-10-19T00:00:00Z", labels: [], user: { login: "human" }, ...extra });
 
 function schemaTemplate(repository) {
   const kit = resolve(repository, "node_modules/drizzle-kit");
@@ -248,6 +249,8 @@ export async function fixture(scenario, spec) {
       call.status = status; if (!path.endsWith("/access_tokens")) rate.remaining--;
       return new Response(text, { status, headers: { ...headers, "x-ratelimit-remaining": String(rate.remaining) } });
     };
+    const can = (permission) => tokens.get(credential)?.[permission] === "write";
+    const lostResponse = (set, key, message, ok, status = 201) => set.delete(key) ? reply({ message }, 502) : reply(ok, status);
     if (patMode && credential !== pat) return reply({ message: "Bad credentials" }, 401);
     if (path === "/user") return user.status === 200 ? reply({ login: user.login }) : reply({ message: "Bad credentials" }, user.status);
     if (path === "/app") return reply({ slug: githubApp.slug });
@@ -256,12 +259,11 @@ export async function fixture(scenario, spec) {
       return reply({ token, expires_at: new Date(Date.now() + 3600000).toISOString() }, 201);
     }
     if (path.endsWith("/issues") && method === "POST") {
-      const token = bearer(options);
-      if (tokens.get(token)?.issues !== "write") return reply({ message: "Resource not accessible by integration" }, 403);
+      if (!can("issues")) return reply({ message: "Resource not accessible by integration" }, 403);
       const number = ++nextIssueNumber;
-      const created = { id: number, node_id: "ISSUE_" + number, number, title: body.title, body: body.body, state: "open", html_url: `https://github.com/fixture/project/issues/${number}`, updated_at: "2026-10-19T02:00:00Z", labels: [], user: { login: config.github.botLogin } };
+      const created = githubItem("issue", number, { title: body.title, body: body.body, updated_at: "2026-10-19T02:00:00Z", user: { login: config.github.botLogin } });
       issues.set(number, created); writes.push({ type: "issue", number, title: body.title });
-      return faults.issue.delete(body.title) ? reply({ message: "Lost issue response" }, 502) : reply(created, 201);
+      return lostResponse(faults.issue, body.title, "Lost issue response", created);
     }
     if (path.endsWith("/issues") && method === "GET") return reply([...issues.values(), ...prs.map((pr) => ({ ...pr, pull_request: {} }))].filter((item) => item.state === "open"));
     let match = path.match(/\/(issues|pulls)\/(\d+)$/);
@@ -279,14 +281,13 @@ export async function fixture(scenario, spec) {
         const next = page * size < all.length ? { link: `<https://api.github.com${path}?per_page=${size}&page=${page + 1}>; rel="next"` } : {};
         return reply(all.slice((page - 1) * size, page * size), 200, next);
       }
-      const token = bearer(options);
       const permission = prs.some((pr) => pr.number === n) ? "pull_requests" : "issues";
-      if (tokens.get(token)?.[permission] !== "write") return reply({ message: "Resource not accessible by integration" }, 403);
+      if (!can(permission)) return reply({ message: "Resource not accessible by integration" }, 403);
       writes.push({ type: "comment", number: n, body: body.body });
       const comment = { id: ++nextCommentId, body: body.body, user: { login: config.github.botLogin }, updated_at: "2026-10-19T01:00:00Z", html_url: `https://github.com/fixture/project/issues/${n}#comment` };
       comments.set(n, [...(comments.get(n) ?? []), comment]);
       if (faults.cleanup.delete(n)) { const run = db.select().from(schema.runs).all().find((run) => !run.finishedAt); const workspace = db.select().from(schema.workspaces).all().find((w) => w.id === run.workspaceId); writeFileSync(workspace.path + "/keep.txt", "preserve\n"); git(workspace.path, "add", "."); commit(workspace.path, "Unpublished"); }
-      return faults.comment.delete(n) ? reply({ message: "Lost response" }, 502) : reply(comment, 201);
+      return lostResponse(faults.comment, n, "Lost response", comment);
     }
     match = path.match(/\/issues\/comments\/(\d+)$/);
     if (match && method === "PATCH") {
@@ -294,7 +295,7 @@ export async function fixture(scenario, spec) {
       const comment = [...comments.values()].flat().find((comment) => comment.id === Number(match[1]));
       if (!comment) return reply({ message: "Not Found" }, 404);
       comment.body = body.body; writes.push({ type: "comment_update", id: comment.id });
-      return faults.comment.delete(number) ? reply({ message: "Lost update response" }, 502) : reply(comment);
+      return lostResponse(faults.comment, number, "Lost update response", comment, 200);
     }
     match = path.match(/\/issues\/(\d+)\/labels(?:\/(.+))?$/);
     if (match) {
@@ -311,26 +312,27 @@ export async function fixture(scenario, spec) {
     }
     if (path.endsWith("/pulls") && method === "GET") return reply(prs.filter((pr) => (!url.searchParams.get("head") || pr.head.ref === url.searchParams.get("head").split(":").slice(1).join(":")) && (url.searchParams.get("state") !== "open" || pr.state === "open")));
     if (path.endsWith("/pulls") && method === "POST") {
-      const token = bearer(options);
-      const permissions = tokens.get(token);
-      if (permissions?.pull_requests !== "write" || !["read", "write"].includes(permissions.contents)) {
+      if (!can("pull_requests") || !["read", "write"].includes(tokens.get(credential)?.contents)) {
         return reply({ message: "Validation Failed", errors: [{ resource: "PullRequest", code: "custom", message: "not all refs are readable" }] }, 422);
       }
       const n = Number(body.body.match(/Closes #(\d+)/)[1]); writes.push({ type: "pr", number: n });
-      const pr = { id: 200 + n, node_id: "PR_" + n, number: 200 + n, title: body.title, body: body.body, state: "open", html_url: `https://github.com/fixture/project/pull/${200 + n}`, labels: [], updated_at: "2026-10-19T01:00:00Z", user: { login: config.github.botLogin }, head: { ref: body.head, sha: git(resolve("remote.git"), "rev-parse", body.head), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } } };
+      const pr = githubItem("pr", 200 + n, { node_id: "PR_" + n, title: body.title, body: body.body, updated_at: "2026-10-19T01:00:00Z", user: { login: config.github.botLogin }, head: { ref: body.head, sha: git(resolve("remote.git"), "rev-parse", body.head), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } } });
       prs.push(pr); git(resolve("remote.git"), "update-ref", `refs/pull/${pr.number}/head`, pr.head.sha);
-      return faults.pr.delete(n) ? reply({ message: "Lost PR response" }, 502) : reply(pr, 201);
+      return lostResponse(faults.pr, n, "Lost PR response", pr);
     }
     throw new Error(`Unexpected GitHub call: ${method} ${path}`);
   };
   const addIssue = (number, labels = [], title = "Issue " + number) => {
-    const payload = { id: number, node_id: "ISSUE_" + number, number, title, body: "Inspect app.ts", state: "open", html_url: `https://github.com/fixture/project/issues/${number}`, updated_at: "2026-10-19T00:00:00Z", labels: labels.map((name) => ({ name })), user: { login: "human" } };
+    const payload = githubItem("issue", number, { title, body: "Inspect app.ts", labels: labels.map((name) => ({ name })) });
     issues.set(number, payload); db.insert(schema.subjects).values({ id: "issue-" + number, repository: "fixture/project", kind: "item", key: payload.node_id }).run();
     return db.insert(schema.items).values({ id: "issue-" + number, externalId: payload.node_id, kind: "issue", payload }).returning().get();
   };
   const enqueue = (number, action = "review_issue", input = { source: "github_items", kind: "manual" }) => tasks.enqueueTask({ subjectId: "issue-" + number, action, reason: "Integration", input });
   const row = (table, id) => db.select().from(table).all().find((entry) => entry.id === id);
-  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, pat, user, githubApp, modes, requests, calls, slack, rate, issues, prs, comments, reviews, writes, faults, transient, frozen, forced, addIssue, enqueue, row,
+  const addPr = (number, branch, login, extra = {}) => { prs.push(githubItem("pr", number, { title: "PR " + number, body: "", user: { login }, head: { ref: branch, sha: git(resolve("remote.git"), "rev-parse", branch), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } }, ...extra })); };
+  const botComments = (number) => (comments.get(number) ?? []).filter((c) => c.user.login !== "human");
+  const written = (type, predicate = () => true) => writes.filter((write) => write.type === type && predicate(write));
+  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, pat, user, githubApp, modes, requests, calls, slack, rate, issues, prs, comments, reviews, writes, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
     set onModel(value) { onModel = value; },
     set script(value) { script = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },

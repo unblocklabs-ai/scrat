@@ -5,15 +5,20 @@ import { type Action, getManifest, manifests } from "./actions.ts";
 import { config, getActionConfig, isActionEnabled } from "./config.ts";
 import { itemsInRepository, sameRepository } from "./repository.ts";
 import { db } from "./db.ts";
-import { describeError, errorCode, errorMessage, transientInferenceCode } from "./errors.ts";
-import { recordEvent } from "./events.ts";
+import { describeError, type ErrorDetails, errorCode, errorMessage, transientInferenceCode } from "./errors.ts";
+import { recordEvent, type JournalEvent } from "./events.ts";
 import { withOperationSync } from "./logging.ts";
 import { entryStage, hasPublicationSnapshot, hasValidationCheckpoint, InterruptedError } from "./results.ts";
 import { getRun, latestRunOfTask } from "./run-history.ts";
 import { asItem } from "./items.ts";
-import { items, runs, subjects, tasks, type Task, type Subject } from "./schema.ts";
+import { items, runs, type Run, subjects, tasks, type Task, type Subject } from "./schema.ts";
 import { isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
 import { signalWork } from "./work-signal.ts";
+
+type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+const queuedTaskOf = (transaction: Pick<typeof db, "select">, subjectId: string, action: Action) =>
+  transaction.select().from(tasks).where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action), eq(tasks.status, "queued"))).get();
 
 export function latestTask(subjectId: string, action: Action) {
   return db.select().from(tasks).where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action)))
@@ -38,9 +43,7 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | 
   return withOperationSync("task.enqueue", { subjectId: task.subjectId, action: task.action }, (operation) => {
     if (!isKnownAction(task.action)) throw new Error(`Unknown action: ${task.action}`);
     const queued = db.transaction((transaction) => {
-      const previous = transaction.select().from(tasks).where(and(
-        eq(tasks.subjectId, task.subjectId), eq(tasks.action, task.action), eq(tasks.status, "queued"),
-      )).get();
+      const previous = queuedTaskOf(transaction, task.subjectId, task.action);
       const input = isManual(task.input) && previous ? { ...previous.input, manual: true }
         : previous && isManual(previous.input) ? { ...task.input, manual: true } : task.input;
       const queuedTask = transaction.insert(tasks).values({ ...task, input, priority: task.priority ?? config.actions[task.action].priority }).onConflictDoUpdate({
@@ -181,9 +184,7 @@ export function retryTask(taskId: string, mode: Task["retryMode"] = "repair") {
       }
       const failed = transaction.select().from(tasks).where(and(eq(tasks.id, taskId), eq(tasks.status, "failed"))).get();
       if (!failed) throw new Error(`Task is not failed: ${taskId}`);
-      const queued = transaction.select().from(tasks).where(and(
-        eq(tasks.subjectId, failed.subjectId), eq(tasks.action, failed.action), eq(tasks.status, "queued"),
-      )).get();
+      const queued = queuedTaskOf(transaction, failed.subjectId, failed.action);
       if (queued) throw new Error(`A queued task already exists for this subject/action: ${queued.id}`);
       if (mode === "validation") {
         const previous = latestRunOfTask(taskId, transaction);
@@ -202,23 +203,23 @@ export function retryTask(taskId: string, mode: Task["retryMode"] = "repair") {
   });
 }
 
+function closeRun(transaction: Transaction, runId: string, error: ErrorDetails | null, plan: (run: Run) => { set: Partial<typeof tasks.$inferInsert>; event: JournalEvent }) {
+  const run = transaction.update(runs).set({ error, finishedAt: new Date().toISOString() })
+    .where(and(eq(runs.id, runId), isNull(runs.finishedAt))).returning().get();
+  if (!run) throw new Error(`Run not active: ${runId}`);
+  const { set, event } = plan(run);
+  const task = transaction.update(tasks).set(set).where(and(eq(tasks.id, run.taskId), eq(tasks.status, "running"))).returning().get();
+  if (!task) throw new Error(`Task not running: ${run.taskId}`);
+  recordEvent({ subjectId: task.subjectId, taskId: task.id, runId, ...event }, transaction);
+  return run;
+}
+
 export function finishRun(runId: string, outcome: { status: "completed" } | { status: "failed"; error: unknown }) {
   const error = outcome.status === "failed" ? describeError(outcome.error) : null;
-  const finished = db.transaction((transaction) => {
-    const run = transaction.update(runs).set({ error, finishedAt: new Date().toISOString() })
-      .where(and(eq(runs.id, runId), isNull(runs.finishedAt))).returning().get();
-    if (!run) throw new Error(`Run not active: ${runId}`);
-    const task = transaction.update(tasks).set({ status: outcome.status, ...outcome.status === "completed" ? { retryCount: null, availableAt: null } : {} })
-      .where(and(eq(tasks.id, run.taskId), eq(tasks.status, "running"))).returning().get();
-    if (!task) throw new Error(`Task not running: ${run.taskId}`);
-    const references = { subjectId: task.subjectId, taskId: task.id, runId };
-    recordEvent(error ? {
-      ...references, type: "run.failed", data: { stage: run.stage, error },
-    } : {
-      ...references, type: "run.completed", data: { stage: run.stage },
-    }, transaction);
-    return run;
-  }, { behavior: "immediate" });
+  const finished = db.transaction((transaction) => closeRun(transaction, runId, error, (run) => ({
+    set: { status: outcome.status, ...outcome.status === "completed" ? { retryCount: null, availableAt: null } : {} },
+    event: error ? { type: "run.failed", data: { stage: run.stage, error } } : { type: "run.completed", data: { stage: run.stage } },
+  })), { behavior: "immediate" });
   signalWork();
   return finished;
 }
@@ -234,26 +235,19 @@ export function retryTransientFailure(runId: string, error: unknown) {
 
 export function interruptRun(runId: string, error: unknown = new InterruptedError("Worker stopped before finishing this run"), retry?: { initialDelaySeconds: number; maxDelaySeconds: number }) {
   const details = describeError(error);
-  const interrupted = db.transaction((transaction) => {
-    const run = transaction.update(runs).set({ error: details, finishedAt: new Date().toISOString() })
-      .where(and(eq(runs.id, runId), isNull(runs.finishedAt))).returning().get();
-    if (!run) throw new Error(`Run not active: ${runId}`);
+  const interrupted = db.transaction((transaction) => closeRun(transaction, runId, details, (run) => {
     const own = transaction.select().from(tasks).where(eq(tasks.id, run.taskId)).get()!;
-    const superseded = transaction.select({ id: tasks.id }).from(tasks).where(and(
-      eq(tasks.subjectId, own.subjectId), eq(tasks.action, own.action), eq(tasks.status, "queued"),
-    )).get();
+    const superseded = queuedTaskOf(transaction, own.subjectId, own.action);
     const retryMode = hasValidationCheckpoint(run) ? "validation" : "repair";
     const attempt = (own.retryCount ?? 0) + 1;
     const delaySeconds = retry && Math.min(retry.maxDelaySeconds, retry.initialDelaySeconds * 2 ** (attempt - 1) * (1 + config.harness.retryJitter * Math.random()));
     const nextAttemptAt = delaySeconds === undefined ? undefined : new Date(Date.now() + delaySeconds * 1000).toISOString();
-    const task = transaction.update(tasks).set(superseded ? { status: "failed" } : { status: "queued", retryMode, ...nextAttemptAt ? { retryCount: attempt, availableAt: nextAttemptAt } : {} })
-      .where(and(eq(tasks.id, run.taskId), eq(tasks.status, "running"))).returning().get();
-    if (!task) throw new Error(`Task not running: ${run.taskId}`);
-    const references = { subjectId: task.subjectId, taskId: task.id, runId };
-    recordEvent(superseded ? { ...references, type: "run.failed", data: { stage: run.stage, error: details } }
-      : { ...references, type: "run.requeued", data: { stage: run.stage, retryMode, ...nextAttemptAt ? { attempt, nextAttemptAt } : {} } }, transaction);
-    return run;
-  }, { behavior: "immediate" });
+    return {
+      set: superseded ? { status: "failed" } : { status: "queued", retryMode, ...nextAttemptAt ? { retryCount: attempt, availableAt: nextAttemptAt } : {} },
+      event: superseded ? { type: "run.failed", data: { stage: run.stage, error: details } }
+        : { type: "run.requeued", data: { stage: run.stage, retryMode, ...nextAttemptAt ? { attempt, nextAttemptAt } : {} } },
+    };
+  }), { behavior: "immediate" });
   signalWork();
   return interrupted;
 }

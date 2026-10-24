@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { isAbsolute, resolve } from "node:path";
 import settings from "../scrat.config.json" with { type: "json" };
 import { buildConfig, type Json } from "./config-merge.ts";
-import { validateConfig } from "./config-schema.ts";
+import { configError, validateConfig } from "./config-schema.ts";
 import { deploymentDefaults, findTriggerConflicts, readManifests, skillPath, type ThinkingLevel } from "./manifests.ts";
 
 const configUrl = new URL("../scrat.config.json", import.meta.url);
@@ -31,15 +31,15 @@ const actionDefaults = { ...Object.fromEntries(loadedManifests.map((manifest) =>
 const merged = buildConfig({ ...settings, actions: actionDefaults }, overrides);
 delete (merged.actions as Json).directory;
 const unknownActions = Object.keys(merged.actions as Json).filter((name) => !loadedManifests.some((manifest) => manifest.name === name));
-if (unknownActions.length) throw new Error(`Invalid Scrat configuration:\n${unknownActions.map((name) => `- actions.${name}: unknown action`).join("\n")}`);
+if (unknownActions.length) throw configError(unknownActions.map((name) => `actions.${name}: unknown action`));
 export const config = validateConfig(merged);
 
 const conflicts = findTriggerConflicts(loadedManifests, (manifest) => config.actions[manifest.name]?.enabled !== false);
-if (conflicts.length) throw new Error(`Invalid Scrat configuration:\n${conflicts.map((conflict) => `- ${conflict}`).join("\n")}`);
+if (conflicts.length) throw configError(conflicts);
 
 const unbound = loadedManifests.flatMap((manifest) => [manifest.http?.binding, manifest.browser?.binding]
   .filter((name): name is string => name !== undefined && !Object.hasOwn(config.bindings, name)).map((name) => `${manifest.file}: unknown binding ${name}; define it under bindings in scrat.local.json`));
-if (unbound.length) throw new Error(`Invalid Scrat configuration:\n${unbound.map((problem) => `- ${problem}`).join("\n")}`);
+if (unbound.length) throw configError(unbound);
 
 export function getRepositoryPath() {
   return resolve(fileURLToPath(new URL(".", configUrl)), process.env.SCRAT_REPOSITORY_PATH ?? config.github.repositoryPath);

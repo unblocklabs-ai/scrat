@@ -62,6 +62,8 @@ export type ActionSettings = ScratConfig["actions"][string];
 const dotted = (path: string) => path.slice(1).replaceAll("/", ".");
 const where = (path: string, key: string) => [dotted(path), key].filter(Boolean).join(".");
 
+export const configError = (problems: Iterable<string>) => new Error(`Invalid Scrat configuration:\n${[...problems].map((problem) => `- ${problem}`).join("\n")}`);
+
 export function validateConfig(value: unknown): ScratConfig {
   if (Value.Check(schema, value)) return value;
   const problems = new Set<string>();
@@ -71,5 +73,5 @@ export function validateConfig(value: unknown): ScratConfig {
     else if (keyword === "required") for (const key of (params as { requiredProperties: string[] }).requiredProperties) problems.add(`${where(instancePath, key)}: required`);
     else problems.add(`${dotted(instancePath) || "config"}: ${message}`);
   }
-  throw new Error(`Invalid Scrat configuration:\n${[...problems].map((problem) => `- ${problem}`).join("\n")}`);
+  throw configError(problems);
 }

@@ -2,7 +2,7 @@ import { access, lstat, mkdir } from "node:fs/promises";
 import { manifests } from "./actions.ts";
 import { type Resolver, publicAnswers, resolveHost, validateBindings } from "./bindings.ts";
 import { config } from "./config.ts";
-import type { ActionSettings, ScratConfig } from "./config-schema.ts";
+import { configError, type ActionSettings, type ScratConfig } from "./config-schema.ts";
 import { deploymentDefaults, skillPath } from "./manifests.ts";
 import { slugOf } from "./identity.ts";
 import { logger } from "./logging.ts";
@@ -34,6 +34,8 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
     else if (await lstat(store).then((entry) => entry.isSymbolicLink(), () => false)) problems.push("workspace.packageStore must not be a symlink");
     else if (process.platform === "linux") await mkdir(store, { recursive: true, mode: 0o700 }).catch(() => { problems.push(`workspace.packageStore ${store} cannot be created`); });
   }
+  const resolvedEntry = (manifest: ReturnType<typeof manifests>[number]) => ({ ...deploymentDefaults(manifest), ...settings.actions[manifest.name] });
+  const checkSlackAuth = (prefix: string) => authTest().catch((error: unknown) => { problems.push(`${prefix} auth.test failed: ${errorMessage(error)}`); });
   const checkEntry = (label: string, { provider, model }: Entry) => {
     if (!modelRuntime.getModel(provider, model)) problems.push(`${label}: no Pi model ${provider}/${model}${modelRuntime.getError() ? ` (${modelRuntime.getError()})` : ""}`);
   };
@@ -47,12 +49,12 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
   settings.workspace?.heavyCommands?.forEach((pattern, index) => {
     try { new RegExp(pattern); } catch { problems.push(`workspace.heavyCommands[${index}] is not a valid regular expression`); }
   });
-  const changeActions = manifests().filter((manifest) => manifest.mode === "change" && ({ ...deploymentDefaults(manifest), ...settings.actions[manifest.name] }).enabled !== false).map((manifest) => manifest.name);
+  const changeActions = manifests().filter((manifest) => manifest.mode === "change" && resolvedEntry(manifest).enabled !== false).map((manifest) => manifest.name);
   if (changeActions.length && !settings.workspace?.validate?.length) {
     problems.push(`workspace.validate is empty but ${changeActions.join(", ")} publish commits; list the target repository's check commands, or use [["true"]] if it has nothing to check`);
   }
   for (const manifest of manifests()) {
-    if (manifest.mode === "change" && ({ ...deploymentDefaults(manifest), ...settings.actions[manifest.name] }).agent !== "single") problems.push(`${manifest.name}: mode change requires source github_items and agent: single`);
+    if (manifest.mode === "change" && resolvedEntry(manifest).agent !== "single") problems.push(`${manifest.name}: mode change requires source github_items and agent: single`);
   }
   const bindingProblems = validateBindings(settings.bindings);
   problems.push(...bindingProblems);
@@ -69,13 +71,13 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
   if (settings.slack?.enabled) {
     if (!settings.slack.channel?.trim()) problems.push("slack.channel must not be empty when slack.enabled is true");
     if (!process.env.SLACK_BOT_TOKEN) problems.push("slack.enabled is true but SLACK_BOT_TOKEN is not set");
-    else await authTest().catch((error: unknown) => { problems.push(`slack: auth.test failed: ${errorMessage(error)}`); });
+    else await checkSlackAuth("slack:");
   }
   for (const [name, { apiKey }] of Object.entries(settings.providers ?? {})) {
     if (apiKey && !/\$\{\w+\}/.test(apiKey)) logger.warn({ provider: name }, "Provider apiKey is not a ${VAR} placeholder; it will not be redacted from output");
   }
   for (const manifest of manifests()) {
-    const action = manifest.name, entry = { ...deploymentDefaults(manifest), ...settings.actions[action] };
+    const action = manifest.name, entry = resolvedEntry(manifest);
     checkEntry(action, entry);
     if (entry.retry && manifest.mode !== "review") problems.push(`${action}: retry requires mode review`);
     if (entry.retry && entry.retry.maxDelaySeconds < entry.retry.initialDelaySeconds) problems.push(`${action}: retry.maxDelaySeconds must be at least retry.initialDelaySeconds`);
@@ -91,7 +93,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
         if (unknown.length) problems.push(`${action}: unknown startMessage variable ${unknown.map((name) => `{{${name}}}`).join(", ")}`);
       }
       if (entry.agent === "panel" && entry.reviewers?.length !== 2) problems.push(`${action}: agent "panel" requires exactly two reviewers`);
-      if (slack && process.env.SLACK_BOT_TOKEN) await authTest().catch((error: unknown) => { problems.push(`${action}: Slack auth.test failed: ${errorMessage(error)}`); });
+      if (slack && process.env.SLACK_BOT_TOKEN) await checkSlackAuth(`${action}: Slack`);
       if (manifest.browser) await loadPlaywright().catch((error: unknown) => { problems.push(`${action}: ${errorMessage(error)}`); });
       const skill = skillPath(manifest, entry.skill);
       if (!await access(skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${skill}`);
@@ -99,7 +101,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
   }
   if (problems.length) {
     if (modelRuntime.getError()) dropModelRuntime();
-    throw new Error(`Invalid Scrat configuration:\n${problems.map((problem) => `- ${problem}`).join("\n")}`);
+    throw configError(problems);
   }
 }
 

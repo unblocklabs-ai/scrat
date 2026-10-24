@@ -6,7 +6,7 @@ import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { botName } from "./identity.ts";
 import { gradeLabels, reconcileLabels } from "./labels.ts";
-import { isIssueComment, issueCommentId, reviewMarker, taskMarker } from "./markers.ts";
+import { isIssueComment, issueCommentId, reviewMarker, taskMarker, withMarker } from "./markers.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { runHistory, updateRun } from "./run-history.ts";
@@ -16,7 +16,7 @@ import { serialized } from "./single-flight.ts";
 const pendingReviews = new Map<string, Promise<unknown>>();
 
 function reviewBody(text: string, taskId: string) {
-  return `${text}\n\n${reviewMarker}\n${taskMarker(taskId)}`;
+  return withMarker(text, reviewMarker, taskMarker(taskId));
 }
 
 function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeof runHistory>) {

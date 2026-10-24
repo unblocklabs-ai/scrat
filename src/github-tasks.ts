@@ -94,7 +94,7 @@ async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation
   const exhausted = repair !== undefined && settings.maxSelfRepairs !== undefined && count >= settings.maxSelfRepairs;
   try {
     await reconcileLabels(ctx.github, item.payload.number, { current: observation.labels, desired: exhausted ? [exhaustedLabel] : [], managed: [exhaustedLabel] }, { subjectId: item.id });
-  } catch (error) { ctx.log.warn({ event: "self_repair.label_pending", subjectId: item.id, err: error }); }
+  } catch (error) { ctx.log.warn({ event: "github.label_pending", subjectId: item.id, err: error }); }
 }
 
 async function reconcileFailedLabels(ctx: SyncContext, item: Item) {
@@ -109,7 +109,7 @@ async function reconcileFailedLabels(ctx: SyncContext, item: Item) {
       desired: labelled.filter(({ name }) => latestTask(item.id, name)?.status === "failed").map(({ label }) => label),
       managed: labelled.map(({ label }) => label),
     }, { subjectId: item.id });
-  } catch (error) { ctx.log.warn({ event: "github.failed_label_pending", subjectId: item.id, err: error }); }
+  } catch (error) { ctx.log.warn({ event: "github.label_pending", subjectId: item.id, err: error }); }
 }
 
 async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObservation, mainSha: string, routes: Routes) {

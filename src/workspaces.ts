@@ -147,8 +147,9 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
 export async function commitWorkspace(workspace: Workspace, message: string, author: { name: string; email: string }, references: EventReferences = {}) {
   await git(workspace.path, ["add", "--all"]);
   const staged = await git(workspace.path, ["diff", "--cached", "--name-only"]);
-  if (staged || await hasPendingMerge(workspace.path)) {
-    await git(workspace.path, [...identity(author), "commit", "-m", message]);
+  const merging = await hasPendingMerge(workspace.path);
+  if (staged || merging) {
+    await git(workspace.path, [...identity(author), "commit", ...merging ? ["--no-edit", "--cleanup=strip"] : ["-m", message]]);
     const commitSha = await headOf(workspace.path);
     recordEvent({ ...references, type: "workspace.committed", data: { workspaceId: workspace.id, commitSha } });
     return commitSha;

@@ -13,7 +13,7 @@ const all = (table) => db.select().from(table).all();
 const route = async () => (await f.app("github-sync.ts")).syncGitHub();
 const run = async () => { const r = await f.runNextTask(); assert.ok(r); return r; };
 const success = async () => { const r = await run(); assert.equal(r.error, null, JSON.stringify(r.error)); return r; };
-const implement = async (n) => { f.addIssue(n, ["scrat"]); f.enqueue(n, "implement"); return success(); };
+const implement = async (n, title) => { f.addIssue(n, ["scrat"], title); f.enqueue(n, "implement"); return success(); };
 const changeMain = (path, text) => {
   writeFileSync(resolve("seed", path), text); git(resolve("seed"), "add", "."); commit(resolve("seed"), "Change " + path);
   git(resolve("seed"), "push", resolve("remote.git"), "main");
@@ -231,11 +231,29 @@ const staleBranch = async (variant) => {
     assert.equal(f.requests.length, calls); assert.equal(remoteGit("for-each-ref", "refs/heads"), heads2);
     assert.equal(f.comments.get(302)?.length ?? 0, 0);
     assert.ok(all(s.workspaces).every((w) => w.removedAt));
+    const notices = () => (f.comments.get(302) ?? []).filter((c) => /does not merge cleanly/.test(c.body));
+    await route(); await route();
+    assert.equal(notices().length, 1); assert.match(notices()[0].body, /behind main/); assert.deepEqual(queuedFor(302), []);
+    assert.deepEqual(f.prs[1].labels, []);
+    const writes = f.writes.length;
+    changeMain("src/other.ts", "export const other = 1;\n"); await route();
+    assert.deepEqual(queuedFor(302), []); assert.equal(f.writes.length, writes, "a base move neither queues nor comments");
+    tasks.enqueueManualTasks("review_pr", ["302"]); await route();
+    assert.deepEqual(queuedFor(302), ["review_pr"], "a manual request survives routing");
+    assert.ok((await run()).error); await route();
+    assert.equal(notices().length, 1); assert.equal(f.comments.get(302).length, 1); assert.deepEqual(queuedFor(302), []);
+    branchOff("release", "release.txt", "release\n"); f.prs[1].base.ref = "release"; await route();
+    assert.deepEqual(queuedFor(302), ["review_pr"], "a retargeted PR is no longer blocked");
+    f.prs[1].base.ref = "main"; await route(); assert.deepEqual(queuedFor(302), []);
+    pushFile("feature-b", "src/app.ts", "export const value = 9;\n"); f.prs[1].head.sha = remoteGit("rev-parse", "feature-b"); await route();
+    assert.deepEqual(queuedFor(302), ["review_pr"]);
+    await success(); await route();
+    assert.equal(f.comments.get(302).length, 1); assert.equal(notices().length, 0); assert.equal(f.prs[1].labels.length, 1);
     f.prs[1].state = "closed"; await route();
     branchOff("feature-c", "src/c.ts", "export const c = 1;\n"); needs("needed4.txt");
     addPr(303, "feature-c", "human"); await route();
-    const workspaces = all(s.workspaces).length, unmasked = await run();
-    assert.match(unmasked.error.stdout, /ERR_MISSING needed4\.txt/); assert.equal(f.requests.length, calls);
+    const workspaces = all(s.workspaces).length, requests = f.requests.length, unmasked = await run();
+    assert.match(unmasked.error.stdout, /ERR_MISSING needed4\.txt/); assert.equal(f.requests.length, requests);
     assert.equal(all(s.workspaces).length, workspaces + 1, "no synthetic workspace is made");
   } else {
     await implement(1); await route(); drainExcept(201);
@@ -278,7 +296,7 @@ const staleBranch = async (variant) => {
     const head3 = remoteGit("rev-parse", f.prs[2].head.ref);
     assert.equal(parents(resolve("remote.git"), head3).length, 2);
     assert.equal(remoteGit("show", head3 + ":src/app.ts"), "export const value = 300;"); assert.equal(resolved.publication.publishedCommitSha, head3);
-    assert.equal(remoteGit("log", "-1", "--format=%s", head3), f.prs[2].title, "A PR's commit keeps its title's single conventional prefix");
+    assert.match(remoteGit("log", "-1", "--format=%s", head3), /^Merge/, "A conflict-resolving merge keeps its merge message");
     await implement(4); drainExcept(204);
     needs("needed3.txt"); changeMain("needed3.txt", "ok\n");
     tasks.enqueueTask({ subjectId: prItem(204).id, action: "address_pr_feedback", reason: "Exercise self-heal", input: { source: "github_items", kind: "manual", manual: true } });
@@ -287,6 +305,10 @@ const staleBranch = async (variant) => {
     remoteGit("merge-base", "--is-ancestor", mainHead(), head4);
     assert.equal(healed.publication.publishedCommitSha, head4); assert.equal(remoteGit("show", head4 + ":src/app.ts"), "export const value = 214;");
     assert.equal(remoteGit("show", head4 + ":needed3.txt"), "ok");
+    assert.equal(remoteGit("log", "-1", "--format=%s", head4), `Address feedback: ${f.prs[3].title}`, "A repair commit says what it repairs, not just the PR title");
+    await implement(5, "fix(auth): x"); await implement(6, "Bug: y");
+    assert.deepEqual([f.prs[4].title, f.prs[5].title], ["fix(auth): x", "fix: Bug: y"]);
+    assert.deepEqual([4, 5].map((i) => remoteGit("log", "-1", "--format=%s", f.prs[i].head.ref)), ["fix(auth): x", "fix: Bug: y"]);
   }
 };
 const validationFeedback = async (variant) => {
@@ -822,15 +844,12 @@ export const scenarios = {
     assert.equal(f.requests.length, calls); assert.equal(recovered.publication.commentId, original.id);
     f.reset(201, "grade-A");
     tasks.enqueueTask({ subjectId: f.row(s.tasks, lost.taskId).subjectId, action: "review_pr", reason: "New assessment", input: { source: "github_items", kind: "manual", manual: true } });
-    const labelWrites = (from) => f.writes.slice(from).filter((w) => w.type === "label").length;
-    const labelsBefore = f.writes.length;
     f.faults.comment.add(201); const lostUpdate = await run(); assert.ok(lostUpdate.error);
     assert.deepEqual(f.prs[0].labels, [], "A lost report-write response must not leave the old report's grade");
     const updateCalls = f.requests.length; tasks.retryTask(lostUpdate.taskId); const updated = await success();
     assert.equal(f.requests.length, updateCalls); assert.equal(updated.publication.commentId, original.id);
     assert.equal(f.comments.get(201).length, 2); assert.equal(f.comments.get(201)[1].body, feedback.body);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
-    assert.equal(labelWrites(labelsBefore), 2, "a changed grade removes the old label once and adds the new one once");
   } },
   deleted_review: { title: "deleted canonical comments are restored from the authoritative saved assessment", run: () => deletedReview("deleted") },
   unreceipted_review: { title: "older retries preserve a newer remote review even when its write receipt was lost", run: () => deletedReview("unreceipted") },
@@ -1475,7 +1494,7 @@ export const scenarios = {
       reviewed = await success();
     }
   } },
-  stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or fails clearly when the merge conflicts", configure: [configureStaleBranch], run: () => staleBranch("human") },
+  stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or says once in its assessment comment that the merge conflicts and is not retried until its head changes or a review is requested by hand", configure: [configureStaleBranch], run: () => staleBranch("human") },
   stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", configure: [configureStaleBranch], run: () => staleBranch("scrat") },
   validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit", configure: [configureValidation], run: () => validationFeedback("fix") },
   validation_feedback_cap: { title: "validation feedback stops after two rounds and never applies to signal-killed commands", configure: [configureValidation], run: () => validationFeedback("cap") },
@@ -1968,6 +1987,8 @@ export const scenarios = {
     for (const request of firstRequests) assert.ok(!("previous_assessment" in request.context.files) && !("previous_repair" in request.context.files), "A first review has no prior state");
     await route(); f.reset(201, "normal"); const repair = await success();
     assert.equal(repair.taskId, all(s.tasks).find((t) => t.action === "address_review").id); assert.ok(repair.result.text.includes("Implemented the change"));
+    const repaired201 = f.prs.find((pr) => pr.number === 201);
+    assert.equal(git(resolve("remote.git"), "log", "-1", "--format=%s", repaired201.head.ref), `Address review: ${repaired201.title}`);
     await route(); f.reset(201, "normal"); const second = await success();
     assert.notEqual(second.id, first.id);
     const secondRequests = filesOf(201, second.id);

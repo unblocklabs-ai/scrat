@@ -322,8 +322,8 @@ export async function fixture(scenario, spec) {
     }
     throw new Error(`Unexpected GitHub call: ${method} ${path}`);
   };
-  const addIssue = (number, labels = []) => {
-    const payload = { id: number, node_id: "ISSUE_" + number, number, title: "Issue " + number, body: "Inspect app.ts", state: "open", html_url: `https://github.com/fixture/project/issues/${number}`, updated_at: "2026-10-19T00:00:00Z", labels: labels.map((name) => ({ name })), user: { login: "human" } };
+  const addIssue = (number, labels = [], title = "Issue " + number) => {
+    const payload = { id: number, node_id: "ISSUE_" + number, number, title, body: "Inspect app.ts", state: "open", html_url: `https://github.com/fixture/project/issues/${number}`, updated_at: "2026-10-19T00:00:00Z", labels: labels.map((name) => ({ name })), user: { login: "human" } };
     issues.set(number, payload); db.insert(schema.subjects).values({ id: "issue-" + number, repository: "fixture/project", kind: "item", key: payload.node_id }).run();
     return db.insert(schema.items).values({ id: "issue-" + number, externalId: payload.node_id, kind: "issue", payload }).returning().get();
   };

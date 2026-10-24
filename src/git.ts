@@ -153,6 +153,8 @@ export async function isAncestor(repositoryPath: string, ancestor: string, desce
   return !await exitsOne(git(repositoryPath, ["merge-base", "--is-ancestor", ancestor, descendant]));
 }
 
+export const conventionalTitle = (title: string) => /^[a-z]+(\([^)]*\))?!?: /.test(title) ? title : `fix: ${title}`;
+
 type Author = { name: string; email: string };
 export const identity = (author: Author) => ["-c", `user.name=${author.name}`, "-c", `user.email=${author.email}`];
 

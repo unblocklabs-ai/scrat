@@ -95,6 +95,9 @@ export function planReview(facts: ReviewFacts): RoutingDecision[] {
   if (facts.kind === "pr" && facts.state.kind === "current") {
     return [{ type: "cancel", action, reason: "No observed relevant changes since the authoritative review" }];
   }
+  if (facts.kind === "pr" && facts.state.kind === "blocked") {
+    return [{ type: "cancel", action, reason: "PR conflicts with its base branch; waiting for a new head" }];
+  }
   const { triggerKey, covered } = reviewTrigger(facts);
   if (covered) return [];
   const completed = facts.kind === "pr"

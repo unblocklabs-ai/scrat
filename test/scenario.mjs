@@ -393,12 +393,15 @@ const commitReview = async (variant) => {
     assert.equal(reactions().length - callsBefore, 2); assert.equal(retried.publication.slackReaction, "large_orange_square");
     assert.equal(retried.publication.slackReplyTs, failed.publication.slackReplyTs);
   } else if (variant === "no_start") {
+    f.verdicts.default = "concerns";
     let before;
     f.onModel = (_context, step) => { if (step === 0 && before === undefined) before = posts().length; };
     assert.equal(await push("No start slot"), 1);
     await success();
     assert.equal(before, 0, "no root is posted before the agent runs");
     assert.equal(posts().length, 2); assert.equal(roots().length, 1); assert.equal(all(s.slackThreads).length, 1);
+    assert.deepEqual(reactions().map((call) => [call.body.channel, call.body.timestamp, call.body.name]), [[channel, all(s.slackThreads)[0].ts, "large_orange_square"]]);
+    assert.equal(all(s.slackThreads)[0].ts, posts()[1].body.thread_ts);
     } else if (variant === "panel") {
     f.verdicts["gpt-6.1-sol"] = "concerns"; f.verdicts["deepseek/deepseek-v4.1-flash"] = "breaking";
     assert.equal(await push("Panel change"), 1);

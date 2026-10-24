@@ -2,7 +2,7 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { posix } from "node:path";
 import { Type } from "typebox";
 import { config } from "./config.ts";
-import { blobSize, git, gitPage, type GitPage } from "./git.ts";
+import { blobSize, commitOf, gitPage, type GitPage } from "./git.ts";
 
 const operations = ["diff_stat", "diff", "log", "show"];
 
@@ -22,8 +22,9 @@ export function createReviewGitTool(cwd: string, revisions: Record<string, strin
     if (!/^[0-9a-f]{7,40}$/.test(candidate)) {
       throw new Error(`${parameter} must be ${accepted}; ^, ~ and other revision syntax are not accepted: ${value}`);
     }
-    try { return await git(cwd, ["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`]); }
-    catch { throw new Error(`${parameter} is not a commit available in this checkout: ${value}`); }
+    const sha = await commitOf(cwd, candidate);
+    if (!sha) throw new Error(`${parameter} is not a commit available in this checkout: ${value}`);
+    return sha;
   }
   function repositoryPath(value: string | undefined, required: boolean) {
     if (!value) {

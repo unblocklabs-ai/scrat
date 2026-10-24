@@ -115,6 +115,7 @@ const configureDatabase = (config) => {
   const helper = fileURLToPath(new URL("database-command.mjs", import.meta.url)); cpSync(helper, "database-command.mjs");
   config.workspace = { ...config.workspace, environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), scenario === "validation_resume" ? "validate-resume" : "validate", resolve("database-receipts.jsonl")]] };
 };
+const withTools = (text, tools) => text.replace(/^tools: .*\n/m, "").trimEnd() + `\ntools: ${tools}\n`;
 const configureManifestDirectory = (config) => {
   const directory = resolve("deployment"), shipped = (name) => readFileSync(`app/actions/${name}.yaml`, "utf8"), field = (text, key, value) => text.replace(new RegExp(`^${key}: .*$`, "m"), `${key}: ${value}`);
   mkdirSync(directory); config.actions.directory = directory;
@@ -128,8 +129,8 @@ const configureManifestDirectory = (config) => {
     config.actions.review_pr.enabled = false;
   } else {
     const skill = (name) => resolve("app/skills", name, "SKILL.md");
-    writeFileSync("deployment/review_issue.yaml", field(field(field(shipped("review_issue"), "tools", "[read, grep]"), "files", "[]"), "skill", skill("review_issue")));
-    writeFileSync("deployment/implement.yaml", field(field(field(shipped("implement"), "tools", "[read, grep, find, ls, edit, write]"), "files", "[discussion, history]"), "skill", skill("implement")));
+    writeFileSync("deployment/review_issue.yaml", withTools(field(field(shipped("review_issue"), "files", "[]"), "skill", skill("review_issue")), "[read, grep]"));
+    writeFileSync("deployment/implement.yaml", withTools(field(field(shipped("implement"), "files", "[discussion, history]"), "skill", skill("implement")), "[read, grep, find, ls, edit, write]"));
   }
 };
 const configureSchedule = (config) => {
@@ -145,7 +146,11 @@ const configureSchedule = (config) => {
   if (scenario === "schedule_source") { sweep("slow_sweep", "30 3 * * 1", "24h", "read, grep"); config.actions.slow_sweep = { provider: "fixture" }; }
 };
 const configureCommitSource = (config) => Object.assign(config.actions.review_base_change, { enabled: true, channel: "C0123456789" });
-const configureCommitPanel = (config) => Object.assign(config.actions.review_base_change, { agent: "panel", reviewers: structuredClone(config.actions.review_pr.reviewers) });
+const configureCommitPanel = (config) => {
+  const reviewers = structuredClone(config.actions.review_pr.reviewers);
+  writeFileSync("app/actions/review_base_change.yaml", readFileSync("app/actions/review_base_change.yaml", "utf8") + `agent: panel\nreviewers: ${JSON.stringify(reviewers)}\n`);
+  Object.assign(config.actions.review_base_change, { reviewers });
+};
 const configureNoStart = () => writeFileSync("app/actions/review_base_change.yaml", readFileSync("app/actions/review_base_change.yaml", "utf8").replace("start: [slack_post]\n", ""));
 const configureHistory = () => writeFileSync("app/actions/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace("files: [discussion, previous_assessment]", "files: [discussion, previous_assessment, history]"));
 const configureScoped = (config) => {
@@ -153,7 +158,7 @@ const configureScoped = (config) => {
   const scopedTools = { scoped_http: ["[read, grep, http]", "http: { binding: scout, methods: [GET] }"], bindings_startup: ["[read, grep, http]", "http: { binding: scout }"], scoped_github_search: ["[read, grep, github_search]", ""],
     scoped_browser: ["[read, grep, browser]", "browser: { navigationHosts: [shop.example.test], resourceHosts: [cdn.example.test], binding: scout }"] }[scenario];
   mkdirSync("deployment"); config.actions.directory = resolve("deployment");
-  writeFileSync("deployment/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace(/^tools: .*$/m, "tools: " + scopedTools[0]).replace(/^skill: .*$/m, "skill: " + resolve("app/skills/review_issue/SKILL.md")).trimEnd() + "\n" + scopedTools[1] + "\n");
+  writeFileSync("deployment/review_issue.yaml", withTools(readFileSync("app/actions/review_issue.yaml", "utf8").replace(/^skill: .*$/m, "skill: " + resolve("app/skills/review_issue/SKILL.md")), scopedTools[0]) + scopedTools[1] + "\n");
 };
 const deletedReview = async (variant) => {
   await implement(1); await route(); f.faults.label.add(201);
@@ -898,33 +903,6 @@ export const scenarios = {
     assert.equal(f.comments.get(201).length, 2); assert.equal(f.comments.get(201)[1].body, feedback.body);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
   } },
-  legacy_assessments: { title: "the canonical assessment replaces legacy assessments, survives a failed legacy delete and leaves repair replies and human comments alone", run: async () => {
-    await implement(1); await route(); const initial = await success();
-    const canonical = f.comments.get(201)[0], bot = f.config.github.botLogin, at = "2026-10-19T03:00:00Z";
-    const botComment = (id, body) => ({ id, body, user: { login: bot }, updated_at: at, html_url: `https://github.com/fixture/project/pull/201#issuecomment-${id}` });
-    const legacy = botComment(9001, "Old summary.\n\n<!-- scrat:summary:v1 -->"), repair = botComment(9002, "Pushed the edge case fix.\n\n<!-- scrat-task:0f0f0f0f-0000-4000-8000-000000000001 -->");
-    const older = botComment(9003, `Older assessment.\n\n<!-- scrat-task:${initial.taskId} -->`), human = humanComment(201, 9100, "Please look at the edge case", at);
-    f.comments.get(201).push(legacy, repair, older, human);
-    const subjectId = f.row(s.tasks, initial.taskId).subjectId;
-    const reReview = () => { tasks.enqueueTask({ subjectId, action: "review_pr", reason: "New assessment", input: { source: "github_items", kind: "manual", manual: true } }); return success(); };
-    const deleteCalls = () => f.calls.filter((c) => c.method === "DELETE" && c.path.includes("/issues/comments/"));
-    const deleted = () => f.writes.filter((w) => w.type === "comment_delete").map((w) => w.id);
-    f.reset(201, "grade-A"); f.faults.commentDelete.add(legacy.id);
-    const failed = await reReview();
-    assert.equal(failed.publication.commentId, canonical.id); assert.equal(failed.publication.status, "published");
-    assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
-    assert.deepEqual(deleteCalls().map((c) => [c.path, c.status]), [[`/repos/fixture/project/issues/comments/${legacy.id}`, 500], [`/repos/fixture/project/issues/comments/${older.id}`, 204]]);
-    assert.deepEqual(deleted(), [older.id]);
-    assert.deepEqual(f.comments.get(201).map((c) => c.id), [canonical.id, legacy.id, repair.id, human.id]);
-    assert.equal(f.comments.get(201)[2].body, repair.body); assert.equal(f.comments.get(201)[3].body, human.body);
-    f.faults.commentDelete.delete(legacy.id);
-    const healed = await reReview();
-    assert.equal(healed.publication.commentId, canonical.id);
-    assert.deepEqual(f.comments.get(201).map((c) => c.id), [canonical.id, repair.id, human.id]);
-    assert.equal(f.comments.get(201).filter((c) => c.body.includes("<!-- scrat-review -->")).length, 1);
-    assert.deepEqual(deleted(), [older.id, legacy.id]);
-    assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
-  } },
   deleted_review: { title: "deleted canonical comments are restored from the authoritative saved assessment", run: () => deletedReview("deleted") },
   unreceipted_review: { title: "older retries preserve a newer remote review even when its write receipt was lost", run: () => deletedReview("unreceipted") },
   stale_assessment: { title: "a stale newest assessment clears its grade without resurrecting an older narrower review", run: async () => {
@@ -1492,7 +1470,7 @@ export const scenarios = {
     assert.equal((await freshness(saved, { revision: saved.revision, baseBranch: saved.baseBranch }, "relevant-paths")).kind, "current");
     const unknown = { ...saved, mainSha: null };
     assert.equal((await freshness(unknown, now, "relevant-paths")).kind, "stale");
-    assert.equal((await freshness(unknown, now, "relevant-paths", { unknownBase: "current" })).kind, "current");
+    assert.equal((await freshness(unknown, now, "relevant-paths", true)).kind, "current");
     changeMain("notes.md", "new docs\n"); const docsSha = await fetchMain(); assert.notEqual(docsSha, saved.mainSha);
     assert.deepEqual(await freshness(saved, { ...now, mainSha: docsSha }, "relevant-paths"), { kind: "current", baseMoved: true });
     assert.deepEqual(await freshness(saved, { ...now, mainSha: docsSha }, "exact"), { kind: "stale", reason: "base", changedPaths: [] });
@@ -1903,13 +1881,8 @@ export const scenarios = {
     assert.equal(rejected.length, 1);
     assert.match(rejected[0].data.reason, /Subject belongs to other\/repo, not fixture\/project/);
     assert.equal(f.row(s.tasks, rejected[0].taskId).status, "failed");
-    f.addIssue(3); f.addIssue(4); f.enqueue(3); f.enqueue(4);
-    db.update(s.subjects).set({ repository: "" }).where(eq(s.subjects.id, "issue-3")).run();
-    db.update(s.subjects).set({ repository: "" }).where(eq(s.subjects.id, "issue-4")).run();
-    assert.equal(tasks.claimTask(), undefined);
-    const bad = all(s.events).filter((e) => e.type === "task.rejected").slice(1);
-    assert.equal(bad.length, 2);
-    for (const e of bad) assert.match(e.data.reason, /Subject has no parseable repository/);
+    const { upsertItem } = await f.app("items.ts");
+    assert.throws(() => upsertItem({ externalId: "elsewhere", kind: "issue", payload: { html_url: "https://example.test/o/r/issues/1" } }), /not on github\.com/);
 
     const { fetchRepository } = await f.app("git.ts");
     const checkout = f.config.github.repositoryPath, remote = "https://github.com/fixture/project.git";
@@ -2677,7 +2650,7 @@ export const scenarios = {
     await startup((c) => { c.relevance.ignoredPaths = ["^assets/", "^(unclosed"]; }, /relevance\.ignoredPaths\[1\] is not a valid regular expression/);
     await startup((c) => { c.workspace.validate = []; }, /workspace\.validate is empty but address_pr_feedback, address_review, implement, resolve_conflicts publish commits.*\[\["true"\]\]/);
     await validateStaticConfig(variant((c) => { c.workspace.validate = []; for (const name of ["implement", "address_review", "address_pr_feedback", "resolve_conflicts"]) c.actions[name].enabled = false; }));
-    await startup((c) => { c.actions.implement.agent = "panel"; }, /implement: mode change requires source github_items and agent: single/);
+    schema((c) => { c.actions.implement.agent = "panel"; }, /actions\.implement\.agent: unknown setting/);
     await startup((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 30 }; }, /review_pr: retry\.maxDelaySeconds must be at least retry\.initialDelaySeconds/);
     await validateStaticConfig(variant((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 5, maxDelaySeconds: 5 }; }));
     await startup((c) => { c.actions.implement.retry = { initialDelaySeconds: 1, maxDelaySeconds: 2 }; }, /implement: retry requires mode review/);
@@ -2708,9 +2681,7 @@ export const scenarios = {
     await assert.rejects(validateStaticConfig(enabled((a) => { a.channel = " "; })), /review_base_change: channel must not be empty/);
     await assert.rejects(validateStaticConfig(enabled((a) => { a.branch = " "; })), /branch must not be empty/);
     await assert.rejects(validateStaticConfig(enabled((a) => { a.startMessage = "{{bot}} saw {{commit}}"; })), /unknown startMessage variable \{\{commit\}\}/);
-    await assert.rejects(validateStaticConfig(enabled((a) => { a.agent = "panel"; })), /requires exactly two reviewers/);
-    await validateStaticConfig(enabled((a) => { a.agent = "panel"; a.reviewers = structuredClone(f.config.actions.review_pr.reviewers); }));
-    schema((c) => { c.actions.review_base_change.agent = "solo"; }, /actions\.review_base_change\.agent: must be equal to one of the allowed values/);
+    await startup((c) => { c.actions.review_pr.reviewers.pop(); }, /review_pr: agent: panel requires exactly two reviewers/);
     f.slack.fail = "invalid_auth";
     await assert.rejects(validateStaticConfig(status(() => {})), /slack: auth\.test failed: .*invalid_auth/);
     await assert.rejects(validateStaticConfig(enabled()), /review_base_change: Slack auth\.test failed: .*invalid_auth/);
@@ -2929,7 +2900,7 @@ export const scenarios = {
     const { findTriggerConflicts, readManifests } = await f.app("manifests.ts");
     const { config: live } = await f.app("config.ts");
     const seed = resolve("seed"), remote = resolve("remote.git");
-    const base = manifests().find((m) => m.name === "review_base_change"), trigger = base.trigger;
+    const base = manifests.find((m) => m.name === "review_base_change"), trigger = base.trigger;
     const authored = (name, file, message, branch = "main") => {
       writeFileSync(resolve(seed, "src", file), "export const " + file.replace(".ts", "") + " = 1;\n"); git(seed, "add", ".");
       git(seed, "-c", "user.name=" + name, "-c", "user.email=" + name + "@users.noreply.github.com", "commit", "-m", message); git(seed, "push", remote, branch);
@@ -2987,7 +2958,7 @@ export const scenarios = {
     delete trigger.message;
     const count = reviews().length;
     git(seed, "switch", "-c", "develop"); const dev0 = authored("dave", "dev0.ts", "Develop start", "develop");
-    manifests().push({ ...base, name: "review_develop", file: "actions/review_develop.yaml", trigger: { ...trigger, branch: "develop", granularity: "commit" } });
+    manifests.push({ ...base, name: "review_develop", file: "actions/review_develop.yaml", trigger: { ...trigger, branch: "develop", granularity: "commit" } });
     live.actions.review_develop = { ...live.actions.review_base_change, branch: "develop" };
     assert.equal(await pollCommits(), 0); assert.equal(cursor("develop"), dev0);
     const dev1 = authored("dave", "dev1.ts", "Develop one", "develop"), dev2 = authored("dave", "dev2.ts", "Develop two", "develop");
@@ -3043,10 +3014,10 @@ export const scenarios = {
     broken("review_pr", (text) => text + "bogus: 1\n", /actions\/review_pr\.yaml: \/bogus: unknown key/);
     broken("review_pr", (text) => text.replace("[pr_assessment]", "[teleport]"), /actions\/review_pr\.yaml: \/publish\/0/);
     broken("implement", (text) => text.replace("nonempty_diff", "sometimes"), /actions\/implement\.yaml: \/acceptance/);
-    broken("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, teleport]"), /actions\/review_issue\.yaml: \/tools\/1/);
+    broken("review_issue", (text) => withTools(text, "[read, teleport]"), /actions\/review_issue\.yaml: \/tools\/1/);
     broken("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [secrets]"), /actions\/review_issue\.yaml: \/files\/0/);
     broken("review_issue", (text) => text.replace("name: review_issue", "name: Review-Issue"), /actions\/review_issue\.yaml: \/name/);
-    broken("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, bash]"), /mode review forbids the bash, edit and write tools/);
+    broken("review_issue", (text) => withTools(text, "[read, bash]"), /mode review forbids the bash, edit and write tools/);
     f.addIssue(1); f.enqueue(1);
     assert.equal(isActionEnabled("review_issue"), true); assert.equal(isActionEnabled("nope"), false);
     assert.equal(live.actions.review_pr.provider, "fixture"); assert.equal(live.actions.review_pr.reviewers[1].provider, "fixture");
@@ -3056,7 +3027,7 @@ export const scenarios = {
   manifest_directory: { title: "a deployment manifest directory adds an action for a freed trigger, rejects duplicate enabled triggers, unknown tools and files, and bad directories", configure: [configureManifestDirectory], run: async () => {
     const { manifests, routeFor } = await f.app("actions.ts");
     const { validateStaticConfig } = await f.app("startup.ts");
-    assert.deepEqual(manifests().map((m) => m.name).sort(), ["address_pr_feedback", "address_review", "implement", "my_pr_review", "resolve_conflicts", "review_base_change", "review_issue", "review_pr", "review_triage"]);
+    assert.deepEqual(manifests.map((m) => m.name).sort(), ["address_pr_feedback", "address_review", "implement", "my_pr_review", "resolve_conflicts", "review_base_change", "review_issue", "review_pr", "review_triage"]);
     await validateStaticConfig(f.config);
     await assert.rejects(validateStaticConfig({ ...f.config, actions: { ...f.config.actions, review_issue: { ...f.config.actions.review_issue, enabled: true } } }), /review_issue, review_triage would share one review comment on each issue; enable only one/);
     const issue = { source: "github_items", kind: "item_changed", item: "issue", author: "other" };
@@ -3082,7 +3053,7 @@ export const scenarios = {
     assert.doesNotMatch(probe(base), /Error/);
     assert.match(probe({ directory, review_pr: { enabled: false } }), /actions\/review_issue\.yaml and .*review_triage\.yaml both match \{source: github_items, kind: item_changed, item: issue\}; disable one/);
     assert.doesNotMatch(probe({ directory, review_pr: { enabled: false }, review_triage: { enabled: false } }), /Error/);
-    assert.match(probe(base, { "bad_tool.yaml": named("bad_tool", "tools", "[teleport]") }), /bad_tool\.yaml: \/tools\/0/);
+    assert.match(probe(base, { "bad_tool.yaml": withTools(named("bad_tool", "priority", "10"), "[teleport]") }), /bad_tool\.yaml: \/tools\/0/);
     assert.match(probe(base, { "bad_file.yaml": named("bad_file", "files", "[secrets]") }), /bad_file\.yaml: \/files\/0/);
     assert.match(probe({ ...base, directory: "relative/actions" }), /actions\.directory must be an absolute path/);
     assert.match(probe({ ...base, directory: resolve("missing-actions") }), /Cannot read manifests in/);
@@ -3114,15 +3085,15 @@ export const scenarios = {
       writeFileSync(resolve(directory, "rule_check.yaml"), change(readFileSync(resolve("app/actions", name + ".yaml"), "utf8").replace("name: " + name, "name: rule_check")));
       assert.throws(() => readManifests(resolve("app"), directory), message);
     };
-    rejects("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, bash]"), /rule_check\.yaml: mode review forbids the bash, edit and write tools/);
-    rejects("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, git, read_base]"), /read_base requires a review with agent: panel or context: change/);
+    rejects("review_issue", (text) => withTools(text, "[read, bash]"), /rule_check\.yaml: mode review forbids the bash, edit and write tools/);
+    rejects("review_issue", (text) => withTools(text, "[read, git, read_base]"), /read_base requires a review with agent: panel or context: change/);
     rejects("review_pr", (text) => text.replace("[discussion, previous_assessment, previous_repair, validation, issue]", "[history]"), /files: history is not allowed with the pr_assessment effect/);
     rejects("review_pr", (text) => text.replace("validation, issue]", "validation, triage]"), /files: triage requires trigger.item issue/);
     rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [issue]"), /files: issue requires trigger.item pr/);
     rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [review]"), /files: review requires trigger.kind low_grade/);
     rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [labels]"), /files: previous_assessment requires the pr_assessment effect or a review that publishes comment/);
     rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [discussion, previous_repair]"), /files: previous_repair requires the pr_assessment effect/);
-    rejects("implement", (text) => text.replace("[read, grep, find, ls, bash, edit, write]", "[read, git]"), /mode change forbids the git and read_base tools/);
+    rejects("implement", (text) => withTools(text, "[read, git]"), /mode change forbids the git and read_base tools/);
     rejects("implement", (text) => text.replace("item: issue", "item: pr"), /trigger.kind label requires item: issue/);
     rejects("review_issue", (text) => text + "failedLabel: Scrat failed\n", /rule_check\.yaml: failedLabel requires mode change/);
   } },
@@ -3352,18 +3323,18 @@ export const scenarios = {
       writeFileSync(resolve(rules, "rule_check.yaml"), change(readFileSync(resolve("app/actions", name + ".yaml"), "utf8").replace("name: " + name, "name: rule_check")));
       assert.throws(() => readManifests(resolve("app"), rules), message);
     };
-    const reviewTools = "[read, grep, find, ls, git]", mutual = (kind) => new RegExp(`the ${kind} tool and the ${kind} setting require each other`);
-    invalid("review_issue", (text) => text.replace(reviewTools, "[read, http]"), mutual("http"));
+    const mutual = (kind) => new RegExp(`the ${kind} tool and the ${kind} setting require each other`);
+    invalid("review_issue", (text) => withTools(text, "[read, http]"), mutual("http"));
     invalid("review_issue", (text) => text + "http: { binding: scout }\n", mutual("http"));
-    invalid("review_issue", (text) => text.replace(reviewTools, "[read, browser]"), mutual("browser"));
+    invalid("review_issue", (text) => withTools(text, "[read, browser]"), mutual("browser"));
     invalid("review_issue", (text) => text + "browser: { navigationHosts: [shop.example.test], resourceHosts: [] }\n", mutual("browser"));
-    invalid("review_issue", (text) => text.replace(reviewTools, "[read, browser]") + "browser: { navigationHosts: [127.0.0.1], resourceHosts: [] }\n", /browser: 127\.0\.0\.1 is an IP address/);
-    invalid("review_issue", (text) => text.replace(reviewTools, "[read, browser]") + 'browser: { navigationHosts: [shop.example.test], resourceHosts: ["*.example.test"] }\n', /browser: \*\.example\.test is not an exact public hostname/);
-    invalid("review_issue", (text) => text.replace(reviewTools, "[read, http]") + "http: { binding: scout, methods: [TRACE] }\n", /rule_check\.yaml: \/http\/methods\/0/);
-    invalid("review_issue", (text) => text.replace(reviewTools, "[read, http]") + "http: { binding: scout, hosts: [x.example.test] }\n", /rule_check\.yaml: \/http\/hosts: unknown key/);
-    invalid("implement", (text) => text.replace("[read, grep, find, ls, bash, edit, write]", "[read, bash, github_search]"), /github_search requires mode review/);
+    invalid("review_issue", (text) => withTools(text, "[read, browser]") + "browser: { navigationHosts: [127.0.0.1], resourceHosts: [] }\n", /browser: 127\.0\.0\.1 is an IP address/);
+    invalid("review_issue", (text) => withTools(text, "[read, browser]") + 'browser: { navigationHosts: [shop.example.test], resourceHosts: ["*.example.test"] }\n', /browser: \*\.example\.test is not an exact public hostname/);
+    invalid("review_issue", (text) => withTools(text, "[read, http]") + "http: { binding: scout, methods: [TRACE] }\n", /rule_check\.yaml: \/http\/methods\/0/);
+    invalid("review_issue", (text) => withTools(text, "[read, http]") + "http: { binding: scout, hosts: [x.example.test] }\n", /rule_check\.yaml: \/http\/hosts: unknown key/);
+    invalid("implement", (text) => withTools(text, "[read, bash, github_search]"), /github_search requires mode review/);
     const accepted = resolve("accepted"); mkdirSync(accepted);
-    writeFileSync(resolve(accepted, "scoped_check.yaml"), readFileSync(resolve("app/actions/review_issue.yaml"), "utf8").replace("name: review_issue", "name: scoped_check").replace(reviewTools, "[read, github_search, http]") + "http: { binding: scout, methods: [GET, POST] }\n");
+    writeFileSync(resolve(accepted, "scoped_check.yaml"), withTools(readFileSync(resolve("app/actions/review_issue.yaml"), "utf8").replace("name: review_issue", "name: scoped_check"), "[read, github_search, http]") + "http: { binding: scout, methods: [GET, POST] }\n");
     assert.deepEqual(readManifests(resolve("app"), accepted).find((entry) => entry.name === "scoped_check").http, { binding: "scout", methods: ["GET", "POST"] });
 
     const { containsSecret } = await f.app("secrets.ts"), { redactSecrets } = await f.app("errors.ts"), { childEnvironment } = await f.app("secrets.ts");

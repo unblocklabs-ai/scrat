@@ -55,7 +55,6 @@ export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, ba
     }
   }
   const insideWorkspace = (path: string) => confine(path, roots);
-  const writable = confineWrite;
   async function searchRoot(path = ".") {
     const requested = path.startsWith("@") ? path.slice(1) : path;
     if (requested === "~" || requested.startsWith("~/")) throw new Error(`Path is outside the workspace: ${path}`);
@@ -118,13 +117,13 @@ export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, ba
     },
   };
   const edit = createEditToolDefinition(cwd, { operations: {
-    access: async (path) => access(await writable(path), constants.R_OK | constants.W_OK),
-    readFile: async (path) => readFile(await writable(path)),
-    writeFile: async (path, content) => writeFile(await writable(path), content, "utf8"),
+    access: async (path) => access(await confineWrite(path), constants.R_OK | constants.W_OK),
+    readFile: async (path) => readFile(await confineWrite(path)),
+    writeFile: async (path, content) => writeFile(await confineWrite(path), content, "utf8"),
   } });
   const write = createWriteToolDefinition(cwd, { operations: {
-    mkdir: async (dir) => { await mkdir(await writable(dir), { recursive: true }); },
-    writeFile: async (path, content) => writeFile(await writable(path), content, "utf8"),
+    mkdir: async (dir) => { await mkdir(await confineWrite(dir), { recursive: true }); },
+    writeFile: async (path, content) => writeFile(await confineWrite(path), content, "utf8"),
   } });
   const readBase = defineTool({
     name: "read_base",
@@ -148,11 +147,11 @@ export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, ba
     read_base: readBase, bash: quiet(bash), edit: quiet(edit), write: quiet(write),
   } satisfies Record<Exclude<ToolName, ScopedToolName>, object>;
   const binding = (name?: string) => name === undefined ? undefined : config.bindings[name];
-  const browser = tools.includes("browser") && scoped.browser
+  const browser = scoped.browser
     ? createBrowserTool({ settings: scoped.browser, binding: binding(scoped.browser.binding), contextDir, runId, log }) : undefined;
   const table = {
     ...core,
-    ...tools.includes("http") && scoped.http && { http: createHttpTool({ settings: scoped.http, binding: binding(scoped.http.binding)!, runId }) },
+    ...scoped.http && { http: createHttpTool({ settings: scoped.http, binding: binding(scoped.http.binding)!, runId }) },
     ...browser && { browser: browser.tool },
     ...tools.includes("github_search") && { github_search: createGithubSearchTool(new GitHubRepository(config.github.repository)) },
   };

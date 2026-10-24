@@ -3,7 +3,7 @@ import { manifests } from "./actions.ts";
 import { type Resolver, publicAnswers, resolveHost, validateBindings } from "./bindings.ts";
 import { config } from "./config.ts";
 import { configError, type ActionSettings, type ScratConfig } from "./config-schema.ts";
-import { deploymentDefaults, skillPath } from "./manifests.ts";
+import { deploymentDefaults, entryProblems, skillPath, type Manifest } from "./manifests.ts";
 import { slugOf } from "./identity.ts";
 import { logger } from "./logging.ts";
 import { errorMessage } from "./errors.ts";
@@ -15,7 +15,6 @@ const templateVariables = new Set(["sha", "short_sha", "author", "title", "url",
 
 type Entry = { provider: string; model: string };
 
-// @public: exported for the scenario tests, which validate alternative configurations directly.
 export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, "actions"> & { resolve?: Resolver; actions: Record<string, Partial<ActionSettings>> } = config) {
   const modelRuntime = await sharedModelRuntime();
   const problems: string[] = [];
@@ -34,7 +33,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
     else if (await lstat(store).then((entry) => entry.isSymbolicLink(), () => false)) problems.push("workspace.packageStore must not be a symlink");
     else if (process.platform === "linux") await mkdir(store, { recursive: true, mode: 0o700 }).catch(() => { problems.push(`workspace.packageStore ${store} cannot be created`); });
   }
-  const resolvedEntry = (manifest: ReturnType<typeof manifests>[number]) => ({ ...deploymentDefaults(manifest), ...settings.actions[manifest.name] });
+  const resolvedEntry = (manifest: Manifest) => ({ ...deploymentDefaults(manifest), ...settings.actions[manifest.name] });
   const checkSlackAuth = (prefix: string) => authTest().catch((error: unknown) => { problems.push(`${prefix} auth.test failed: ${errorMessage(error)}`); });
   const checkEntry = (label: string, { provider, model }: Entry) => {
     if (!modelRuntime.getModel(provider, model)) problems.push(`${label}: no Pi model ${provider}/${model}${modelRuntime.getError() ? ` (${modelRuntime.getError()})` : ""}`);
@@ -51,17 +50,14 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
       try { new RegExp(pattern); } catch { problems.push(`${key}[${index}] is not a valid regular expression`); }
     });
   }
-  const reviewComments = manifests().filter((manifest) => manifest.mode === "review" && manifest.publish.includes("comment") && resolvedEntry(manifest).enabled !== false);
+  const reviewComments = manifests.filter((manifest) => manifest.mode === "review" && manifest.publish.includes("comment") && resolvedEntry(manifest).enabled !== false);
   for (const item of ["issue", "pr"] as const) {
     const sharing = reviewComments.filter((manifest) => manifest.trigger.item === item).map((manifest) => manifest.name);
     if (sharing.length > 1) problems.push(`${sharing.join(", ")} would share one review comment on each ${item}; enable only one`);
   }
-  const changeActions = manifests().filter((manifest) => manifest.mode === "change" && resolvedEntry(manifest).enabled !== false).map((manifest) => manifest.name);
+  const changeActions = manifests.filter((manifest) => manifest.mode === "change" && resolvedEntry(manifest).enabled !== false).map((manifest) => manifest.name);
   if (changeActions.length && !settings.workspace?.validate?.length) {
     problems.push(`workspace.validate is empty but ${changeActions.join(", ")} publish commits; list the target repository's check commands, or use [["true"]] if it has nothing to check`);
-  }
-  for (const manifest of manifests()) {
-    if (manifest.mode === "change" && resolvedEntry(manifest).agent !== "single") problems.push(`${manifest.name}: mode change requires source github_items and agent: single`);
   }
   const bindingProblems = validateBindings(settings.bindings);
   problems.push(...bindingProblems);
@@ -83,13 +79,11 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
   for (const [name, { apiKey }] of Object.entries(settings.providers ?? {})) {
     if (apiKey && !/\$\{\w+\}/.test(apiKey)) logger.warn({ provider: name }, "Provider apiKey is not a ${VAR} placeholder; it will not be redacted from output");
   }
-  for (const manifest of manifests()) {
+  for (const manifest of manifests) {
     const action = manifest.name, entry = resolvedEntry(manifest);
     checkEntry(action, entry);
-    if (entry.retry && manifest.mode !== "review") problems.push(`${action}: retry requires mode review`);
-    if (entry.failedLabel && manifest.mode !== "change") problems.push(`${action}: failedLabel requires mode change`);
-    if (entry.retry && entry.retry.maxDelaySeconds < entry.retry.initialDelaySeconds) problems.push(`${action}: retry.maxDelaySeconds must be at least retry.initialDelaySeconds`);
-    entry.reviewers?.forEach((reviewer, index) => checkEntry(`${action} reviewer ${index + 1}`, reviewer));
+    problems.push(...entryProblems(manifest, entry).map((problem) => `${action}: ${problem}`));
+    entry.reviewers.forEach((reviewer, index) => checkEntry(`${action} reviewer ${index + 1}`, reviewer));
     if (entry.enabled !== false) {
       const slack = [...manifest.start ?? [], ...manifest.publish].some((effect) => effect.startsWith("slack_"));
       if (slack) {
@@ -100,7 +94,6 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
         const unknown = [...(entry.startMessage ?? "").matchAll(/\{\{(.*?)\}\}/g)].map((match) => match[1]).filter((name) => !templateVariables.has(name));
         if (unknown.length) problems.push(`${action}: unknown startMessage variable ${unknown.map((name) => `{{${name}}}`).join(", ")}`);
       }
-      if (entry.agent === "panel" && entry.reviewers?.length !== 2) problems.push(`${action}: agent "panel" requires exactly two reviewers`);
       if (slack && process.env.SLACK_BOT_TOKEN) await checkSlackAuth(`${action}: Slack`);
       if (manifest.browser) await loadPlaywright().catch((error: unknown) => { problems.push(`${action}: ${errorMessage(error)}`); });
       const skill = skillPath(manifest, entry.skill);
@@ -111,8 +104,4 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
     if (modelRuntime.getError()) dropModelRuntime();
     throw configError(problems);
   }
-}
-
-export async function prepareService() {
-  await validateStaticConfig();
 }

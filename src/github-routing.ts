@@ -1,4 +1,3 @@
-import type { Action } from "./actions.ts";
 import type { Freshness } from "./freshness.ts";
 import { botName, botSlug } from "./identity.ts";
 import type { PrReviewState } from "./pr-assessment.ts";
@@ -11,16 +10,16 @@ type ReviewAttempt = Pick<Run, "mainSha"> & {
 };
 type PreviousReview = ReviewAttempt & Pick<Run, "headSha">;
 export type RoutingDecision =
-  | { type: "enqueue"; action: Action; reason: string; input: KeyedTriggerInput }
-  | { type: "cancel"; action: Action; reason: string };
+  | { type: "enqueue"; action: string; reason: string; input: KeyedTriggerInput }
+  | { type: "cancel"; action: string; reason: string };
 
-function queue(latest: TaskFacts | undefined, action: Action, reason: string, input: KeyedTriggerInput): RoutingDecision[] {
+function queue(latest: TaskFacts | undefined, action: string, reason: string, input: KeyedTriggerInput): RoutingDecision[] {
   if (latest?.status !== "cancelled" && latest && triggerKeyOf(latest.input) === input.triggerKey) return [];
   return [{ type: "enqueue", action, reason, input }];
 }
 
 export function planIssueTasks({ labelAction, reviewAction, labelled, implemented, workspaceId, previouslyLabelled, latest, updatedAt, mainSha }: {
-  labelAction: Action | undefined; reviewAction: Action | undefined;
+  labelAction: string | undefined; reviewAction: string | undefined;
   labelled: boolean; implemented: boolean; workspaceId: string | null; previouslyLabelled?: boolean;
   latest?: TaskFacts; updatedAt: string; mainSha: string;
 }): { review: boolean; decisions: RoutingDecision[] } {
@@ -38,7 +37,7 @@ export function planIssueTasks({ labelAction, reviewAction, labelled, implemente
 }
 
 export function planPrMaintenance({ conflictAction, feedbackAction, conflicts, stale, mainSha, headSha, pendingComments, conflictTask, feedbackTask }: {
-  conflictAction: Action | undefined; feedbackAction: Action | undefined;
+  conflictAction: string | undefined; feedbackAction: string | undefined;
   conflicts: boolean; stale: boolean; mainSha: string; headSha: string; pendingComments: string[];
   conflictTask?: TaskFacts; feedbackTask?: TaskFacts;
 }): RoutingDecision[] {
@@ -60,7 +59,7 @@ export function planPrMaintenance({ conflictAction, feedbackAction, conflicts, s
 }
 
 export function planSelfRepair({ repairAction, repairActions, state, feedbackTask, reviewTask, repairTask, count, limit }: {
-  repairAction: Action | undefined; repairActions: readonly Action[]; state: PrReviewState;
+  repairAction: string | undefined; repairActions: readonly string[]; state: PrReviewState;
   feedbackTask?: TaskFacts; reviewTask?: TaskFacts; repairTask?: TaskFacts; count: number; limit: number | undefined;
 }): { decisions: RoutingDecision[]; limited: boolean } {
   const cancel: RoutingDecision[] = repairActions.map((action) => ({ type: "cancel", action, reason: "No current low-graded review to repair" }));
@@ -85,7 +84,7 @@ export function reviewTrigger({ latest, attempt, revision, mainSha }: ReviewTrig
   return { triggerKey, covered };
 }
 
-type ReviewFacts = ReviewTriggerFacts & { action: Action } & (
+type ReviewFacts = ReviewTriggerFacts & { action: string } & (
   | { kind: "pr"; state: PrReviewState }
   | { kind: "issue"; completed?: PreviousReview; freshness?: Freshness }
 );

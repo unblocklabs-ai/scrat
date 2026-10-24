@@ -7,10 +7,9 @@ import { items, subjects } from "./schema.ts";
 export const remoteUrl = (repository: string) => `https://github.com/${repository}.git`;
 export const sameRepository = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 export function itemRepository(item: { payload: { html_url: string } }) {
-  try {
-    const url = new URL(item.payload.html_url);
-    return url.hostname === "github.com" ? url.pathname.split("/").slice(1, 3).join("/") : undefined;
-  } catch { return undefined; }
+  const url = new URL(item.payload.html_url);
+  if (url.hostname !== "github.com") throw new Error(`Item URL is not on github.com: ${url.href}`);
+  return url.pathname.split("/").slice(1, 3).join("/");
 }
 export function assertConfiguredRepository(repository: string) {
   if (!sameRepository(repository, config.github.repository)) throw new Error(`Scrat serves only ${config.github.repository}, not ${repository}`);

@@ -5,7 +5,7 @@ import { config, isBotLogin } from "./config.ts";
 import { recordEvent, type EventReferences, type JournalEvent } from "./events.ts";
 import { labelName } from "./labels.ts";
 import { logger, withOperation } from "./logging.ts";
-import { fingerprintMarker, inlineCommentId, issueCommentId, reviewCommentId } from "./markers.ts";
+import { fingerprintMarker, inlineCommentId, issueCommentId, reviewCommentId, withMarker } from "./markers.ts";
 import type { GithubComment, GithubContext, GithubIssue, GithubItem, GithubPullRequest } from "./github-types.ts";
 import { errorStatus } from "./errors.ts";
 import { assertConfiguredRepository } from "./repository.ts";
@@ -193,10 +193,10 @@ export class GitHubRepository {
     return { item, comments };
   }
 
-  async fetchItemContexts(items: readonly { kind: "issue" | "pr"; number: number; item?: GithubItem }[], options: { comments?: boolean; defer?: boolean } = {}) {
+  async fetchItemContexts(items: readonly { kind: "issue" | "pr"; number: number; item?: GithubItem }[], options: { defer?: boolean } = {}) {
     const contexts = new Array<GithubContext | undefined>(items.length);
     await mapConcurrent(items, async ({ kind, number, item }, index) => {
-      contexts[index] = await this.fetchItemContext(kind, number, { comments: options.comments, item });
+      contexts[index] = await this.fetchItemContext(kind, number, { item });
     }, () => options.defer === true && rateLimitLow());
     return contexts;
   }
@@ -282,13 +282,6 @@ export class GitHubRepository {
     });
   }
 
-  async deleteComment(commentId: number, references: EventReferences = {}): Promise<void> {
-    await this.write("github.delete_comment", { commentId }, references, "write", {
-      request: ({ github, owner, repo }) => github.rest.issues.deleteComment({ owner, repo, comment_id: commentId }),
-      journal: () => ({ details: { commentId } }),
-    });
-  }
-
   async addLabels(issueNumber: number, labels: string[], references: EventReferences = {}): Promise<void> {
     await this.write("github.add_labels", { issueNumber, labels }, references, "write", {
       request: ({ github, owner, repo }) => github.rest.issues.addLabels({ owner, repo, issue_number: issueNumber, labels }),
@@ -318,7 +311,7 @@ export class GitHubRepository {
     { title, body, fingerprint }: { title: string; body: string; fingerprint: string },
     references: EventReferences = {},
   ) {
-    const marked = `${body.trimEnd()}\n\n${fingerprintMarker(fingerprint)}`;
+    const marked = withMarker(body, fingerprintMarker(fingerprint));
     const response = await this.write("github.create_issue", { fingerprint }, references, "write", {
       inspect: () => assertPublishable(title, marked),
       request: ({ github, owner, repo }) => github.rest.issues.create({ owner, repo, title, body: marked }),

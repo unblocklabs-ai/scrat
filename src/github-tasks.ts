@@ -1,6 +1,6 @@
 import { and, eq, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
-import { actionsPublishing, manifests, matchingActions, routeFor } from "./actions.ts";
+import { manifests, matchingActions, routeFor } from "./actions.ts";
 import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import type { Signal } from "./manifests.ts";
 import { botSlug } from "./identity.ts";
@@ -21,7 +21,7 @@ import { parseTriggerInput } from "./triggers.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { reconcileObserved, serializePr } from "./pr-review-publication.ts";
 import { completedRunsOfAction, latestFinishedRun, latestRunOfTask, runHistory } from "./run-history.ts";
-import { resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
+import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
 import { planIssueTasks, planPrMaintenance, planReview, planSelfRepair, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
 
 type SyncContext = {
@@ -94,11 +94,11 @@ async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation
   const exhausted = repair !== undefined && settings.maxSelfRepairs !== undefined && count >= settings.maxSelfRepairs;
   try {
     await reconcileLabels(ctx.github, item.payload.number, { current: observation.labels, desired: exhausted ? [exhaustedLabel] : [], managed: [exhaustedLabel] }, { subjectId: item.id });
-  } catch (error) { ctx.log.warn({ event: "self_repair.label_pending", subjectId: item.id, err: error }); }
+  } catch (error) { ctx.log.warn({ event: "github.label_pending", subjectId: item.id, err: error }); }
 }
 
 async function reconcileFailedLabels(ctx: SyncContext, item: Item) {
-  const labelled = manifests().flatMap(({ name, trigger }) => {
+  const labelled = manifests.flatMap(({ name, trigger }) => {
     const label = config.actions[name]?.failedLabel;
     return trigger.item === item.kind && label ? [{ name, label, selected: trigger.kind !== "label" || hasScratLabel(item) }] : [];
   });
@@ -109,14 +109,14 @@ async function reconcileFailedLabels(ctx: SyncContext, item: Item) {
       desired: labelled.filter(({ name, selected }) => selected && latestTask(item.id, name)?.status === "failed").map(({ label }) => label),
       managed: labelled.map(({ label }) => label),
     }, { subjectId: item.id });
-  } catch (error) { ctx.log.warn({ event: "github.failed_label_pending", subjectId: item.id, err: error }); }
+  } catch (error) { ctx.log.warn({ event: "github.label_pending", subjectId: item.id, err: error }); }
 }
 
 async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObservation, mainSha: string, routes: Routes) {
   const action = routes.review;
   if (!action) return 0;
   const latest = latestTask(item.id, action);
-  const reviews = runHistory(item.id, actionsPublishing("pr_assessment"));
+  const reviews = prReviewHistory(item.id);
   const attempt = reviews.find(({ task }) => task.id === latest?.id)?.run;
   const state = await resolvePrReview(reviews, observation, mainSha);
   let added = applyDecisions(item.id, planReview({ kind: "pr", action, state, latest, attempt, revision: observation.revision, mainSha }));

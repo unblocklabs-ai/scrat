@@ -1,5 +1,4 @@
 import { and, desc, eq, getTableColumns, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
-import type { Action } from "./actions.ts";
 import { db } from "./db.ts";
 import { items, type Run, runs, type Subject, subjects, tasks } from "./schema.ts";
 
@@ -10,6 +9,9 @@ export const getRun = (id: string, database: Database = db) =>
 
 export const updateRun = (id: string, patch: Partial<typeof runs.$inferInsert>, database: Pick<typeof db, "update"> = db) =>
   database.update(runs).set(patch).where(eq(runs.id, id)).run();
+
+export const getTask = (id: string, database: Database = db) =>
+  database.select().from(tasks).where(eq(tasks.id, id)).get();
 
 export const inferenceRunOf = (run: Run): Run => run.inferenceFromRunId ? inferenceRunOf(getRun(run.inferenceFromRunId)!) : run;
 
@@ -24,27 +26,29 @@ const { context: _context, verification: _verification, ...historyColumns } = ge
 const historyContext = sql<string | null>`case when ${runs.context} is null then null else json_object('revision', json_extract(${runs.context}, '$.revision'), 'baseBranch', json_extract(${runs.context}, '$.baseBranch'), 'commentRevisions', json_extract(${runs.context}, '$.commentRevisions')) end`
   .mapWith((value: string | null) => value === null ? null : JSON.parse(value) as HistoryRun["context"]);
 
-export const runHistory = (subjectId: string, actions: Action | readonly Action[]) =>
+const completedOnly = and(eq(tasks.status, "completed"), isNull(runs.error));
+
+export const runHistory = (subjectId: string, actions: string | readonly string[]) =>
   db.select({ run: { ...historyColumns, context: historyContext }, task: tasks }).from(runs)
     .innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.subjectId, subjectId), inArray(tasks.action, typeof actions === "string" ? [actions] : [...actions])))
+    .where(and(eq(tasks.subjectId, subjectId), inArray(tasks.action, [actions].flat())))
     .orderBy(desc(runs.sequence)).all();
 
-export const completedRunsOfAction = (subjectId: string, actions: Action | readonly Action[], limit = Number.MAX_SAFE_INTEGER): Run[] =>
+export const completedRunsOfAction = (subjectId: string, actions: string | readonly string[], limit: number): Run[] =>
   db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.subjectId, subjectId), inArray(tasks.action, typeof actions === "string" ? [actions] : [...actions]), eq(tasks.status, "completed"), isNull(runs.error)))
+    .where(and(eq(tasks.subjectId, subjectId), inArray(tasks.action, [actions].flat()), completedOnly))
     .orderBy(desc(runs.sequence)).limit(limit).all().map(({ run }) => run);
 
-export const issueImplementedBy = (repository: string, pullRequestNumber: number) =>
+export const issueOfPullRequest = (repository: string, pullRequestNumber: number) =>
   db.select({ payload: items.payload }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
     .innerJoin(subjects, eq(tasks.subjectId, subjects.id)).innerJoin(items, eq(items.id, subjects.id))
     .where(and(eq(subjects.repository, repository), eq(items.kind, "issue"), sql`json_extract(${runs.publication}, '$.pullRequestNumber') = ${pullRequestNumber}`))
     .get()?.payload;
 
-export const completedRunsOfActionInRepository = (repository: string, action: Action, limit: number): { run: Run; subject: Subject; number?: number }[] =>
+export const completedRunsOfActionInRepository = (repository: string, action: string, limit: number): { run: Run; subject: Subject; number?: number }[] =>
   db.select({ run: runs, subject: subjects, payload: items.payload }).from(runs)
     .innerJoin(tasks, eq(runs.taskId, tasks.id)).innerJoin(subjects, eq(tasks.subjectId, subjects.id)).leftJoin(items, eq(items.id, subjects.id))
-    .where(and(eq(subjects.repository, repository), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
+    .where(and(eq(subjects.repository, repository), eq(tasks.action, action), completedOnly))
     .orderBy(desc(runs.sequence)).limit(limit).all().map(({ run, subject, payload }) => ({ run, subject, number: payload?.number }));
 
 export const verificationOfCommit = (headSha: string) =>

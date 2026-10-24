@@ -15,7 +15,7 @@ export function upsertItem(item: Pick<typeof items.$inferInsert,
   "externalId" | "kind" | "payload"
 > & { state?: typeof subjects.$inferInsert.state }, database: Pick<typeof db, "insert"> = db) {
   const state = item.state ?? "open";
-  const subject = upsertSubject({ repository: itemRepository(item) ?? "", kind: "item", key: item.externalId }, state, database);
+  const subject = upsertSubject({ repository: itemRepository(item), kind: "item", key: item.externalId }, state, database);
   const row = database.insert(items).values({ id: subject.id, externalId: item.externalId, kind: item.kind, payload: item.payload })
     .onConflictDoUpdate({ target: items.externalId, set: { kind: item.kind, payload: item.payload } }).returning().get()!;
   return asItem(row, subject);

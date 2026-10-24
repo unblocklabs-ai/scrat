@@ -5,6 +5,7 @@ import Value from "typebox/value";
 import { parse } from "yaml";
 import { nextTick, parseCron, parseWindow } from "./cron.ts";
 import { hostProblem } from "./bindings.ts";
+import { prGrades } from "./results.ts";
 import { triggerKinds, triggerSource } from "./triggers.ts";
 
 export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -17,13 +18,14 @@ export type ToolName = (typeof toolNames)[number];
 export type EffectName = (typeof effectNames)[number];
 
 const strict = { additionalProperties: false } as const;
+export const nullable = <T extends TSchema>(schema: T) => Type.Union([schema, Type.Null()]);
 const list = <T extends TSchema>(items: T, minItems = 0) => Type.Array(items, { minItems, uniqueItems: true });
-const model = Type.Object({ provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels) }, strict);
-const retry = Type.Object({ initialDelaySeconds: Type.Integer({ minimum: 1 }), maxDelaySeconds: Type.Integer({ minimum: 1 }) }, strict);
+export const modelSettings = Type.Object({ provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels) }, strict);
+export const retrySettings = Type.Object({ initialDelaySeconds: Type.Integer({ minimum: 1 }), maxDelaySeconds: Type.Integer({ minimum: 1 }) }, strict);
 const trigger = Type.Object({
   source: Type.Enum(["github_items", "github_commits", "schedule"]), kind: Type.Enum(triggerKinds),
   item: Type.Optional(Type.Enum(["issue", "pr"])), author: Type.Optional(Type.String({ minLength: 1 })),
-  grades: Type.Optional(list(Type.Enum(["S", "A", "B", "C", "D", "F"]), 1)),
+  grades: Type.Optional(list(Type.Enum(prGrades), 1)),
   manual: Type.Optional(Type.Boolean()), branch: Type.Optional(Type.String()),
   granularity: Type.Optional(Type.Enum(["range", "commit"])), message: Type.Optional(Type.String({ minLength: 1 })),
   cron: Type.Optional(Type.String()), window: Type.Optional(Type.String()),
@@ -32,25 +34,42 @@ const httpSettings = Type.Object({ binding: Type.String(), methods: Type.Optiona
 const browserSettings = Type.Object({ navigationHosts: list(Type.String(), 1), resourceHosts: list(Type.String()), binding: Type.Optional(Type.String()) }, strict);
 const schema = Type.Object({
   name: Type.String({ pattern: "^[a-z][a-z0-9_]{0,63}$" }), enabled: Type.Optional(Type.Boolean()),
-  trigger, mode: Type.Enum(["review", "change"]), agent: Type.Enum(["single", "panel"]), reviewers: Type.Optional(Type.Array(model)),
-  context: Type.Enum(["all", "feedback", "change"]),
+  trigger, mode: Type.Enum(["review", "change"]), agent: Type.Optional(Type.Enum(["single", "panel"])), reviewers: Type.Optional(Type.Array(modelSettings)),
+  context: Type.Optional(Type.Enum(["all", "feedback", "change"])),
   tools: Type.Optional(list(Type.Enum(toolNames), 1)), http: Type.Optional(httpSettings), browser: Type.Optional(browserSettings), files: Type.Optional(list(Type.Enum(contextFileNames))),
   acceptance: Type.Optional(Type.Enum(["complete", "nonempty_diff", "conflict_free"])),
   start: Type.Optional(list(Type.Enum(startEffectNames))), publish: list(Type.Enum(effectNames), 1),
-  skill: Type.String(), model, priority: Type.Integer(), retry: Type.Optional(retry),
-  maxSelfRepairs: Type.Optional(Type.Integer({ minimum: 0 })), exhaustedLabel: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-  failedLabel: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  skill: Type.String(), model: modelSettings, priority: Type.Integer(), retry: Type.Optional(retrySettings),
+  maxSelfRepairs: Type.Optional(Type.Integer({ minimum: 0 })), exhaustedLabel: Type.Optional(nullable(Type.String())),
+  failedLabel: Type.Optional(nullable(Type.String())),
   channel: Type.Optional(Type.String()), maxRangeCommits: Type.Optional(Type.Integer({ minimum: 1 })), startMessage: Type.Optional(Type.String()),
 }, strict);
 
 type Parsed = Static<typeof schema>;
-export type Manifest = Parsed & Required<Pick<Parsed, "tools" | "files" | "reviewers">> & { file: string; root: string };
+type Resolved = Parsed & Required<Pick<Parsed, "tools" | "files" | "reviewers" | "agent" | "context">>;
+export type Manifest = Resolved & { file: string; root: string };
 
-const defaultTools = ({ mode, agent, context }: Parsed): ToolName[] => mode === "change" ? ["read", "grep", "find", "ls", "bash", "edit", "write"]
+const defaultTools = ({ mode, agent, context }: Pick<Resolved, "mode" | "agent" | "context">): ToolName[] => mode === "change" ? ["read", "grep", "find", "ls", "bash", "edit", "write"]
   : ["read", "grep", "find", "ls", "git", ...agent === "panel" || context === "change" ? ["read_base" as const] : []];
 
-function crossChecks(m: Parsed) {
-  const { trigger: t, mode, agent, publish } = m, tools: readonly string[] = m.tools ?? defaultTools(m), files: readonly string[] = m.files ?? [];
+type EntrySettings = {
+  reviewers?: readonly unknown[]; retry?: { initialDelaySeconds: number; maxDelaySeconds: number } | null;
+  failedLabel?: string | null; maxSelfRepairs?: number; exhaustedLabel?: string | null;
+};
+
+export function entryProblems({ mode, agent, trigger }: Pick<Resolved, "mode" | "agent" | "trigger">, entry: EntrySettings) {
+  const checks: [boolean, string][] = [
+    [agent !== "panel" || entry.reviewers?.length === 2, "agent: panel requires exactly two reviewers"],
+    [!entry.retry || mode === "review", "retry requires mode review"],
+    [!entry.retry || entry.retry.maxDelaySeconds >= entry.retry.initialDelaySeconds, "retry.maxDelaySeconds must be at least retry.initialDelaySeconds"],
+    [!entry.failedLabel || mode === "change", "failedLabel requires mode change"],
+    [(entry.maxSelfRepairs === undefined && !entry.exhaustedLabel) || trigger.kind === "low_grade", "maxSelfRepairs and exhaustedLabel are only allowed with kind low_grade"],
+  ];
+  return checks.filter(([ok]) => !ok).map(([, message]) => message);
+}
+
+function crossChecks(m: Resolved) {
+  const { trigger: t, mode, agent, publish, tools, files } = m;
   const problems: string[] = [];
   const need = (ok: boolean, message: string) => { if (!ok) problems.push(message); };
   const any = (list: readonly string[], names: readonly string[]) => names.some((name) => list.includes(name));
@@ -69,17 +88,14 @@ function crossChecks(m: Parsed) {
   }
   need(!scheduled || mode === "review", "a schedule trigger requires mode review");
   need(t.grades === undefined || t.kind === "low_grade", "trigger.grades is only allowed with kind low_grade");
-  need((m.maxSelfRepairs === undefined && m.exhaustedLabel === undefined) || t.kind === "low_grade", "maxSelfRepairs and exhaustedLabel are only allowed with kind low_grade");
   need(t.kind !== "low_grade" || m.maxSelfRepairs !== undefined, "kind low_grade requires maxSelfRepairs");
-  need(m.failedLabel === undefined || mode === "change", "failedLabel requires mode change");
   need(!commits || m.maxRangeCommits !== undefined, "source github_commits requires maxRangeCommits");
   need((m.channel === undefined && m.startMessage === undefined && m.maxRangeCommits === undefined) || commits, "channel, startMessage and maxRangeCommits are only allowed with source github_commits");
   need(!any(slack, ["slack_post", "slack_reply"]) || commits, "slack effects require source github_commits");
   need(!publish.includes("issue") || !commits, "the issue effect requires source github_items or schedule");
   need(!any(publish, ["labels", "comment"]) || items, "labels and comment effects require a github_items trigger");
   need(!publish.includes("pr_assessment") || (t.item === "pr" && agent === "panel"), "pr_assessment requires item: pr and agent: panel");
-  need(agent !== "panel" || m.reviewers?.length === 2, "agent: panel requires exactly two reviewers");
-  need(m.retry === undefined || mode === "review", "retry requires mode review");
+  problems.push(...entryProblems(m, m));
   need(tools.includes("read"), "tools must include read");
   need(tools.includes("http") === (m.http !== undefined), "the http tool and the http setting require each other");
   need(tools.includes("browser") === (m.browser !== undefined), "the browser tool and the browser setting require each other");
@@ -116,12 +132,13 @@ function readManifest(root: string, path: string, label: string): Manifest {
       ? `${label}: ${unknown.instancePath}/${(unknown.params as { additionalProperties: string[] }).additionalProperties[0]}: unknown key`
       : `${label}: ${error?.instancePath || "/"}: ${error?.message ?? "invalid manifest"}`);
   }
-  const parsed = document as Parsed;
-  const problems = crossChecks(parsed);
+  const parsed = document as Parsed, agent = parsed.agent ?? "single", context = parsed.context ?? "all";
+  const resolved: Resolved = { ...parsed, agent, context, tools: parsed.tools ?? defaultTools({ mode: parsed.mode, agent, context }), files: parsed.files ?? [], reviewers: parsed.reviewers ?? [] };
+  const problems = crossChecks(resolved);
   if (basename(path, ".yaml") !== parsed.name) problems.unshift(`name ${parsed.name} must equal the file name`);
   if (parsed.name === "directory") problems.unshift("directory is not a legal action name");
   if (problems.length) throw new Error(`${label}: ${problems.join("; ")}`);
-  return { ...parsed, tools: parsed.tools ?? defaultTools(parsed), files: parsed.files ?? [], reviewers: parsed.reviewers ?? [], file: label, root };
+  return { ...resolved, file: label, root };
 }
 
 export function readManifests(root: string, directory?: string | null) {
@@ -170,7 +187,7 @@ export const skillPath = (manifest: Manifest, skill = manifest.skill) => resolve
 export function deploymentDefaults(m: Manifest) {
   const optional = { branch: m.trigger.branch, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel, failedLabel: m.failedLabel, retry: m.retry };
   return {
-    enabled: m.enabled ?? true, priority: m.priority, skill: m.skill, ...m.model, agent: m.agent, reviewers: m.reviewers,
+    enabled: m.enabled ?? true, priority: m.priority, skill: m.skill, ...m.model, reviewers: m.reviewers,
     ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== undefined)),
   };
 }

@@ -12,7 +12,7 @@ import { botSlug } from "./identity.ts";
 import type { EffectName } from "./manifests.ts";
 import { upsertItem } from "./items.ts";
 import { reconcileLabels } from "./labels.ts";
-import { fingerprintMarker, isIssueComment, reviewMarker, taskMarker } from "./markers.ts";
+import { endsWithMarker, fingerprintMarker, isIssueComment, reviewMarker, taskMarker, withMarker } from "./markers.ts";
 import { observe } from "./observation.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
 import { remoteUrl } from "./repository.ts";
@@ -101,8 +101,8 @@ const comment = {
   async apply({ github, task, run, current, references, saveReceipt }) {
     const marker = manifestOf(task.action).mode === "review" ? reviewMarker : taskMarker(task.id);
     const observation = observe(github.repository, current);
-    const existing = observation.own.findLast((candidate) => isIssueComment(candidate) && candidate.body.trimEnd().endsWith(marker));
-    const commentId = await upsertComment(github, run.context.item.number, existing, `${run.result.text}\n\n${validationLine(run)}${marker}`, references);
+    const existing = observation.own.findLast((candidate) => isIssueComment(candidate) && endsWithMarker(candidate.body, marker));
+    const commentId = await upsertComment(github, run.context.item.number, existing, withMarker(`${run.result.text}\n\n${validationLine(run)}`, marker), references);
     saveReceipt({ commentId });
   },
 } satisfies Effect<GithubEffectContext>;
@@ -131,7 +131,7 @@ const issue = {
     for (const { title, body, fingerprint } of missing) {
       if (publication().issues?.[fingerprint] !== undefined) continue;
       const marker = fingerprintMarker(fingerprint);
-      const existing = open.find((candidate) => isBotLogin(candidate.user?.login) && candidate.body?.trimEnd().endsWith(marker));
+      const existing = open.find((candidate) => isBotLogin(candidate.user?.login) && endsWithMarker(candidate.body ?? "", marker));
       const number = existing?.number ?? (await github.createIssue({ title, body, fingerprint }, references)).number;
       saveReceipt({ issues: { ...publication().issues, [fingerprint]: number } });
     }

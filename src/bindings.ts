@@ -34,13 +34,13 @@ export function hostProblem(host: string) {
   return undefined;
 }
 
-export function bindingSecret(binding: Pick<Binding, "secret">, source: NodeJS.ProcessEnv = process.env) {
-  const name = placeholder.exec(binding.secret)?.[1], value = name ? source[name] : undefined;
+export function bindingSecret(binding: Pick<Binding, "secret">) {
+  const name = placeholder.exec(binding.secret)?.[1], value = name ? process.env[name] : undefined;
   if (!value) throw new Error(`Binding secret ${binding.secret} is not set in the environment`);
   return value;
 }
 
-export function validateBindings(bindings: Record<string, unknown> | undefined, source: NodeJS.ProcessEnv = process.env) {
+export function validateBindings(bindings: Record<string, unknown> | undefined) {
   const problems: string[] = [];
   for (const [name, value] of Object.entries(bindings ?? {})) {
     const label = `bindings.${name}`, fail = (message: string) => problems.push(`${label}: ${message}`);
@@ -49,7 +49,7 @@ export function validateBindings(bindings: Record<string, unknown> | undefined, 
     const { secret, hosts, header, prefix, ...rest } = value as Record<string, unknown>;
     for (const key of Object.keys(rest)) fail(`unknown key ${key}`);
     if (typeof secret !== "string" || !placeholder.test(secret)) fail('secret must be a "${VAR}" placeholder');
-    else if (!source[placeholder.exec(secret)![1]]) fail(`${secret} is not set in the environment`);
+    else if (!process.env[placeholder.exec(secret)![1]]) fail(`${secret} is not set in the environment`);
     if (!Array.isArray(hosts) || hosts.length === 0 || !hosts.every((host) => typeof host === "string")) fail("hosts must be a non-empty list of hostnames");
     else for (const host of hosts) { const problem = hostProblem(host); if (problem) fail(`hosts: ${problem}`); }
     if (typeof header !== "string" || !/^[A-Za-z][A-Za-z0-9-]*$/.test(header) || forbiddenHeaders.has(header.toLowerCase())) fail("header must be a permitted header name");

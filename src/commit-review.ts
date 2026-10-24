@@ -5,7 +5,6 @@ import { db } from "./db.ts";
 import { changedPaths, git } from "./git.ts";
 import { botName } from "./identity.ts";
 import type { startOperation } from "./logging.ts";
-import { getRun } from "./run-history.ts";
 import { slackThreads, type Run, type Subject } from "./schema.ts";
 import { escapeSlack, postMessage } from "./slack.ts";
 import { parseTriggerInput } from "./triggers.ts";
@@ -55,8 +54,7 @@ export async function describeCommit(repositoryPath: string, subject: Subject, r
 
 export async function postCommitReply(subject: Subject, action: string, run: Run) {
   const input = commitInput(run.input);
-  const saved = getRun(run.id)!;
-  if (!saved.result) throw new Error("Run has no saved result to publish");
+  if (!run.result) throw new Error("Run has no saved result to publish");
   const thread = await threadRoot(subject, action, input);
-  return postMessage({ channel: thread.channel, text: escapeSlack(saved.result.text), threadTs: thread.ts });
+  return postMessage({ channel: thread.channel, text: escapeSlack(run.result.text), threadTs: thread.ts });
 }

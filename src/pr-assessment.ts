@@ -1,4 +1,4 @@
-import { actionsPublishing, actionsTriggeredBy } from "./actions.ts";
+import { actionsPublishing, manifests } from "./actions.ts";
 import { branchConflictCode } from "./errors.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import type { ItemObservation } from "./observation.ts";
@@ -7,6 +7,8 @@ import { runHistory } from "./run-history.ts";
 import type { Run } from "./schema.ts";
 
 type History = ReturnType<typeof runHistory>;
+
+export const prReviewHistory = (subjectId: string) => runHistory(subjectId, actionsPublishing("pr_assessment"));
 
 function selectAssessment(history: History) {
   const byId = new Map(history.map((entry) => [entry.run.id, entry]));
@@ -34,9 +36,9 @@ function selectAssessment(history: History) {
 }
 
 export function priorReviewTexts(subjectId: string) {
-  const assessment = selectAssessment(runHistory(subjectId, actionsPublishing("pr_assessment")));
+  const assessment = selectAssessment(prReviewHistory(subjectId));
   if (!assessment) return undefined;
-  const repair = runHistory(subjectId, actionsTriggeredBy("low_grade"))
+  const repair = runHistory(subjectId, manifests.filter((manifest) => manifest.trigger.kind === "low_grade").map((manifest) => manifest.name))
     .find(({ run }) => run.result?.outcome === "complete" && run.sequence > assessment.run.sequence)?.run.result?.text;
   return { assessment: assessment.result.text, repair };
 }
@@ -57,3 +59,5 @@ export async function resolvePrReview(history: History, now: ItemObservation, ma
   const state = await freshness(savedEvaluation(assessment.run), { ...now, mainSha }, "relevant-paths");
   return state.kind === "current" ? { kind: "current", assessment } : { kind: "stale", reason: state.reason, assessment, changedPaths: state.changedPaths };
 }
+
+export const currentPrReview = (subjectId: string, now: ItemObservation, mainSha: string) => resolvePrReview(prReviewHistory(subjectId), now, mainSha);

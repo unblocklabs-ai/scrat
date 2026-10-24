@@ -8,7 +8,7 @@ import { botName } from "./identity.ts";
 import { commentKey, parseCommentKey } from "./markers.ts";
 import type { ItemObservation } from "./observation.ts";
 import { priorReviewTexts } from "./pr-assessment.ts";
-import { completedRunsOfAction, completedRunsOfActionInRepository, getRun, issueImplementedBy, verificationOfCommit } from "./run-history.ts";
+import { completedRunsOfAction, completedRunsOfActionInRepository, getRun, issueOfPullRequest, verificationOfCommit } from "./run-history.ts";
 import type { Run, Task } from "./schema.ts";
 import { parseTriggerInput } from "./triggers.ts";
 
@@ -86,7 +86,7 @@ export async function buildAgentInput(options: {
   const prior = assessesPr ? priorReviewTexts(task.subjectId) : undefined;
   const previousAssessment = assessesPr ? prior?.assessment : listed.includes("previous_assessment") ? completedRunsOfAction(task.subjectId, action, 1)[0]?.result?.text : undefined;
   const triage = listed.includes("triage") ? completedRunsOfAction(task.subjectId, actionsPublishing("labels"), 1)[0]?.result : undefined;
-  const issue = listed.includes("issue") ? issueImplementedBy(config.github.repository, evaluated.item.number) : undefined;
+  const issue = listed.includes("issue") ? issueOfPullRequest(config.github.repository, evaluated.item.number) : undefined;
   const found = listed.includes("validation") ? verificationOfCommit(headSha) : undefined, verification = found?.commands.length ? found : undefined;
   await Promise.all([
     verification && writeContext("validation", "validation.md", `# Validation run by ${botName} on ${headSha}\n\n${verification.commands.map((check) => `- ${check.name}: ${check.status} (${(check.durationMs / 1000).toFixed(1)}s)`).join("\n")}\n`),

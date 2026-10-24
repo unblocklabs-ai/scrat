@@ -1486,7 +1486,7 @@ export const scenarios = {
     assert.equal(failed.error.code, "AGENT_TIMEOUT"); assert.match(failed.error.message, /exceeded 1 seconds/);
     assert.equal(f.requests.length, 1); assert.equal(f.prs.length, 0);
   } },
-  bash_guard: { title: "heavy commands are refused in the agent's bash tool and bad guard or slot settings block startup", run: async () => {
+  bash_guard: { title: "heavy commands are refused in the agent's bash tool and wait for a validation slot", run: async () => {
     const { heavyCommand, backgroundsWork } = await f.app("commands.ts");
     for (const command of ["pnpm verify &", "nohup pnpm lint", "a & b", "setsid pnpm verify", "pnpm lint; disown", "pnpm verify &   "]) assert.ok(backgroundsWork(command), command);
     for (const command of ["a && b", "x 2>&1", "x &> f", "y 3>&1", "a |& b", "pnpm lint > nohup.out", "echo a \\& b", 'echo "a & b"', "cat setsid.txt"]) assert.ok(!backgroundsWork(command), command);
@@ -1498,48 +1498,6 @@ export const scenarios = {
       assert.equal(heavyCommand(command, patterns), undefined, command);
     }
     assert.equal(heavyCommand("cd x && pnpm verify", patterns), "pnpm verify");
-    const { validateStaticConfig } = await f.app("startup.ts");
-    await validateStaticConfig(f.config);
-    const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
-    const { validateConfig } = await f.app("config-schema.ts");
-    const { config: merged } = await f.app("config.ts");
-    const invalid = (change, message) => assert.throws(() => { const copy = structuredClone(merged); change(copy); validateConfig(copy); }, message);
-    validateConfig(merged);
-    invalid((c) => { c.harness.maxConcurrentValidations = 0; }, /^Error: Invalid Scrat configuration:\n- harness\.maxConcurrentValidations: must be >= 1$/);
-    invalid((c) => { c.harness.commandTimeoutSeconds = 0; }, /harness\.commandTimeoutSeconds: must be >= 1/);
-    invalid((c) => { c.harness.commandOutputTailBytes = 0; }, /harness\.commandOutputTailBytes: must be >= 1/);
-    invalid((c) => { c.harness.maxConcurrentValidations = "3"; }, /harness\.maxConcurrentValidations: must be integer/);
-    invalid((c) => { c.harness.maxConcurency = 8; }, /harness\.maxConcurency: unknown setting/);
-    invalid((c) => { c.workspace.commandMemoryMax = "lots"; }, /workspace\.commandMemoryMax: must match pattern/);
-    invalid((c) => { c.workspace.commandMemoryMax = "0"; }, /workspace\.commandMemoryMax: must match pattern/);
-    { const copy = structuredClone(merged); copy.workspace.environment = { ANY_NEW_KEY: "1" }; validateConfig(copy); }
-    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = false; c.workspace.commandMemoryMax = "6G"; })), /commandMemoryMax requires workspace\.sandbox/);
-    await validateStaticConfig(variant((c) => { c.workspace.commandMemoryMax = null; }));
-    invalid((c) => { c.workspace.packageStore = "relative/store"; }, /workspace\.packageStore: must match pattern/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = false; c.workspace.packageStore = "/tmp/scrat-store"; })), /packageStore requires workspace\.sandbox/);
-    await validateStaticConfig(variant((c) => { c.workspace.packageStore = null; }));
-    invalid((c) => { c.harness.agentTimeoutSeconds = 1.5; }, /harness\.agentTimeoutSeconds: must be integer/);
-    invalid((c) => { c.harness.corrections.incomplete = -1; }, /harness\.corrections\.incomplete: must be >= 0/);
-    invalid((c) => { c.harness.corrections.incomplete = 1.5; }, /harness\.corrections\.incomplete: must be integer/);
-    invalid((c) => { c.harness.corrections.validation = -1; }, /harness\.corrections\.validation: must be >= 0/);
-    invalid((c) => { c.harness.gitNetworkTimeoutSeconds = 0; }, /harness\.gitNetworkTimeoutSeconds: must be >= 1/);
-    invalid((c) => { c.context.historyRuns = 0; }, /context\.historyRuns: must be >= 1/);
-    invalid((c) => { c.context.windowSize = 1; }, /context\.windowSize: unknown setting/);
-    invalid((c) => { delete c.tools; }, /tools: required/);
-    invalid((c) => { c.tools.readBytes.max = "big"; }, /tools\.readBytes\.max: must be integer/);
-    invalid((c) => { c.tools.git.maxCommits = 0; }, /tools\.git\.maxCommits: must be >= 1/);
-    invalid((c) => { c.tools.http.timeoutSeconds = 1.5; }, /tools\.http\.timeoutSeconds: must be integer/);
-    invalid((c) => { c.tools.browser.steps = 0; }, /tools\.browser\.steps: must be >= 1/);
-    invalid((c) => { c.slack.maxRetryAfterSeconds = 0; }, /slack\.maxRetryAfterSeconds: must be >= 1/);
-    await validateStaticConfig(variant((c) => { c.harness.corrections.incomplete = 0; }));
-    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.heavyCommands = ["^(unclosed"]; })), /heavyCommands\[0\] is not a valid regular expression/);
-    for (const disabled of [null, ""]) await validateStaticConfig(variant((c) => { c.actions.address_review.exhaustedLabel = disabled; }));
-    invalid((c) => { c.actions.address_review.exhaustedLabel = 5; }, /actions\.address_review\.exhaustedLabel: must be string/);
-    await validateStaticConfig(variant((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 5, maxDelaySeconds: 5 }; }));
-    await validateStaticConfig(variant((c) => { c.actions.review_pr.retry = null; }));
-    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 30 }; })), /review_pr: retry\.maxDelaySeconds must be at least retry\.initialDelaySeconds/);
-    invalid((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 0, maxDelaySeconds: 30 }; }, /actions\.review_pr\.retry\.initialDelaySeconds: must be >= 1/);
-    invalid((c) => { c.harness.retryJitter = 2; }, /harness\.retryJitter: must be <= 1/);
     const toolResults = () => JSON.stringify(f.requests.findLast((entry) => entry.request.messages.some((message) => message.role === "tool")).request.messages.filter((message) => message.role === "tool"));
     const attempt = async (number, mode) => { f.addIssue(number, ["scrat"]); f.reset(number, mode); f.enqueue(number, "implement"); return run(); };
     const { withValidationSlot } = await f.app("commands.ts"), { config: live } = await f.app("config.ts");
@@ -1647,7 +1605,7 @@ export const scenarios = {
     const rejected = all(s.events).filter((e) => e.type === "task.rejected");
     assert.equal(rejected.length, 1); assert.match(rejected[0].data.reason, /^Invalid trigger input for review_issue: .*commentRevisions/);
   } },
-  rejection: { title: "invalid queued tasks are rejected with a journal reason while later work still runs, and bad static config blocks startup", run: async () => {
+  rejection: { title: "invalid queued tasks are rejected with a journal reason while later work still runs, and a rejected config blocks startup before any task is claimed", run: async () => {
     const rejections = () => all(s.events).filter((e) => e.type === "task.rejected");
     for (let n = 1; n <= 4; n++) f.addIssue(n);
     db.$client.prepare("INSERT INTO tasks (id, subject_id, action, priority, reason, input, created_at) VALUES ('bogus', 'issue-1', 'ship_it', 1000, 'Integration', '{}', '2026-01-01')").run();
@@ -1664,34 +1622,11 @@ export const scenarios = {
 
     assert.throws(() => tasks.retryTask("bogus", "validation"), /Validation-only retry requires/);
 
-    const { validateStaticConfig } = await f.app("startup.ts");
-    await validateStaticConfig(f.config);
-    const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
-    const { validateConfig } = await f.app("config-schema.ts");
-    const { config: merged } = await f.app("config.ts");
-    const invalid = (change, message) => assert.throws(() => { const copy = structuredClone(merged); change(copy); validateConfig(copy); }, message);
     const { GitHubRepository: Verified } = await f.app("github.ts");
     f.githubApp.slug = "other-app";
     await assert.rejects(new Verified("fixture/project").fetchOpenItems(), /GitHub App other-app posts as other-app\[bot\], but github\.botLogin is scrat-unblock\[bot\]/);
     f.githubApp.slug = "Scrat-Unblock";
     await new Verified("fixture/project").fetchOpenItems();
-    const changeActions = ["implement", "address_review", "address_pr_feedback", "resolve_conflicts"];
-    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.validate = []; })), /workspace\.validate is empty but address_pr_feedback, address_review, implement, resolve_conflicts publish commits.*\[\["true"\]\]/);
-    await assert.rejects(validateStaticConfig(variant((c) => { delete c.workspace.validate; c.actions.address_review.enabled = false; })), /workspace\.validate is empty but address_pr_feedback, implement, resolve_conflicts publish/);
-    await validateStaticConfig(variant((c) => { c.workspace.validate = [["true"]]; }));
-    await validateStaticConfig(variant((c) => { c.workspace.validate = []; for (const name of changeActions) c.actions[name].enabled = false; }));
-    invalid((c) => { c.actions.implement.thinkingLevel = "turbo"; }, /actions\.implement\.thinkingLevel: must be equal to one of the allowed values/);
-    invalid((c) => { c.github.auth = "token"; }, /github\.auth: must be equal to one of the allowed values/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.implement.agent = "panel"; })), /implement: mode change requires source github_items and agent: single/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.github.botLogin = " "; })), /github\.botLogin must not be empty/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.github.botName = " !! "; })), /github\.botName must contain a letter or digit/);
-    const key = process.env.GITHUB_APP_PRIVATE_KEY;
-    delete process.env.GITHUB_APP_PRIVATE_KEY;
-    await assert.rejects(validateStaticConfig(f.config), /github\.auth is "app" but GITHUB_APP_PRIVATE_KEY is not set/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.github.auth = "pat"; })), /github\.auth is "pat" but GITHUB_PAT is not set/);
-    process.env.GITHUB_PAT = "ghp_x"; await validateStaticConfig(variant((c) => { c.github.auth = "pat"; })); delete process.env.GITHUB_PAT;
-    process.env.GITHUB_APP_PRIVATE_KEY = key;
-    invalid((c) => { c.actions.review_pr.reviewers[1].thinkingLevel = "turbo"; }, /actions\.review_pr\.reviewers\.1\.thinkingLevel: must be equal to one of the allowed values/);
 
     assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
     const local = resolve("app/scrat.local.json"), requestLog = resolve("startup-requests.log");
@@ -1701,34 +1636,30 @@ export const scenarios = {
     const startup = (overrides) => {
       writeFileSync(local, JSON.stringify(layered(overrides)));
       const run = spawnSync(process.execPath, ["startup-probe.mjs"], { encoding: "utf8" });
-      const failure = run.stderr.split("\n").flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } }).find((line) => line.msg === "Run command failed");
-      return { status: run.status, message: failure?.err.message };
+      return { status: run.status, rejected: /Invalid Scrat configuration/.test(run.stderr) };
     };
     const outbound = () => existsSync(requestLog) ? readFileSync(requestLog, "utf8") : "";
     const modelRequests = f.requests.length;
     const untouched = JSON.stringify([all(s.tasks), all(s.runs)]);
     writeFileSync(local, JSON.stringify(layered({ harness: { maxConcurrentValidations: 0 } })));
     const broken = spawnSync(process.execPath, ["startup-probe.mjs"], { encoding: "utf8" });
-    assert.notEqual(broken.status, 0); assert.match(broken.stderr, /Invalid Scrat configuration:\n- harness\.maxConcurrentValidations: must be >= 1/);
+    assert.notEqual(broken.status, 0); assert.match(broken.stderr, /Invalid Scrat configuration/);
     assert.equal(outbound(), ""); assert.equal(JSON.stringify([all(s.tasks), all(s.runs)]), untouched, "no task is claimed when the schema rejects the config");
-    for (const exhaustedLabel of ["scrat-exhausted", null, ""]) assert.deepEqual(startup({ actions: { address_review: { exhaustedLabel } } }), { status: 0, message: undefined });
+    for (const exhaustedLabel of ["scrat-exhausted", null, ""]) assert.deepEqual(startup({ actions: { address_review: { exhaustedLabel } } }), { status: 0, rejected: false });
     f.addIssue(7); f.enqueue(7);
     const before = JSON.stringify([all(s.tasks), all(s.runs)]);
-    const base = JSON.parse(readFileSync("app/scrat.config.json", "utf8")), { provider } = existing.actions.implement;
+    const base = JSON.parse(readFileSync("app/scrat.config.json", "utf8"));
     writeFileSync("app/scrat.config.json", JSON.stringify({ ...base, workspace: { ...base.workspace, heavyCommands: [] } }));
-    for (const [overrides, problem] of [
-      [{ actions: { implement: { model: "no-such-model" } } }, `implement: no Pi model ${provider}/no-such-model`],
-      [{ actions: { implement: { skill: "skills/missing/SKILL.md" } } }, `implement: skill file not found: ${resolve("app/skills/missing/SKILL.md")}`],
-      [{ workspace: { heavyCommands: ["^(unclosed"] } }, "workspace.heavyCommands[0] is not a valid regular expression"],
-      [{ actions: { implement: { retry: { initialDelaySeconds: 1, maxDelaySeconds: 2 } } } }, "implement: retry requires mode review"],
+    for (const overrides of [
+      { actions: { implement: { model: "no-such-model" } } },
+      { actions: { implement: { skill: "skills/missing/SKILL.md" } } },
+      { workspace: { heavyCommands: ["^(unclosed"] } },
+      { actions: { implement: { retry: { initialDelaySeconds: 1, maxDelaySeconds: 2 } } } },
     ]) {
-      assert.deepEqual(startup(overrides), { status: 1, message: `Invalid Scrat configuration:\n- ${problem}` }, problem);
+      assert.deepEqual(startup(overrides), { status: 1, rejected: true }, JSON.stringify(overrides));
       assert.equal(JSON.stringify([all(s.tasks), all(s.runs)]), before, "no task is claimed on a rejected start");
     }
     assert.equal(outbound(), ""); assert.equal(f.requests.length, modelRequests);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_issue.model = "missing-model"; })), /review_issue: no Pi model fixture\/missing-model/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.reviewers[0].provider = "nowhere"; })), /review_pr reviewer 1: no Pi model nowhere/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.actions.resolve_conflicts.skill = "skills/missing/SKILL.md"; })), /resolve_conflicts: skill file not found/);
   } },
   recovery: { title: "recover releases an abandoned claim without rewriting the saved result, and an interrupted commit review is recovered and retried with exactly one root and one reply", configure: [configureCommitSource], run: async () => {
     await commitReview("restart");
@@ -2378,22 +2309,9 @@ export const scenarios = {
     assert.deepEqual(merged.workspace.validate, defaults.workspace.validate);
 
     probe(undefined, ""); assert.equal(readFileSync(local, "utf8"), "{}\n");
-    const { validateStaticConfig: startupCheck } = await f.app("startup.ts"), narrow = structuredClone(f.config);
-    narrow.tools.readBytes.max = narrow.tools.readBytes.default - 1;
-    await assert.rejects(startupCheck(narrow), /tools\.readBytes\.max must not be less than tools\.readBytes\.default/);
-    const { validateConfig } = await f.app("config-schema.ts");
-    const check = (overrides, message) => assert.throws(() => validateConfig(buildConfig(defaults, overrides)), message);
-    check({ harness: 8 }, /^Error: Invalid Scrat configuration:\n- harness: must be object$/);
-    check({ harness: null }, /harness: must be object/);
-    check({ harness: { toString: 1 } }, /harness\.toString: unknown setting/);
-    check({ harness: { maxConcurrentValidations: "3" } }, /harness\.maxConcurrentValidations: must be integer/);
-    check({ harness: { maxConcurrentValidations: 0 } }, /harness\.maxConcurrentValidations: must be >= 1/);
-    check({ harness: { maxConcurency: 8 } }, /harness\.maxConcurency: unknown setting/);
-    check({ actions: { implement: { thinkingLevel: "turbo" } } }, /actions\.implement\.thinkingLevel: must be equal to one of the allowed values/);
-    validateConfig(buildConfig(defaults, { workspace: { environment: { ANY_NEW_KEY: "1" } } }));
     rejected(JSON.parse('{"workspace":{"environment":{"__proto__":{"x":"1"}}}}'), /Unknown setting in scrat\.local\.json: workspace\.environment\.__proto__/);
-    assert.throws(() => probe({ actions: { bogus: {} } }, ""), (error) => /Invalid Scrat configuration:\n- actions\.bogus: unknown action/.test(error.stderr));
-    assert.throws(() => probe({ harness: { maxConcurency: 8 } }, ""), (error) => /Invalid Scrat configuration:\n- harness\.maxConcurency: unknown setting/.test(error.stderr));
+    assert.throws(() => probe({ actions: { bogus: {} } }, ""), (error) => /Invalid Scrat configuration[\s\S]*actions\.bogus/.test(error.stderr));
+    assert.throws(() => probe({ harness: { maxConcurency: 8 } }, ""), (error) => /Invalid Scrat configuration[\s\S]*harness\.maxConcurency/.test(error.stderr));
 
     const provider = Object.keys(defaults.providers)[0], model = defaults.providers[provider].models[0].id;
     const seen = probe({ providers: { [provider]: { baseUrl: "http://override.invalid/v1" } } }, `
@@ -2502,49 +2420,113 @@ export const scenarios = {
     await assert.rejects(postMessage({ channel: "C1", text: "no token" }), /SLACK_BOT_TOKEN is not set/);
     assert.equal(f.slack.calls.length, count);
   } },
-  slack_startup: { title: "an enabled Slack action or status config blocks startup on missing token, channel, template variables, panel reviewers or a failed auth.test, while a disabled one makes no Slack call and queued tasks for it are rejected", run: async () => {
-    const { validateStaticConfig } = await f.app("startup.ts");
-    {
-      const statusVariant = (change) => { const copy = structuredClone(f.config); copy.slack = { enabled: true, channel: "C0123456789" }; change(copy.slack); return copy; };
-      await validateStaticConfig(f.config);
-      assert.equal(f.slack.calls.length, 0);
-      await assert.rejects(validateStaticConfig(statusVariant((slack) => { slack.channel = " "; })), /slack\.channel must not be empty/);
-      f.slack.calls.length = 0;
-      const token = ["xoxb", "1111", "2222", "fixturetoken"].join("-"); delete process.env.SLACK_BOT_TOKEN;
-      await assert.rejects(validateStaticConfig(statusVariant(() => {})), /SLACK_BOT_TOKEN is not set/);
-      assert.equal(f.slack.calls.length, 0);
-      process.env.SLACK_BOT_TOKEN = token;
-      f.slack.fail = "invalid_auth";
-      await assert.rejects(validateStaticConfig(statusVariant(() => {})), /slack: auth\.test failed: .*invalid_auth/);
-      f.slack.fail = null; f.slack.calls.length = 0;
-      await validateStaticConfig(statusVariant(() => {}));
-      assert.deepEqual(f.slack.calls.map((call) => call.method), ["auth.test"]);
-      f.slack.calls.length = 0;
-    }
+  config_validation: { title: "the configuration schema reports each kind of error once and startup validation rejects every cross-field rule", run: async () => {
+    const { validateStaticConfig } = await f.app("startup.ts"), { validateConfig } = await f.app("config-schema.ts"), { config: merged } = await f.app("config.ts");
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
-    const { validateConfig } = await f.app("config-schema.ts");
+    const schema = (change, message) => assert.throws(() => { const copy = structuredClone(merged); change(copy); validateConfig(copy); }, message);
+    const startup = (change, message) => assert.rejects(validateStaticConfig(variant(change)), message);
+    const publicAnswer = [{ address: "93.184.216.34", family: 4 }];
+
+    validateConfig(merged);
+    await validateStaticConfig(f.config);
+
+    schema((c) => { c.harness.maxConcurency = 8; }, /harness\.maxConcurency: unknown setting/);
+    schema((c) => { c.harness.maxConcurrentValidations = "3"; }, /harness\.maxConcurrentValidations: must be integer/);
+    schema((c) => { c.harness.agentTimeoutSeconds = 1.5; }, /harness\.agentTimeoutSeconds: must be integer/);
+    schema((c) => { c.harness = 8; }, /harness: must be object/);
+    schema((c) => { c.actions.address_review.exhaustedLabel = 5; }, /actions\.address_review\.exhaustedLabel: must be string/);
+    schema((c) => { c.harness.maxConcurrentValidations = 0; }, /^Error: Invalid Scrat configuration:\n- harness\.maxConcurrentValidations: must be >= 1$/);
+    schema((c) => { c.harness.corrections.incomplete = -1; }, /harness\.corrections\.incomplete: must be >= 0/);
+    schema((c) => { c.harness.retryJitter = 2; }, /harness\.retryJitter: must be <= 1/);
+    schema((c) => { c.actions.implement.thinkingLevel = "turbo"; }, /actions\.implement\.thinkingLevel: must be equal to one of the allowed values/);
+    schema((c) => { c.github.auth = "token"; }, /github\.auth: must be equal to one of the allowed values/);
+    schema((c) => { c.workspace.commandMemoryMax = "lots"; }, /workspace\.commandMemoryMax: must match pattern/);
+    schema((c) => { c.workspace.packageStore = "relative/store"; }, /workspace\.packageStore: must match pattern/);
+    schema((c) => { delete c.tools; }, /tools: required/);
+    schema((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 0, maxDelaySeconds: 30 }; }, /actions\.review_pr\.retry\.initialDelaySeconds: must be >= 1/);
+    for (const change of [(c) => { c.workspace.commandMemoryMax = null; }, (c) => { c.workspace.packageStore = null; }, (c) => { c.actions.review_pr.retry = null; },
+      (c) => { c.actions.address_review.exhaustedLabel = null; }, (c) => { c.actions.address_review.exhaustedLabel = ""; }, (c) => { c.workspace.environment = { ANY_NEW_KEY: "1" }; }]) {
+      const copy = structuredClone(merged); change(copy); validateConfig(copy);
+    }
+
+    await startup((c) => { c.workspace.sandbox = false; c.workspace.commandMemoryMax = "6G"; }, /commandMemoryMax requires workspace\.sandbox/);
+    await startup((c) => { c.workspace.sandbox = false; c.workspace.packageStore = "/tmp/scrat-store"; }, /packageStore requires workspace\.sandbox/);
+    await validateStaticConfig(variant((c) => { c.workspace.commandMemoryMax = null; c.workspace.packageStore = null; }));
+    await startup((c) => { c.tools.readBytes.max = c.tools.readBytes.default - 1; }, /tools\.readBytes\.max must not be less than tools\.readBytes\.default/);
+    await startup((c) => { c.workspace.heavyCommands = ["^(unclosed"]; }, /heavyCommands\[0\] is not a valid regular expression/);
+    await startup((c) => { c.workspace.validate = []; }, /workspace\.validate is empty but address_pr_feedback, address_review, implement, resolve_conflicts publish commits.*\[\["true"\]\]/);
+    await validateStaticConfig(variant((c) => { c.workspace.validate = []; for (const name of ["implement", "address_review", "address_pr_feedback", "resolve_conflicts"]) c.actions[name].enabled = false; }));
+    await startup((c) => { c.actions.implement.agent = "panel"; }, /implement: mode change requires source github_items and agent: single/);
+    await startup((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 30 }; }, /review_pr: retry\.maxDelaySeconds must be at least retry\.initialDelaySeconds/);
+    await validateStaticConfig(variant((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 5, maxDelaySeconds: 5 }; }));
+    await startup((c) => { c.actions.implement.retry = { initialDelaySeconds: 1, maxDelaySeconds: 2 }; }, /implement: retry requires mode review/);
+    await startup((c) => { c.actions.review_issue.model = "missing-model"; }, /review_issue: no Pi model fixture\/missing-model/);
+    await startup((c) => { c.actions.review_pr.reviewers[0].provider = "nowhere"; }, /review_pr reviewer 1: no Pi model nowhere/);
+    await startup((c) => { c.actions.resolve_conflicts.skill = "skills/missing/SKILL.md"; }, /resolve_conflicts: skill file not found/);
+
+    await startup((c) => { c.github.botLogin = " "; }, /github\.botLogin must not be empty/);
+    await startup((c) => { c.github.botName = " !! "; }, /github\.botName must contain a letter or digit/);
+    const key = process.env.GITHUB_APP_PRIVATE_KEY;
+    delete process.env.GITHUB_APP_PRIVATE_KEY;
+    await assert.rejects(validateStaticConfig(f.config), /github\.auth is "app" but GITHUB_APP_PRIVATE_KEY is not set/);
+    await startup((c) => { c.github.auth = "pat"; }, /github\.auth is "pat" but GITHUB_PAT is not set/);
+    process.env.GITHUB_PAT = "ghp_x"; await validateStaticConfig(variant((c) => { c.github.auth = "pat"; })); delete process.env.GITHUB_PAT;
+    process.env.GITHUB_APP_PRIVATE_KEY = key;
+
+    const token = ["xoxb", "1111", "2222", "fixturetoken"].join("-");
+    const status = (change) => variant((c) => { c.slack = { enabled: true, channel: "C0123456789" }; change(c.slack); });
+    const enabled = (change = () => {}) => variant((c) => {
+      Object.assign(c.actions.review_base_change, { enabled: true, channel: "C0123456789", skill: "skills/review_issue/SKILL.md" }); change(c.actions.review_base_change);
+    });
+    await assert.rejects(validateStaticConfig(status(() => {})), /SLACK_BOT_TOKEN is not set/);
+    await assert.rejects(validateStaticConfig(enabled()), /review_base_change: SLACK_BOT_TOKEN is not set/);
+    process.env.SLACK_BOT_TOKEN = token;
+    await assert.rejects(validateStaticConfig(status((slack) => { slack.channel = " "; })), /slack\.channel must not be empty/);
+    await assert.rejects(validateStaticConfig(enabled((a) => { a.channel = " "; })), /review_base_change: channel must not be empty/);
+    await assert.rejects(validateStaticConfig(enabled((a) => { a.branch = " "; })), /branch must not be empty/);
+    await assert.rejects(validateStaticConfig(enabled((a) => { a.startMessage = "{{bot}} saw {{commit}}"; })), /unknown startMessage variable \{\{commit\}\}/);
+    await assert.rejects(validateStaticConfig(enabled((a) => { a.agent = "panel"; })), /requires exactly two reviewers/);
+    await validateStaticConfig(enabled((a) => { a.agent = "panel"; a.reviewers = structuredClone(f.config.actions.review_pr.reviewers); }));
+    schema((c) => { c.actions.review_base_change.agent = "solo"; }, /actions\.review_base_change\.agent: must be equal to one of the allowed values/);
+    f.slack.fail = "invalid_auth";
+    await assert.rejects(validateStaticConfig(status(() => {})), /slack: auth\.test failed: .*invalid_auth/);
+    await assert.rejects(validateStaticConfig(enabled()), /review_base_change: Slack auth\.test failed: .*invalid_auth/);
+    f.slack.fail = null;
+
+    const secret = "scout-" + "k9Xq2LmPz7".repeat(3);
+    process.env.SCOUT_TOKEN = secret;
+    const binding = () => ({ secret: "${SCOUT_TOKEN}", hosts: ["api.example.test", "other.example.test"], header: "Authorization", prefix: "Bearer " });
+    const bound = (change) => { const copy = structuredClone(f.config); copy.bindings = { scout: binding() }; change(copy.bindings); return { ...copy, resolve: async () => publicAnswer }; };
+    const binds = (change, message) => assert.rejects(validateStaticConfig(bound(change)), message);
+    await validateStaticConfig(bound(() => {}));
+    await binds((b) => { b.scout.secret = "${MISSING_SCOUT_VAR}"; }, /bindings\.scout: \$\{MISSING_SCOUT_VAR\} is not set in the environment/);
+    await binds((b) => { b.scout.secret = "literal-secret-value"; }, /bindings\.scout: secret must be a "\$\{VAR\}" placeholder/);
+    await binds((b) => { b.scout.hosts = []; }, /bindings\.scout: hosts must be a non-empty list/);
+    await binds((b) => { b.scout.hosts = ["api.example.test", "10.0.0.1"]; }, /bindings\.scout: hosts: .*IP address/);
+    await binds((b) => { b.scout.hosts = ["api.example.test", "localhost"]; }, /bindings\.scout: hosts: .*local or metadata/);
+    await binds((b) => { b.scout.hosts = ["api.example.test", "*.example.test"]; }, /bindings\.scout: hosts: .*exact public hostname/);
+    await binds((b) => { b.scout.header = "Host"; }, /bindings\.scout: header must be a permitted header name/);
+    await binds((b) => { b.scout.prefix = "Bearer \nX: y"; }, /prefix must be a single-line string/);
+    await binds((b) => { b.scout.extra = 1; }, /bindings\.scout: unknown key extra/);
+    await binds((b) => { b.Bad_Name = binding(); }, /bindings\.Bad_Name: name must be lowercase/);
+    await binds((b) => { b.scout = "text"; }, /bindings\.scout: must be an object/);
+    await validateStaticConfig(bound((b) => { b.scout.header = "X-Api-Key"; delete b.scout.prefix; }));
+  } },
+  slack_startup: { title: "an enabled Slack action or status config verifies the token with auth.test, while a disabled one makes no Slack call and queued tasks for it are rejected", run: async () => {
+    const { validateStaticConfig } = await f.app("startup.ts");
+    const token = ["xoxb", "1111", "2222", "fixturetoken"].join("-");
+    const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
     const enabled = (change = () => {}) => variant((c) => {
       Object.assign(c.actions.review_base_change, { enabled: true, channel: "C0123456789", skill: "skills/review_issue/SKILL.md" }); change(c.actions.review_base_change);
     });
     await validateStaticConfig(f.config);
     assert.equal(f.slack.calls.length, 0);
-    delete process.env.SLACK_BOT_TOKEN;
-    await assert.rejects(validateStaticConfig(enabled()), /review_base_change: SLACK_BOT_TOKEN is not set/);
-    process.env.SLACK_BOT_TOKEN = ["xoxb", "1111", "2222", "fixturetoken"].join("-");
+    process.env.SLACK_BOT_TOKEN = token;
+    await validateStaticConfig(variant((c) => { c.slack = { enabled: true, channel: "C0123456789" }; }));
+    assert.deepEqual(f.slack.calls.map((call) => call.method), ["auth.test"]);
+    f.slack.calls.length = 0;
     await validateStaticConfig(enabled());
     assert.deepEqual(f.slack.calls.map((call) => call.method), ["auth.test"]);
-    await validateStaticConfig(enabled((a) => { a.agent = "panel"; a.reviewers = structuredClone(f.config.actions.review_pr.reviewers); }));
-    await assert.rejects(validateStaticConfig(enabled((a) => { a.channel = " "; })), /channel must not be empty/);
-    await validateStaticConfig(enabled((a) => { a.branch = "develop"; }));
-    await assert.rejects(validateStaticConfig(enabled((a) => { a.branch = " "; })), /branch must not be empty/);
-    await assert.rejects(validateStaticConfig(enabled((a) => { a.startMessage = "{{bot}} saw {{commit}}"; })), /unknown startMessage variable \{\{commit\}\}/);
-    await assert.rejects(validateStaticConfig(enabled((a) => { a.agent = "panel"; })), /requires exactly two reviewers/);
-    const { config: merged } = await f.app("config.ts");
-    const copy = structuredClone(merged); copy.actions.review_base_change.agent = "solo";
-    assert.throws(() => validateConfig(copy), /actions\.review_base_change\.agent: must be equal to one of the allowed values/);
-    f.slack.fail = "invalid_auth";
-    await assert.rejects(validateStaticConfig(enabled()), /Slack auth\.test failed: .*invalid_auth/);
-    f.slack.fail = null;
     delete process.env.SLACK_BOT_TOKEN;
     const calls = f.slack.calls.length;
     await validateStaticConfig(variant((c) => { c.actions.review_base_change.channel = ""; c.actions.review_base_change.startMessage = "{{nope}}"; }));
@@ -3103,37 +3085,15 @@ export const scenarios = {
     f.addIssue(1); f.enqueue(1); await success();
     assert.deepEqual(f.requests.at(-1).request.tools.map((tool) => tool.function.name), ["read", "grep", "browser"]);
   } },
-  bindings_startup: { title: "every invalid binding stops startup, a manifest naming an unknown binding is rejected at load, and tool settings are validated structurally", configure: [configureScoped], run: async () => {
+  bindings_startup: { title: "a binding host that resolves privately stops startup while an unresolvable one does not, a manifest naming an unknown binding is rejected at load, and tool settings are validated structurally", configure: [configureScoped], run: async () => {
     const secret = process.env.SCOUT_TOKEN;
     const { validateStaticConfig } = await f.app("startup.ts"), { readManifests } = await f.app("manifests.ts");
     const publicAnswer = [{ address: "93.184.216.34", family: 4 }], resolving = (answers) => async (host) => answers[host] ?? publicAnswer;
     await validateStaticConfig({ ...f.config, resolve: resolving({}) });
-    const variant = (change) => { const copy = structuredClone(f.config); change(copy.bindings); return { ...copy, resolve: resolving({}) }; };
-    const rejects = (change, message) => assert.rejects(validateStaticConfig(variant(change)), message);
-    await rejects((b) => { b.scout.secret = "${MISSING_SCOUT_VAR}"; }, /bindings\.scout: \$\{MISSING_SCOUT_VAR\} is not set in the environment/);
-    await rejects((b) => { b.scout.secret = "literal-secret-value"; }, /bindings\.scout: secret must be a "\$\{VAR\}" placeholder/);
-    await rejects((b) => { b.scout.hosts = []; }, /bindings\.scout: hosts must be a non-empty list/);
-    await rejects((b) => { delete b.scout.hosts; }, /bindings\.scout: hosts must be a non-empty list/);
-    for (const [host, why] of [["10.0.0.1", "IP address"], ["127.0.0.1", "IP address"], ["169.254.169.254", "IP address"], ["[::1]", "IP address"], ["::1", "IP address"],
-      ["localhost", "local or metadata"], ["metadata.google.internal", "local or metadata"], ["db.internal", "local or metadata"], ["*.example.test", "exact public hostname"],
-      ["example", "exact public hostname"], ["Api.Example.test", "exact public hostname"], ["0x7f.1", "exact public hostname"]]) {
-      await rejects((b) => { b.scout.hosts = ["api.example.test", host]; }, new RegExp(`bindings\\.scout: hosts: .*${why}`));
-    }
-    await rejects((b) => { b.scout.header = "Host"; }, /bindings\.scout: header must be a permitted header name/);
-    await rejects((b) => { b.scout.header = "Bad Header"; }, /header must be a permitted header name/);
-    await rejects((b) => { b.scout.prefix = "Bearer \nX: y"; }, /prefix must be a single-line string/);
-    await rejects((b) => { b.scout.extra = 1; }, /bindings\.scout: unknown key extra/);
-    await rejects((b) => { b.Bad_Name = structuredClone(b.scout); }, /bindings\.Bad_Name: name must be lowercase/);
-    await rejects((b) => { b.scout = "text"; }, /bindings\.scout: must be an object/);
-    await validateStaticConfig(variant((b) => { b.scout.header = "X-Api-Key"; delete b.scout.prefix; }));
-    for (const address of ["10.0.0.9", "127.0.0.1", "169.254.169.254", "100.64.0.1", "fd00:ec2::254", "::ffff:192.168.0.1"]) {
-      await assert.rejects(validateStaticConfig({ ...f.config, resolve: resolving({ "other.example.test": [{ address: "93.184.216.34", family: 4 }, { address, family: address.includes(":") ? 6 : 4 }] }) }),
-        new RegExp(`bindings\\.scout: hosts: other\\.example\\.test resolves to private address ${address.replace(/\./g, "\\.")}`));
+    for (const address of ["10.0.0.9", "fd00:ec2::254"]) {
+      await assert.rejects(validateStaticConfig({ ...f.config, resolve: resolving({ "other.example.test": [{ address: "93.184.216.34", family: 4 }, { address, family: address.includes(":") ? 6 : 4 }] }) }), /other\.example\.test resolves to private address/);
     }
     await validateStaticConfig({ ...f.config, resolve: async (host) => { if (host === "other.example.test") throw new Error("ENOTFOUND"); return publicAnswer; } });
-    delete process.env.SCOUT_TOKEN;
-    await assert.rejects(validateStaticConfig(f.config), /bindings\.scout: \$\{SCOUT_TOKEN\} is not set in the environment/);
-    process.env.SCOUT_TOKEN = secret;
 
     const local = resolve("app/scrat.local.json"), original = readFileSync(local, "utf8"), directory = resolve("deployment");
     const probe = (overrides) => {

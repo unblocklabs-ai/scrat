@@ -1379,7 +1379,7 @@ export const scenarios = {
     assert.equal(replacement.taskId, replaced.taskId); assert.ok(f.requests.length > replacementCalls);
     assert.equal(replacement.inferenceFromRunId, null);
   } },
-  retry: { title: "publication retries reconcile remote comments and labels without rerunning Pi, and follow-up issue reviews edit the one assessment comment with the previous assessment in hand", run: async () => {
+  retry: { title: "publication retries reconcile remote comments and labels without rerunning Pi, and follow-up issue reviews edit the one assessment comment with the previous assessment in hand while an unchanged one writes nothing", run: async () => {
     for (const [n, fault] of [[1, "label"], [2, "comment"]]) {
       f.addIssue(n, ["human-label"]); f.reset(n, "ready"); f.enqueue(n); f.faults[fault].add(n);
       const first = f.requests.length, failed = await run(); assert.ok(failed.error); const calls = f.requests.length;
@@ -1389,14 +1389,18 @@ export const scenarios = {
       assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === n).length, 1);
       assert.deepEqual(f.issues.get(n).labels.map((label) => label.name).sort(), ["human-label", "scrat"]);
     }
-    f.reset(1, "normal"); f.enqueue(1); const followUp = await success();
+    f.reset(1, "normal"); f.enqueue(1); let written = f.writes.length; const followUp = await success();
     assert.deepEqual(f.issues.get(1).labels.map((label) => label.name), ["human-label"]);
+    assert.deepEqual(f.writes.slice(written).map((w) => [w.type, w.method]), [["label", "DELETE"]], "The same text with a changed conclusion only moves the label");
     assert.equal(f.comments.get(1).length, 1, "A second review keeps one assessment comment");
-    f.reset(1, "revised"); f.enqueue(1); const before = f.requests.length, written = f.writes.length, revised = await success();
+    f.reset(1, "revised"); f.enqueue(1); const before = f.requests.length; written = f.writes.length; const revised = await success();
     assert.equal(readFileSync(f.requests[before].context.files.previous_assessment, "utf8"), followUp.result.text);
     assert.deepEqual(f.writes.slice(written).map((w) => w.type), ["comment_update"], "A changed assessment edits the comment in place");
     assert.equal(f.comments.get(1).length, 1); assert.equal(f.comments.get(1)[0].body, `${revised.result.text}\n\n<!-- scrat-review -->`);
     assert.equal(revised.publication.commentId, f.comments.get(1)[0].id);
+    f.reset(1, "revised"); f.enqueue(1); written = f.writes.length; const unchanged = await success();
+    assert.deepEqual(f.writes.slice(written), [], "An unchanged follow-up makes no GitHub write");
+    assert.equal(unchanged.publication.commentId, revised.publication.commentId); assert.equal(unchanged.publication.status, "published");
   } },
   ambiguous_pr: { title: "a lost PR response is reconciled without another PR, inference or revalidation, resuming at the publishing stage", configure: [configureValidation], run: async () => {
     const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;

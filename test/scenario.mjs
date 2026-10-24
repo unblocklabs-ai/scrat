@@ -306,6 +306,19 @@ const validationFeedback = async (variant) => {
     assert.match(r.result.text, /^Implemented the change\./);
     assert.match(r.result.text, /\*\*Validation correction 1:\*\* Fixed the validation failure\./);
     assert.match(f.prs[0].body, /Implemented the change\.[\s\S]*Fixed the validation failure\./);
+    const turns = () => f.requests.filter((entry) => entry.request.messages.at(-1).role === "user").length - feedbackRequests().length;
+    f.addIssue(2, ["scrat"]); f.reset(2, "feedback-fix"); f.enqueue(2, "implement");
+    const stop = new AbortController(); f.onModel = () => stop.abort();
+    const cut = await f.runNextTask(stop.signal); f.onModel = undefined;
+    assert.equal(cut.stage, "validating"); assert.equal(f.row(s.tasks, cut.taskId).retryMode, "validation");
+    const started = turns(), asked = feedbackRequests().length, checked = validations();
+    const resumed = await success();
+    assert.equal(resumed.inferenceFromRunId, cut.id); assert.equal(resumed.piSessionId, cut.piSessionId);
+    assert.equal(turns(), started, "the resumed run starts no new agent turn");
+    assert.equal(feedbackRequests().length, asked + 1); assert.match(lastUser(feedbackRequests().at(-1)), /round 1 of 2/);
+    assert.equal(validations(), checked + 2); assert.equal(f.prs.length, 2);
+    assert.equal(git(resolve("remote.git"), "rev-list", "--count", `main..${f.prs[1].head.ref}`), "1");
+    assert.match(resumed.result.text, /^Implemented the change\.[\s\S]*\*\*Validation correction 1:\*\* Fixed the validation failure\./);
   } else {
     f.addIssue(1, ["scrat"]); f.reset(1, "feedback-stubborn"); f.enqueue(1, "implement"); const failed = await run();
     assert.equal(failed.error.exitCode, 7); assert.equal(failed.verification, null); assert.equal(f.prs.length, 0);
@@ -1476,7 +1489,7 @@ export const scenarios = {
   } },
   stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or fails clearly when the merge conflicts", configure: [configureStaleBranch], run: () => staleBranch("human") },
   stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", configure: [configureStaleBranch], run: () => staleBranch("scrat") },
-  validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit", configure: [configureValidation], run: () => validationFeedback("fix") },
+  validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit, including after a restart resumed it at validation", configure: [configureValidation], run: () => validationFeedback("fix") },
   validation_feedback_cap: { title: "validation feedback stops after two rounds and never applies to signal-killed commands", configure: [configureValidation], run: () => validationFeedback("cap") },
   measured_checks: { title: "a chatty passing validation command stores a bounded tail and keeps its full output on disk", configure: [configureChatty], run: async () => {
     const r = await implement(1);

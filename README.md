@@ -46,7 +46,7 @@ npm run fetch                    # Save GitHub state without routing tasks
 npm run sync                     # Sync, queue tasks, and reconcile reviews/labels
 npm run work                     # Drain runnable queued work, then exit
 npm run retry -- <task-id>        # Repair a failed task, or resume publication
-npm run retry -- <task-id> --validation-only  # Recheck saved code without Pi
+npm run retry -- <task-id> --validation-only  # Recheck saved code without a new agent turn
 npm run enqueue -- <action> <number|item-id>... [--priority N]  # Queue work for PR/issue numbers; sync never cancels it, even past routing guards (closing the item does)
 npm run cleanup                  # Retry finished-run resource cleanup
 npm run typecheck                # Strict TypeScript and Node type-erasure compatibility
@@ -54,13 +54,13 @@ npm run knip                     # Unused files, exports, and dependencies
 npm test                         # Integration/E2E tests, 4 scenarios at a time (SCRAT_TEST_CONCURRENCY=N to change), about 2 minutes; PostgreSQL case needs Docker
 ```
 
-When the final validation fails because a command exited nonzero (including preparation commands), the failure is sent back into the same Pi session, up to `harness.corrections.validation` rounds, before the run fails. Commands killed by a signal (an out-of-memory kill or a timeout), tree mutation, secret-scan and acceptance failures are not sent back and fail the run as before; use `--validation-only` for the infrastructure cases.
+When the final validation fails because a command exited nonzero (including preparation commands), the failure is sent back into the same Pi session, up to `harness.corrections.validation` rounds, before the run fails. This includes a run resumed at validation after a restart and a `--validation-only` retry. Commands killed by a signal (an out-of-memory kill or a timeout), tree mutation, secret-scan and acceptance failures are not sent back and fail the run as before; use `--validation-only` for the infrastructure cases.
 
 Change sessions are told to keep working notes in `.scrat/notes.md` inside their workspace, so plans and findings survive context compaction, retries and validation feedback. Scrat adds `/.scrat/` to the clone's shared Git exclude file, so the notes are never committed or published; they are removed with the workspace.
 
 Normal retries rerun Pi for pre-publication failures, reusing the workspace/session so it can repair the problem. Publication-only retries reuse the saved validated result.
 
-Use `--validation-only` for a transient validation failure after a mutating agent returned complete. It requires a saved checkpoint with unchanged task input, workspace identity, HEAD, source tree, merge state, GitHub context, and base SHA. Scrat skips Pi, creates a fresh disposable database when configured, reruns preparation/migrations and all checks, and still enforces action postconditions before publication. Ignored files are outside the source checkpoint; configured preparation must restore any required dependency/generated state. Changed or incomplete work requires a normal repair retry.
+Use `--validation-only` for a transient validation failure after a mutating agent returned complete. It requires a saved checkpoint with unchanged task input, workspace identity, HEAD, source tree, merge state, GitHub context, and base SHA. Scrat skips the agent's turn, creates a fresh disposable database when configured, reruns preparation/migrations and all checks, and still enforces action postconditions before publication; a check that exits nonzero goes back into the saved session. Ignored files are outside the source checkpoint; configured preparation must restore any required dependency/generated state. Changed or incomplete work requires a normal repair retry.
 
 ## Configuration
 

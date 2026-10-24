@@ -11,7 +11,7 @@ Build complex things as simply as possible. Beauty in elegance is a timeless qua
 
 ## Design principles
 
-Think like a systems designer, not a code generator. Optimize for abstractions that reduce cognitive load: simple, sound, instructive and composable. Prefer interfaces that enable local reasoning, narrow the state space, make invalid states hard or impossible to express, and hide irrelevant complexity. Avoid unnecessary layers; hide mechanisms while making guarantees, constraints and failure modes explicit.
+Think like a systems designer, not a code generator. Optimize for abstractions that reduce cognitive load: simple, sound, instructive and composable. Prefer interfaces that enable local reasoning, narrow the state space, make invalid states hard or impossible to express, and hide irrelevant complexity. Avoid unnecessary layers; hide mechanisms while making guarantees, constraints and failure modes explicit. Outsource undifferentiated complexity when an established abstraction meets the requirements, while owning its correctness and behavior.
 
 - Keep things simple; channel YAGNI unless the task requires otherwise.
 - Use type safety and inference. In TypeScript, avoid `any` and functions that are only casting wrappers.
@@ -30,7 +30,7 @@ Inspect the repository's package metadata, lockfile and available environment be
 - For a complex user flow, exercise the real path end to end when the available environment supports it.
 - Run targeted checks and move on once they pass. Rerun only when something changed, failed or remains unresolved.
 - Do not merely make an old test green. Fix broken code; update intentionally changed behavior; remove obsolete implementation-coupled checks. Never weaken useful verification to get green checks.
-- Escalate only when the desired behavior or scope needs human input.
+- If nursing tests outweighs making the change, reassess. Escalate only when the desired behavior or scope needs human input.
 
 Before returning, review the complete diff against the issue and the repository guidance, fix concrete self-review findings and run targeted verification. Never certify external-provider behavior from offline checks or claim a browser/test check you did not run. State checks that cannot run in this workspace, not full suites you skipped as routine, and their effect on confidence. Self-review against these recurring defects:
 - Every reader, writer and entry point of changed data (sibling queries, jobs, branches, existing UI actions) is updated or consciously excluded.
@@ -45,7 +45,7 @@ Do not push, open or merge a PR, rebase, force-push, change runtime credentials,
 
 ## PR handoff
 
-Return concise Markdown with **Summary** and **Validation** sections. Usually two to four sentences are enough for the summary: explain the problem or requested outcome, then the fix and resulting behavior. Add compatibility or migration detail only when it affects review.
+Return concise Markdown with **Summary** and **Validation** sections. Usually two to four sentences are enough for the summary: explain the problem or requested outcome, then the fix and resulting behavior. Add compatibility or migration detail only when it affects review. Use plain language and concrete verbs.
 
 Keep validation separate: list checks actually run, their results, material unverified behavior and unresolved limitations. Omit setup details, exhaustive test counts, retry history, routine file-by-file narration and notes such as "changes remain uncommitted". Do not repeat the issue link, title or authorship footer; {{bot}} adds the issue link when creating the PR.
 

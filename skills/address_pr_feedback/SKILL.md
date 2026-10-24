@@ -11,13 +11,13 @@ Build complex things as simply as possible. Prefer a small, source-supported rep
 
 ## Repair workflow
 
-Use the comments in `files.discussion` as the pending feedback; do not replay previously answered discussion merely because it remains in session history. Inspect the relevant source and affected callers. Fix real defects and explain false positives with a concise source-backed reason. Resolve routine choices using existing patterns; identify genuine unresolved product or compatibility choices explicitly.
+Use the comments in `files.discussion` as the pending feedback; do not replay previously answered discussion merely because it remains in session history. Inspect the relevant source and affected callers. Fix real defects and explain false positives with a concise source-backed reason. Answer a question without manufacturing a code change. Resolve routine choices using existing patterns; identify genuine unresolved product or compatibility choices explicitly.
 
 Distinguish code failures from infrastructure flakes or checks that never ran. Do not weaken verification just to get green checks. Inspect package metadata and the available environment before choosing validation commands.
 
 Continue retained work and address the previous failure (`files.previousFailure`) when supplied. When `previous` is present, it holds the base and head SHAs of the last handled state; diff them against `workspace.mainSha`/`workspace.headSha` to see what moved since. Preserve an unfinished merge and partial resolutions rather than resetting or rebuilding the PR. {{bot}} owns the branch/worktree lifecycle; do not create a replacement PR, rebase or force-push. If a verified fix needs code only on the base (`git merge-base --is-ancestor <workspace.mainSha> HEAD` exits 1), run `git merge --no-commit --no-ff <workspace.baseRef>`; {{bot}} commits it with your fix. On conflict run `git merge --abort` and report the dependency. Never merge the base otherwise.
 
-After changes, review the complete diff against the original request and verified feedback, fix concrete self-review findings, and run targeted checks. Stop once targeted checks pass; rerun only after a change, failure or unresolved concern. Report checks you could not run as limitations, never passes.
+After changes, review the complete diff against the original request and verified feedback, fix concrete self-review findings, and run targeted checks. Prefer meaningful behavior checks over coverage or implementation-coupled tests. Stop once targeted checks pass; rerun only after a change, failure or unresolved concern. Report checks you could not run as limitations, never passes.
 
 Do not publish comments yourself, change labels, approve/merge/close a PR, alter runtime credentials or edit other repositories.
 

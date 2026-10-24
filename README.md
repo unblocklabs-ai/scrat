@@ -169,7 +169,7 @@ Before relying on a new deployment, run it once against a disposable repository 
 
 ### Workspace
 
-On Linux, set `workspace.sandbox: true` (which requires `workspace.layout: "clone"`) in deployment overrides to run repository
+On Linux, set `workspace.sandbox: true` in deployment overrides to run repository
 preparation, validation, agent Bash and workspace Git (including hooks) inside
 Bubblewrap. Enabling it is fail-closed: missing namespaces or runtimes are errors,
 not a fallback to host execution. The installer checks the boundary before stopping
@@ -201,10 +201,7 @@ Commands get the workspace, their own persistent home, private `/tmp`, `/run` an
 process namespace, read-only system/Node/pnpm runtimes, read-only repository Git
 objects, and (for Bash) their own context directory. They do not get controller
 credentials/data, other workspaces, host process environments or the Docker socket.
-`workspace.layout` is `"worktree"` (default; linked worktrees of the shared repository) or `"clone"` (private clones that share objects with the repository clone); `"clone"` works on any OS without Bubblewrap.
-New workspaces in the clone layout are private Git clones that borrow the repository clone's objects (`git clone --shared`; Scrat sets `gc.auto=0` there and pins each workspace base under `refs/scrat/workspaces/<id>`), and the layout is recorded on the workspace row; legacy linked workspaces are
-converted in place with their index, merge state and working files retained. Old
-Git metadata/pointers remain under `data/private-git/` for recovery. The controller
+Workspaces are private Git clones that borrow the repository clone's objects (`git clone --shared`; Scrat sets `gc.auto=0` there and pins each workspace base under `refs/scrat/workspaces/<id>`), which works on any OS without Bubblewrap. The controller
 imports published commits through a checked incremental Git bundle (only the commits the clone lacks) rather than executing Git
 in a writable shared repository. Review-workspace cleanup also removes its private
 home; retained implementation workspaces keep theirs for retries.
@@ -222,7 +219,6 @@ Workspace commands are argument arrays, not shell strings: `["pnpm", "verify"]`.
 | Setting | Purpose |
 | --- | --- |
 | `workspace.environment` | Environment variables added to Pi's Bash commands and harness preparation/validation commands. These commands inherit only path, home, user, locale, temporary-directory, proxy, certificate and `DOCKER_HOST` settings, so any other variable they need belongs here. Test-process limits belong here too; task concurrency does not serialize tests. |
-| `workspace.layout` | `worktree` (default) or `clone`: linked worktrees of the shared repository, or private clones that share objects with the repository clone. Must be `clone` when `workspace.sandbox` is true; `clone` works on any OS. |
 | `workspace.prepare` | Setup commands, including dependency installation and code generation. Also used for read-only reviews, and rerun before mutating-work validation. |
 | `workspace.heavyCommands` | Optional regular expressions, matched against each shell command segment of Pi's Bash tool, with quoted text ignored and whitespace collapsed (leading `VAR=value`, `env`, `nohup`, `time`, `sudo`, `exec` and `timeout N` are stripped). A foreground match is queued, not refused: it runs in one of the `harness.maxConcurrentValidations` slots, shared with Scrat's own validation, and logs `pi.heavy_command` with its wait. It may hold the slot for at most `harness.commandTimeoutSeconds`, and a cancelled run leaves the queue. A command that backgrounds work (a background `&`, `nohup`, `setsid` or `disown`) is refused instead, because the job would outlive its slot; the agent is told to run it in the foreground. This is a speed bump against accidental parallel lint/type-check/verify runs, not a sandbox: `sh -c '...'` or a script can still evade it. |
 | `workspace.validate` | Required checks for mutating tasks before committing or publishing. Not run as a harness gate for read-only reviews. |

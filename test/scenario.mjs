@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { bearer, fixture } from "./fixture.mjs";
 
-const [scenario, layout] = (process.argv[2] ?? "").split("@");
+const scenario = process.argv[2] ?? "";
 let f, db, s, tasks, git, commit;
 const all = (table) => db.select().from(table).all();
 const route = async () => (await f.app("github-sync.ts")).syncGitHub();
@@ -878,7 +878,7 @@ export const scenarios = {
     await route();
     assert.deepEqual(reviews2().filter((t) => t.status === "queued"), [], "a running manual review covers the sync");
   } },
-  working_notes: { title: "change sessions keep working notes in an excluded workspace file that never reaches a commit; reviews are not told to", layouts: ["clone"], run: async () => {
+  working_notes: { title: "change sessions keep working notes in an excluded workspace file that never reaches a commit; reviews are not told to", run: async () => {
     f.addIssue(1, ["scrat"]); f.reset(1, "notes"); f.enqueue(1, "implement"); const r = await success();
     const notes = resolve(f.row(s.workspaces, r.workspaceId).path, ".scrat/notes.md");
     const system = ({ request }) => JSON.stringify(request.messages.filter((m) => m.role === "system" || m.role === "developer"));
@@ -893,7 +893,7 @@ export const scenarios = {
     const reviews = f.requests.filter((entry) => entry.context.action === "review_pr");
     assert.ok(reviews.length && reviews.every((entry) => !system(entry).includes(".scrat/notes.md")));
   } },
-  implement_base_moved: { title: "a retried implementation whose retained workspace began on an older base moves up to the current base first", layouts: ["clone"], configure: [configureCheck], run: async () => {
+  implement_base_moved: { title: "a retried implementation whose retained workspace began on an older base moves up to the current base first", configure: [configureCheck], run: async () => {
     changeMain("fail-validation", "fail\n"); const oldBase = git(resolve("remote.git"), "rev-parse", "main");
     f.addIssue(1); f.enqueue(1, "implement"); const failed = await run();
     f.addIssue(2); f.enqueue(2, "implement"); const overlapping = await run();
@@ -932,9 +932,7 @@ export const scenarios = {
     db.update(s.runs).set({ startedAt: "2021-01-01T00:00:00Z" }).where(eq(s.runs.id, r5.id)).run();
     db.update(s.runs).set({ startedAt: "2020-01-01T00:00:00Z" }).where(eq(s.runs.id, r4.id)).run();
     rebuildRunsTable(["sequence"]);
-    db.$client.exec("ALTER TABLE workspaces DROP COLUMN layout");
     pushSchema();
-    assert.ok(db.$client.prepare("PRAGMA table_info(workspaces)").all().some((column) => column.name === "layout"));
     assert.deepEqual(db.$client.prepare("PRAGMA foreign_key_check").all(), []);
     assert.equal(all(s.runs).length, 5); assert.ok(all(s.runs).every((r) => r.sequence === null));
     assert.ok(db.$client.prepare("SELECT 1 FROM sqlite_master WHERE name = 'runs_sequence_unique'").get());
@@ -1229,7 +1227,7 @@ export const scenarios = {
     f.addIssue(6); f.reset(6, "incomplete-once"); f.enqueue(6, "implement");
     const partial = await run(); assert.ok(partial.error); assert.equal(prompts(), asked);
   } },
-  pr_head: { title: "a stale refs/pull head is replaced by the API head, and a head the remote lacks fails the run without publishing", layouts: ["clone"], run: async () => {
+  pr_head: { title: "a stale refs/pull head is replaced by the API head, and a head the remote lacks fails the run without publishing", run: async () => {
     await implement(1);
     const remote = resolve("remote.git"), branch = f.prs[0].head.ref, stale = git(remote, "rev-parse", branch);
     f.frozen.add(201);
@@ -1259,7 +1257,7 @@ export const scenarios = {
     }
     assert.equal(f.prs.length, 0); assert.equal(f.writes.length, 0);
   } },
-  verification: { title: "verification receipts bind to the published commit and failing checks block publication", layouts: ["clone"], configure: [configureCheck], run: async () => {
+  verification: { title: "verification receipts bind to the published commit and failing checks block publication", configure: [configureCheck], run: async () => {
     const r = await implement(1);
     assert.equal(r.verification.headSha, r.publication.publishedCommitSha);
     assert.match(r.verification.commands[0].tail, /checked actual source/); assert.equal(r.verification.commands[0].status, "passed"); assert.match(readFileSync(r.verification.commands[0].evidence[0], "utf8"), /checked actual source/);
@@ -1525,9 +1523,9 @@ export const scenarios = {
       reviewed = await success();
     }
   } },
-  stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or fails clearly when the merge conflicts", layouts: ["clone"], configure: [configureStaleBranch], run: staleBranch },
-  stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", layouts: ["clone"], configure: [configureStaleBranch], run: staleBranch },
-  validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit", layouts: ["clone"], configure: [configureValidation], run: validationFeedback },
+  stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or fails clearly when the merge conflicts", configure: [configureStaleBranch], run: staleBranch },
+  stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", configure: [configureStaleBranch], run: staleBranch },
+  validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit", configure: [configureValidation], run: validationFeedback },
   validation_feedback_cap: { title: "validation feedback stops after two rounds and never applies to signal-killed commands", configure: [configureValidation], run: validationFeedback },
   measured_checks: { title: "a chatty passing validation command stores a bounded tail, keeps its full output on disk and old receipts still read", configure: [configureChatty], run: async () => {
     const r = await implement(1);
@@ -1733,7 +1731,7 @@ export const scenarios = {
     await assert.rejects(aborted, /cancelled/); release(); await holder; await next;
     assert.deepEqual(ran, ["next"]);
   } },
-  merge: { title: "retry resumes an unfinished merge and preserves partial work", layouts: ["clone"], run: async () => {
+  merge: { title: "retry resumes an unfinished merge and preserves partial work", run: async () => {
     const original = await implement(1); changeMain("src/app.ts", "export const value = 200;\n");
     await route(); f.reset(201, "merge-failure");
     for (const t of all(s.tasks).filter((t) => t.action === "review_pr")) db.update(s.tasks).set({ status: "cancelled" }).where(eq(s.tasks.id, t.id)).run();
@@ -1841,9 +1839,6 @@ export const scenarios = {
     await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.validate = []; })), /workspace\.validate is empty but address_pr_feedback, address_review, implement, resolve_conflicts publish commits.*\[\["true"\]\]/);
     await assert.rejects(validateStaticConfig(variant((c) => { delete c.workspace.validate; c.actions.address_review.enabled = false; })), /workspace\.validate is empty but address_pr_feedback, implement, resolve_conflicts publish/);
     await validateStaticConfig(variant((c) => { c.workspace.validate = [["true"]]; }));
-    await validateStaticConfig(variant((c) => { c.workspace.layout = "clone"; }));
-    invalid((c) => { c.workspace.layout = "copy"; }, /workspace\.layout: must be equal to one of the allowed values/);
-    await assert.rejects(validateStaticConfig(variant((c) => { c.workspace.sandbox = true; c.workspace.layout = "worktree"; })), /workspace\.sandbox requires workspace\.layout "clone"/);
     await validateStaticConfig(variant((c) => { c.workspace.validate = []; for (const name of changeActions) c.actions[name].enabled = false; }));
     invalid((c) => { c.actions.implement.thinkingLevel = "turbo"; }, /actions\.implement\.thinkingLevel: must be equal to one of the allowed values/);
     invalid((c) => { c.github.auth = "token"; }, /github\.auth: must be equal to one of the allowed values/);
@@ -1902,7 +1897,7 @@ export const scenarios = {
     const r = f.row(s.runs, claim.run.id); assert.equal(r.error.code, "RUN_INTERRUPTED"); assert.equal(r.result.text, "Saved"); assert.equal(r.publication.commentId, 123);
     tasks.retryTask(r.taskId); assert.ok(tasks.claimTask());
   } },
-  crash_before_publishing: { title: "validated artifacts and the publishing stage are written together, so a run failed after validation resumes at publishing without validating again", layouts: ["clone"], configure: [configureValidation], run: async () => {
+  crash_before_publishing: { title: "validated artifacts and the publishing stage are written together, so a run failed after validation resumes at publishing without validating again", configure: [configureValidation], run: async () => {
     const updates = [], update = db.update.bind(db);
     db.update = (table) => {
       const builder = update(table);
@@ -1926,7 +1921,7 @@ export const scenarios = {
     f.addIssue(1); f.enqueue(1); f.faults.cleanup.add(1); const r = await success();
     assert.equal(f.row(s.tasks, r.taskId).status, "completed"); const w = f.row(s.workspaces, r.workspaceId);
     assert.equal(w.removedAt, null); assert.equal(readFileSync(w.path + "/keep.txt", "utf8"), "preserve\n");
-    unlinkSync(w.path + "/keep.txt"); execFileSync(process.execPath, [resolve("app/src/cleanup.ts")], { stdio: "pipe" });
+    git(w.path, "reset", "--hard", w.baseSha); execFileSync(process.execPath, [resolve("app/src/cleanup.ts")], { stdio: "pipe" });
     assert.ok(f.row(s.workspaces, r.workspaceId).removedAt);
   } },
   sync_missing_item: { title: "a deleted open item is marked closed and its failed read does not stop routing for the others", run: async () => {
@@ -1990,7 +1985,7 @@ export const scenarios = {
     const [failed, ran] = await Promise.allSettled([failing, after]);
     assert.equal(failed.reason.message, "first"); assert.equal(ran.value, "ok"); assert.equal(locks.size, 0);
   } },
-  identity: { title: "retained workspaces reject branch replacement and retain unpublished commits", layouts: ["clone"], run: async () => {
+  identity: { title: "retained workspaces reject branch replacement and retain unpublished commits", run: async () => {
     const original = await implement(1); const w = f.row(s.workspaces, original.workspaceId);
     const { removeWorkspace } = await f.app("workspaces.ts");
     git(w.path, "switch", "-c", "replacement");
@@ -2298,16 +2293,16 @@ export const scenarios = {
     f.addIssue(1); f.enqueue(1, "implement");
     f.onModel = (_context, step) => {
       if (step) return;
-      const hook = resolve(f.config.github.repositoryPath, ".git/hooks/pre-commit");
+      const hook = resolve(all(s.workspaces).at(-1).path, ".git/hooks/pre-commit");
       copyFileSync(hook + ".sample", hook);
       writeFileSync(hook, '#!/bin/sh\nprintf "export const value = 909;\\n" > src/app.ts\ngit add src/app.ts\n');
     };
     const r = await run(); assert.match(r.error.message, /Committed tree differs/);
     assert.equal(r.verification, null); assert.equal(f.prs.length, 0);
   } },
-  publish_existing_branch: { title: "a retained workspace whose push was rejected publishes a new commit onto the existing PR branch when retried", layouts: ["clone"], run: async () => {
+  publish_existing_branch: { title: "a retained workspace whose push was rejected publishes a new commit onto the existing PR branch when retried", run: async () => {
     const first = await implement(1), remote = resolve("remote.git"), branch = f.prs[0].head.ref, workspace = f.row(s.workspaces, first.workspaceId);
-    assert.equal(fs.lstatSync(resolve(workspace.path, ".git")).isDirectory(), layout === "clone");
+    assert.ok(fs.lstatSync(resolve(workspace.path, ".git")).isDirectory());
     const item = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 201);
     f.script = [{ name: "bash", args: { command: "printf 'export const value = 14;\\n' > src/app.ts" } }];
     tasks.enqueueTask({ subjectId: item.id, action: "address_pr_feedback", reason: "Publish onto the existing branch", input: {} });
@@ -2335,14 +2330,14 @@ export const scenarios = {
     assert.notEqual(git(remote, "rev-parse", "refs/pull/201/head"), git(remote, "rev-parse", branch));
     assert.equal(all(s.tasks).filter((t) => t.subjectId === item.id && t.status === "queued" && t.action === "resolve_conflicts").length, 1);
   } },
-  behind_unpublished: { title: "a retained workspace holding a commit the shared repository has never seen is merged with a behind main in code, without the agent", layouts: ["clone"], run: async () => {
+  behind_unpublished: { title: "a retained workspace holding a commit the shared repository has never seen is merged with a behind main in code, without the agent", run: async () => {
     const first = await implement(1), remote = resolve("remote.git"), workspace = f.row(s.workspaces, first.workspaceId);
     const item = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 201);
     tasks.cancelQueuedTasks(item.id, "Isolate");
     writeFileSync(resolve(workspace.path, "src/local.ts"), "export const local = 1;\n");
     git(workspace.path, "add", "."); commit(workspace.path, "Unpublished work");
     const local = git(workspace.path, "rev-parse", "HEAD");
-    if (layout === "clone") assert.throws(() => git(f.config.github.repositoryPath, "cat-file", "-e", local + "^{commit}"));
+    assert.throws(() => git(f.config.github.repositoryPath, "cat-file", "-e", local + "^{commit}"));
     changeMain("src/other.ts", "export const other = 1;\n");
     const calls = f.requests.length;
     tasks.enqueueTask({ subjectId: item.id, action: "resolve_conflicts", reason: "Merge main", input: {} });
@@ -2353,18 +2348,12 @@ export const scenarios = {
     git(remote, "merge-base", "--is-ancestor", local, head);
     git(remote, "merge-base", "--is-ancestor", git(resolve("seed"), "rev-parse", "main"), head);
   } },
-  workspace_layout: { title: "workspaces record their layout, clones share objects that a shared-repository gc cannot remove, and publication bundles only the new commits with a full-bundle fallback", layouts: ["clone"], run: async () => {
+  workspace_layout: { title: "workspaces share objects that a shared-repository gc cannot remove, and publication bundles only the new commits with a full-bundle fallback", run: async () => {
     const first = await implement(1), shared = f.config.github.repositoryPath, remote = resolve("remote.git");
     const { createWorkspace, pushWorkspace } = await f.app("workspaces.ts");
     const row = () => f.row(s.workspaces, first.workspaceId);
-    assert.equal(row().layout, layout ?? "worktree");
     const pin = (id) => `refs/scrat/workspaces/${id}`;
-    assert.equal(git(shared, "rev-parse", pin(row().id)), layout === "clone" ? git(remote, "rev-parse", row().branch) : row().baseSha);
-    db.update(s.workspaces).set({ layout: null }).where(eq(s.workspaces.id, row().id)).run();
-    const { backfillWorkspaceLayouts } = await f.app("workspaces.ts");
-    await backfillWorkspaceLayouts();
-    assert.equal(row().layout, layout ?? "worktree");
-    if (layout !== "clone") return;
+    assert.equal(git(shared, "rev-parse", pin(row().id)), git(remote, "rev-parse", row().branch));
     assert.ok(existsSync(resolve(row().path, ".git/objects/info/alternates")));
     const header = () => readFileSync(resolve(row().path, ".scrat/publish.bundle"), "latin1").split("\n").filter((line) => line.startsWith("-"));
     const publish = async (name) => {
@@ -2395,9 +2384,6 @@ export const scenarios = {
     git(row().path, "repack", "-a", "-d", "-q"); fs.rmSync(resolve(row().path, ".git/objects/info/alternates"));
     const { branchContainsCommit } = await f.app("git.ts");
     assert.equal(await branchContainsCommit(row(), remote, row().branch, published2, { ...process.env }), true);
-    db.update(s.workspaces).set({ layout: "worktree" }).where(eq(s.workspaces.id, row().id)).run();
-    await backfillWorkspaceLayouts();
-    assert.equal(row().layout, "clone");
     const tree = git(shared, "rev-parse", "HEAD^{tree}"), head = git(shared, "rev-parse", "HEAD");
     const orphan = () => git(shared, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", tree, "-p", head, "-m", "orphan " + Math.random());
     const [kept, lost] = [orphan(), orphan()];
@@ -2424,7 +2410,7 @@ export const scenarios = {
         assert.match(readFileSync("/proc/self/status","utf8"),/NoNewPrivs:\\s+1/);
         mkdirSync(".scrat",{recursive:true});appendFileSync(".scrat/sandbox-proof.jsonl",JSON.stringify({phase:process.argv[2]})+"\\n");`);
     },
-    configure: [(config) => { config.workspace = { sandbox: true, layout: "clone", prepare: [[process.execPath, "sandbox-probe.mjs", "prepare"]], validate: [[process.execPath, "sandbox-probe.mjs", "validate"]] }; }],
+    configure: [(config) => { config.workspace = { sandbox: true, prepare: [[process.execPath, "sandbox-probe.mjs", "prepare"]], validate: [[process.execPath, "sandbox-probe.mjs", "validate"]] }; }],
     run: async () => {
       f.script = [
         { name: "bash", args: { command: `${process.execPath} sandbox-probe.mjs bash && printf 'export const value = 13;\\n' > src/app.ts` } },
@@ -2450,28 +2436,11 @@ export const scenarios = {
       await removeWorkspace(workspace.id);
       assert.equal(existsSync(workspace.path), false);
       assert.equal(existsSync(resolve("data/sandbox-homes", workspace.id)), false);
-      const legacyPath = resolve("data/workspaces/legacy-migration"), checkout = f.config.github.repositoryPath;
-      const baseSha = git(checkout, "rev-parse", "HEAD");
-      git(checkout, "worktree", "add", "-b", "scrat/legacy-migration", legacyPath, baseSha);
-      writeFileSync(resolve(legacyPath, "src/app.ts"), "export const value = 21;\n");
-      git(legacyPath, "add", "."); commit(legacyPath, "Legacy branch edit");
-      writeFileSync(resolve(checkout, "src/app.ts"), "export const value = 22;\n");
-      git(checkout, "add", "."); commit(checkout, "Conflicting base edit");
-      assert.throws(() => git(legacyPath, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "merge", "--no-commit", git(checkout, "rev-parse", "HEAD")), /Command failed/);
-      const index = git(legacyPath, "ls-files", "--unmerged");
-      assert.ok(index);
-      mkdirSync(resolve(legacyPath, ".scrat")); writeFileSync(resolve(legacyPath, ".scrat/notes.md"), "Retain the unresolved merge\n");
-      const { isolateWorkspace } = await f.app("workspaces.ts");
-      await isolateWorkspace({ id: "legacy-migration", path: legacyPath, repositoryPath: checkout, branch: "scrat/legacy-migration", layout: "worktree" });
-      assert.equal(git(legacyPath, "ls-files", "--unmerged"), index);
-      assert.equal(git(legacyPath, "rev-parse", "MERGE_HEAD"), git(checkout, "rev-parse", "HEAD"));
-      assert.equal(readFileSync(resolve(legacyPath, ".scrat/notes.md"), "utf8"), "Retain the unresolved merge\n");
-      assert.ok(fs.lstatSync(resolve(legacyPath, ".git")).isDirectory());
     } },
   package_store: { title: "a configured package store is shared read-write across sandboxed workspaces", needsSandbox: true,
     configure: [(config) => {
       const store = "/home/scrat/.local/share/pnpm/store";
-      config.workspace = { sandbox: true, layout: "clone", packageStore: resolve("shared-store"), prepare: [["sh", "-c", `pnpm store path > ${store}/path && if [ -f ${store}/marker ]; then touch ${store}/seen; else touch ${store}/marker; fi`]] };
+      config.workspace = { sandbox: true, packageStore: resolve("shared-store"), prepare: [["sh", "-c", `pnpm store path > ${store}/path && if [ -f ${store}/marker ]; then touch ${store}/seen; else touch ${store}/marker; fi`]] };
     }],
     run: async () => {
       for (const number of [1, 2]) {
@@ -2485,7 +2454,7 @@ export const scenarios = {
     } },
   command_memory: { title: "a sandboxed command that exceeds workspace.commandMemoryMax is killed alone, fails the run as out of memory without re-prompting the agent and accepts validation-only retry", needsSandbox: true, needsSystemd: true,
     configure: [(config) => {
-      config.workspace = { sandbox: true, layout: "clone", commandMemoryMax: "128M", environment: { ALLOCATE_MB: "512" }, validate: [[process.execPath, "-e", "const n=Number(process.env.ALLOCATE_MB);const held=[];for(let i=0;i<n;i++){const b=Buffer.alloc(1024*1024);b.fill(1);held.push(b);}console.log('allocated',held.length);"]] };
+      config.workspace = { sandbox: true, commandMemoryMax: "128M", environment: { ALLOCATE_MB: "512" }, validate: [[process.execPath, "-e", "const n=Number(process.env.ALLOCATE_MB);const held=[];for(let i=0;i<n;i++){const b=Buffer.alloc(1024*1024);b.fill(1);held.push(b);}console.log('allocated',held.length);"]] };
     }],
     run: async () => {
       f.addIssue(1, ["scrat"]); f.enqueue(1, "implement");
@@ -2525,7 +2494,7 @@ export const scenarios = {
     f.onModel = (context, step) => {
       if (step || context.action !== "implement" || context.item.number !== 3) return;
       for (const name of ["pre-commit", "pre-push"]) {
-        const hook = resolve(f.config.github.repositoryPath, ".git/hooks", name);
+        const hook = resolve(all(s.workspaces).at(-1).path, ".git/hooks", name);
         copyFileSync(hook + ".sample", hook); writeFileSync(hook, `#!/bin/sh\nexec ${process.execPath} ${resolve("probe.mjs")} ${name}\n`);
       }
     };
@@ -3659,8 +3628,7 @@ export const scenarios = {
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const spec = Object.hasOwn(scenarios, scenario) ? scenarios[scenario] : undefined;
   if (!spec) throw new Error("Unknown scenario " + scenario);
-  if (layout && !spec.layouts?.includes(layout)) throw new Error("Unknown layout " + layout);
-  f = await fixture(scenario, spec, layout);
+  f = await fixture(scenario, spec);
   ({ db, schema: s, tasks, git, commit } = f);
   try {
     await spec.run();

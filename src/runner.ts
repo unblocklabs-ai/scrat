@@ -29,7 +29,7 @@ import { childEnvironment } from "./secrets.ts";
 import { recordEvent } from "./events.ts";
 import { claimTask, finishRun, interruptRun, retryTransientFailure } from "./tasks.ts";
 import { parseTriggerInput } from "./triggers.ts";
-import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, isolateWorkspace, pinWorkspaceBase, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
+import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, pinWorkspaceBase, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
 
 type DatabaseConfig = NonNullable<NonNullable<typeof config.workspace>["database"]>;
 type Environment = Record<string, string | undefined>;
@@ -218,8 +218,7 @@ async function acquireChangeWorkspace(ctx: Ctx, observed: Observed) {
   if (workspace?.removedAt) throw new Error(`Workspace was removed: ${workspace.id}`);
   if (workspace) {
     await validateWorkspace(workspace);
-    await isolateWorkspace(workspace);
-    if (config.workspace?.layout === "clone") await git(workspace.path, ["fetch", "--no-tags", "--", `${repositoryPath}/.git`, preparedHead, mainSha]);
+    await git(workspace.path, ["fetch", "--no-tags", "--", `${repositoryPath}/.git`, preparedHead, mainSha]);
   }
   if (validationOnly) {
     if (!hasValidationCheckpoint(run)) throw new Error("No complete agent checkpoint to resume; use normal retry to repair");

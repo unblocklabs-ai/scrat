@@ -4,7 +4,7 @@ mode: change
 agent: single
 context: all
 tools: [read, grep, find, ls, bash, edit, write]
-files: [discussion, review]
+files: [discussion, review, issue]
 acceptance: complete
 publish: [push, comment]
 skill: skills/address_review/SKILL.md

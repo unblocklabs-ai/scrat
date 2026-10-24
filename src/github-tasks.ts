@@ -17,6 +17,7 @@ import type { GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
 import { items, runs, subjects } from "./schema.ts";
 import { cancelQueuedTasks, enqueueTask, latestTask } from "./tasks.ts";
+import { parseTriggerInput } from "./triggers.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { reconcileObserved, serializePr } from "./pr-review-publication.ts";
 import { completedRunsOfAction, latestFinishedRun, latestRunOfTask, runHistory } from "./run-history.ts";
@@ -73,8 +74,8 @@ async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observatio
       || run.publication.commentId || acknowledged.has(task.id));
   const consumed = new Set(handled.flatMap(({ run }) => {
     if (run.context) return run.context.commentRevisions;
-    const legacy = run.input.commentRevisions;
-    return Array.isArray(legacy) ? legacy.filter((entry: unknown): entry is string => typeof entry === "string") : [];
+    const trigger = parseTriggerInput(run.input);
+    return trigger.kind === "pr_feedback" ? trigger.commentRevisions : [];
   }));
   const pending = observation.external.filter((comment) => !consumed.has(commentKey(comment)));
   return {

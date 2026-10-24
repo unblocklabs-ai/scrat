@@ -158,7 +158,7 @@ const deletedReview = async () => {
   await implement(1); await route(); f.faults.label.add(201);
   const older = await run(); assert.ok(older.error); assert.ok(older.publication.commentId);
   const itemId = f.row(s.tasks, older.taskId).subjectId;
-  f.reset(201, "grade-A"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "New assessment", input: {} });
+  f.reset(201, "grade-A"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "New assessment", input: { source: "github_items", kind: "manual" } });
   if (scenario === "unreceipted_review") f.faults.comment.add(201);
   const newer = await run();
   if (scenario === "deleted_review") {
@@ -263,7 +263,7 @@ const staleBranch = async () => {
     assert.equal(all(s.tasks).filter((t) => t.action === "resolve_conflicts").length, 1);
     await implement(2); drainExcept(202);
     changeMain("bad.txt", "bad\n"); writeFileSync("require-validation", "");
-    const fallback = tasks.enqueueTask({ subjectId: prItem(202).id, action: "resolve_conflicts", reason: "Exercise fallback", input: {} });
+    const fallback = tasks.enqueueTask({ subjectId: prItem(202).id, action: "resolve_conflicts", reason: "Exercise fallback", input: { source: "github_items", kind: "manual" } });
     f.reset(202, "remove-bad");
     const repaired = await success(); assert.equal(repaired.taskId, fallback.id);
     const request = f.requests.findLast((r) => r.context.action === "resolve_conflicts" && r.context.item.number === 202);
@@ -276,7 +276,7 @@ const staleBranch = async () => {
     unlinkSync("require-validation");
     await implement(3); drainExcept(203);
     needs("needed2.txt"); changeMain("needed2.txt", "ok\n"); changeMain("src/app.ts", "export const value = 99;\n");
-    tasks.enqueueTask({ subjectId: prItem(203).id, action: "resolve_conflicts", reason: "Exercise bug fix", input: {} });
+    tasks.enqueueTask({ subjectId: prItem(203).id, action: "resolve_conflicts", reason: "Exercise bug fix", input: { source: "github_items", kind: "manual" } });
     f.reset(203, "resolve"); const resolved = await success();
     assert.ok(f.requests.some((r) => r.context.action === "resolve_conflicts" && r.context.item.number === 203));
     const head3 = remoteGit("rev-parse", f.prs[2].head.ref);
@@ -285,7 +285,7 @@ const staleBranch = async () => {
     assert.equal(remoteGit("log", "-1", "--format=%s", head3), f.prs[2].title, "A PR's commit keeps its title's single conventional prefix");
     await implement(4); drainExcept(204);
     needs("needed3.txt"); changeMain("needed3.txt", "ok\n");
-    tasks.enqueueTask({ subjectId: prItem(204).id, action: "address_pr_feedback", reason: "Exercise self-heal", input: {} });
+    tasks.enqueueTask({ subjectId: prItem(204).id, action: "address_pr_feedback", reason: "Exercise self-heal", input: { source: "github_items", kind: "manual" } });
     f.reset(204, "normal"); const healed = await success();
     const head4 = remoteGit("rev-parse", f.prs[3].head.ref);
     remoteGit("merge-base", "--is-ancestor", mainHead(), head4);
@@ -448,8 +448,8 @@ const commitReview = async () => {
 export const scenarios = {
   queue: { title: "SQLite queue coalesces input, orders priorities, excludes busy workspaces and caps six tasks", run: async () => {
     for (let n = 1; n <= 9; n++) f.addIssue(n);
-    f.enqueue(1); f.enqueue(2, "implement"); const first = f.enqueue(3, "review_pr", { version: 1 });
-    const coalesced = f.enqueue(3, "review_pr", { version: 2 });
+    f.enqueue(1); f.enqueue(2, "implement"); const first = f.enqueue(3, "review_pr", { source: "github_items", kind: "manual", version: 1 });
+    const coalesced = f.enqueue(3, "review_pr", { source: "github_items", kind: "manual", version: 2 });
     assert.equal(coalesced.id, first.id); assert.equal(coalesced.input.version, 2);
     assert.equal(tasks.claimTask().task.action, "review_pr");
     assert.equal(tasks.claimTask().task.action, "implement");
@@ -675,7 +675,7 @@ export const scenarios = {
     calls = f.requests.length; tasks.retryTask(unresolved.taskId, "validation");
     const stillConflicted = await run(); assert.match(stillConflicted.error.message, /still conflicts/); assert.equal(f.requests.length, calls);
     assert.ok(!f.row(s.workspaces, implemented.workspaceId).removedAt);
-    tasks.enqueueTask({ subjectId: prItem.id, action: "address_pr_feedback", reason: "Reply without code changes", input: {} });
+    tasks.enqueueTask({ subjectId: prItem.id, action: "address_pr_feedback", reason: "Reply without code changes", input: { source: "github_items", kind: "manual" } });
     f.reset(202, "no-change"); const replied = await success();
     assert.equal(replied.publication.publishedCommitSha, head); assert.equal(f.prs.length, 1);
     assert.equal(f.comments.get(202).length, 1); assert.equal(replied.workspaceId, implemented.workspaceId);
@@ -753,9 +753,9 @@ export const scenarios = {
     assert.equal(f.writes.filter((w) => w.type === "comment_update").length, 1);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["A · Strong", "human-label"]);
     const itemId = f.row(s.tasks, review.taskId).subjectId;
-    f.reset(201, "normal"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "Manual review", input: {} });
+    f.reset(201, "normal"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "Manual review", input: { source: "github_items", kind: "manual" } });
     f.faults.label.add(201); const older = await run(); assert.ok(older.error);
-    f.reset(201, "grade-A"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "Newer manual review", input: {} });
+    f.reset(201, "grade-A"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "Newer manual review", input: { source: "github_items", kind: "manual" } });
     await success(); const writes = f.writes.length, inferences = f.requests.length;
     tasks.retryTask(older.taskId); const superseded = await success();
     assert.equal(superseded.publication.status, "not_needed");
@@ -771,7 +771,7 @@ export const scenarios = {
     const calls = f.requests.length; tasks.retryTask(lost.taskId); const recovered = await success();
     assert.equal(f.requests.length, calls); assert.equal(recovered.publication.commentId, original.id);
     f.reset(201, "grade-A");
-    tasks.enqueueTask({ subjectId: f.row(s.tasks, lost.taskId).subjectId, action: "review_pr", reason: "New assessment", input: {} });
+    tasks.enqueueTask({ subjectId: f.row(s.tasks, lost.taskId).subjectId, action: "review_pr", reason: "New assessment", input: { source: "github_items", kind: "manual" } });
     f.faults.comment.add(201); const lostUpdate = await run(); assert.ok(lostUpdate.error);
     assert.deepEqual(f.prs[0].labels, [], "A lost report-write response must not leave the old report's grade");
     const updateCalls = f.requests.length; tasks.retryTask(lostUpdate.taskId); const updated = await success();
@@ -787,7 +787,7 @@ export const scenarios = {
     const older = await run(); assert.ok(older.error);
     const itemId = f.row(s.tasks, older.taskId).subjectId;
     f.reset(201, "helper-grade-A");
-    tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "Broader fresh review", input: {} });
+    tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "Broader fresh review", input: { source: "github_items", kind: "manual" } });
     const newer = await success();
     assert.ok(newer.result.paths.includes("src/helper.ts"));
     const report = f.comments.get(201)[0].body;
@@ -806,7 +806,7 @@ export const scenarios = {
     await implement(1); await route(); f.reset(201, "incomplete");
     const failed = await run(); assert.ok(failed.error); assert.notEqual(failed.stage, "publishing");
     const itemId = f.row(s.tasks, failed.taskId).subjectId;
-    f.reset(201, "normal"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "New task", input: {} });
+    f.reset(201, "normal"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "New task", input: { source: "github_items", kind: "manual" } });
     const middle = await success();
     db.update(s.runs).set({ startedAt: "2099-01-01T00:00:00Z" }).where(eq(s.runs.id, middle.id)).run();
     f.reset(201, "grade-A"); tasks.retryTask(failed.taskId); const newest = await success();
@@ -831,9 +831,9 @@ export const scenarios = {
     assert.equal(manual.input.manual, true); assert.equal(manual.priority, 77);
     await route();
     assert.equal(f.row(s.tasks, manual.id).status, "queued", "routing must not cancel a manual task");
-    tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "Routing", input: { triggerKey: "k", changedPaths: [] } });
+    tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "Routing", input: { source: "github_items", kind: "item_changed", triggerKey: "k", revision: "r", mainSha: "m", changedPaths: [] } });
     const merged = f.row(s.tasks, manual.id);
-    assert.equal(merged.status, "queued"); assert.deepEqual(merged.input, { triggerKey: "k", changedPaths: [], manual: true });
+    assert.equal(merged.status, "queued"); assert.deepEqual(merged.input, { source: "github_items", kind: "item_changed", triggerKey: "k", revision: "r", mainSha: "m", changedPaths: [], manual: true });
     await route(); assert.equal(f.row(s.tasks, manual.id).status, "queued");
     const result = await success();
     assert.equal(result.taskId, manual.id);
@@ -924,7 +924,7 @@ export const scenarios = {
     assert.ok(all(s.tasks).some((t) => t.action === "review_issue" && t.status === "queued"), "The latest claimed review is the baseline");
     f.addIssue(2, ["scrat"]); f.enqueue(2, "implement"); const implemented = await success();
     const prItem = all(s.items).find((i) => i.kind === "pr");
-    const feedback = async () => { tasks.enqueueTask({ subjectId: prItem.id, action: "address_pr_feedback", reason: "Reply", input: {} }); f.reset(202, "no-change"); return success(); };
+    const feedback = async () => { tasks.enqueueTask({ subjectId: prItem.id, action: "address_pr_feedback", reason: "Reply", input: { source: "github_items", kind: "manual" } }); f.reset(202, "no-change"); return success(); };
     const older = await feedback(); assert.equal(older.workspaceId, implemented.workspaceId);
     assert.equal(older.piSessionFile, implemented.piSessionFile);
     const copy = implemented.piSessionFile.replace(/\.jsonl$/, "-copy.jsonl");
@@ -957,7 +957,7 @@ export const scenarios = {
   } },
   grade_race: { title: "sync invalidation and publication reconcile one current PR grade under concurrent execution", run: async () => {
     await implement(1); await route(); const reviewed = await success();
-    tasks.enqueueTask({ subjectId: f.row(s.tasks, reviewed.taskId).subjectId, action: "review_pr", reason: "Fresh review", input: {} });
+    tasks.enqueueTask({ subjectId: f.row(s.tasks, reviewed.taskId).subjectId, action: "review_pr", reason: "Fresh review", input: { source: "github_items", kind: "manual" } });
     f.reset(201, "normal"); changeMain("src/app.ts", "export const value = 99;\n");
     let unblock, sawRemoval, sawPublicationContext;
     const blocked = new Promise((resolve) => { unblock = resolve; });
@@ -1052,14 +1052,14 @@ export const scenarios = {
     const pr = all(s.items).find((item) => item.kind === "pr");
     changeMain("other.txt", "other\n");
     let mark = trace.length, pushed = pushes();
-    tasks.enqueueTask({ subjectId: pr.id, action: "resolve_conflicts", reason: "Exercise comment publication", input: {} });
+    tasks.enqueueTask({ subjectId: pr.id, action: "resolve_conflicts", reason: "Exercise comment publication", input: { source: "github_items", kind: "manual" } });
     const merged = await success();
     assert.deepEqual(types(mark), ["comment"]);
     assert.ok(trace[mark].pushes > pushed, "the merge is pushed before the comment is posted");
     assert.equal(merged.publication.status, "published");
     changeMain("another.txt", "another\n");
     f.faults.comment.add(201); mark = trace.length;
-    tasks.enqueueTask({ subjectId: pr.id, action: "resolve_conflicts", reason: "Exercise comment receipt", input: {} });
+    tasks.enqueueTask({ subjectId: pr.id, action: "resolve_conflicts", reason: "Exercise comment receipt", input: { source: "github_items", kind: "manual" } });
     const lost = await run(); assert.ok(lost.error); assert.equal(lost.stage, "publishing");
     assert.deepEqual(types(mark), ["comment"]);
     assert.equal(lost.publication.publishedCommitSha, lost.publication.commitSha);
@@ -1117,7 +1117,7 @@ export const scenarios = {
     tasks.retryTask(id); assert.equal(task().availableAt, null); assert.equal(task().retryCount, 1); assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 1);
     failed = await run(); assert.equal(task().retryCount, 2); assert.ok(delay() >= 120 && delay() <= 132.1, String(delay()));
     assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
-    tasks.enqueueTask({ subjectId: task().subjectId, action: "review_pr", reason: "Changed", input: {} });
+    tasks.enqueueTask({ subjectId: task().subjectId, action: "review_pr", reason: "Changed", input: { source: "github_items", kind: "manual" } });
     assert.equal(task().retryCount, null); assert.equal(task().availableAt, null);
     const reviewed = await success(); assert.equal(reviewed.taskId, id);
     assert.equal(task().status, "completed"); assert.equal(task().retryCount, null); assert.equal(task().availableAt, null); assert.equal(f.writes.filter((w) => w.type === "comment").length, 1);
@@ -1138,7 +1138,7 @@ export const scenarios = {
     assert.match(f.comments.get(201)[0].body, /```\nSCRAT_GRADE: F\nSCRAT_READY\n```/);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
     f.reset(201, "quoted-only");
-    tasks.enqueueTask({ subjectId: f.row(s.tasks, reviewed.taskId).subjectId, action: "review_pr", reason: "Review again", input: {} });
+    tasks.enqueueTask({ subjectId: f.row(s.tasks, reviewed.taskId).subjectId, action: "review_pr", reason: "Review again", input: { source: "github_items", kind: "manual" } });
     const invalid = await run(); assert.match(invalid.error.message, /grade/i);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
     f.addIssue(2); f.reset(2, "quoted-only"); f.enqueue(2);
@@ -1160,7 +1160,7 @@ export const scenarios = {
     assert.equal(Object.keys(normal).length, 3);
     for (const [mode, target] of [["reviewer-grade-once", "deepseek/deepseek-v4.1-flash/false"], ["consolidation-grade-once", "gpt-6.1-sol/true"]]) {
       const start = reviewCounts(); f.reset(201, mode);
-      tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Review again", input: {} });
+      tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Review again", input: { source: "github_items", kind: "manual" } });
       const reviewed = await success(); const end = reviewCounts();
       for (const k of Object.keys(normal)) assert.equal(end[k] - (start[k] ?? 0), normal[k] + (k === target ? 1 : 0), `${mode} ${k}`);
       assert.equal(reviewed.result.grade, "B");
@@ -1178,16 +1178,16 @@ export const scenarios = {
     const lines = captureLogs();
     const prompts = () => f.requests.filter((r) => r.request.messages.at(-1).role === "user" && JSON.stringify(r.request.messages.at(-1).content).includes("Your assessment was returned incomplete")).length;
     const publications = () => f.writes.length;
-    f.reset(201, "incomplete-once"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Continue", input: {} });
+    f.reset(201, "incomplete-once"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Continue", input: { source: "github_items", kind: "manual" } });
     let writes = publications(); const continued = await success().finally(restoreLogs);
     assert.equal(lines.filter((l) => l.event === "pi.incomplete_continue").length, 3);
     assert.equal(continued.result.outcome, "complete"); assert.ok(prompts() >= 3); assert.equal(publications() - writes, 3);
     const published = f.comments.get(201).length;
-    f.reset(201, "incomplete"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Never completes", input: {} });
+    f.reset(201, "incomplete"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Never completes", input: { source: "github_items", kind: "manual" } });
     writes = publications(); const spent = prompts(); const exhausted = await run();
     assert.match(exhausted.error.cause.message, /Reviewer returned incomplete/); assert.equal(publications(), writes); assert.equal(f.comments.get(201).length, published);
     assert.ok(prompts() > spent);
-    f.reset(201, "needs_decision"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Undecided", input: {} });
+    f.reset(201, "needs_decision"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Undecided", input: { source: "github_items", kind: "manual" } });
     const asked = prompts(); await run(); assert.equal(prompts(), asked);
     f.addIssue(6); f.reset(6, "incomplete-once"); f.enqueue(6, "implement");
     const partial = await run(); assert.ok(partial.error); assert.equal(prompts(), asked);
@@ -1285,7 +1285,7 @@ export const scenarios = {
     assert.throws(() => tasks.retryTask(changedInput.taskId, "validation"), /unchanged task input/);
     f.addIssue(101); f.enqueue(101, "implement"); const replaced = await run();
     tasks.retryTask(replaced.taskId, "validation");
-    f.enqueue(101, "implement", { requirements: "replacement" });
+    f.enqueue(101, "implement", { source: "github_items", kind: "manual", requirements: "replacement" });
     assert.equal(f.row(s.tasks, replaced.taskId).retryMode, "repair");
     f.reset(99, "normal"); unlinkSync("block-validation"); const calls = f.requests.length;
     tasks.retryTask(partial.taskId); const repaired = await success();
@@ -1700,7 +1700,7 @@ export const scenarios = {
     assert.ok(!all(s.tasks).some((t) => t.subjectId === "issue-2" && t.status === "queued"));
     assert.ok(all(s.tasks).some((t) => t.action === "review_pr" && t.status === "queued"));
   } },
-  trigger_inputs: { title: "every trigger input shape parses to one typed member, legacy rows classify by their fields, unknown shapes are rejected clearly and a malformed queued row is rejected at claim", run: async () => {
+  trigger_inputs: { title: "every trigger input shape parses to one typed member, a kind-less input is rejected, unknown shapes are rejected clearly and a malformed queued row is rejected at claim", run: async () => {
     const { parseTriggerInput } = await f.app("triggers.ts");
     const items = (kind, fields) => ({ source: "github_items", kind, ...fields });
     const members = [
@@ -1714,26 +1714,16 @@ export const scenarios = {
       { source: "schedule", kind: "tick", triggerKey: "2026-10-21T12:00:00.000Z", start: "2026-10-21T06:00:00.000Z", end: "2026-10-21T12:00:00.000Z" },
     ];
     for (const member of members) assert.deepEqual(parseTriggerInput(member), member);
-    const legacy = (input, expected) => assert.deepEqual(parseTriggerInput(input), { ...input, ...expected });
-    legacy({ triggerKey: "k", revision: "r", mainSha: "m", changedPaths: [] }, { source: "github_items", kind: "item_changed" });
-    legacy({ triggerKey: "k", mainSha: "m" }, { source: "github_items", kind: "label" });
-    legacy({ triggerKey: "k", mainSha: "m", headSha: "h" }, { source: "github_items", kind: "pr_conflicts" });
-    legacy({ triggerKey: "k", commentRevisions: [] }, { source: "github_items", kind: "pr_feedback" });
-    legacy({ triggerKey: "a", assessmentRunId: "a", grade: "F" }, { source: "github_items", kind: "low_grade" });
-    legacy({ manual: true }, { source: "github_items", kind: "manual" });
-    legacy({}, { source: "github_items", kind: "manual" });
-    legacy({ kind: "commit", triggerKey: "s", sha: "s", previousSha: "p", branch: "main", commitCount: 1, truncated: true }, { source: "github_commits" });
-    legacy({ kind: "tick", triggerKey: "k", start: "s", end: "e" }, { source: "schedule" });
-    legacy({ triggerKey: "k", revision: "r", mainSha: "m", manual: true }, { source: "github_items", kind: "item_changed" });
     assert.throws(() => parseTriggerInput(null), /must be an object/);
     assert.throws(() => parseTriggerInput([]), /must be an object/);
+    assert.throws(() => parseTriggerInput({ source: "github_items", triggerKey: "k", mainSha: "m" }), /missing its kind/);
     assert.throws(() => parseTriggerInput({ kind: "schedule" }), /Unknown trigger kind: "schedule"/);
     assert.throws(() => parseTriggerInput({ source: "schedule", kind: "label", triggerKey: "k", mainSha: "m" }), /Unknown trigger source for label: "schedule"/);
-    assert.throws(() => parseTriggerInput({ triggerKey: "k", commentRevisions: "c@1" }), /Invalid github_items\/pr_feedback trigger input at \/commentRevisions/);
-    assert.throws(() => parseTriggerInput({ kind: "commit", sha: "s" }), /Invalid github_commits\/commit trigger input/);
-    assert.throws(() => parseTriggerInput({ kind: "tick", triggerKey: "k" }), /Invalid schedule\/tick trigger input at \/: must have required properties start, end/);
+    assert.throws(() => parseTriggerInput({ source: "github_items", kind: "pr_feedback", triggerKey: "k", commentRevisions: "c@1" }), /Invalid github_items\/pr_feedback trigger input at \/commentRevisions/);
+    assert.throws(() => parseTriggerInput({ source: "github_commits", kind: "commit", sha: "s" }), /Invalid github_commits\/commit trigger input/);
+    assert.throws(() => parseTriggerInput({ source: "schedule", kind: "tick", triggerKey: "k" }), /Invalid schedule\/tick trigger input at \/: must have required properties start, end/);
     for (let n = 1; n <= 2; n++) f.addIssue(n);
-    db.$client.prepare("INSERT INTO tasks (id, subject_id, action, priority, reason, input, created_at) VALUES ('malformed', 'issue-1', 'review_issue', 1000, 'Integration', '{\"triggerKey\":\"k\",\"commentRevisions\":7}', '2026-01-01')").run();
+    db.$client.prepare("INSERT INTO tasks (id, subject_id, action, priority, reason, input, created_at) VALUES ('malformed', 'issue-1', 'review_issue', 1000, 'Integration', '{\"source\":\"github_items\",\"kind\":\"pr_feedback\",\"triggerKey\":\"k\",\"commentRevisions\":7}', '2026-01-01')").run();
     f.enqueue(2);
     assert.equal(tasks.claimTask().task.subjectId, "issue-2");
     assert.equal(f.row(s.tasks, "malformed").status, "failed");
@@ -2238,7 +2228,7 @@ export const scenarios = {
     assert.ok(fs.lstatSync(resolve(workspace.path, ".git")).isDirectory());
     const item = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 201);
     f.script = [{ name: "bash", args: { command: "printf 'export const value = 14;\\n' > src/app.ts" } }];
-    tasks.enqueueTask({ subjectId: item.id, action: "address_pr_feedback", reason: "Publish onto the existing branch", input: {} });
+    tasks.enqueueTask({ subjectId: item.id, action: "address_pr_feedback", reason: "Publish onto the existing branch", input: { source: "github_items", kind: "manual" } });
     f.reset(201, "normal");
     writeFileSync(resolve(remote, "hooks/pre-receive"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
     const rejected = await run();
@@ -2273,7 +2263,7 @@ export const scenarios = {
     assert.throws(() => git(f.config.github.repositoryPath, "cat-file", "-e", local + "^{commit}"));
     changeMain("src/other.ts", "export const other = 1;\n");
     const calls = f.requests.length;
-    tasks.enqueueTask({ subjectId: item.id, action: "resolve_conflicts", reason: "Merge main", input: {} });
+    tasks.enqueueTask({ subjectId: item.id, action: "resolve_conflicts", reason: "Merge main", input: { source: "github_items", kind: "manual" } });
     const merged = await success();
     assert.equal(f.requests.length, calls, "a clean update needs no model");
     const head = git(remote, "rev-parse", f.prs[0].head.ref);
@@ -2356,7 +2346,7 @@ export const scenarios = {
       assert.ok(fs.lstatSync(resolve(workspace.path, ".git")).isDirectory());
       const pr = result.publication.pullRequestNumber, prItem = all(s.items).find((i) => i.kind === "pr" && i.payload.number === pr);
       f.script = [{ name: "bash", args: { command: `printf 'export const value = 14;\\n' > src/app.ts` } }];
-      tasks.enqueueTask({ subjectId: prItem.id, action: "address_pr_feedback", reason: "Publish onto the existing branch", input: {} });
+      tasks.enqueueTask({ subjectId: prItem.id, action: "address_pr_feedback", reason: "Publish onto the existing branch", input: { source: "github_items", kind: "manual" } });
       f.reset(pr, "normal"); const followUp = await success();
       assert.equal(followUp.publication.status, "published"); assert.notEqual(followUp.publication.commitSha, result.publication.commitSha);
       assert.equal(git(resolve("remote.git"), "rev-parse", f.prs[0].head.ref), followUp.publication.commitSha);

@@ -328,7 +328,7 @@ export async function fixture(scenario, spec) {
     issues.set(number, payload); db.insert(schema.subjects).values({ id: "issue-" + number, repository: "fixture/project", kind: "item", key: payload.node_id }).run();
     return db.insert(schema.items).values({ id: "issue-" + number, externalId: payload.node_id, kind: "issue", payload }).returning().get();
   };
-  const enqueue = (number, action = "review_issue", input = {}) => tasks.enqueueTask({ subjectId: "issue-" + number, action, reason: "Integration", input });
+  const enqueue = (number, action = "review_issue", input = { source: "github_items", kind: "manual" }) => tasks.enqueueTask({ subjectId: "issue-" + number, action, reason: "Integration", input });
   const row = (table, id) => db.select().from(table).all().find((entry) => entry.id === id);
   return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, pat, user, githubApp, modes, requests, calls, slack, rate, issues, prs, comments, reviews, writes, faults, transient, frozen, forced, addIssue, enqueue, row,
     set onModel(value) { onModel = value; },

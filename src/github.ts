@@ -26,6 +26,8 @@ const clients = new Map<string, { token: string; github: Octokit; invalid: boole
 
 let appVerified: Promise<void> | undefined;
 
+const noRetry = { retry: { enabled: false }, throttle: { enabled: false } };
+
 async function appToken(repo: string, access: keyof typeof permissions, refresh: boolean) {
   authenticate ??= createAppAuth({
     appId: config.github.appId,
@@ -35,7 +37,7 @@ async function appToken(repo: string, access: keyof typeof permissions, refresh:
   const auth = authenticate;
   appVerified ??= (async () => {
     const { token: jwt } = await auth({ type: "app" });
-    const { slug } = (await new Octokit({ auth: jwt, retry: { enabled: false }, throttle: { enabled: false } }).request("GET /app")).data as { slug: string };
+    const { slug } = (await new Octokit({ auth: jwt, ...noRetry }).request("GET /app")).data as { slug: string };
     if (!isBotLogin(`${slug}[bot]`)) throw new Error(`GitHub App ${slug} posts as ${slug}[bot], but github.botLogin is ${config.github.botLogin}`);
   })().catch((error) => { appVerified = undefined; throw error; });
   await appVerified;
@@ -61,7 +63,7 @@ async function verifiedPat() {
   patVerified ??= (async () => {
     let login: string;
     try {
-      login = (await new Octokit({ auth: token, retry: { enabled: false }, throttle: { enabled: false } }).rest.users.getAuthenticated()).data.login;
+      login = (await new Octokit({ auth: token, ...noRetry }).rest.users.getAuthenticated()).data.login;
     } catch (error) {
       throw errorStatus(error) === 401 ? patRejected(error) : error;
     }
@@ -82,7 +84,7 @@ async function githubForRepository(repository: string, access: keyof typeof perm
   const github = new Octokit({
     auth: token,
     log: logger.child({ component: "octokit", repository, access }),
-    ...(access !== "read" ? { retry: { enabled: false }, throttle: { enabled: false } } : { request: { fetch: conditionalFetch } }),
+    ...(access !== "read" ? noRetry : { request: { fetch: conditionalFetch } }),
   });
   const entry = { token, github, invalid: false };
   github.hook.error("request", (error) => {
@@ -141,8 +143,12 @@ export class GitHubRepository {
     };
   }
 
+  private read() {
+    return githubForRepository(this.repository, "read");
+  }
+
   async fetchOpenItems() {
-    const { github, owner, repo } = await githubForRepository(this.repository, "read");
+    const { github, owner, repo } = await this.read();
     const items = await github.paginate(github.rest.issues.listForRepo, {
       owner, repo, state: "open", per_page: 100,
     });
@@ -158,7 +164,7 @@ export class GitHubRepository {
   }
 
   async fetchItemContext(kind: "issue" | "pr", number: number, { comments: withComments = true, item: known }: { comments?: boolean; item?: GithubItem } = {}): Promise<GithubContext> {
-    const { github, owner, repo } = await githubForRepository(this.repository, "read");
+    const { github, owner, repo } = await this.read();
     const when = <T>(enabled: boolean, read: () => Promise<T[]>) => enabled ? read() : Promise.resolve([] as T[]);
     const reads = [
       known ? Promise.resolve(known) : kind === "issue"
@@ -196,7 +202,7 @@ export class GitHubRepository {
   }
 
   async findPullRequest(branch: string, base: string) {
-    const { github, owner, repo } = await githubForRepository(this.repository, "read");
+    const { github, owner, repo } = await this.read();
     const matches = await github.paginate(github.rest.pulls.list, {
       owner, repo, state: "all", head: `${owner}:${branch}`, base, per_page: 100,
     });
@@ -207,7 +213,7 @@ export class GitHubRepository {
   async searchIssues(query: string) {
     if (/(repo|org|user|owner):/i.test(query)) throw new Error(`The query must not contain repo:, org: or user: qualifiers; the search is limited to ${this.repository}`);
     return withOperation("github.search", { repository: this.repository }, async (operation) => {
-      const { github } = await githubForRepository(this.repository, "read");
+      const { github } = await this.read();
       const response = await github.rest.search.issuesAndPullRequests({ q: `repo:${this.repository} ${query}`, per_page: 20 }).catch((error: unknown) => {
         throw errorStatus(error) === 403 || errorStatus(error) === 429 ? new Error("GitHub search rate limit reached; try again later", { cause: error }) : error;
       });
@@ -253,12 +259,11 @@ export class GitHubRepository {
   }
 
   async postComment(issueNumber: number, body: string, references: EventReferences = {}): Promise<number> {
-    const { repository } = this;
     const response = await this.write("github.post_comment", { issueNumber }, references, "write", {
       inspect: () => assertPublishable(body),
       request: ({ github, owner, repo }) => github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body }),
       journal: ({ data }) => ({
-        event: { type: "github.comment_created", data: { repository, issueNumber, commentId: data.id, url: data.html_url } },
+        event: { type: "github.comment_created", data: { repository: this.repository, issueNumber, commentId: data.id, url: data.html_url } },
         details: { commentId: data.id },
         failure: { commentId: data.id },
       }),
@@ -267,27 +272,24 @@ export class GitHubRepository {
   }
 
   async updateComment(commentId: number, body: string, references: EventReferences = {}): Promise<void> {
-    const { repository } = this;
     await this.write("github.update_comment", { commentId }, references, "write", {
       inspect: () => assertPublishable(body),
       request: ({ github, owner, repo }) => github.rest.issues.updateComment({ owner, repo, comment_id: commentId, body }),
       journal: ({ data }) => ({
-        event: { type: "github.comment_updated", data: { repository, commentId: data.id, url: data.html_url } },
+        event: { type: "github.comment_updated", data: { repository: this.repository, commentId: data.id, url: data.html_url } },
         details: { commentId: data.id },
       }),
     });
   }
 
   async addLabels(issueNumber: number, labels: string[], references: EventReferences = {}): Promise<void> {
-    const { repository } = this;
     await this.write("github.add_labels", { issueNumber, labels }, references, "write", {
       request: ({ github, owner, repo }) => github.rest.issues.addLabels({ owner, repo, issue_number: issueNumber, labels }),
-      journal: () => ({ event: { type: "github.labels_added", data: { repository, issueNumber, labels } } }),
+      journal: () => ({ event: { type: "github.labels_added", data: { repository: this.repository, issueNumber, labels } } }),
     });
   }
 
   async removeLabels(issueNumber: number, labels: string[], references: EventReferences = {}): Promise<void> {
-    const { repository } = this;
     for (const label of labels) {
       await this.write("github.remove_label", { issueNumber, label }, references, "write", {
         request: async ({ github, owner, repo }) => {
@@ -300,7 +302,7 @@ export class GitHubRepository {
             return { status: 404, headers: {} };
           }
         },
-        journal: ({ status }) => ({ event: status === 404 ? undefined : { type: "github.label_removed", data: { repository, issueNumber, label } } }),
+        journal: ({ status }) => ({ event: status === 404 ? undefined : { type: "github.label_removed", data: { repository: this.repository, issueNumber, label } } }),
       });
     }
   }
@@ -309,13 +311,12 @@ export class GitHubRepository {
     { title, body, fingerprint }: { title: string; body: string; fingerprint: string },
     references: EventReferences = {},
   ) {
-    const { repository } = this;
     const marked = `${body.trimEnd()}\n\n${fingerprintMarker(fingerprint)}`;
     const response = await this.write("github.create_issue", { fingerprint }, references, "write", {
       inspect: () => assertPublishable(title, marked),
       request: ({ github, owner, repo }) => github.rest.issues.create({ owner, repo, title, body: marked }),
       journal: ({ data }) => ({
-        event: { type: "github.issue_created", data: { repository, issueNumber: data.number, url: data.html_url, fingerprint } },
+        event: { type: "github.issue_created", data: { repository: this.repository, issueNumber: data.number, url: data.html_url, fingerprint } },
         details: { issueNumber: data.number },
         failure: { issueNumber: data.number },
       }),
@@ -327,12 +328,11 @@ export class GitHubRepository {
     { title, body, head, base }: { title: string; body: string; head: string; base: string },
     references: EventReferences = {},
   ) {
-    const { repository } = this;
     const response = await this.write("github.create_pull_request", { head, base }, references, "pull_request", {
       inspect: () => assertPublishable(title, body),
       request: ({ github, owner, repo }) => github.rest.pulls.create({ owner, repo, title, body, head, base, draft: false }),
       journal: ({ data }) => ({
-        event: { type: "github.pull_request_created", data: { repository, pullRequestNumber: data.number, url: data.html_url, head, base } },
+        event: { type: "github.pull_request_created", data: { repository: this.repository, pullRequestNumber: data.number, url: data.html_url, head, base } },
         details: { pullRequestNumber: data.number },
         failure: { pullRequestNumber: data.number },
       }),

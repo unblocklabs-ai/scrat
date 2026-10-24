@@ -93,12 +93,13 @@ export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, ba
       }, { runId }, args[2]);
     },
   };
-  const sdkGrep = createGrepToolDefinition(cwd);
-  const grep: typeof sdkGrep = { ...sdkGrep, async execute(...args) { await searchRoot(args[1].path); return sdkGrep.execute(...args); } };
-  const sdkFind = createFindToolDefinition(cwd);
-  const find: typeof sdkFind = { ...sdkFind, async execute(...args) { await searchRoot(args[1].path); return sdkFind.execute(...args); } };
-  const sdkLs = createLsToolDefinition(cwd);
-  const ls: typeof sdkLs = { ...sdkLs, async execute(...args) { await searchRoot(args[1].path); return sdkLs.execute(...args); } };
+  const guardSearch = <T extends ReturnType<typeof createGrepToolDefinition> | ReturnType<typeof createFindToolDefinition> | ReturnType<typeof createLsToolDefinition>>(sdkTool: T): T => ({
+    ...sdkTool,
+    async execute(...args: Parameters<T["execute"]>) { await searchRoot(args[1].path); return (sdkTool.execute as (...a: typeof args) => ReturnType<T["execute"]>)(...args); },
+  });
+  const grep = guardSearch(createGrepToolDefinition(cwd));
+  const find = guardSearch(createFindToolDefinition(cwd));
+  const ls = guardSearch(createLsToolDefinition(cwd));
   const sdkRead = createReadToolDefinition(cwd);
   const read: typeof sdkRead = {
     ...sdkRead,

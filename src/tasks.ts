@@ -43,6 +43,21 @@ function checkClaimable({ task, subject }: { task: Task; subject: Subject }, dat
   return { ok: true as const, previousRun, trigger };
 }
 
+function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run | undefined; trigger: TriggerInput }) {
+  const retry = previousRun?.error && isDeepStrictEqual(previousRun.input, task.input) ? previousRun : undefined;
+  const actionSettings = getActionConfig(task.action);
+  const validationOnly = task.retryMode === "validation";
+  const publicationResume = !validationOnly && hasPublicationSnapshot(retry) ? retry : undefined;
+  const resume = validationOnly ? (hasValidationCheckpoint(retry) ? retry : undefined) : publicationResume;
+  const prior = retry?.error?.name === "InterruptedError" && !resume ? undefined : retry;
+  const review = manifestOf(task.action).mode === "review";
+  const pinned = review && !resume ? undefined : prior;
+  const settings = pinned ?? actionSettings;
+  const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? configuredReviewers(task.action, isBaseOnly(trigger));
+  const { provider, model, thinkingLevel } = !resume && reviewers.length === 1 ? reviewers[0] : settings;
+  return { prior, resume, publicationResume, review, reviewers, skill: settings.skill, provider, model, thinkingLevel, stage: entryStage(retry, task.retryMode) };
+}
+
 export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | "action" | "priority" | "reason"> & { input: TriggerInput }) {
   return withOperationSync("task.enqueue", { subjectId: task.subjectId, action: task.action }, (operation) => {
     manifestOf(task.action);
@@ -131,18 +146,7 @@ export function claimTask() {
       recordEvent({ subjectId: next.task.subjectId, taskId: next.task.id, type: "task.rejected", data: { action: next.task.action, reason: claimable.reason } }, transaction);
     }
     if (!next || !claimable?.ok) return;
-    const previousRun = claimable.previousRun;
-    const retry = previousRun?.error && isDeepStrictEqual(previousRun.input, next.task.input) ? previousRun : undefined;
-    const actionSettings = getActionConfig(next.task.action);
-    const validationOnly = next.task.retryMode === "validation";
-    const publicationResume = !validationOnly && hasPublicationSnapshot(retry) ? retry : undefined;
-    const resume = validationOnly ? (hasValidationCheckpoint(retry) ? retry : undefined) : publicationResume;
-    const prior = retry?.error?.name === "InterruptedError" && !resume ? undefined : retry;
-    const review = manifestOf(next.task.action).mode === "review";
-    const pinned = review && !resume ? undefined : prior;
-    const settings = pinned ?? actionSettings;
-    const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? configuredReviewers(next.task.action, isBaseOnly(claimable.trigger));
-    const { provider, model, thinkingLevel } = !resume && reviewers.length === 1 ? reviewers[0] : settings;
+    const { prior, resume, publicationResume, review, reviewers, skill, provider, model, thinkingLevel, stage } = planRunStart(next.task, claimable);
     const task = transaction.update(tasks).set({ status: "running" }).where(eq(tasks.id, next.task.id)).returning().get()!;
     const run = transaction.insert(runs).values({
       taskId: task.id,
@@ -150,10 +154,10 @@ export function claimTask() {
       retryOfRunId: prior?.id,
       inferenceFromRunId: resume?.id,
       input: task.input,
-      skill: settings.skill,
+      skill,
       provider, model, thinkingLevel, reviewers,
       workspaceId: resume?.workspaceId ?? (review ? null : next.subject.workspaceId),
-      stage: entryStage(retry, next.task.retryMode),
+      stage,
       ...(resume ? {
         context: resume.context, result: resume.result, mainSha: resume.mainSha, headSha: resume.headSha,
         piSessionId: resume.piSessionId, piSessionFile: resume.piSessionFile,
@@ -163,7 +167,7 @@ export function claimTask() {
       } : {}),
       startedAt: new Date().toISOString(),
     }).returning().get()!;
-    if (!previousRun && claimable.trigger.kind === "low_grade") {
+    if (!claimable.previousRun && claimable.trigger.kind === "low_grade") {
       transaction.update(items).set({ selfRepairCount: sql`${items.selfRepairCount} + 1` }).where(eq(items.id, task.subjectId)).run();
     }
     recordEvent({ subjectId: task.subjectId, taskId: task.id, runId: run.id, type: "run.started", data: {

@@ -1858,7 +1858,7 @@ export const scenarios = {
     tasks.retryTask(r.taskId); const retried = await success();
     assert.equal(retried.retryOfRunId, null); assert.ok(!("previousFailure" in f.requests.at(-1).context.files), "a recovered run is retried as an interruption, not as a failure to repair");
   } },
-  cleanup: { title: "cleanup failure cannot turn a published review into a failed task, and cleanup never removes a change workspace through a review that stopped early", run: async () => {
+  cleanup: { title: "cleanup failure cannot turn a published review or comment-only implementation into a failed task, and cleanup never removes a change workspace through a review that stopped early", run: async () => {
     f.addIssue(1); f.enqueue(1); f.faults.cleanup.add(1); const r = await success();
     assert.equal(f.row(s.tasks, r.taskId).status, "completed"); const w = f.row(s.workspaces, r.workspaceId);
     assert.equal(w.removedAt, null); assert.equal(readFileSync(w.path + "/keep.txt", "utf8"), "preserve\n");
@@ -1869,6 +1869,12 @@ export const scenarios = {
     const stop = new AbortController(); stop.abort(); assert.ok((await f.runNextTask(stop.signal)).error);
     execFileSync(process.execPath, [resolve("app/src/cleanup.ts")], { stdio: "pipe" });
     assert.equal(f.row(s.workspaces, implemented.workspaceId).removedAt, null, "cleanup keeps a PR workspace that a stopped review never used");
+    tasks.cancelQueuedTasks(pr.id, "Isolate the comment-only implementation");
+    f.addIssue(3, ["scrat"]); f.reset(3, "no-change"); f.faults.cleanup.add(3); f.enqueue(3, "implement");
+    const commented = await success(), kept = f.row(s.workspaces, commented.workspaceId);
+    assert.equal(commented.publication.status, "published"); assert.equal(f.comments.get(3).length, 1);
+    assert.equal(kept.removedAt, null, "a comment-only release that fails leaves the run completed and the workspace retained");
+    assert.equal(readFileSync(kept.path + "/keep.txt", "utf8"), "preserve\n");
   } },
   sync_missing_item: { title: "a deleted open item is marked closed and its failed read does not stop routing for the others", run: async () => {
     f.addIssue(1); f.addIssue(2); await route();

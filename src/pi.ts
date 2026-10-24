@@ -60,7 +60,7 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
     throw new Error(modelRuntime.getError() ?? `Configure a Pi model for ${run.provider}/${run.model}`);
   }
   const thinkingLevel = run.thinkingLevel as ThinkingLevel;
-  const settingsManager = SettingsManager.inMemory();
+  const settingsManager = SettingsManager.inMemory({ retry: config.harness.agentRetry });
   const resourceLoader = new DefaultResourceLoader({
     cwd, agentDir: getAgentDir(), settingsManager, noExtensions: true, noSkills: true,
     appendSystemPromptOverride: (base) => [...base,

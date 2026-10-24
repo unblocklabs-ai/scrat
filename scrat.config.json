@@ -11,6 +11,7 @@
     "drainTimeoutSeconds": 900,
     "retryJitter": 0.1,
     "corrections": { "incomplete": 1, "validation": 2, "format": 2 },
+    "agentRetry": { "maxRetries": 3, "baseDelayMs": 2000 },
     "logLevel": "info"
   },
   "github": {
@@ -40,7 +41,8 @@
   "slack": {
     "enabled": false,
     "channel": "",
-    "maxRetryAfterSeconds": 30
+    "maxRetryAfterSeconds": 30,
+    "minimumGapMs": 1000
   },
   "workspace": {
     "sandbox": false,

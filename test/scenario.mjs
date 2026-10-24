@@ -1142,8 +1142,8 @@ export const scenarios = {
     const invalid = await run(); assert.match(invalid.error.message, /grade/i);
     assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
   } },
-  review_retry: { title: "a review whose reviewers all fail transiently is requeued with doubling delays and publishes once after recovery, while a mixed panel stays failed", run: async () => {
-    await implement(2); await route(); f.transient.failures = 8; f.reset(202, "transient");
+  review_retry: { title: "a review whose reviewers all fail transiently is requeued with doubling delays and publishes once after recovery, while a mixed panel stays failed", configure: [(config) => { config.harness.agentRetry.maxRetries = 1; }], run: async () => {
+    await implement(2); await route(); f.transient.failures = 4; f.reset(202, "transient");
     const delay = () => (Date.parse(f.row(s.tasks, failed.taskId).availableAt) - Date.parse(f.row(s.runs, failed.id).finishedAt)) / 1000;
     let failed = await run(); const task = () => f.row(s.tasks, failed.taskId);
     assert.equal(failed.error.code, "TRANSIENT_INFERENCE"); assert.equal(task().status, "queued"); assert.equal(task().retryCount, 1);
@@ -1686,6 +1686,7 @@ export const scenarios = {
       const pending = attempt(3, "heavy-fg");
       for (let n = 0; n < 600 && !(waiting = lines.find((line) => line.event === "validation.waiting")); n++) await new Promise((done) => setTimeout(done, 50));
       heavyBeforeRelease = lines.filter((line) => line.event === "pi.heavy_command").length;
+      await new Promise((done) => setTimeout(done, 20));
       release(); await holder; foreground = await pending;
     } finally { release?.(); restoreLogs(); }
     const workspaceOf = (r) => f.row(s.workspaces, r.workspaceId).path;
@@ -2813,7 +2814,7 @@ export const scenarios = {
     fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string" && data.includes("slack.post_failed")) failures.push(data); return write(fd, data, ...rest); };
     const { config } = await f.app("config.ts");
     await implement(1);
-    await new Promise((done) => setTimeout(done, 300));
+    await new Promise((done) => setTimeout(done, 100));
     assert.equal(f.slack.calls.length, 0);
 
     config.slack.enabled = true; config.slack.channel = channel;
@@ -2864,7 +2865,7 @@ export const scenarios = {
     await until(() => posts().some((call) => call.body.text === "Completed at stage recovered"));
     assert.equal(all(s.slackThreads).filter((thread) => thread.subjectId === "issue-3").length, 1);
     assert.ok(roots().some((call) => call.body.text.startsWith("*Issue #3*")));
-    for (let seen = -1; seen !== f.slack.calls.length;) { seen = f.slack.calls.length; await new Promise((done) => setTimeout(done, 1500)); }
+    for (let seen = -1; seen !== f.slack.calls.length;) { seen = f.slack.calls.length; await new Promise((done) => setTimeout(done, 200)); }
     fs.writeSync = write;
   } },
   slack_status_startup: { title: "an enabled status config blocks startup on a missing channel, a missing token or a failed auth.test, while a disabled one makes no Slack call", run: async () => {

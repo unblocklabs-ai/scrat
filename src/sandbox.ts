@@ -15,11 +15,11 @@ export function inWorkspace(path: string) {
   return local !== "" && local !== ".." && !local.startsWith("../") && !isAbsolute(local);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url) && config.workspace?.sandbox) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url) && config.workspace.sandbox) {
   mkdirSync("data/workspaces", { recursive: true });
   const cwd = await mkdtemp(join(workspaceRoot(), "sandbox-preflight-"));
   try {
-    const command = sandboxCommand(cwd, "/bin/sh", ["-c", `node --version && pnpm --version && git --version${config.workspace?.packageStore ? ` && touch ${packageStoreMount}/.preflight && rm ${packageStoreMount}/.preflight` : ""}`], {});
+    const command = sandboxCommand(cwd, "/bin/sh", ["-c", `node --version && pnpm --version && git --version${config.workspace.packageStore ? ` && touch ${packageStoreMount}/.preflight && rm ${packageStoreMount}/.preflight` : ""}`], {});
     const { stdout } = await promisify(execFile)(command.file, command.args, { env: command.env, timeout: 30_000 });
     process.stdout.write(`Sandbox ready\n${stdout}`);
   } finally {
@@ -35,7 +35,7 @@ function workspaceRoot() {
 }
 
 export function sandboxCommand(cwd: string, file: string, args: string[], environment: NodeJS.ProcessEnv, readOnly: string[] = [], track = false) {
-  if (!config.workspace?.sandbox) return { file, args, env: environment };
+  if (!config.workspace.sandbox) return { file, args, env: environment };
   if (process.platform !== "linux" || !existsSync("/usr/bin/bwrap")) throw new Error("workspace.sandbox requires Linux bubblewrap; refusing unsandboxed execution");
   if (!inWorkspace(cwd)) throw new Error("Sandbox commands must run inside an owned workspace");
   const workspace = realpathSync(cwd);
@@ -43,7 +43,7 @@ export function sandboxCommand(cwd: string, file: string, args: string[], enviro
   const home = join(realpathSync("data/sandbox-homes"), relative(workspaceRoot(), workspace).split("/")[0]);
   mkdirSync(home, { recursive: true, mode: 0o700 });
   if (realpathSync(home) !== home) throw new Error("Sandbox home is not its owned directory");
-  const limit = config.workspace?.commandMemoryMax;
+  const limit = config.workspace.commandMemoryMax;
   const mounts = ["--unshare-all", "--share-net", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
     "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run"];
   const bind = (source: string, destination = source, writable = false) => {
@@ -69,7 +69,7 @@ export function sandboxCommand(cwd: string, file: string, args: string[], enviro
   for (const path of readOnly) bind(realpathSync(path));
   bind(workspace, workspace, true);
   bind(home, "/home/scrat", true);
-  const store = config.workspace?.packageStore;
+  const store = config.workspace.packageStore;
   if (store) {
     mkdirSync(store, { recursive: true, mode: 0o700 });
     if (lstatSync(store).isSymbolicLink() || !statSync(store).isDirectory()) throw new Error("workspace.packageStore must be a real directory");
@@ -99,5 +99,5 @@ export async function reportMemoryKill(unit: string | undefined, error: unknown)
   const { stdout } = await run("/usr/bin/systemctl", ["--user", "show", unit, "-p", "Result", "--value"], { env: process.env }).catch(() => ({ stdout: "" }));
   await run("/usr/bin/systemctl", ["--user", "reset-failed", unit], { env: process.env }).catch(() => undefined);
   if (stdout.trim() !== "oom-kill") return error;
-  return Object.assign(new Error(`Command exceeded workspace.commandMemoryMax (${config.workspace?.commandMemoryMax}) and was killed for running out of memory`, { cause: error }), { code: "COMMAND_OUT_OF_MEMORY" });
+  return Object.assign(new Error(`Command exceeded workspace.commandMemoryMax (${config.workspace.commandMemoryMax}) and was killed for running out of memory`, { cause: error }), { code: "COMMAND_OUT_OF_MEMORY" });
 }

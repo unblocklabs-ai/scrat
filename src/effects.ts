@@ -102,12 +102,11 @@ const comment = {
 } satisfies Effect<GithubEffectContext>;
 
 const labels = {
-  async apply({ github, run, current, references, saveReceipt }) {
+  async apply({ github, run, current, references }) {
     const observation = observe(github.repository, current);
     await reconcileLabels(github, run.context.item.number, {
       current: observation.labels, desired: run.result.ready ? [botSlug] : [], managed: [botSlug],
     }, references);
-    saveReceipt({ scratLabel: run.result.ready });
   },
 } satisfies Effect<GithubEffectContext>;
 

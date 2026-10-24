@@ -288,7 +288,6 @@ export class GitHubRepository {
 
   async removeLabels(issueNumber: number, labels: string[], references: EventReferences = {}): Promise<void> {
     const { repository } = this;
-    if (labels.length === 0) return;
     for (const label of labels) {
       await this.write("github.remove_label", { issueNumber, label }, references, "write", {
         request: async ({ github, owner, repo }) => {

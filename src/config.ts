@@ -56,9 +56,8 @@ export function getActionConfig(action: string) {
   if (!manifest || !actionConfig) throw new Error(`Unknown action: ${action}`);
   return {
     ...actionConfig,
-    thinkingLevel: actionConfig.thinkingLevel,
     skill: skillPath(manifest, actionConfig.skill),
-    reviewers: (actionConfig.reviewers ?? []).map((reviewer) => ({ ...reviewer, thinkingLevel: reviewer.thinkingLevel })),
+    reviewers: (actionConfig.reviewers ?? []),
   };
 }
 

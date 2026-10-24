@@ -31,7 +31,7 @@ import { claimTask, finishRun, interruptRun, retryTransientFailure } from "./tas
 import { parseTriggerInput } from "./triggers.ts";
 import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, pinWorkspaceBase, removeWorkspace, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
 
-type DatabaseConfig = NonNullable<NonNullable<typeof config.workspace>["database"]>;
+type DatabaseConfig = NonNullable<typeof config.workspace.database>;
 type Environment = Record<string, string | undefined>;
 type References = { subjectId: string; taskId: string; runId: string };
 type Acceptance = NonNullable<Manifest["acceptance"]>;
@@ -39,8 +39,8 @@ type Acceptance = NonNullable<Manifest["acceptance"]>;
 const botAuthor = () => ({ name: config.github.botLogin, email: `${config.github.botLogin}@users.noreply.github.com` });
 
 async function prepareWorkspace(workspace: Workspace, environment: Environment, references: References, databaseConfig?: DatabaseConfig | null) {
-  await runCommands(config.workspace?.prepare ?? [], workspace.path, environment, references, "prepare");
-  if (databaseConfig) await runCommands([databaseConfig.migrate], workspace.path, environment, references, "migrate");
+  await runCommands(config.workspace.prepare, workspace.path, environment, references, "prepare");
+  if (databaseConfig) await runCommands([databaseConfig?.migrate], workspace.path, environment, references, "migrate");
 }
 
 async function asCheckFailure<T>(fn: () => Promise<T>) {
@@ -74,7 +74,7 @@ async function validateAndCommit({ run, references, stop }: Ctx, p: Change, kind
   updateRun(run.id, { agentCheckpoint: checkpoint });
   const validationTree = checkpoint.treeSha;
   stopBefore(stop, "validation commands");
-  const commands = await asCheckFailure(() => withValidationSlot(() => runCommands(config.workspace?.validate ?? [], workspace.path, commandEnvironment, references, "validate"), references, stop)
+  const commands = await asCheckFailure(() => withValidationSlot(() => runCommands(config.workspace.validate, workspace.path, commandEnvironment, references, "validate"), references, stop)
     .catch((error) => { throw stop?.aborted && error === stop.reason ? new InterruptedError("Worker is stopping; run left waiting for a validation slot") : error; }));
   await git(workspace.path, ["add", "--all"]);
   if (await git(workspace.path, ["write-tree"]) !== validationTree) throw new Error("Validation changed the source tree; revalidate the resulting changes");
@@ -190,7 +190,7 @@ async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
     : subject.kind === "window" ? describeWindow(task.action, subject, mainSha) : await describeCommit(repositoryPath, subject, run.input);
   updateRun(run.id, { context: evaluated });
   const review: Review = { workspace, mainSha, headSha, diffBaseSha };
-  const environment: Environment = observed ? { ...config.workspace?.environment } : {};
+  const environment: Environment = observed ? { ...config.workspace.environment } : {};
   stopBefore(stop, "workspace preparation");
   if (observed) await prepareReviewCommands(ctx, observed, review, { ...childEnvironment(), ...environment });
   stopBefore(stop, "the agent");
@@ -323,13 +323,13 @@ async function changeRun(ctx: Ctx, observed: Observed) {
   const acquired = await acquireChangeWorkspace(ctx, observed);
   const { workspace, validationOnly, mainSha, startHeadSha } = acquired;
   if (!validationOnly) updateRun(run.id, { workspaceId: workspace.id, mainSha, headSha: startHeadSha });
-  const databaseConfig = config.workspace?.database;
+  const databaseConfig = config.workspace.database;
   let database: Awaited<ReturnType<typeof createRunDatabase>> | undefined;
   if (databaseConfig) {
     cleanup.databaseRequested = true;
     database = await createRunDatabase(run.id, databaseConfig.image, references);
   }
-  const environment: Environment = { ...config.workspace?.environment,
+  const environment: Environment = { ...config.workspace.environment,
     ...Object.fromEntries((databaseConfig?.environment ?? []).map((name) => [name, database!.url])),
   };
   const p: Change = {
@@ -351,7 +351,7 @@ async function changeRun(ctx: Ctx, observed: Observed) {
       const { prompt, contextDir, revisions } = await buildAgentInput({
         run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha: p.headSha,
         baseRef: mainSha, mergeInProgress: p.mergeInProgress, workspace, validationFailure: p.validationFailure,
-        database: database ? { ...database, environment, schemaPrepared: !p.deferred, prepare: config.workspace?.prepare, migrate: databaseConfig?.migrate } : undefined,
+        database: database ? { ...database, environment, schemaPrepared: !p.deferred, prepare: config.workspace.prepare, migrate: databaseConfig?.migrate } : undefined,
       });
       p.agentInput = { contextDir, revisions };
       const agentResult = await executePi({ run, cwd: workspace.path, context: prompt, tools: manifest.tools, scoped: manifest, log: operation.log, sessionFile: latestSessionRun(workspace.id, run.id)?.piSessionFile ?? undefined, environment, contextDir, revisions, stop });

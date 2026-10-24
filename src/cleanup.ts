@@ -20,7 +20,7 @@ await runCommand("Cleanup command failed", async () => {
     try { await removeWorkspace(workspace.id); }
     catch { process.exitCode = 1; }
   }
-  for (const runId of config.workspace?.database ? await listRunDatabases() : []) {
+  for (const runId of config.workspace.database ? await listRunDatabases() : []) {
     const run = getRun(runId);
     if (run?.finishedAt) {
       try { await removeRunDatabase(runId, { taskId: run.taskId }); }

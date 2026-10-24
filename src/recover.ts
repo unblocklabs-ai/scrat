@@ -11,6 +11,6 @@ await runCommand("Run recovery failed", async () => {
     status: "failed",
     error: Object.assign(new Error("Interrupted run recovered manually after stopping workers"), { code: "RUN_INTERRUPTED" }),
   });
-  if (config.workspace?.database) await removeRunDatabase(run.id, { taskId: run.taskId });
+  if (config.workspace.database) await removeRunDatabase(run.id, { taskId: run.taskId });
   logger.info({ event: "run.recovered", runId, taskId: run.taskId });
 });

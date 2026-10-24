@@ -72,12 +72,12 @@ export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, ba
     spawnHook: (context) => {
       const command = sandboxCommand(cwd, "/bin/bash", ["-c", context.command], { ...childEnvironment(context.env), ...environment }, contextDir ? [contextDir] : []);
       const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-      return config.workspace?.sandbox
+      return config.workspace.sandbox
         ? { ...context, command: [command.file, ...command.args].map(quote).join(" "), env: command.env }
         : { ...context, env: command.env };
     },
   });
-  const heavy = (config.workspace?.heavyCommands ?? []).map((pattern) => new RegExp(pattern));
+  const heavy = config.workspace.heavyCommands.map((pattern) => new RegExp(pattern));
   const bash: typeof sdkBash = {
     ...sdkBash,
     async execute(...args) {

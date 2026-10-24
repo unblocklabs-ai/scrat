@@ -108,7 +108,6 @@ export const runs = sqliteTable("runs", {
     commentId?: number;
     commitSha?: string;
     publishedCommitSha?: string;
-    scratLabel?: boolean;
     pullRequestNumber?: number;
     issues?: Record<string, number>;
     slackReplyTs?: string;

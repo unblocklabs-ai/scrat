@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { execFileSync, spawnSync } from "node:child_process";
 import fs, { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { DatabaseSync } from "node:sqlite";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -9,10 +9,6 @@ import { bearer, fixture } from "./fixture.mjs";
 
 const scenario = process.argv[2] ?? "";
 let f, db, s, tasks, git, commit;
-const freshFixture = async (spec = scenarios[scenario]) => {
-  await f.close(); f = await fixture(scenario, spec);
-  ({ db, schema: s, tasks, git, commit } = f);
-};
 const all = (table) => db.select().from(table).all();
 const route = async () => (await f.app("github-sync.ts")).syncGitHub();
 const run = async () => { const r = await f.runNextTask(); assert.ok(r); return r; };
@@ -106,10 +102,6 @@ const configureGuardsValidate = (config) => {
 const configureDatabase = (config) => {
   const helper = fileURLToPath(new URL("database-command.mjs", import.meta.url)); cpSync(helper, "database-command.mjs");
   config.workspace = { ...config.workspace, environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), scenario === "validation_resume" ? "validate-resume" : "validate", resolve("database-receipts.jsonl")]] };
-};
-const configureCommitIsolation = (config) => {
-  writeFileSync("prepare.mjs", 'import{appendFileSync}from"node:fs";appendFileSync(' + JSON.stringify(resolve("prepare.log")) + ',"prepare\\n");');
-  config.workspace = { ...config.workspace, prepare: [[process.execPath, resolve("prepare.mjs")]], validate: [[process.execPath, resolve("prepare.mjs")]] };
 };
 const configureManifestDirectory = (config) => {
   const directory = resolve("deployment"), shipped = (name) => readFileSync(`app/actions/${name}.yaml`, "utf8"), field = (text, key, value) => text.replace(new RegExp(`^${key}: .*$`, "m"), `${key}: ${value}`);
@@ -330,83 +322,6 @@ const validationFeedback = async (variant) => {
       assert.match(lastUser(feedbackRequests()[2]), /round 1 of 1/);
     }
   } finally { restoreLogs(); }
-};
-const botNameRequests = async () => {
-  const drain = async () => { for (let n = 0; n < 12 && all(s.tasks).some((t) => t.status === "queued"); n++) await success(); };
-  f.addIssue(1, ["scrat"]); f.reset(1, "feedback-fix"); f.enqueue(1, "implement"); await success();
-  f.addIssue(2); f.enqueue(2, "review_issue"); await success();
-  await route(); await drain();
-  f.comments.get(201).push(humanComment(201, 9001, "Please rename the value", "2026-10-19T01:00:00Z"));
-  await route(); await drain();
-  f.reset(201, "resolve"); changeMain("src/app.ts", "export const value = 99;\n"); await route();
-  for (const t of all(s.tasks).filter((t) => t.action === "review_pr" && t.status === "queued")) db.update(s.tasks).set({ status: "cancelled" }).where(eq(s.tasks.id, t.id)).run();
-  await drain();
-  f.reset(201, "grade-C"); tasks.enqueueManualTasks("review_pr", ["201"]); await route(); await drain(); await route(); await drain();
-  const actions = new Set(f.requests.map((r) => r.context.action));
-  assert.deepEqual([...actions].sort(), ["address_pr_feedback", "address_review", "implement", "resolve_conflicts", "review_issue", "review_pr"]);
-  assert.ok(f.requests.some((r) => r.consolidating) && f.requests.some((r) => r.request.model.includes("deepseek")));
-  const prompts = f.requests.map((r) => JSON.stringify(r.request.messages) + JSON.stringify(r.request.tools ?? []));
-  assert.ok(prompts.every((text) => !/Scrat(?!_)/.test(text)), "No model request may name Scrat");
-  assert.ok(prompts.every((text) => text.includes("Mocha") && !text.includes("{{bot}}") && text.includes("SCRAT_STATUS")));
-  assert.ok(prompts.some((text) => text.includes("Mocha's validation failed")));
-};
-const botIdentityNames = async () => {
-  const queued = () => all(s.tasks).filter((t) => t.status === "queued");
-  f.addIssue(1, ["scrat"]); f.addIssue(2, ["mocha-agent"]); await route();
-  assert.deepEqual(queued().map((t) => [t.subjectId, t.action]).sort(), [["issue-1", "review_issue"], ["issue-2", "implement"]]);
-  assert.equal(queued().find((t) => t.subjectId === "issue-2").reason, "Issue has the mocha-agent label");
-  await success(); await success();
-  const labels = (n) => f.issues.get(n).labels.map((label) => label.name);
-  f.addIssue(3); f.reset(3, "ready"); f.enqueue(3, "review_issue"); await success();
-  assert.deepEqual(labels(3), ["mocha-agent"]);
-  f.reset(3, "normal"); f.enqueue(3, "review_issue"); await success();
-  assert.deepEqual(labels(3), []);
-  assert.equal(f.prs.length, 1); assert.match(f.prs[0].head.ref, /^mocha-agent\/[0-9a-f-]{36}$/);
-  assert.deepEqual(labels(1), ["scrat"]);
-};
-const assessmentOrder = async () => {
-  await implement(1); await route(); f.reset(201, "incomplete");
-  const failed = await run(); assert.ok(failed.error); assert.notEqual(failed.stage, "publishing");
-  const itemId = f.row(s.tasks, failed.taskId).subjectId;
-  f.reset(201, "normal"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "New task", input: { source: "github_items", kind: "manual" } });
-  const middle = await success();
-  f.reset(201, "grade-A"); tasks.retryTask(failed.taskId); const newest = await success();
-  assert.ok(newest.sequence > middle.sequence);
-  assert.equal(newest.result.grade, "A");
-  assert.deepEqual(f.prs[0].labels.map((l) => l.name), ["A · Strong"]);
-  assert.match(f.comments.get(201)[0].body, new RegExp(newest.taskId));
-  const calls = f.requests.length; await route();
-  assert.equal(f.requests.length, calls);
-  assert.deepEqual(f.prs[0].labels.map((l) => l.name), ["A · Strong"]);
-};
-const latestRunBaselines = async () => {
-  changeMain("src/helper.ts", "export const helper = 1;\n");
-  f.addIssue(1); await route(); const first = await success(); assert.ok(first.result.paths.includes("src/app.ts"));
-  f.enqueue(1); f.reset(1, "helper");
-  const second = await success(); assert.ok(second.result.paths.includes("src/helper.ts")); assert.ok(second.sequence > first.sequence);
-  await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
-  changeMain("src/helper.ts", "export const helper = 2;\n"); await route();
-  assert.ok(all(s.tasks).some((t) => t.action === "review_issue" && t.status === "queued"), "The latest claimed review is the baseline");
-  f.addIssue(2, ["scrat"]); f.enqueue(2, "implement"); const implemented = await success();
-  const prItem = all(s.items).find((i) => i.kind === "pr");
-  const feedback = async () => { tasks.enqueueTask({ subjectId: prItem.id, action: "address_pr_feedback", reason: "Reply", input: { source: "github_items", kind: "manual" } }); f.reset(202, "no-change"); return success(); };
-  const older = await feedback(); assert.equal(older.workspaceId, implemented.workspaceId);
-  assert.equal(older.piSessionFile, implemented.piSessionFile);
-  const copy = implemented.piSessionFile.replace(/\.jsonl$/, "-copy.jsonl");
-  copyFileSync(implemented.piSessionFile, copy);
-  db.update(s.runs).set({ piSessionFile: copy }).where(eq(s.runs.id, older.id)).run();
-  assert.ok(older.sequence > implemented.sequence);
-  const next = await feedback(); assert.equal(next.piSessionFile, copy); assert.ok(next.sequence > older.sequence);
-};
-const unicodeScope = async () => {
-  f.addIssue(1); f.reset(1, "nbsp"); await route(); await success();
-  assert.ok(f.requests.some((r) => r.request.messages.some((m) => m.role === "tool" && JSON.stringify(m.content).includes("export const special = 1;"))));
-  changeMain("src/a b.ts", "export const special = 2;\n"); await route();
-  assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
-  f.reset(1, "nbsp");
-  let changed = false;
-  f.onModel = (_context, step) => { if (step === 1 && !changed) { changed = true; changeMain("src/a b.ts", "export const special = 3;\n"); } };
-  const stale = await run(); assert.match(stale.error.message, /Reviewed code changed/);
 };
 const commitReview = async (variant) => {
   const { pollCommits } = await f.app("commit-source.ts");
@@ -854,9 +769,8 @@ export const scenarios = {
     assert.equal(f.comments.get(201).length, 2); assert.equal(f.comments.get(201)[1].body, feedback.body);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
   } },
-  deleted_review: { title: "deleted canonical comments are restored from the authoritative saved assessment, and older retries preserve a newer remote review even when its write receipt was lost", run: async () => {
-    await deletedReview("deleted"); await freshFixture(); await deletedReview("unreceipted");
-  } },
+  deleted_review: { title: "deleted canonical comments are restored from the authoritative saved assessment", run: () => deletedReview("deleted") },
+  unreceipted_review: { title: "older retries preserve a newer remote review even when its write receipt was lost", run: () => deletedReview("unreceipted") },
   stale_assessment: { title: "a stale newest assessment clears its grade without resurrecting an older narrower review", run: async () => {
     changeMain("src/helper.ts", "export const helper = 1;\n");
     await implement(1); await route(); f.faults.label.add(201);
@@ -973,10 +887,39 @@ export const scenarios = {
     for (const r of more) tasks.finishRun(r.id, { status: "completed" });
     assert.throws(() => db.$client.exec("UPDATE runs SET sequence = 1 WHERE sequence = 2"), /UNIQUE/);
   } },
-  run_latest: { title: "the latest run follows claim sequence, not timestamps, for a PR's grade and labels, issue baselines and Pi session continuation", run: async () => {
-    await assessmentOrder();
-    await freshFixture();
-    await latestRunBaselines();
+  assessment_order: { title: "new inference on an old task outranks newer-created tasks regardless of timestamps", run: async () => {
+    await implement(1); await route(); f.reset(201, "incomplete");
+    const failed = await run(); assert.ok(failed.error); assert.notEqual(failed.stage, "publishing");
+    const itemId = f.row(s.tasks, failed.taskId).subjectId;
+    f.reset(201, "normal"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "New task", input: { source: "github_items", kind: "manual" } });
+    const middle = await success();
+    f.reset(201, "grade-A"); tasks.retryTask(failed.taskId); const newest = await success();
+    assert.ok(newest.sequence > middle.sequence);
+    assert.equal(newest.result.grade, "A");
+    assert.deepEqual(f.prs[0].labels.map((l) => l.name), ["A · Strong"]);
+    assert.match(f.comments.get(201)[0].body, new RegExp(newest.taskId));
+    const calls = f.requests.length; await route();
+    assert.equal(f.requests.length, calls);
+    assert.deepEqual(f.prs[0].labels.map((l) => l.name), ["A · Strong"]);
+  } },
+  run_latest: { title: "the latest run is chosen by claim sequence for issue baselines and Pi session continuation", run: async () => {
+    changeMain("src/helper.ts", "export const helper = 1;\n");
+    f.addIssue(1); await route(); const first = await success(); assert.ok(first.result.paths.includes("src/app.ts"));
+    f.enqueue(1); f.reset(1, "helper");
+    const second = await success(); assert.ok(second.result.paths.includes("src/helper.ts")); assert.ok(second.sequence > first.sequence);
+    await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
+    changeMain("src/helper.ts", "export const helper = 2;\n"); await route();
+    assert.ok(all(s.tasks).some((t) => t.action === "review_issue" && t.status === "queued"), "The latest claimed review is the baseline");
+    f.addIssue(2, ["scrat"]); f.enqueue(2, "implement"); const implemented = await success();
+    const prItem = all(s.items).find((i) => i.kind === "pr");
+    const feedback = async () => { tasks.enqueueTask({ subjectId: prItem.id, action: "address_pr_feedback", reason: "Reply", input: { source: "github_items", kind: "manual" } }); f.reset(202, "no-change"); return success(); };
+    const older = await feedback(); assert.equal(older.workspaceId, implemented.workspaceId);
+    assert.equal(older.piSessionFile, implemented.piSessionFile);
+    const copy = implemented.piSessionFile.replace(/\.jsonl$/, "-copy.jsonl");
+    copyFileSync(implemented.piSessionFile, copy);
+    db.update(s.runs).set({ piSessionFile: copy }).where(eq(s.runs.id, older.id)).run();
+    assert.ok(older.sequence > implemented.sequence);
+    const next = await feedback(); assert.equal(next.piSessionFile, copy); assert.ok(next.sequence > older.sequence);
   } },
   scope_snapshots: { title: "PR-only, renamed and deleted paths keep their identities across unrelated base changes", seed: seedScopeSnapshots, configure: [configureScopeSnapshots], run: async () => {
     const implemented = await implement(1), workspace = f.row(s.workspaces, implemented.workspaceId);
@@ -1215,6 +1158,8 @@ export const scenarios = {
     f.addIssue(2); f.reset(2, "no-status"); f.enqueue(2, "implement");
     before = f.requests.length; const stuck = await run();
     assert.match(stuck.error.message, /SCRAT_STATUS/); assert.equal(f.requests.length - before, 4);
+    assert.equal(f.row(s.tasks, stuck.taskId).status, "failed");
+    assert.ok(existsSync(f.row(s.workspaces, stuck.workspaceId).path + "/src/app.ts"));
     const prsBefore = f.prs.length, writesBefore = f.writes.length;
     for (const [i, [mode, expected]] of [["incomplete", 2], ["needs_decision", 2], ["bare-status", 4]].entries()) {
       f.addIssue(i + 3); f.reset(i + 3, mode); f.enqueue(i + 3, "implement");
@@ -1402,6 +1347,9 @@ export const scenarios = {
     changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "2.0.0" } }));
     changeMain("pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: old}\n  unrelated@2.0.0:\n    resolution: {integrity: new}\n");
     await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "Unrelated dev dependencies must not trigger review");
+    changeMain("pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: changed}\n  unrelated@2.0.0:\n    resolution: {integrity: newer}\n");
+    await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"), "A changed inspected package beside an unrelated bump must trigger review");
+    f.reset(1, "grep"); await success();
     changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "2.0.0", unrelated: "2.0.0" } }));
     await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"), "Inspected dependency changes must trigger review");
   } },
@@ -1416,8 +1364,10 @@ export const scenarios = {
     assert.equal(changed((text) => text.replaceAll("unrelated@1.0.0", "unrelated@2.0.0").replaceAll("unrelated: {specifier: 1.0.0, version: 1.0.0}", "unrelated: {specifier: 2.0.0, version: 2.0.0}")), false);
     assert.equal(changed((text) => text.replace("unrelated@1.0.0:\n    resolution: {integrity: old}", "unrelated@1.0.0:\n    resolution: {integrity: new}")), false);
     assert.equal(changed((text) => text.replace("integrity: old", "integrity: new")), true);
+    assert.equal(changed((text) => text.replace("integrity: old", "integrity: new").replaceAll("unrelated@1.0.0", "unrelated@2.0.0")), true);
     assert.equal(changed((text) => text.replace("npm:string-width@4.2.2", "npm:string-width@4.2.3")), true);
     assert.equal(changed((text) => text.replace("nested: 1.0.0", "nested: 2.0.0")), true);
+    assert.equal(changed((text) => text.replace("npm:string-width@4.2.2", "npm:string-width@4.2.3").replaceAll("unrelated@1.0.0", "unrelated@2.0.0")), true);
     assert.equal(changed((text) => text.replace("wrangler: {specifier: 1.0.0, version: 1.0.0}", "wrangler: {specifier: 2.0.0, version: 2.0.0}")), true);
     assert.equal(changed((text) => text.replace("unrelated: {specifier: 1.0.0, version: 1.0.0}", "unrelated: {specifier: 1.0.0, version: npm:wrangler@2.0.0}")), true);
     assert.equal(changed((text) => text.replace("unrelated: {specifier: 1.0.0, version: 1.0.0}", "unrelated: {specifier: workspace:*, version: link:../unrelated}")), true);
@@ -1429,7 +1379,7 @@ export const scenarios = {
     assert.equal(affectsPaths(["src/app.ts"], ["src"]), true); assert.equal(affectsPaths(["srcs/app.ts"], ["src/"]), false);
     assert.equal(affectsPaths(["a.ts"], ["a.ts"]), true); assert.equal(affectsPaths(["b.ts"], ["a.ts"]), false);
   } },
-  review_scope: { title: "Pi path aliases, filename normalization and supplied PR diff files participate in freshness and re-review", seed: seedUnicodeScope, run: async () => {
+  review_scope: { title: "Pi path aliases and supplied PR diff files participate in freshness and re-review", run: async () => {
     f.addIssue(1); f.reset(1, "at"); await route();
     const reviewed = await success(); assert.ok(reviewed.result.paths.includes("src/app.ts"));
     changeMain("src/app.ts", "export const value = 9;\n"); await route();
@@ -1443,8 +1393,16 @@ export const scenarios = {
     const stale = await run(); assert.match(stale.error.message, /Reviewed code changed/);
     assert.ok(stale.result.paths.includes("src/app.ts")); assert.ok(stale.result.paths.includes("src/helper.ts"));
     assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === 202).length, 0);
-    await freshFixture();
-    await unicodeScope();
+  } },
+  unicode_scope: { title: "Pi filename normalization cannot hide relevant base changes", seed: seedUnicodeScope, run: async () => {
+    f.addIssue(1); f.reset(1, "nbsp"); await route(); await success();
+    assert.ok(f.requests.some((r) => r.request.messages.some((m) => m.role === "tool" && JSON.stringify(m.content).includes("export const special = 1;"))));
+    changeMain("src/a b.ts", "export const special = 2;\n"); await route();
+    assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
+    f.reset(1, "nbsp");
+    let changed = false;
+    f.onModel = (_context, step) => { if (step === 1 && !changed) { changed = true; changeMain("src/a b.ts", "export const special = 3;\n"); } };
+    const stale = await run(); assert.match(stale.error.message, /Reviewed code changed/);
   } },
   unicode_nfd: { title: "current and persisted Unicode read scopes map to Git filenames across filesystem spellings", seed: seedUnicodeNfd, run: async () => {
     f.addIssue(1); await route(); const reviewed = await success();
@@ -1466,12 +1424,10 @@ export const scenarios = {
       reviewed = await success();
     }
   } },
-  stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or fails clearly when the merge conflicts; behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", configure: [configureStaleBranch], run: async () => {
-    await staleBranch("human"); await freshFixture(); await staleBranch("scrat");
-  } },
-  validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit, and feedback stops after two rounds and never applies to signal-killed commands", configure: [configureValidation], run: async () => {
-    await validationFeedback("fix"); await freshFixture(); await validationFeedback("cap");
-  } },
+  stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or fails clearly when the merge conflicts", configure: [configureStaleBranch], run: () => staleBranch("human") },
+  stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", configure: [configureStaleBranch], run: () => staleBranch("scrat") },
+  validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit", configure: [configureValidation], run: () => validationFeedback("fix") },
+  validation_feedback_cap: { title: "validation feedback stops after two rounds and never applies to signal-killed commands", configure: [configureValidation], run: () => validationFeedback("cap") },
   measured_checks: { title: "a chatty passing validation command stores a bounded tail and keeps its full output on disk", configure: [configureChatty], run: async () => {
     const r = await implement(1);
     const [check] = r.verification.commands;
@@ -2517,10 +2473,38 @@ export const scenarios = {
     assert.equal(git(resolve("remote.git"), "log", "-1", "--format=%an", f.prs[0].head.ref), "agent-account");
     assert.ok(f.writes.some((write) => write.type === "pr") && f.writes.some((write) => write.type === "comment") && f.writes.some((write) => write.type === "label"));
   } },
-  bot_name: { title: "a configured bot name replaces every prose mention of Scrat in model requests across all actions while protocol markers stay, and the selection label, its routing reason and the new branch prefix follow it while the default scrat label stops selecting", configure: [configureValidation, botName("Mocha")], run: async () => {
-    await botNameRequests();
-    await freshFixture({ configure: [botName("Mocha Agent")] });
-    await botIdentityNames();
+  bot_name: { title: "a configured bot name replaces every prose mention of Scrat in model requests across all actions while protocol markers stay", configure: [configureValidation, botName("Mocha")], run: async () => {
+    const drain = async () => { for (let n = 0; n < 12 && all(s.tasks).some((t) => t.status === "queued"); n++) await success(); };
+    f.addIssue(1, ["scrat"]); f.reset(1, "feedback-fix"); f.enqueue(1, "implement"); await success();
+    f.addIssue(2); f.enqueue(2, "review_issue"); await success();
+    await route(); await drain();
+    f.comments.get(201).push(humanComment(201, 9001, "Please rename the value", "2026-10-19T01:00:00Z"));
+    await route(); await drain();
+    f.reset(201, "resolve"); changeMain("src/app.ts", "export const value = 99;\n"); await route();
+    for (const t of all(s.tasks).filter((t) => t.action === "review_pr" && t.status === "queued")) db.update(s.tasks).set({ status: "cancelled" }).where(eq(s.tasks.id, t.id)).run();
+    await drain();
+    f.reset(201, "grade-C"); tasks.enqueueManualTasks("review_pr", ["201"]); await route(); await drain(); await route(); await drain();
+    const actions = new Set(f.requests.map((r) => r.context.action));
+    assert.deepEqual([...actions].sort(), ["address_pr_feedback", "address_review", "implement", "resolve_conflicts", "review_issue", "review_pr"]);
+    assert.ok(f.requests.some((r) => r.consolidating) && f.requests.some((r) => r.request.model.includes("deepseek")));
+    const prompts = f.requests.map((r) => JSON.stringify(r.request.messages) + JSON.stringify(r.request.tools ?? []));
+    assert.ok(prompts.every((text) => !/Scrat(?!_)/.test(text)), "No model request may name Scrat");
+    assert.ok(prompts.every((text) => text.includes("Mocha") && !text.includes("{{bot}}") && text.includes("SCRAT_STATUS")));
+    assert.ok(prompts.some((text) => text.includes("Mocha's validation failed")));
+  } },
+  bot_identity_names: { title: "the selection label, its routing reason and the new branch prefix follow the bot name while the default scrat label stops selecting", configure: [botName("Mocha Agent")], run: async () => {
+    const queued = () => all(s.tasks).filter((t) => t.status === "queued");
+    f.addIssue(1, ["scrat"]); f.addIssue(2, ["mocha-agent"]); await route();
+    assert.deepEqual(queued().map((t) => [t.subjectId, t.action]).sort(), [["issue-1", "review_issue"], ["issue-2", "implement"]]);
+    assert.equal(queued().find((t) => t.subjectId === "issue-2").reason, "Issue has the mocha-agent label");
+    await success(); await success();
+    const labels = (n) => f.issues.get(n).labels.map((label) => label.name);
+    f.addIssue(3); f.reset(3, "ready"); f.enqueue(3, "review_issue"); await success();
+    assert.deepEqual(labels(3), ["mocha-agent"]);
+    f.reset(3, "normal"); f.enqueue(3, "review_issue"); await success();
+    assert.deepEqual(labels(3), []);
+    assert.equal(f.prs.length, 1); assert.match(f.prs[0].head.ref, /^mocha-agent\/[0-9a-f-]{36}$/);
+    assert.deepEqual(labels(1), ["scrat"]);
   } },
   slack_client: { title: "the Slack client posts and replies in threads, retries one 429, surfaces outages and Slack errors, caps and escapes text", run: async () => {
     const token = ["xoxb", "1111", "2222", "fixturetoken"].join("-");
@@ -2870,11 +2854,8 @@ export const scenarios = {
     mutate("review_issue", extend("author: alice"), /trigger\.author must be "bot" for github_items/);
     mutate("review_issue", extend("author: bot"));
   } },
-  commit_review_e2e: { title: "a push to the base branch posts one templated root, runs one diff-only review and replies once in the thread without any GitHub write, and a manifest without a start slot posts no root before the agent and lets the reply create it", configure: [configureCommitSource], run: async () => {
-    await commitReview("e2e");
-    await freshFixture({ configure: [configureCommitSource, configureNoStart] });
-    await commitReview("no_start");
-  } },
+  commit_review_e2e: { title: "a push to the base branch posts one templated root, runs one diff-only review and replies once in the thread without any GitHub write", configure: [configureCommitSource], run: () => commitReview("e2e") },
+  commit_review_no_start: { title: "a commit manifest without a start slot posts no thread root before the agent and the reply creates the root", configure: [configureCommitSource, configureNoStart], run: () => commitReview("no_start") },
   commit_review_panel: { title: "a panel commit review runs two reviewers and a consolidator without requiring a grade and replies once", configure: [configureCommitSource, configureCommitPanel], run: () => commitReview("panel") },
   commit_review_slack_down: { title: "a failed root post still reviews and the reply creates the root, while a failed reply fails at publishing and retries without a new session or second root", configure: [configureCommitSource], run: () => commitReview("slack_down") },
   manifests: { title: "every action is loaded from a validated manifest, malformed manifests are rejected with file and path, and local overrides reach the runtime", run: async () => {

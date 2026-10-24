@@ -50,6 +50,11 @@ type Effect<Context extends EffectContext> = {
   apply: (context: Context) => Promise<void>;
 };
 
+function validationLine({ verification }: Run) {
+  const passed = verification?.commands.filter((check) => check.status === "passed").map((check) => check.name);
+  return verification && passed?.length ? `Validated on ${verification.headSha.slice(0, 7)}: ${passed.join(", ")} passed.\n\n` : "";
+}
+
 function changed(context: GithubEffectContext) {
   const { workspace, commitSha } = context;
   if (!workspace || !commitSha) throw new Error("Change publication has no workspace or validated commit");
@@ -79,7 +84,7 @@ const pullRequest = {
     let pr = await github.findPullRequest(workspace.branch, evaluated.baseBranch);
     if (pr?.state === "closed") throw new Error("The workspace PR was already closed");
     pr ??= await github.createPullRequest({
-      title: conventionalTitle(evaluated.item.title), body: `${result.text}\n\nCloses #${evaluated.item.number}\n\n${taskMarker(task.id)}`,
+      title: conventionalTitle(evaluated.item.title), body: `${result.text}\n\n${validationLine(run)}Closes #${evaluated.item.number}\n\n${taskMarker(task.id)}`,
       head: workspace.branch, base: evaluated.baseBranch,
     }, references);
     const publishedPr = pr;
@@ -97,7 +102,7 @@ const comment = {
     const marker = manifestOf(task.action).mode === "review" ? reviewMarker : taskMarker(task.id);
     const observation = observe(github.repository, current);
     const existing = observation.own.findLast((candidate) => isIssueComment(candidate) && candidate.body.trimEnd().endsWith(marker));
-    const commentId = await upsertComment(github, run.context.item.number, existing, `${run.result.text}\n\n${marker}`, references);
+    const commentId = await upsertComment(github, run.context.item.number, existing, `${run.result.text}\n\n${validationLine(run)}${marker}`, references);
     saveReceipt({ commentId });
   },
 } satisfies Effect<GithubEffectContext>;

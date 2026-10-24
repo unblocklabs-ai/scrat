@@ -39,6 +39,10 @@ export const completedRunsOfActionInRepository = (repository: string, action: Ac
     .where(and(eq(subjects.repository, repository), eq(tasks.action, action), eq(tasks.status, "completed"), isNull(runs.error)))
     .orderBy(desc(runs.sequence)).limit(limit).all().map(({ run, subject, payload }) => ({ run, subject, number: payload?.number }));
 
+export const verificationOfCommit = (headSha: string) =>
+  db.select({ verification: runs.verification }).from(runs)
+    .where(and(eq(runs.headSha, headSha), isNotNull(runs.verification))).orderBy(desc(runs.sequence)).limit(1).get()?.verification ?? undefined;
+
 export const latestFinishedRun = (subjectId: string) =>
   db.select({ error: runs.error, stage: runs.stage, headSha: runs.headSha }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
     .where(and(eq(tasks.subjectId, subjectId), isNotNull(runs.finishedAt))).orderBy(desc(runs.sequence)).limit(1).get();

@@ -876,6 +876,33 @@ export const scenarios = {
     assert.equal(f.comments.get(201).length, 2); assert.equal(f.comments.get(201)[1].body, feedback.body);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
   } },
+  legacy_assessments: { title: "the canonical assessment replaces legacy assessments, survives a failed legacy delete and leaves repair replies and human comments alone", run: async () => {
+    await implement(1); await route(); const initial = await success();
+    const canonical = f.comments.get(201)[0], bot = f.config.github.botLogin, at = "2026-10-19T03:00:00Z";
+    const botComment = (id, body) => ({ id, body, user: { login: bot }, updated_at: at, html_url: `https://github.com/fixture/project/pull/201#issuecomment-${id}` });
+    const legacy = botComment(9001, "Old summary.\n\n<!-- scrat:summary:v1 -->"), repair = botComment(9002, "Pushed the edge case fix.\n\n<!-- scrat-task:0f0f0f0f-0000-4000-8000-000000000001 -->");
+    const older = botComment(9003, `Older assessment.\n\n<!-- scrat-task:${initial.taskId} -->`), human = humanComment(201, 9100, "Please look at the edge case", at);
+    f.comments.get(201).push(legacy, repair, older, human);
+    const subjectId = f.row(s.tasks, initial.taskId).subjectId;
+    const reReview = () => { tasks.enqueueTask({ subjectId, action: "review_pr", reason: "New assessment", input: { source: "github_items", kind: "manual", manual: true } }); return success(); };
+    const deleteCalls = () => f.calls.filter((c) => c.method === "DELETE" && c.path.includes("/issues/comments/"));
+    const deleted = () => f.writes.filter((w) => w.type === "comment_delete").map((w) => w.id);
+    f.reset(201, "grade-A"); f.faults.commentDelete.add(legacy.id);
+    const failed = await reReview();
+    assert.equal(failed.publication.commentId, canonical.id); assert.equal(failed.publication.status, "published");
+    assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
+    assert.deepEqual(deleteCalls().map((c) => [c.path, c.status]), [[`/repos/fixture/project/issues/comments/${legacy.id}`, 500], [`/repos/fixture/project/issues/comments/${older.id}`, 204]]);
+    assert.deepEqual(deleted(), [older.id]);
+    assert.deepEqual(f.comments.get(201).map((c) => c.id), [canonical.id, legacy.id, repair.id, human.id]);
+    assert.equal(f.comments.get(201)[2].body, repair.body); assert.equal(f.comments.get(201)[3].body, human.body);
+    f.faults.commentDelete.delete(legacy.id);
+    const healed = await reReview();
+    assert.equal(healed.publication.commentId, canonical.id);
+    assert.deepEqual(f.comments.get(201).map((c) => c.id), [canonical.id, repair.id, human.id]);
+    assert.equal(f.comments.get(201).filter((c) => c.body.includes("<!-- scrat-review -->")).length, 1);
+    assert.deepEqual(deleted(), [older.id, legacy.id]);
+    assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
+  } },
   deleted_review: { title: "deleted canonical comments are restored from the authoritative saved assessment", run: () => deletedReview("deleted") },
   unreceipted_review: { title: "older retries preserve a newer remote review even when its write receipt was lost", run: () => deletedReview("unreceipted") },
   stale_assessment: { title: "a stale newest assessment clears its grade without resurrecting an older narrower review", run: async () => {
@@ -954,7 +981,7 @@ export const scenarios = {
     const system = ({ request }) => JSON.stringify(request.messages.filter((m) => m.role === "system" || m.role === "developer"));
     const change = f.requests.filter((entry) => entry.context.action === "implement");
     assert.ok(change.length && change.every((entry) => system(entry).includes(notes.replaceAll("\\", "\\\\"))), "Every change request carries the notes path");
-    assert.ok(change.every((entry) => system(entry).includes("do not say the changes are uncommitted")));
+    assert.ok(change.every((entry) => system(entry).includes("its validation or the commit state")));
     assert.equal(readFileSync(notes, "utf8"), "Plan: change value\n");
     const commit = r.publication.publishedCommitSha;
     assert.deepEqual(git(resolve("remote.git"), "ls-tree", "-r", "--name-only", commit).split("\n").filter((path) => path.startsWith(".scrat")), []);
@@ -1935,7 +1962,15 @@ export const scenarios = {
     const repairs = (n) => all(s.tasks).filter((t) => t.subjectId === prItem(n).id && t.action === "address_review");
     const count = (n) => db.$client.prepare("select self_repair_count as c from items where id = ?").get(prItem(n).id).c;
     const review = async (n, mode) => { f.reset(n, mode); await route(); return success(); };
-    await implement(1); const graded = await review(201, "grade-C");
+    const implemented = await implement(1);
+    assert.ok(implemented.verification.commands.length > 0 && implemented.verification.commands.every((c) => c.status === "passed"));
+    const validated = `Validated on ${implemented.headSha.slice(0, 7)}: ${implemented.verification.commands.map((c) => c.name).join(", ")} passed.`;
+    assert.ok(f.prs.find((pr) => pr.number === 201).body.includes(`\n\n${validated}\n\nCloses #1`));
+    const graded = await review(201, "grade-C");
+    const reviewed = f.requests.findLast((r) => r.context.action === "review_pr").context.files.validation;
+    const listing = readFileSync(reviewed, "utf8");
+    assert.ok(listing.includes(implemented.headSha));
+    for (const c of implemented.verification.commands) assert.ok(listing.includes(`- ${c.name}: passed (`));
     assert.equal(graded.result.grade, "C"); await route();
     assert.equal(repairs(201).length, 1); assert.equal(repairs(201)[0].status, "queued"); assert.equal(repairs(201)[0].input.assessmentRunId, graded.id);
     assert.equal(count(201), 0, "A queued repair spends no cap slot until it runs"); await route(); assert.equal(repairs(201).length, 1); assert.equal(count(201), 0);
@@ -1951,7 +1986,8 @@ export const scenarios = {
     assert.equal(repairs(201).length, 1); assert.equal(count(201), 1);
     db.$client.prepare("update items set self_repair_count = 2 where id = ?").run(prItem(201).id); await route();
     assert.ok(f.prs.find((pr) => pr.number === 201).labels.some((label) => label.name === "Scrat repair exhausted"), "A last repair that changed nothing still marks the PR");
-    await implement(2); await review(202, "normal"); await route(); assert.equal(repairs(202).length, 0, "Grade B does not trigger");
+    await implement(2); db.$client.prepare("update runs set verification = null").run(); await review(202, "normal");
+    assert.equal(f.requests.findLast((r) => r.context.action === "review_pr").context.files.validation, undefined, "A head with no stored verification gets no validation file"); await route(); assert.equal(repairs(202).length, 0, "Grade B does not trigger");
     await implement(3); f.prs.find((pr) => pr.number === 203).user.login = "human";
     await review(203, "grade-C"); await route(); assert.equal(repairs(203).length, 0, "Human-authored PRs never trigger");
     await implement(4); await review(204, "grade-C");
@@ -3025,7 +3061,7 @@ export const scenarios = {
     };
     rejects("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, bash]"), /rule_check\.yaml: mode review forbids the bash, edit and write tools/);
     rejects("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, git, read_base]"), /read_base requires a review with agent: panel or context: change/);
-    rejects("review_pr", (text) => text.replace("[discussion, previous_assessment, previous_repair]", "[history]"), /files: history is not allowed with the pr_assessment effect/);
+    rejects("review_pr", (text) => text.replace("[discussion, previous_assessment, previous_repair, validation]", "[history]"), /files: history is not allowed with the pr_assessment effect/);
     rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [review]"), /files: review requires trigger.kind low_grade/);
     rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [labels]"), /files: previous_assessment requires the pr_assessment effect or a review that publishes comment/);
     rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [discussion, previous_repair]"), /files: previous_repair requires the pr_assessment effect/);

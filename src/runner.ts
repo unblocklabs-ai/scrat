@@ -22,7 +22,7 @@ import { resolvePrReview } from "./pr-assessment.ts";
 import { getRun, latestSessionRun, runHistory, updateRun } from "./run-history.ts";
 import { reviewPullRequest } from "./pr-review.ts";
 import { publishCommit, publishRun, publishWindow } from "./publication.ts";
-import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint, InterruptedError, mergePaths } from "./results.ts";
+import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint, InterruptedError } from "./results.ts";
 import type { Item } from "./items.ts";
 import { subjects, workspaces, type Run, type Task, type Subject, type Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
@@ -164,17 +164,17 @@ async function tryCleanup(operation: Ctx["operation"], detail: Record<string, st
   catch { operation.log.warn({ event: "run.cleanup_pending", ...detail }); }
 }
 
-async function runAgent({ run, task, manifest, operation, stop }: Ctx, { workspace, environment, input, sessionFile, baseSha, panel }: {
-  workspace: { path: string; branch: string | null }; environment: Environment;
-  input: Omit<Parameters<typeof buildAgentInput>[0], "run" | "task" | "workspace">; sessionFile?: string; baseSha?: string;
-  panel?: { baseSha: string; requireGrade: boolean };
+async function runAgent({ run, task, manifest, operation, stop }: Ctx, { environment, input, sessionFile, baseSha, panel }: {
+  environment: Environment; input: Omit<Parameters<typeof buildAgentInput>[0], "run" | "task">;
+  sessionFile?: string; baseSha?: string; panel?: { baseSha: string; requireGrade: boolean };
 }) {
-  const { prompt, contextDir, revisions } = await buildAgentInput({ run, task, workspace, ...input });
+  const { workspace } = input;
+  const { prompt, contextDir, revisions } = await buildAgentInput({ run, task, ...input });
   const shared = { tools: manifest.tools, scoped: manifest, contextDir, revisions, stop };
   const agentResult = panel
     ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { ...shared, ...panel })
     : await executePi({ run, cwd: workspace.path, context: prompt, log: operation.log, sessionFile, environment, baseSha, ...shared });
-  return { result: { ...agentResult, paths: mergePaths(input.diffPaths, agentResult.paths) }, contextDir, revisions };
+  return { result: { ...agentResult, paths: [...new Set([...input.diffPaths, ...agentResult.paths])] }, contextDir, revisions };
 }
 
 async function prepareReviewCommands({ run, repositoryPath, references, operation, cleanup }: Ctx, { context, pullRequest, observation }: Observed, review: Review, environment: Environment) {
@@ -214,9 +214,9 @@ async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   const changeContext = manifest.context === "change";
   updateRun(run.id, { stage: "agent" });
   const { result } = await runAgent(ctx, {
-    workspace: review.workspace, environment, baseSha: changeContext ? review.diffBaseSha : undefined,
+    environment, baseSha: changeContext ? review.diffBaseSha : undefined,
     panel: getActionConfig(task.action).agent === "panel" ? { baseSha: review.diffBaseSha, requireGrade: !changeContext } : undefined,
-    input: { evaluated, diffBaseSha: review.diffBaseSha, diffPaths, mainSha: review.mainSha, headSha: review.headSha, baseRef: review.mainSha, mergeInProgress: false },
+    input: { workspace: review.workspace, evaluated, diffBaseSha: review.diffBaseSha, diffPaths, mainSha: review.mainSha, headSha: review.headSha, baseRef: review.mainSha, mergeInProgress: false },
   });
   updateRun(run.id, { result, stage: "validating" });
   assertComplete(result);
@@ -283,7 +283,7 @@ async function mergeBehind(ctx: Ctx, observed: Observed, p: Change, diffPaths: s
   if (acceptance !== "conflict_free" || p.mergeInProgress || run.retryOfRunId) return;
   if (!await mergeBehindBase(p, observed)) return;
   const { baseBranch } = observed.observation;
-  p.result = { text: `Merged ${baseBranch} (${p.mainSha.slice(0, 7)}) into this branch; no conflicts`, ready: false, paths: mergePaths(diffPaths), outcome: "complete" };
+  p.result = { text: `Merged ${baseBranch} (${p.mainSha.slice(0, 7)}) into this branch; no conflicts`, ready: false, paths: [...new Set(diffPaths)], outcome: "complete" };
   updateRun(run.id, { result: p.result, stage: "validating" });
   try {
     await validateAndCommit(ctx, p, acceptance);
@@ -323,7 +323,7 @@ async function validateStage(ctx: Ctx, p: Change, acceptance: Acceptance) {
         operation.log.warn({ event: "pi.validation_retry", round });
         updateRun(run.id, { stage: "agent" });
         const followUp = await executePi({ run, cwd: workspace.path, context: "", tools: ctx.manifest.tools, scoped: ctx.manifest, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });
-        result = { ...followUp, text: `${result.text}\n\n**Validation correction ${round}:** ${followUp.text}`, paths: mergePaths(result.paths, followUp.paths) };
+        result = { ...followUp, text: `${result.text}\n\n**Validation correction ${round}:** ${followUp.text}`, paths: [...new Set([...result.paths, ...followUp.paths])] };
         updateRun(run.id, { result, stage: "validating" });
         assertComplete(result);
       }
@@ -363,9 +363,9 @@ async function changeRun(ctx: Ctx, observed: Observed) {
       stopBefore(stop, "the agent");
       updateRun(run.id, { stage: "agent" });
       const { result, contextDir, revisions } = await runAgent(ctx, {
-        workspace, environment, sessionFile: latestSessionRun(workspace.id, run.id)?.piSessionFile ?? undefined,
+        environment, sessionFile: latestSessionRun(workspace.id, run.id)?.piSessionFile ?? undefined,
         input: {
-          evaluated, diffBaseSha, diffPaths, mainSha, headSha: p.headSha, baseRef: mainSha, mergeInProgress: p.mergeInProgress, validationFailure: p.validationFailure,
+          workspace, evaluated, diffBaseSha, diffPaths, mainSha, headSha: p.headSha, baseRef: mainSha, mergeInProgress: p.mergeInProgress, validationFailure: p.validationFailure,
           database: database ? { ...database, environment, schemaPrepared: !p.deferred, prepare: config.workspace.prepare, migrate: databaseConfig?.migrate } : undefined,
         },
       });

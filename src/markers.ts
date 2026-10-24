@@ -1,6 +1,7 @@
 import type { GithubComment } from "./github-types.ts";
 
 export const reviewMarker = "<!-- scrat-review -->";
+export const legacySummaryMarker = "scrat:summary:v1";
 const taskMarkerParts = ["<!-- scrat-task:", " -->"] as const;
 export const taskMarker = (taskId: string) => `${taskMarkerParts[0]}${taskId}${taskMarkerParts[1]}`;
 const issuePrefix = "issue:";

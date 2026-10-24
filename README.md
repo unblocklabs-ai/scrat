@@ -106,6 +106,7 @@ The installer keeps this file across deploys (any other drop-in is moved into th
 | `harness.corrections.validation` | How many times the agent is re-prompted, in the same session, after `workspace.validate` fails before the run fails (default 2, a non-negative integer; 0 disables). |
 | `harness.corrections.format` | How many times the agent is re-prompted when its final answer is not in the required result format (default 2, a non-negative integer; 0 disables). |
 | `harness.maxConcurrentValidations` | Maximum `workspace.validate` runs at once (default 3, a positive integer). Further runs wait in a FIFO queue; preparation does not take a slot. |
+| `harness.agentRetry` | Retries for a failed model request inside a Pi session: `maxRetries` (default 3) and `baseDelayMs` (default 2000), both non-negative integers; 0 retries fails the request at once. |
 | `harness.logLevel` | Pino log verbosity, such as `info` or `debug`. |
 | `context.inlinePaths` | Most changed paths put inline in the agent's input; beyond it they go to a context file (default 200, a positive integer). |
 | `context.historyRuns` | How many earlier completed runs of an action feed its `history` context (default 10, a positive integer). |

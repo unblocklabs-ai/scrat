@@ -150,7 +150,8 @@ async function settleReviewPlan(ctx: Ctx, { item, observation, mainSha }: Observ
     if (state.kind === "stale" && state.reason === "base" && (state.assessment.run.mainSha ?? null) === (trigger.previousMainSha ?? null)
       && (state.assessment.run.headSha ?? null) === (trigger.previousHeadSha ?? null)) return;
   }
-  updateRun(run.id, { reviewers: configuredReviewers(task.action) });
+  const { provider, model, thinkingLevel } = getActionConfig(task.action);
+  updateRun(run.id, { reviewers: configuredReviewers(task.action), provider, model, thinkingLevel });
   ctx.run = getRun(run.id)!;
 }
 

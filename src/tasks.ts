@@ -141,6 +141,8 @@ export function claimTask() {
     const prior = retry?.error?.name === "InterruptedError" && !resume ? undefined : retry;
     const pinned = getManifest(next.task.action)?.mode === "review" && !resume ? undefined : prior;
     const settings = pinned ?? actionSettings;
+    const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? configuredReviewers(next.task.action, isBaseOnly(claimable.trigger));
+    const { provider, model, thinkingLevel } = !resume && reviewers.length === 1 ? reviewers[0] : settings;
     const task = transaction.update(tasks).set({ status: "running" }).where(eq(tasks.id, next.task.id)).returning().get()!;
     const run = transaction.insert(runs).values({
       taskId: task.id,
@@ -149,10 +151,7 @@ export function claimTask() {
       inferenceFromRunId: resume?.id,
       input: task.input,
       skill: settings.skill,
-      provider: settings.provider,
-      model: settings.model,
-      thinkingLevel: settings.thinkingLevel,
-      reviewers: resume ? resume.reviewers : pinned?.reviewers ?? configuredReviewers(task.action, isBaseOnly(claimable.trigger)),
+      provider, model, thinkingLevel, reviewers,
       workspaceId: resume?.workspaceId ?? next.subject.workspaceId,
       stage: entryStage(retry, next.task.retryMode),
       ...(resume ? {

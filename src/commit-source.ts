@@ -8,7 +8,7 @@ import { remoteUrl } from "./repository.ts";
 import { enqueueOnce, pollSource, sourceCursor } from "./sources.ts";
 
 export function pollCommits(repository = config.github.repository) {
-  return pollSource("commits.poll", "github_commits", ({ name, trigger }, operation) => pollAction(name, trigger, repository, operation), repository);
+  return pollSource("commits.poll", "github_commits", repository, pollAction);
 }
 
 type CommitTrigger = Manifest["trigger"];
@@ -30,7 +30,7 @@ async function rangeCommits(repositoryPath: string, previousSha: string, tip: st
   });
 }
 
-async function pollAction(action: string, trigger: CommitTrigger, repository: string, operation: OperationScope) {
+async function pollAction({ name: action, trigger }: Manifest, operation: OperationScope, repository: string) {
   const { enabled, branch, maxRangeCommits } = commitSettings(action);
   const cursor = sourceCursor(repository, action, branch);
   if (!enabled) {
@@ -40,27 +40,26 @@ async function pollAction(action: string, trigger: CommitTrigger, repository: st
   operation.stage("fetch");
   const repositoryPath = getRepositoryPath();
   const tip = await fetchRepository(repositoryPath, remoteUrl(repository), branch, await new GitHubRepository(repository).getGitEnvironment());
-  const cursorSha = cursor.value;
-  if (!cursorSha) {
+  if (!cursor.value) {
     cursor.save(tip);
     operation.log.info({ event: "commits.seeded", branch, sha: tip });
     return 0;
   }
-  if (cursorSha === tip) {
+  if (cursor.value === tip) {
     return 0;
   }
   operation.stage("range");
-  let previousSha = cursorSha;
-  const known = await git(repositoryPath, ["cat-file", "-e", `${cursorSha}^{commit}`]).then(() => true, () => false);
-  if (!known || !await isAncestor(repositoryPath, cursorSha, tip)) {
-    const base = known ? await git(repositoryPath, ["merge-base", cursorSha, tip]).catch(() => "") : "";
+  let previousSha = cursor.value;
+  const known = await git(repositoryPath, ["cat-file", "-e", `${cursor.value}^{commit}`]).then(() => true, () => false);
+  if (!known || !await isAncestor(repositoryPath, cursor.value, tip)) {
+    const base = known ? await git(repositoryPath, ["merge-base", cursor.value, tip]).catch(() => "") : "";
     if (!base || base === tip) {
       cursor.save(tip);
-      operation.log.warn({ event: "commits.cursor_reset", branch, from: cursorSha, sha: tip });
+      operation.log.warn({ event: "commits.cursor_reset", branch, from: cursor.value, sha: tip });
       return 0;
     }
     previousSha = base;
-    operation.log.warn({ event: "commits.cursor_rewound", branch, from: cursorSha, to: base });
+    operation.log.warn({ event: "commits.cursor_rewound", branch, from: cursor.value, to: base });
   }
   if (trigger.granularity === "commit") {
     const matching = (await rangeCommits(repositoryPath, previousSha, tip)).filter((commit) => commitMatches(trigger, commit));
@@ -91,7 +90,7 @@ function enqueueCommit({ repository, action, branch, sha, previousSha, commitCou
   const subject = upsertSubject({
     repository, kind: "commit", key: `${branch}:${sha}`,
     metadata: { title, author, url: `https://github.com/${repository}/commit/${sha}` },
-  }, "open");
+  });
   return enqueueOnce(subject, action, `${branch} moved to ${sha.slice(0, 7)}`,
     { source: "github_commits", kind: "commit", triggerKey: sha, sha, previousSha, branch, commitCount, truncated });
 }

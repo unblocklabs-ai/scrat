@@ -8,7 +8,7 @@ import { enqueueOnce, pollSource, sourceCursor } from "./sources.ts";
 const cursorBranch = "schedule";
 
 export function pollSchedules(repository = config.github.repository, now = new Date()) {
-  return pollSource("schedule.poll", "schedule", (manifest, operation) => pollAction(manifest, repository, now, operation), repository);
+  return pollSource("schedule.poll", "schedule", repository, (manifest, operation) => pollAction(manifest, repository, now, operation));
 }
 
 function pollAction(manifest: Manifest, repository: string, now: Date, operation: OperationScope) {
@@ -31,7 +31,7 @@ function pollAction(manifest: Manifest, repository: string, now: Date, operation
   while (next <= now) { tick = next; next = nextTick(cron, tick); }
   operation.stage("enqueue");
   const end = tick.toISOString(), start = new Date(tick.getTime() - parseWindow(trigger.window!)).toISOString();
-  const subject = upsertSubject({ repository, kind: "window", key: `${action}:${end}`, metadata: { start, end } }, "open");
+  const subject = upsertSubject({ repository, kind: "window", key: `${action}:${end}`, metadata: { start, end } });
   const queued = enqueueOnce(subject, action, `schedule tick ${end}`, { source: "schedule", kind: "tick", triggerKey: end, start, end });
   cursor.save(next.toISOString());
   return queued;

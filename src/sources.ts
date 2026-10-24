@@ -12,18 +12,18 @@ export function sourceCursor(repository: string, action: string, scope: string) 
   const key = and(eq(sourceCursors.repository, repository), eq(sourceCursors.action, action), eq(sourceCursors.branch, scope));
   return {
     value: db.select().from(sourceCursors).where(key).get()?.sha,
-    save: (sha: string) => db.insert(sourceCursors).values({ repository, action, branch: scope, sha, updatedAt: new Date().toISOString() })
-      .onConflictDoUpdate({ target: [sourceCursors.repository, sourceCursors.action, sourceCursors.branch], set: { sha, updatedAt: new Date().toISOString() } }).run(),
+    save: (sha: string) => { const updatedAt = new Date().toISOString(); return db.insert(sourceCursors).values({ repository, action, branch: scope, sha, updatedAt })
+      .onConflictDoUpdate({ target: [sourceCursors.repository, sourceCursors.action, sourceCursors.branch], set: { sha, updatedAt } }).run(); },
     clear: () => db.delete(sourceCursors).where(key).run(),
   };
 }
 
-export function pollSource(operationName: string, source: string, perAction: (manifest: Manifest, operation: OperationScope) => number | Promise<number>, repository: string) {
+export function pollSource(operationName: string, source: string, repository: string, perAction: (manifest: Manifest, operation: OperationScope, repository: string) => number | Promise<number>) {
   return withOperation(operationName, { repository }, async (operation) => {
     assertConfiguredRepository(repository);
     let queued = 0;
     for (const manifest of manifests()) {
-      if (manifest.trigger.source === source) queued += await perAction(manifest, operation);
+      if (manifest.trigger.source === source) queued += await perAction(manifest, operation, repository);
     }
     operation.complete({ queued });
     return queued;

@@ -6,7 +6,7 @@ export type Item = ItemRow & Pick<Subject, "state" | "workspaceId">;
 
 export const asItem = (item: ItemRow, { state, workspaceId }: Pick<Subject, "state" | "workspaceId">): Item => ({ ...item, state, workspaceId });
 
-export function upsertSubject(values: Omit<typeof subjects.$inferInsert, "state">, state: typeof subjects.$inferInsert.state, database: Pick<typeof db, "insert"> = db) {
+export function upsertSubject(values: Omit<typeof subjects.$inferInsert, "state">, state: typeof subjects.$inferInsert.state = "open", database: Pick<typeof db, "insert"> = db) {
   return database.insert(subjects).values({ ...values, state })
     .onConflictDoUpdate({ target: [subjects.repository, subjects.kind, subjects.key], set: { state } }).returning().get()!;
 }

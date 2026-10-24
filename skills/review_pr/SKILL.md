@@ -46,6 +46,10 @@ For a complete review, include exactly one machine-readable `SCRAT_GRADE: <grade
 
 When `files.previous_assessment` is present, first state for each of its findings whether it is fixed, unfixed or no longer applicable, with evidence from the current source. When `files.previous_repair` is present, it is the repair agent's summary of what it changed. Then report new findings only if verified against the current diff. Do not re-raise a finding the evidence shows fixed. Grade by the rubric on what remains.
 
+## Validation
+
+When `files.validation` is present, those checks already ran and passed on this head. Do not list them as unrun and do not recommend them.
+
 ## Follow-ups and output
 
 Reconcile prior coverage with the current full diff and recheck affected conclusions against current source. When `previous` is present, use the `git` tool to diff `previousMain` to `main` and `previousHead` to `head`, together with the discussion, to focus new investigation; reuse applicable evidence without repeating unchanged work. Hints are not a complete dependency map.

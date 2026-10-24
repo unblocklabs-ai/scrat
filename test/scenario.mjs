@@ -1947,7 +1947,15 @@ export const scenarios = {
     const repairs = (n) => all(s.tasks).filter((t) => t.subjectId === prItem(n).id && t.action === "address_review");
     const count = (n) => db.$client.prepare("select self_repair_count as c from items where id = ?").get(prItem(n).id).c;
     const review = async (n, mode) => { f.reset(n, mode); await route(); return success(); };
-    await implement(1); const graded = await review(201, "grade-C");
+    const implemented = await implement(1);
+    assert.ok(implemented.verification.commands.length > 0 && implemented.verification.commands.every((c) => c.status === "passed"));
+    const validated = `Validated on ${implemented.headSha.slice(0, 7)}: ${implemented.verification.commands.map((c) => c.name).join(", ")} passed.`;
+    assert.ok(f.prs.find((pr) => pr.number === 201).body.includes(`\n\n${validated}\n\nCloses #1`));
+    const graded = await review(201, "grade-C");
+    const reviewed = f.requests.findLast((r) => r.context.action === "review_pr").context.files.validation;
+    const listing = readFileSync(reviewed, "utf8");
+    assert.ok(listing.includes(implemented.headSha));
+    for (const c of implemented.verification.commands) assert.ok(listing.includes(`- ${c.name}: passed (`));
     assert.equal(graded.result.grade, "C"); await route();
     assert.equal(repairs(201).length, 1); assert.equal(repairs(201)[0].status, "queued"); assert.equal(repairs(201)[0].input.assessmentRunId, graded.id);
     assert.equal(count(201), 0, "A queued repair spends no cap slot until it runs"); await route(); assert.equal(repairs(201).length, 1); assert.equal(count(201), 0);
@@ -1963,7 +1971,8 @@ export const scenarios = {
     assert.equal(repairs(201).length, 1); assert.equal(count(201), 1);
     db.$client.prepare("update items set self_repair_count = 2 where id = ?").run(prItem(201).id); await route();
     assert.ok(f.prs.find((pr) => pr.number === 201).labels.some((label) => label.name === "Scrat repair exhausted"), "A last repair that changed nothing still marks the PR");
-    await implement(2); await review(202, "normal"); await route(); assert.equal(repairs(202).length, 0, "Grade B does not trigger");
+    await implement(2); db.$client.prepare("update runs set verification = null").run(); await review(202, "normal");
+    assert.equal(f.requests.findLast((r) => r.context.action === "review_pr").context.files.validation, undefined, "A head with no stored verification gets no validation file"); await route(); assert.equal(repairs(202).length, 0, "Grade B does not trigger");
     await implement(3); f.prs.find((pr) => pr.number === 203).user.login = "human";
     await review(203, "grade-C"); await route(); assert.equal(repairs(203).length, 0, "Human-authored PRs never trigger");
     await implement(4); await review(204, "grade-C");
@@ -3036,7 +3045,7 @@ export const scenarios = {
     };
     rejects("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, bash]"), /rule_check\.yaml: mode review forbids the bash, edit and write tools/);
     rejects("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, git, read_base]"), /read_base requires a review with agent: panel or context: change/);
-    rejects("review_pr", (text) => text.replace("[discussion, previous_assessment, previous_repair]", "[history]"), /files: history is not allowed with the pr_assessment effect/);
+    rejects("review_pr", (text) => text.replace("[discussion, previous_assessment, previous_repair, validation]", "[history]"), /files: history is not allowed with the pr_assessment effect/);
     rejects("review_issue", (text) => text.replace("files: [discussion]", "files: [review]"), /files: review requires trigger.kind low_grade/);
     rejects("implement", (text) => text.replace("[read, grep, find, ls, bash, edit, write]", "[read, git]"), /mode change forbids the git and read_base tools/);
     rejects("implement", (text) => text.replace("item: issue", "item: pr"), /trigger.kind label requires item: issue/);

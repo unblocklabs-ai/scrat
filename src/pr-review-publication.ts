@@ -2,11 +2,13 @@ import { actionsPublishing } from "./actions.ts";
 import { upsertComment } from "./comments.ts";
 import { getRepositoryPath } from "./config.ts";
 import type { EventReferences } from "./events.ts";
+import { errorStatus } from "./errors.ts";
 import { git } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubComment, GithubContext } from "./github-types.ts";
 import { botName } from "./identity.ts";
 import { gradeLabels, reconcileLabels } from "./labels.ts";
+import { logger } from "./logging.ts";
 import { acknowledgedTaskIds, isIssueComment, issueCommentId, legacySummaryMarker, parseIssueCommentId, reviewMarker, taskMarker } from "./markers.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { resolvePrReview } from "./pr-assessment.ts";
@@ -23,6 +25,12 @@ function reviewBody(text: string, taskId: string) {
 function legacyAssessment(comment: GithubComment, assessmentTaskIds: Set<string>) {
   if (comment.body.includes(legacySummaryMarker)) return true;
   return !comment.body.includes(reviewMarker) && acknowledgedTaskIds(comment.body).some((taskId) => assessmentTaskIds.has(taskId));
+}
+
+async function deleteLegacyAssessment(github: GitHubRepository, comment: GithubComment, references: EventReferences) {
+  const commentId = parseIssueCommentId(comment.id);
+  try { await github.deleteComment(commentId, references); }
+  catch (error) { if (errorStatus(error) !== 404) logger.warn({ event: "github.legacy_assessment_pending", commentId, status: errorStatus(error) }); }
 }
 
 function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeof runHistory>) {
@@ -53,17 +61,15 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
   await reconcileLabels(github, number, { current: labels, desired: kept, managed }, deliveryReferences);
   if (publication && !desired) throw new Error("Reviewed code changed or PR context changed; enqueue a fresh review");
 
+  let canonicalId: string | undefined;
   if (shown) {
     const body = desired ? reviewBody(desired.result.text, desired.task.id)
       : reviewBody(`This PR is behind ${observation.baseBranch} and does not merge cleanly; update the branch and ${botName} will review it.`, shown.task.id);
     const { run } = shown;
     const commentId = await upsertComment(github, number, existing, body, deliveryReferences);
+    canonicalId = issueCommentId(commentId);
     run.publication = { ...run.publication, commentId };
     updateRun(run.id, { publication: run.publication });
-    const canonicalId = issueCommentId(commentId);
-    for (const comment of observation.own.filter(isIssueComment)) {
-      if (comment.id !== canonicalId && legacyAssessment(comment, assessmentTaskIds)) await github.deleteComment(parseIssueCommentId(comment.id), deliveryReferences);
-    }
   }
 
   await reconcileLabels(github, number, {
@@ -71,6 +77,11 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
   }, deliveryReferences);
   if (desired) updateRun(desired.run.id, { publication: { ...desired.run.publication, status: "published" } });
   if (publication && publication.run.id !== desired?.run.id) updateRun(publication.run.id, { publication: { ...publication.run.publication, status: "not_needed" } });
+  if (canonicalId) {
+    for (const comment of observation.own.filter(isIssueComment)) {
+      if (comment.id !== canonicalId && legacyAssessment(comment, assessmentTaskIds)) await deleteLegacyAssessment(github, comment, deliveryReferences);
+    }
+  }
 }
 
 export const serializePr = <T>(github: GitHubRepository, number: number, work: () => Promise<T>) =>

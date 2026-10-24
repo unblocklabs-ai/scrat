@@ -13,6 +13,7 @@ const schema = Type.Object({
     maxConcurrency: positive, maxConcurrentValidations: positive, commandTimeoutSeconds: positive, commandOutputTailBytes: positive, maxOutputBytes: positive, gitNetworkTimeoutSeconds: positive, idlePollSeconds: positive, agentTimeoutSeconds: positive, drainTimeoutSeconds: positive,
     retryJitter: Type.Number({ minimum: 0, maximum: 1 }),
     corrections: Type.Object({ incomplete: Type.Integer({ minimum: 0 }), validation: Type.Integer({ minimum: 0 }), format: Type.Integer({ minimum: 0 }) }, strict),
+    agentRetry: Type.Object({ maxRetries: Type.Integer({ minimum: 0 }), baseDelayMs: Type.Integer({ minimum: 0 }) }, strict),
     logLevel: Type.Enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]),
   }, strict),
   github: Type.Object({
@@ -27,7 +28,7 @@ const schema = Type.Object({
     http: Type.Object({ timeoutSeconds: positive, maxRequestBytes: positive }, strict),
     browser: Type.Object({ steps: positive, sessionSeconds: positive, stepSeconds: positive }, strict),
   }, strict),
-  slack: Type.Object({ enabled: Type.Boolean(), channel: Type.String(), maxRetryAfterSeconds: positive }, strict),
+  slack: Type.Object({ enabled: Type.Boolean(), channel: Type.String(), maxRetryAfterSeconds: positive, minimumGapMs: Type.Integer({ minimum: 0 }) }, strict),
   workspace: Type.Object({
     sandbox: Type.Optional(Type.Boolean()),
     commandMemoryMax: Type.Optional(nullable(Type.String({ pattern: "^(?:[1-9]\\d*[KMGT]?|(?:100|[1-9]\\d?)%)$" }))),

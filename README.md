@@ -115,6 +115,7 @@ The installer keeps this file across deploys (any other drop-in is moved into th
 | `tools.git.maxScopeBytes` | Most bytes of file names the review git tool reads to scope a diff (default 1048576, a positive integer). |
 | `tools.http.timeoutSeconds` / `tools.http.maxRequestBytes` | Per-request timeout and request body cap of the `http` tool (defaults 30 / 65536, positive integers). |
 | `tools.browser.steps` / `tools.browser.sessionSeconds` / `tools.browser.stepSeconds` | Browser actions allowed per agent session, session length, and timeout of one action (defaults 40 / 300 / 30, positive integers). |
+| `slack.minimumGapMs` | Least time between Slack posts in milliseconds (default 1000, a non-negative integer; 0 posts back to back). |
 | `slack.maxRetryAfterSeconds` | Longest `Retry-After` Scrat waits out once on a Slack 429; a longer one drops the post (default 30, a positive integer). |
 | `github.repository` | Target GitHub repository as `owner/repo`. |
 | `github.repositoryPath` | Local repository clone; relative paths resolve from the config directory. `SCRAT_REPOSITORY_PATH` overrides it. |

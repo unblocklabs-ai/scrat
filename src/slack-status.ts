@@ -6,7 +6,6 @@ import { logger } from "./logging.ts";
 import { items, slackThreads, subjects, type Subject } from "./schema.ts";
 import { escapeSlack, postMessage } from "./slack.ts";
 
-const minimumGapMs = 1000;
 const maxErrorLength = 300;
 
 const link = (url: string, label: string) => `<${url}|${escapeSlack(label)}>`;
@@ -33,7 +32,7 @@ let chain: Promise<void> = Promise.resolve();
 let lastPostAt = 0;
 
 async function send(message: Parameters<typeof postMessage>[0]) {
-  const wait = lastPostAt + minimumGapMs - Date.now();
+  const wait = lastPostAt + config.slack.minimumGapMs - Date.now();
   if (wait > 0) await new Promise((done) => setTimeout(done, wait));
   try { return await postMessage(message); } finally { lastPostAt = Date.now(); }
 }

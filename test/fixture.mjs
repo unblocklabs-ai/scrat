@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { createServer } from "node:http";
@@ -8,6 +8,19 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 export const bearer = (options) => new Headers(options.headers).get("authorization")?.replace(/^(token|bearer) /i, "");
+
+function schemaTemplate(repository) {
+  const kit = resolve(repository, "node_modules/drizzle-kit");
+  const key = createHash("sha256").update(readFileSync(resolve(repository, "src/schema.ts"))).update(JSON.parse(readFileSync(resolve(kit, "package.json"), "utf8")).version).digest("hex").slice(0, 16);
+  const template = resolve(tmpdir(), `scrat-schema-${key}.sqlite`);
+  if (existsSync(template)) return template;
+  const work = mkdtempSync(resolve(tmpdir(), "scrat-schema-build-"));
+  try {
+    execFileSync(process.execPath, [resolve(kit, "bin.cjs"), "push", "--dialect=sqlite", "--schema=" + resolve(repository, "src/schema.ts"), "--url=./template.sqlite"], { cwd: work, stdio: ["ignore", "pipe", "pipe"] });
+    renameSync(resolve(work, "template.sqlite"), template);
+  } finally { rmSync(work, { recursive: true, force: true }); }
+  return template;
+}
 
 export async function fixture(scenario, spec, layout) {
   const repository = fileURLToPath(new URL("..", import.meta.url));
@@ -170,6 +183,7 @@ export async function fixture(scenario, spec, layout) {
   const config = JSON.parse(readFileSync("app/scrat.config.json", "utf8"));
   const heavyCommands = config.workspace.heavyCommands;
   if (scenario !== "config_overrides") config.workspace = scenario === "bash_guard" ? { heavyCommands: [...heavyCommands, "^touch \\.scrat/heavy-"], validate: [["true"]] } : { validate: [["true"]] };
+  config.harness.agentRetry = { maxRetries: 0, baseDelayMs: 0 }; config.slack.minimumGapMs = 0;
   config.harness.maxConcurrency = 6; config.github.repository = "fixture/project"; config.github.repositoryPath = resolve("checkout");
   config.providers = { fixture: { api: "openai-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: "fixture", models: [
     { id: "gpt-6.1-sol", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
@@ -183,7 +197,7 @@ export async function fixture(scenario, spec, layout) {
   writeFileSync("app/scrat.config.json", JSON.stringify(fileSettings));
   writeFileSync("app/scrat.local.json", JSON.stringify({ actions }));
   mkdirSync("data");
-  execFileSync(process.execPath, [resolve(repository, "node_modules/drizzle-kit/bin.cjs"), "push", "--dialect=sqlite", "--schema=./app/src/schema.ts", "--url=./data/scrat.sqlite"], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+  copyFileSync(schemaTemplate(repository), "data/scrat.sqlite");
   const app = async (path) => import(pathToFileURL(resolve("app/src", path)));
   const { db } = await app("db.ts"), schema = await app("schema.ts"), tasks = await app("tasks.ts"), { runNextTask } = await app("runner.ts");
   const slack = { calls: [], down: false, rateLimitOnce: false, retryAfter: "0", fail: null, sequence: 0 };

@@ -70,7 +70,7 @@ const commitPurposes: Record<string, string> = { address_review: "Address review
 
 async function validateAndCommit({ run, task, references, stop }: Ctx, p: Change, kind: Acceptance) {
   const { workspace, commandEnvironment } = p;
-  if (!p.validationOnly) updateRun(run.id, { agentCheckpoint: await checkpointWorkspace(workspace) });
+  updateRun(run.id, { agentCheckpoint: await checkpointWorkspace(workspace) });
   await asCheckFailure(() => prepareWorkspace(workspace, commandEnvironment, references, p.databaseConfig));
   const checkpoint = await checkpointWorkspace(workspace);
   updateRun(run.id, { agentCheckpoint: checkpoint });
@@ -337,7 +337,7 @@ async function validateStage(ctx: Ctx, p: Change, acceptance: Acceptance) {
       catch (error) {
         if (!(error instanceof CheckFailure)) throw error;
         const sessionFile = getRun(run.id)!.piSessionFile ?? undefined;
-        if (validationOnly || !p.agentInput || !sessionFile || round > config.harness.corrections.validation) throw error.cause;
+        if (!sessionFile || round > config.harness.corrections.validation) throw error.cause;
         operation.log.warn({ event: "pi.validation_retry", round });
         updateRun(run.id, { stage: "agent" });
         const followUp = await executePi({ run, cwd: workspace.path, context: "", tools: ctx.manifest.tools, scoped: ctx.manifest, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });

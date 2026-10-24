@@ -53,7 +53,7 @@ const schema = Type.Object({
   actions: Type.Record(Type.String(), Type.Object({
     enabled: Type.Optional(Type.Boolean()), priority: Type.Integer(), skill: Type.String(), agent: Type.Enum(["single", "panel"]), reviewers: Type.Optional(Type.Array(model)),
     branch: Type.Optional(Type.String()), channel: Type.Optional(Type.String()), maxRangeCommits: Type.Optional(positive), startMessage: Type.Optional(Type.String()),
-    maxSelfRepairs: Type.Optional(Type.Integer({ minimum: 0 })), exhaustedLabel: Type.Optional(nullable(Type.String())),
+    maxSelfRepairs: Type.Optional(Type.Integer({ minimum: 0 })), exhaustedLabel: Type.Optional(nullable(Type.String())), failedLabel: Type.Optional(nullable(Type.String())),
     provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels),
     retry: Type.Optional(nullable(Type.Object({ initialDelaySeconds: positive, maxDelaySeconds: positive }, strict))),
   }, strict)),

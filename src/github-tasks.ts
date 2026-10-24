@@ -1,6 +1,6 @@
 import { and, eq, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
-import { actionsPublishing, matchingActions, routeFor } from "./actions.ts";
+import { actionsPublishing, manifests, matchingActions, routeFor } from "./actions.ts";
 import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import type { Signal } from "./manifests.ts";
 import { botSlug } from "./identity.ts";
@@ -95,6 +95,21 @@ async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation
   try {
     await reconcileLabels(ctx.github, item.payload.number, { current: observation.labels, desired: exhausted ? [exhaustedLabel] : [], managed: [exhaustedLabel] }, { subjectId: item.id });
   } catch (error) { ctx.log.warn({ event: "self_repair.label_pending", subjectId: item.id, err: error }); }
+}
+
+async function reconcileFailedLabels(ctx: SyncContext, item: Item) {
+  const labelled = manifests().flatMap(({ name, trigger }) => {
+    const label = config.actions[name]?.failedLabel;
+    return trigger.item === item.kind && label ? [{ name, label }] : [];
+  });
+  if (!labelled.length) return;
+  try {
+    await reconcileLabels(ctx.github, item.payload.number, {
+      current: item.payload.labels ?? [],
+      desired: labelled.filter(({ name }) => latestTask(item.id, name)?.status === "failed").map(({ label }) => label),
+      managed: labelled.map(({ label }) => label),
+    }, { subjectId: item.id });
+  } catch (error) { ctx.log.warn({ event: "github.failed_label_pending", subjectId: item.id, err: error }); }
 }
 
 async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObservation, mainSha: string, routes: Routes) {
@@ -193,6 +208,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       db.update(subjects).set({ workspaceId: null }).where(eq(subjects.id, item.id)).run();
       item.workspaceId = null;
     }
+    await reconcileFailedLabels(ctx, item);
     if (item.kind === "issue") {
       const previousItem = previous.get(item.externalId);
       const labelAction = routeFor(issueSignal(item, "label"));

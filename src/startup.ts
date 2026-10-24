@@ -80,6 +80,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
     const action = manifest.name, entry = resolvedEntry(manifest);
     checkEntry(action, entry);
     if (entry.retry && manifest.mode !== "review") problems.push(`${action}: retry requires mode review`);
+    if (entry.failedLabel && manifest.mode !== "change") problems.push(`${action}: failedLabel requires mode change`);
     if (entry.retry && entry.retry.maxDelaySeconds < entry.retry.initialDelaySeconds) problems.push(`${action}: retry.maxDelaySeconds must be at least retry.initialDelaySeconds`);
     entry.reviewers?.forEach((reviewer, index) => checkEntry(`${action} reviewer ${index + 1}`, reviewer));
     if (entry.enabled !== false) {

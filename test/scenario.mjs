@@ -328,6 +328,19 @@ const validationFeedback = async (variant) => {
     assert.match(r.result.text, /^Implemented the change\./);
     assert.match(r.result.text, /\*\*Validation correction 1:\*\* Fixed the validation failure\./);
     assert.match(f.prs[0].body, /Implemented the change\.[\s\S]*Fixed the validation failure\./);
+    const turns = () => f.requests.filter((entry) => entry.request.messages.at(-1).role === "user").length - feedbackRequests().length;
+    f.addIssue(2, ["scrat"]); f.reset(2, "feedback-fix"); f.enqueue(2, "implement");
+    const stop = new AbortController(); f.onModel = () => stop.abort();
+    const cut = await f.runNextTask(stop.signal); f.onModel = undefined;
+    assert.equal(cut.stage, "validating"); assert.equal(f.row(s.tasks, cut.taskId).retryMode, "validation");
+    const started = turns(), asked = feedbackRequests().length, checked = validations();
+    const resumed = await success();
+    assert.equal(resumed.inferenceFromRunId, cut.id); assert.equal(resumed.piSessionId, cut.piSessionId);
+    assert.equal(turns(), started, "the resumed run starts no new agent turn");
+    assert.equal(feedbackRequests().length, asked + 1); assert.match(lastUser(feedbackRequests().at(-1)), /round 1 of 2/);
+    assert.equal(validations(), checked + 2); assert.equal(f.prs.length, 2);
+    assert.equal(git(resolve("remote.git"), "rev-list", "--count", `main..${f.prs[1].head.ref}`), "1");
+    assert.match(resumed.result.text, /^Implemented the change\.[\s\S]*\*\*Validation correction 1:\*\* Fixed the validation failure\./);
   } else {
     f.addIssue(1, ["scrat"]); f.reset(1, "feedback-stubborn"); f.enqueue(1, "implement"); const failed = await run();
     assert.equal(failed.error.exitCode, 7); assert.equal(failed.verification, null); assert.equal(f.prs.length, 0);
@@ -345,6 +358,14 @@ const validationFeedback = async (variant) => {
     const limited = await run();
     assert.equal(limited.error.exitCode, 7); assert.equal(feedbackRequests().length, 3);
     assert.match(lastUser(feedbackRequests()[2]), /round 1 of 1/);
+    const marked = (n) => f.issues.get(n).labels.some(({ name }) => name === "Scrat failed");
+    await route(); assert.ok([1, 2, 3, 4].every(marked), "a change task that failed for good labels its issue");
+    const labelWrites = () => f.writes.filter((w) => w.type === "label" && w.method !== "GET").length;
+    const written = labelWrites(); await route(); assert.equal(labelWrites(), written, "a steady state writes no label");
+    f.addIssue(5, ["scrat"]); f.enqueue(5, "implement"); const stop = new AbortController(); f.onModel = () => stop.abort();
+    const cut = await f.runNextTask(stop.signal); f.onModel = undefined; assert.equal(f.row(s.tasks, cut.taskId).status, "queued");
+    await route(); assert.ok(!marked(5), "an interrupted task is not labelled");
+    tasks.retryTask(limited.taskId); await route(); assert.ok(!marked(4), "a retried task clears the label"); assert.ok(marked(3));
   }
 };
 const commitReview = async (variant) => {
@@ -1289,6 +1310,8 @@ export const scenarios = {
     assert.equal(failed.error.exitCode, 7);
     assert.match(failed.error.stdout, /validation detail \[redacted\]/);
     assert.match(failed.error.stdout, /Verification failed/);
+    assert.match(failed.error.evidence, new RegExp(`^${RegExp.escape(resolve("data/checks", failed.id))}/validate-0-\\d+\\.log$`));
+    assert.match(readFileSync(failed.error.evidence, "utf8"), /Verification failed/);
     assert.ok(!JSON.stringify(failed.error).includes("ghs_fixture_sensitive"));
   } },
   validation_mutation: { title: "checks that change source cannot certify the resulting commit", configure: [configureCheck], run: async () => {
@@ -1496,8 +1519,8 @@ export const scenarios = {
   } },
   stale_branch: { title: "a human PR whose branch is behind and cannot be prepared is reviewed on a local merge without pushing, or says once in its assessment comment that the merge conflicts and is not retried until its head changes or a review is requested by hand", configure: [configureStaleBranch], run: () => staleBranch("human") },
   stale_branch_scrat: { title: "behind Scrat PRs are merged in code, fall back to the agent when validation fails, self-heal feedback tasks and reach the agent when conflicting", configure: [configureStaleBranch], run: () => staleBranch("scrat") },
-  validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit", configure: [configureValidation], run: () => validationFeedback("fix") },
-  validation_feedback_cap: { title: "validation feedback stops after two rounds and never applies to signal-killed commands", configure: [configureValidation], run: () => validationFeedback("cap") },
+  validation_feedback: { title: "a failed validation is sent back into the same Pi session, fixed there and published as one commit, including after a restart resumed it at validation", configure: [configureValidation], run: () => validationFeedback("fix") },
+  validation_feedback_cap: { title: "validation feedback stops after two rounds and never applies to signal-killed commands, and sync labels each issue whose implementation failed for good until it is retried", configure: [configureValidation], run: () => validationFeedback("cap") },
   measured_checks: { title: "a chatty passing validation command stores a bounded tail and keeps its full output on disk", configure: [configureChatty], run: async () => {
     const r = await implement(1);
     const [check] = r.verification.commands;
@@ -2523,6 +2546,7 @@ export const scenarios = {
     schema((c) => { c.harness = null; }, /harness: must be object/);
     schema((c) => { c.harness.toString = 1; }, /harness\.toString: unknown setting/);
     schema((c) => { c.actions.address_review.exhaustedLabel = 5; }, /actions\.address_review\.exhaustedLabel: must be string/);
+    schema((c) => { c.actions.implement.failedLabel = 5; }, /actions\.implement\.failedLabel: must be string/);
     schema((c) => { c.harness.maxConcurrentValidations = 0; }, /^Error: Invalid Scrat configuration:\n- harness\.maxConcurrentValidations: must be >= 1$/);
     schema((c) => { c.harness.corrections.incomplete = -1; }, /harness\.corrections\.incomplete: must be >= 0/);
     schema((c) => { c.harness.retryJitter = 2; }, /harness\.retryJitter: must be <= 1/);
@@ -2533,7 +2557,7 @@ export const scenarios = {
     schema((c) => { delete c.tools; }, /tools: required/);
     schema((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 0, maxDelaySeconds: 30 }; }, /actions\.review_pr\.retry\.initialDelaySeconds: must be >= 1/);
     for (const change of [(c) => { c.workspace.commandMemoryMax = null; }, (c) => { c.workspace.packageStore = null; }, (c) => { c.actions.review_pr.retry = null; },
-      (c) => { c.actions.address_review.exhaustedLabel = null; }, (c) => { c.actions.address_review.exhaustedLabel = ""; }, (c) => { c.workspace.environment = { ANY_NEW_KEY: "1" }; }]) {
+      (c) => { c.actions.address_review.exhaustedLabel = null; }, (c) => { c.actions.address_review.exhaustedLabel = ""; }, (c) => { c.actions.implement.failedLabel = null; }, (c) => { c.workspace.environment = { ANY_NEW_KEY: "1" }; }]) {
       const copy = structuredClone(merged); change(copy); validateConfig(copy);
     }
 
@@ -2548,6 +2572,7 @@ export const scenarios = {
     await startup((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 30 }; }, /review_pr: retry\.maxDelaySeconds must be at least retry\.initialDelaySeconds/);
     await validateStaticConfig(variant((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 5, maxDelaySeconds: 5 }; }));
     await startup((c) => { c.actions.implement.retry = { initialDelaySeconds: 1, maxDelaySeconds: 2 }; }, /implement: retry requires mode review/);
+    await startup((c) => { c.actions.review_pr.failedLabel = "Scrat failed"; }, /review_pr: failedLabel requires mode change/);
     await startup((c) => { c.actions.review_issue.model = "missing-model"; }, /review_issue: no Pi model fixture\/missing-model/);
     await startup((c) => { c.actions.review_pr.reviewers[0].provider = "nowhere"; }, /review_pr reviewer 1: no Pi model nowhere/);
     await startup((c) => { c.actions.resolve_conflicts.skill = "skills/missing/SKILL.md"; }, /resolve_conflicts: skill file not found/);
@@ -2985,6 +3010,7 @@ export const scenarios = {
     rejects("review_issue", (text) => text.replace("files: [discussion]", "files: [review]"), /files: review requires trigger.kind low_grade/);
     rejects("implement", (text) => text.replace("[read, grep, find, ls, bash, edit, write]", "[read, git]"), /mode change forbids the git and read_base tools/);
     rejects("implement", (text) => text.replace("item: issue", "item: pr"), /trigger.kind label requires item: issue/);
+    rejects("review_issue", (text) => text + "failedLabel: Scrat failed\n", /rule_check\.yaml: failedLabel requires mode change/);
   } },
   scoped_http: { title: "the http tool injects its binding's credential after the model's call, refuses off-list, IP, loopback and metadata hosts, never follows redirects, redacts echoed secrets and journals only method, host and status", configure: [configureScoped], run: async () => {
     const secret = process.env.SCOUT_TOKEN;

@@ -146,7 +146,7 @@ const configureSchedule = (config) => {
 const configureCommitSource = (config) => Object.assign(config.actions.review_base_change, { enabled: true, channel: "C0123456789" });
 const configureCommitPanel = (config) => Object.assign(config.actions.review_base_change, { agent: "panel", reviewers: structuredClone(config.actions.review_pr.reviewers) });
 const configureNoStart = () => writeFileSync("app/actions/review_base_change.yaml", readFileSync("app/actions/review_base_change.yaml", "utf8").replace("start: [slack_post]\n", ""));
-const configureHistory = () => writeFileSync("app/actions/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace("files: [discussion]", "files: [discussion, history]"));
+const configureHistory = () => writeFileSync("app/actions/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace("files: [discussion, previous_assessment]", "files: [discussion, previous_assessment, history]"));
 const configureScoped = (config) => {
   config.bindings = { scout: { secret: "${SCOUT_TOKEN}", hosts: ["api.example.test", "other.example.test"], header: "Authorization", prefix: "Bearer " } };
   const scopedTools = { scoped_http: ["[read, grep, http]", "http: { binding: scout, methods: [GET] }"], bindings_startup: ["[read, grep, http]", "http: { binding: scout }"], scoped_github_search: ["[read, grep, github_search]", ""],
@@ -1378,17 +1378,24 @@ export const scenarios = {
     assert.equal(replacement.taskId, replaced.taskId); assert.ok(f.requests.length > replacementCalls);
     assert.equal(replacement.inferenceFromRunId, null);
   } },
-  retry: { title: "publication retries reconcile remote comments and labels without rerunning Pi", run: async () => {
+  retry: { title: "publication retries reconcile remote comments and labels without rerunning Pi, and follow-up issue reviews edit the one assessment comment with the previous assessment in hand", run: async () => {
     for (const [n, fault] of [[1, "label"], [2, "comment"]]) {
       f.addIssue(n, ["human-label"]); f.reset(n, "ready"); f.enqueue(n); f.faults[fault].add(n);
-      const failed = await run(); assert.ok(failed.error); const calls = f.requests.length;
+      const first = f.requests.length, failed = await run(); assert.ok(failed.error); const calls = f.requests.length;
+      assert.ok(!("previous_assessment" in f.requests[first].context.files), "A first issue review has no previous assessment");
       tasks.retryTask(failed.taskId); const completed = await success();
       assert.equal(completed.retryOfRunId, failed.id); assert.equal(f.requests.length, calls);
       assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === n).length, 1);
       assert.deepEqual(f.issues.get(n).labels.map((label) => label.name).sort(), ["human-label", "scrat"]);
     }
-    f.reset(1, "normal"); f.enqueue(1); await success();
+    f.reset(1, "normal"); f.enqueue(1); const followUp = await success();
     assert.deepEqual(f.issues.get(1).labels.map((label) => label.name), ["human-label"]);
+    assert.equal(f.comments.get(1).length, 1, "A second review keeps one assessment comment");
+    f.reset(1, "revised"); f.enqueue(1); const before = f.requests.length, written = f.writes.length, revised = await success();
+    assert.equal(readFileSync(f.requests[before].context.files.previous_assessment, "utf8"), followUp.result.text);
+    assert.deepEqual(f.writes.slice(written).map((w) => w.type), ["comment_update"], "A changed assessment edits the comment in place");
+    assert.equal(f.comments.get(1).length, 1); assert.equal(f.comments.get(1)[0].body, `${revised.result.text}\n\n<!-- scrat-review -->`);
+    assert.equal(revised.publication.commentId, f.comments.get(1)[0].id);
   } },
   ambiguous_pr: { title: "a lost PR response is reconciled without another PR, inference or revalidation, resuming at the publishing stage", configure: [configureValidation], run: async () => {
     const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
@@ -2938,7 +2945,7 @@ export const scenarios = {
     broken("review_pr", (text) => text.replace("[pr_assessment]", "[teleport]"), /actions\/review_pr\.yaml: \/publish\/0/);
     broken("implement", (text) => text.replace("nonempty_diff", "sometimes"), /actions\/implement\.yaml: \/acceptance/);
     broken("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, teleport]"), /actions\/review_issue\.yaml: \/tools\/1/);
-    broken("review_issue", (text) => text.replace("files: [discussion]", "files: [secrets]"), /actions\/review_issue\.yaml: \/files\/0/);
+    broken("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [secrets]"), /actions\/review_issue\.yaml: \/files\/0/);
     broken("review_issue", (text) => text.replace("name: review_issue", "name: Review-Issue"), /actions\/review_issue\.yaml: \/name/);
     broken("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, bash]"), /mode review forbids the bash, edit and write tools/);
     f.addIssue(1); f.enqueue(1);
@@ -3010,7 +3017,9 @@ export const scenarios = {
     rejects("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, bash]"), /rule_check\.yaml: mode review forbids the bash, edit and write tools/);
     rejects("review_issue", (text) => text.replace("[read, grep, find, ls, git]", "[read, git, read_base]"), /read_base requires a review with agent: panel or context: change/);
     rejects("review_pr", (text) => text.replace("[discussion, previous_assessment, previous_repair]", "[history]"), /files: history is not allowed with the pr_assessment effect/);
-    rejects("review_issue", (text) => text.replace("files: [discussion]", "files: [review]"), /files: review requires trigger.kind low_grade/);
+    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [review]"), /files: review requires trigger.kind low_grade/);
+    rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [labels]"), /files: previous_assessment requires the pr_assessment effect or a review that publishes comment/);
+    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [discussion, previous_repair]"), /files: previous_repair requires the pr_assessment effect/);
     rejects("implement", (text) => text.replace("[read, grep, find, ls, bash, edit, write]", "[read, git]"), /mode change forbids the git and read_base tools/);
     rejects("implement", (text) => text.replace("item: issue", "item: pr"), /trigger.kind label requires item: issue/);
     rejects("review_issue", (text) => text + "failedLabel: Scrat failed\n", /rule_check\.yaml: failedLabel requires mode change/);

@@ -98,7 +98,8 @@ function crossChecks(m: Parsed) {
     need(!any(tools, ["bash", "edit", "write"]), "mode review forbids the bash, edit and write tools");
   }
   need(!files.includes("review") || t.kind === "low_grade", "files: review requires trigger.kind low_grade");
-  need(!any(files, ["previous_assessment", "previous_repair"]) || publish.includes("pr_assessment"), "files: previous_assessment and previous_repair require the pr_assessment effect");
+  need(!files.includes("previous_assessment") || publish.includes("pr_assessment") || (mode === "review" && publish.includes("comment")), "files: previous_assessment requires the pr_assessment effect or a review that publishes comment");
+  need(!files.includes("previous_repair") || publish.includes("pr_assessment"), "files: previous_repair requires the pr_assessment effect");
   need(!files.includes("history") || !publish.includes("pr_assessment"), "files: history is not allowed with the pr_assessment effect");
   return problems;
 }

@@ -165,6 +165,7 @@ export async function fixture(scenario, spec) {
       + (mode.startsWith("issues") ? '\n```\nSCRAT_ISSUE_BEGIN\ntitle: Quoted\nfingerprint: quoted:one\n\nQuoted only.\nSCRAT_ISSUE_END\n```' : "")
       + (mode === "issues" ? '\nSCRAT_ISSUE_BEGIN\ntitle: Broken link\nfingerprint: link:docs-a\n\nThe link on docs/a is broken.\nSCRAT_ISSUE_END\nSCRAT_ISSUE_BEGIN\ntitle: Slow page\nfingerprint: perf:home\n\nHome takes 9s.\n\n```\ntrace\n```\nSCRAT_ISSUE_END' : "")
       + (mode === "issues-bad" ? '\nSCRAT_ISSUE_BEGIN\ntitle: Bad\nfingerprint: a --> <!-- b\n\nBad fingerprint.\nSCRAT_ISSUE_END' : "")
+      + (mode === "revised" ? "\nRevised after the latest changes." : "")
       + (mode === "ready" ? "\nSCRAT_READY" : "")
       + (["review_pr", "my_pr_review"].includes(context.action) && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : ["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : mode === "grade-C" ? "C" : "B"}` : "")
       + (mode === "no-status" || (fumble && mode === "format-once" && !review) ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);

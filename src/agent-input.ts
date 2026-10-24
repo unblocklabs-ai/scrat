@@ -81,7 +81,7 @@ export async function buildAgentInput(options: {
   const listed = manifestOf(action).files;
   const history = listed.includes("history") ? historyReport(completedRunsOfActionInRepository(config.github.repository, action, config.context.historyRuns), action) : undefined;
   const prior = manifestOf(action).publish.includes("pr_assessment") ? priorReviewTexts(task.subjectId) : undefined;
-  const verification = listed.includes("validation") ? verificationOfCommit(headSha) : undefined;
+  const found = listed.includes("validation") ? verificationOfCommit(headSha) : undefined, verification = found?.commands.length ? found : undefined;
   await Promise.all([
     verification && writeContext("validation", "validation.md", `# Validation run by ${botName} on ${headSha}\n\n${verification.commands.map((check) => `- ${check.name}: ${check.status} (${(check.durationMs / 1000).toFixed(1)}s)`).join("\n")}\n`),
     listed.includes("discussion") && writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),

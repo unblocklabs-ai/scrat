@@ -4,8 +4,7 @@
     "src/{fetch,sync,enqueue,run-next,work,retry,cleanup,recover,recover-active,serve}.ts",
     "src/sandbox.ts",
     "test/{integration.test,scenario,database-command}.mjs",
-    "deploy/prepare-tools.mjs",
-    "deploy/migrate-subjects.mjs"
+    "deploy/prepare-tools.mjs"
   ],
   "ignoreDependencies": ["playwright-core"],
   "project":["src/**/*.ts", "test/**/*.mjs", "deploy/**/*.mjs"]

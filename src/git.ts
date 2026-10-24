@@ -23,7 +23,6 @@ function timedOut(label: string) {
 
 const gitCommand = (repositoryPath: string, args: string[], env: NodeJS.ProcessEnv) => inWorkspace(repositoryPath)
   ? sandboxCommand(repositoryPath, "git", args, env) : { file: "git", args: ["-C", repositoryPath, ...args], env };
-
 export async function git(repositoryPath: string, args: string[], env = childEnvironment()) {
   const command = gitCommand(repositoryPath, args, env);
   const { stdout } = await executeFile(command.file, command.args, { cwd: repositoryPath, env: command.env, maxBuffer: config.harness.maxOutputBytes, ...(networkCommands.has(args[0]!) ? networkOptions() : {}) }).catch(timedOut(args[0]!));
@@ -31,11 +30,7 @@ export async function git(repositoryPath: string, args: string[], env = childEnv
 }
 
 export const headOf = (repositoryPath: string) => git(repositoryPath, ["rev-parse", "HEAD"]);
-
-export async function gitList(repositoryPath: string, args: string[]) {
-  return (await git(repositoryPath, args)).split("\0").filter(Boolean);
-}
-
+export const gitList = async (repositoryPath: string, args: string[]) => (await git(repositoryPath, args)).split("\0").filter(Boolean);
 export const changedPaths = (repositoryPath: string, ...range: string[]) => gitList(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", ...range]);
 
 export type GitPage = { text: string; end: number; more: boolean; total?: number };
@@ -128,19 +123,9 @@ export async function hasPendingMerge(repositoryPath: string) {
   return existsSync(resolve(repositoryPath, mergeHead));
 }
 
-export async function mergeHeadOf(repositoryPath: string) {
-  return await hasPendingMerge(repositoryPath) ? git(repositoryPath, ["rev-parse", "MERGE_HEAD"]) : null;
-}
+export const mergeHeadOf = async (repositoryPath: string) => await hasPendingMerge(repositoryPath) ? git(repositoryPath, ["rev-parse", "MERGE_HEAD"]) : null;
 
-async function exitsOne(command: Promise<unknown>) {
-  try {
-    await command;
-    return false;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === 1) return true;
-    throw error;
-  }
-}
+const exitsOne = (command: Promise<unknown>) => command.then(() => false, (error: unknown) => { if (error instanceof Error && "code" in error && error.code === 1) return true; throw error; });
 
 const hasConflicts = (repositoryPath: string, base: string, head: string) => exitsOne(git(repositoryPath, ["merge-tree", "--write-tree", base, head]));
 

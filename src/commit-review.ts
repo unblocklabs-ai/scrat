@@ -7,7 +7,7 @@ import { botName } from "./identity.ts";
 import type { startOperation } from "./logging.ts";
 import { getRun } from "./run-history.ts";
 import { slackThreads, type Run, type Subject } from "./schema.ts";
-import { escapeSlack, postMessage } from "./slack.ts";
+import { addReaction, escapeSlack, postMessage } from "./slack.ts";
 import { parseTriggerInput } from "./triggers.ts";
 
 type CommitInput = { sha: string; previousSha: string; branch: string; commitCount: number };
@@ -59,4 +59,17 @@ export async function postCommitReply(subject: Subject, action: string, run: Run
   if (!saved.result) throw new Error("Run has no saved result to publish");
   const thread = await threadRoot(subject, action, input);
   return postMessage({ channel: thread.channel, text: escapeSlack(saved.result.text), threadTs: thread.ts });
+}
+
+const verdictReactions = { clean: "white_check_mark", concerns: "large_orange_square", breaking: "large_red_square" } as const;
+
+export function verdictReaction(run: Run) {
+  const result = getRun(run.id)?.result;
+  return result?.outcome === "complete" && result.verdict ? verdictReactions[result.verdict] : undefined;
+}
+
+export async function reactToCommitRoot(subject: Subject, name: string) {
+  const thread = db.select().from(slackThreads).where(eq(slackThreads.subjectId, subject.id)).get();
+  if (!thread) throw new Error("Commit review has no Slack thread root to react to");
+  await addReaction({ channel: thread.channel, timestamp: thread.ts, name });
 }

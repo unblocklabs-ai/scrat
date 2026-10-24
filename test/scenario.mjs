@@ -325,10 +325,12 @@ const commitReview = async (variant) => {
     git(seed, "push", remote, "main"); return pollCommits();
   };
   const reviewRequests = () => f.requests.filter((request) => request.context.action === "review_base_change");
+  const reactions = () => f.slack.calls.filter((call) => call.method === "reactions.add");
   const bot = f.config.github.botName;
   assert.equal(await pollCommits(), 0); assert.equal(f.slack.calls.length, 0);
   const previous = tip();
   if (variant === "e2e") {
+    f.verdicts.default = "clean";
     assert.equal(await push("Fix a<b & c>d"), 1);
     const head = tip(); assert.equal(f.slack.calls.length, 0);
     const r = await success();
@@ -354,6 +356,42 @@ const commitReview = async (variant) => {
     assert.equal(context.input.previousSha, previous); assert.equal(context.input.sha, head); assert.equal(context.input.commitCount, 1);
     assert.equal(context.commentRevisions.length, 0);
     assert.equal(f.writes.length, 0); assert.equal(all(s.runs).length, 1);
+    const rootTs = "1700000000.000001", reacted = (calls) => calls.map((call) => [call.body.channel, call.body.timestamp, call.body.name]);
+    assert.deepEqual(reacted(reactions()), [[channel, rootTs, "white_check_mark"]]);
+    assert.equal(r.result.verdict, "clean"); assert.equal(r.publication.slackReaction, "white_check_mark"); assert.ok(!reply.body.text.includes("SCRAT_VERDICT"));
+    assert.ok(reactions().every((call) => call.token === process.env.SLACK_BOT_TOKEN));
+    const review = async (value, verdict) => {
+      f.verdicts.default = verdict; assert.equal(await push("Verdict " + value, value), 1);
+      const before = reactions().length, done = await success();
+      const root = all(s.slackThreads).find((row) => row.subjectId === f.row(s.tasks, done.taskId).subjectId);
+      return { done, root: root.ts, added: reacted(reactions().slice(before)) };
+    };
+    const concerns = await review(3, "concerns");
+    assert.deepEqual(concerns.added, [[channel, concerns.root, "large_orange_square"]]);
+    const missing = await review(4, undefined);
+    assert.deepEqual(missing.added, []); assert.equal(missing.done.result.verdict, undefined); assert.equal(missing.done.publication.slackReaction, undefined);
+    const { parseResult } = await f.app("results.ts");
+    assert.throws(() => parseResult("Fine.\nSCRAT_VERDICT: safe\nSCRAT_STATUS: complete", []), /SCRAT_VERDICT/);
+    assert.equal(parseResult("Fine.\nSCRAT_VERDICT: breaking\nSCRAT_STATUS: complete", []).verdict, "breaking");
+    f.slack.reactionFail = ["already_reacted"];
+    const repeated = await review(5, "breaking");
+    assert.deepEqual(repeated.added, [[channel, repeated.root, "large_red_square"]]); assert.equal(repeated.done.publication.slackReaction, "large_red_square");
+    f.verdicts.default = "clean"; f.modes.set(0, "incomplete");
+    assert.equal(await push("Incomplete", 6), 1);
+    const reactionsBefore = reactions().length, incomplete = await run();
+    assert.ok(incomplete.error); assert.equal(reactions().length, reactionsBefore);
+    f.modes.delete(0); tasks.retryTask(incomplete.taskId); await success();
+    f.verdicts.default = "concerns"; f.slack.reactionFail = ["service_unavailable"];
+    assert.equal(await push("Reaction down", 7), 1);
+    const replies = () => posts().filter((call) => call.body.thread_ts !== undefined).length, postsBefore = replies(), callsBefore = reactions().length, failed = await run();
+    assert.ok(failed.error); assert.equal(failed.stage, "publishing");
+    assert.equal(failed.publication.slackReplyTs !== undefined, true); assert.equal(failed.publication.slackReaction, undefined);
+    assert.equal(replies() - postsBefore, 1); assert.equal(f.row(s.tasks, failed.taskId).status, "failed");
+    const used = f.requests.length; tasks.retryTask(failed.taskId);
+    const retried = await success();
+    assert.equal(f.requests.length, used); assert.equal(replies() - postsBefore, 1);
+    assert.equal(reactions().length - callsBefore, 2); assert.equal(retried.publication.slackReaction, "large_orange_square");
+    assert.equal(retried.publication.slackReplyTs, failed.publication.slackReplyTs);
   } else if (variant === "no_start") {
     let before;
     f.onModel = (_context, step) => { if (step === 0 && before === undefined) before = posts().length; };
@@ -362,8 +400,10 @@ const commitReview = async (variant) => {
     assert.equal(before, 0, "no root is posted before the agent runs");
     assert.equal(posts().length, 2); assert.equal(roots().length, 1); assert.equal(all(s.slackThreads).length, 1);
     } else if (variant === "panel") {
+    f.verdicts["gpt-6.1-sol"] = "concerns"; f.verdicts["deepseek/deepseek-v4.1-flash"] = "breaking";
     assert.equal(await push("Panel change"), 1);
     const r = await success();
+    assert.equal(r.result.verdict, "breaking"); assert.deepEqual(reactions().map((call) => call.body.name), ["large_red_square"]);
     assert.equal(r.reviewers.length, 2); assert.ok(r.reviewers.every((reviewer) => reviewer.result?.outcome === "complete"));
     assert.equal(new Set([...r.reviewers.map((reviewer) => reviewer.piSessionId), r.piSessionId]).size, 3);
     const requests = reviewRequests(), consolidation = requests.filter((request) => request.consolidating);

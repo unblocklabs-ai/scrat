@@ -111,6 +111,7 @@ export const runs = sqliteTable("runs", {
     pullRequestNumber?: number;
     issues?: Record<string, number>;
     slackReplyTs?: string;
+    slackReaction?: string;
   }>().notNull().$defaultFn(() => ({ status: "pending" })),
 }, (table) => [uniqueIndex("runs_sequence_unique").on(table.sequence)]);
 

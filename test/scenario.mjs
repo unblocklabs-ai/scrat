@@ -18,6 +18,11 @@ const changeMain = (path, text) => {
   writeFileSync(resolve("seed", path), text); git(resolve("seed"), "add", "."); commit(resolve("seed"), "Change " + path);
   git(resolve("seed"), "push", resolve("remote.git"), "main");
 };
+const branchOff = (branch, path, text) => {
+  git(resolve("seed"), "switch", "-c", branch); writeFileSync(resolve("seed", path), text);
+  git(resolve("seed"), "add", "."); commit(resolve("seed"), "Branch " + branch);
+  git(resolve("seed"), "push", resolve("remote.git"), branch); git(resolve("seed"), "switch", "main");
+};
 const pushFile = (branch, path, text) => {
   const remote = resolve("remote.git"), parent = git(remote, "rev-parse", branch), index = resolve("human-push.index"), env = { ...process.env, GIT_INDEX_FILE: index };
   rmSync(index, { force: true });
@@ -174,33 +179,25 @@ const deletedReview = async (variant) => {
     assert.ok(newer.error); assert.equal(newer.publication.commentId, undefined);
     assert.match(f.comments.get(201)[0].body, new RegExp(newer.taskId));
   }
-  const calls = f.requests.length, updates = f.writes.filter((w) => w.type === "comment_update").length;
+  const calls = f.requests.length, updates = f.written("comment_update").length;
   tasks.retryTask(older.taskId); const superseded = await success();
   assert.equal(superseded.publication.status, "not_needed");
-  assert.equal(f.requests.length, calls); assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
+  assert.equal(f.requests.length, calls); assert.equal(f.botComments(201).length, 1);
   assert.match(f.comments.get(201)[0].body, new RegExp(newer.taskId));
   assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
   assert.equal(f.row(s.runs, newer.id).publication.commentId, f.comments.get(201)[0].id);
   if (variant === "deleted") {
     f.comments.set(201, []); await route();
-    assert.equal(f.requests.length, calls); assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
+    assert.equal(f.requests.length, calls); assert.equal(f.botComments(201).length, 1);
     assert.match(f.comments.get(201)[0].body, new RegExp(newer.taskId));
   } else {
-    assert.equal(f.writes.filter((w) => w.type === "comment_update").length, updates);
+    assert.equal(f.written("comment_update").length, updates);
     tasks.retryTask(newer.taskId); await success(); assert.equal(f.requests.length, calls);
   }
 };
 const staleBranch = async (variant) => {
   const remoteGit = (...args) => git(resolve("remote.git"), ...args);
   const needs = (name) => writeFileSync(`require-${name}`, "");
-  const branchOff = (branch, path, text) => {
-    git(resolve("seed"), "switch", "-c", branch); writeFileSync(resolve("seed", path), text);
-    git(resolve("seed"), "add", "."); commit(resolve("seed"), "Branch " + branch);
-    git(resolve("seed"), "push", resolve("remote.git"), branch); git(resolve("seed"), "switch", "main");
-  };
-  const addPr = (number, branch, login) => f.prs.push({ id: number, node_id: "PR_" + number, number, title: "PR " + number, body: "", state: "open",
-    html_url: `https://github.com/fixture/project/pull/${number}`, labels: [], updated_at: "2026-10-19T00:00:00Z", user: { login },
-    head: { ref: branch, sha: remoteGit("rev-parse", branch), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } } });
   const prItem = (n) => all(s.items).find((i) => i.kind === "pr" && i.payload.number === n);
   const queuedFor = (n) => all(s.tasks).filter((t) => t.subjectId === prItem(n).id && t.status === "queued").map((t) => t.action).sort();
   const drainExcept = (n) => { for (const item of all(s.items)) if (item.id !== prItem(n).id) tasks.cancelQueuedTasks(item.id, "Isolate"); };
@@ -212,7 +209,7 @@ const staleBranch = async (variant) => {
     branchOff("feature-b", "src/app.ts", "export const value = 7;\n");
     needs("needed.txt");
     changeMain("needed.txt", "ok\n");
-    addPr(301, "feature-a", "human"); await route();
+    f.addPr(301, "feature-a", "human"); await route();
     const heads = remoteGit("for-each-ref", "refs/heads"), realHead = remoteGit("rev-parse", "feature-a"), main1 = mainHead();
     const reviewed = await success();
     assert.equal(reviewed.headSha, realHead, "the run records the real PR head");
@@ -230,7 +227,7 @@ const staleBranch = async (variant) => {
     assert.ok(all(s.workspaces).every((w) => w.removedAt), "review workspaces are cleaned up");
     f.prs[0].state = "closed"; await route();
     changeMain("src/app.ts", "export const value = 9;\n");
-    addPr(302, "feature-b", "human"); await route();
+    f.addPr(302, "feature-b", "human"); await route();
     const calls = f.requests.length, heads2 = remoteGit("for-each-ref", "refs/heads");
     const conflicted = await run();
     assert.equal(conflicted.error.message, "PR branch is behind main and does not merge cleanly; the author needs to update it");
@@ -259,7 +256,7 @@ const staleBranch = async (variant) => {
     assert.equal(f.comments.get(302).length, 1); assert.equal(notices().length, 0); assert.equal(f.prs[1].labels.length, 1);
     f.prs[1].state = "closed"; await route();
     branchOff("feature-c", "src/c.ts", "export const c = 1;\n"); needs("needed4.txt");
-    addPr(303, "feature-c", "human"); await route();
+    f.addPr(303, "feature-c", "human"); await route();
     const workspaces = all(s.workspaces).length, requests = f.requests.length, unmasked = await run();
     assert.match(unmasked.error.stdout, /ERR_MISSING needed4\.txt/); assert.equal(f.requests.length, requests);
     assert.equal(all(s.workspaces).length, workspaces + 1, "no synthetic workspace is made");
@@ -374,7 +371,7 @@ const validationFeedback = async (variant) => {
     assert.match(lastUser(feedbackRequests()[2]), /round 1 of 1/);
     const marked = (n) => f.issues.get(n).labels.some(({ name }) => name === "Scrat failed");
     await route(); assert.ok([1, 2, 3, 4].every(marked), "a change task that failed for good labels its issue");
-    const labelWrites = () => f.writes.filter((w) => w.type === "label" && w.method !== "GET").length;
+    const labelWrites = () => f.written("label", (w) => w.method !== "GET").length;
     const written = labelWrites(); await route(); assert.equal(labelWrites(), written, "a steady state writes no label");
     f.addIssue(5, ["scrat"]); f.enqueue(5, "implement"); const stop = new AbortController(); f.onModel = () => stop.abort();
     const cut = await f.runNextTask(stop.signal); f.onModel = undefined; assert.equal(f.row(s.tasks, cut.taskId).status, "queued");
@@ -506,7 +503,7 @@ export const scenarios = {
       const count = (predicate) => seen.filter(predicate).length;
       return { primary: count((r) => r.request.model === primary && !r.consolidating), secondary: count((r) => r.request.model === secondary), consolidation: count((r) => r.consolidating) };
     };
-    const comments = () => f.comments.get(201).filter((c) => c.user.login !== "human").length;
+    const comments = () => f.botComments(201).length;
     const queued = () => all(s.tasks).filter((t) => t.status === "queued" && t.action === "review_pr");
     const panelRun = (result, since) => {
       const counts = sessions(since);
@@ -585,15 +582,9 @@ export const scenarios = {
     await route(); assert.equal(queued().length, 2);
     f.issues.get(1).labels.push({ name: "scrat" }); f.issues.get(2).labels = []; await route();
     assert.deepEqual(queued().map((t) => [t.subjectId, t.action]).sort(), [["issue-1", "implement"], ["issue-2", "review_issue"]]);
-    git(resolve("seed"), "switch", "-c", "scrat/routing");
-    writeFileSync("seed/src/app.ts", "export const value = 2;\n"); git(resolve("seed"), "add", "."); commit(resolve("seed"), "PR branch");
-    git(resolve("seed"), "push", resolve("remote.git"), "scrat/routing"); git(resolve("seed"), "switch", "main");
+    branchOff("scrat/routing", "src/app.ts", "export const value = 2;\n");
     changeMain("src/app.ts", "export const value = 3;\n");
-    f.prs.push({ ...f.issues.get(1), id: 201, node_id: "PR_routing", number: 201,
-      html_url: "https://github.com/fixture/project/pull/201", body: "Closes #1", labels: [], user: { login: f.config.github.botLogin },
-      head: { ref: "scrat/routing", sha: git(resolve("remote.git"), "rev-parse", "scrat/routing"), repo: { full_name: "fixture/project" } },
-      base: { ref: "main", repo: { full_name: "fixture/project" } },
-    });
+    f.addPr(201, "scrat/routing", f.config.github.botLogin, { node_id: "PR_routing", title: f.issues.get(1).title, body: "Closes #1" });
     const external = humanComment(201, 9001, "Please explain this change", "2026-10-19T01:00:00Z");
     f.comments.set(201, [external, { ...external, id: 9002, body: "My own review", user: { login: f.config.github.botLogin } }]);
     await route();
@@ -751,9 +742,9 @@ export const scenarios = {
       release();
       const [, published] = await Promise.all([syncing, working]);
       assert.equal(published.error, null, JSON.stringify(published.error));
-      assert.equal(f.writes.filter((write) => write.type === "comment" && write.number === 201).length, 1);
-      assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
-      await route(); assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
+      assert.equal(f.written("comment", (write) => write.number === 201).length, 1);
+      assert.equal(f.botComments(201).length, 1);
+      await route(); assert.equal(f.botComments(201).length, 1);
     } finally { release(); globalThis.fetch = fetch; }
   } },
   routing_history: { title: "covered triggers and attempts skip unavailable review history, and an item whose routing throws is logged without blocking later items", run: async () => {
@@ -820,7 +811,7 @@ export const scenarios = {
     for (const request of f.requests.filter((r) => r.context.action === "review_pr")) {
       assert.deepEqual(request.context.diffPaths, ["src/app.ts"]); assert.match(request.context.diffBaseSha, /^[a-f0-9]{40}$/);
     }
-    assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === 201).length, 1);
+    assert.equal(f.written("comment", (w) => w.number === 201).length, 1);
     assert.match(f.comments.get(201)[0].body, /Consolidated/);
     assert.equal(review.result.grade, "B");
     const prompts = (request) => request.request.messages.filter((m) => m.role === "user").map((m) => JSON.stringify(m.content)).join("\n");
@@ -873,8 +864,8 @@ export const scenarios = {
       assert.ok(!("changedPaths" in r.context.input) && r.context.input.changedPathCount >= 250);
       assert.ok(readFileSync(r.context.files.changedPaths, "utf8").split("\n").includes("src/many-249.txt"));
     }
-    assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
-    assert.equal(f.writes.filter((w) => w.type === "comment_update").length, 1);
+    assert.equal(f.botComments(201).length, 1);
+    assert.equal(f.written("comment_update").length, 1);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name).sort(), ["A · Strong", "human-label"]);
     const itemId = f.row(s.tasks, review.taskId).subjectId;
     f.reset(201, "normal"); tasks.enqueueTask({ subjectId: itemId, action: "review_pr", reason: "Manual review", input: { source: "github_items", kind: "manual", manual: true } });
@@ -1117,7 +1108,7 @@ export const scenarios = {
     const { GitHubRepository } = await f.app("github.ts");
     const request = () => reconcileLabels(new GitHubRepository("fixture/project"), 1, { current: ["scrat"], desired: [], managed: ["scrat"] });
     await reconcileLabels(new GitHubRepository("fixture/project"), 1, { current: ["scrat", "B"], desired: [], managed: ["scrat", "B"] });
-    assert.deepEqual(f.writes.filter((w) => w.type === "label" && w.method === "DELETE").map((w) => w.name), ["scrat", "B"]);
+    assert.deepEqual(f.written("label", (w) => w.method === "DELETE").map((w) => w.name), ["scrat", "B"]);
     f.issues.get(1).labels = [{ name: "scrat" }];
     const fetch = globalThis.fetch;
     globalThis.fetch = async (input, options = {}) => options.method === "DELETE"
@@ -1211,11 +1202,11 @@ export const scenarios = {
     await implement(2); await route(); f.reset(202, "reviewer-failure");
     const r = await run(); assert.ok(r.error); assert.ok(r.reviewers.some((r) => r.error));
     assert.equal(f.requests.filter((r) => r.consolidating).length, 0);
-    assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
+    assert.equal(f.written("comment").length, 0);
     assert.ok(f.row(s.workspaces, r.workspaceId).removedAt);
     f.reset(202, "missing-grade"); tasks.retryTask(r.taskId);
     const invalid = await run(); assert.match(invalid.error.message, /grade/i);
-    assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
+    assert.equal(f.written("comment").length, 0);
   } },
   review_retry: { title: "a review whose reviewers all fail transiently is held until due and publishes once after recovery, while a mixed panel stays failed", configure: [(config) => { config.harness.agentRetry.maxRetries = 1; config.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 100 }; }], run: async () => {
     await implement(2); await route(); f.transient.failures = 4; f.reset(202, "transient");
@@ -1229,10 +1220,10 @@ export const scenarios = {
     failed = await run(); assert.equal(failed.error.code, "TRANSIENT_INFERENCE"); assert.equal(task().status, "queued");
     const second = delay(); assert.ok(second >= 1.5 * first, `backoff grows: ${first} then ${second}`); assert.ok(second <= 100.1, `backoff stays within maxDelaySeconds: ${second}`);
     assert.equal(await f.runNextTask(), undefined, "a second failure is also held until due");
-    assert.equal(f.writes.filter((w) => w.type === "comment").length, 0);
+    assert.equal(f.written("comment").length, 0);
     tasks.enqueueTask({ subjectId: task().subjectId, action: "review_pr", reason: "Changed", input: { source: "github_items", kind: "manual", manual: true } });
     const reviewed = await success(); assert.equal(reviewed.taskId, id);
-    assert.equal(task().status, "completed"); assert.equal(f.writes.filter((w) => w.type === "comment").length, 1);
+    assert.equal(task().status, "completed"); assert.equal(f.written("comment").length, 1);
     await implement(3); await route(); f.transient.failures = 100; f.reset(203, "transient-mixed");
     const mixed = await run(); assert.ok(mixed.error); assert.notEqual(mixed.error.code, "TRANSIENT_INFERENCE");
     assert.equal(f.row(s.tasks, mixed.taskId).status, "failed");
@@ -1413,7 +1404,7 @@ export const scenarios = {
       assert.ok(!("previous_assessment" in f.requests[first].context.files), "A first issue review has no previous assessment");
       tasks.retryTask(failed.taskId); const completed = await success();
       assert.equal(completed.retryOfRunId, failed.id); assert.equal(f.requests.length, calls);
-      assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === n).length, 1);
+      assert.equal(f.written("comment", (w) => w.number === n).length, 1);
       assert.deepEqual(f.issues.get(n).labels.map((label) => label.name).sort(), ["human-label", "scrat"]);
     }
     f.reset(1, "normal"); f.enqueue(1); let written = f.writes.length; const followUp = await success();
@@ -1533,7 +1524,7 @@ export const scenarios = {
     };
     const stale = await run(); assert.match(stale.error.message, /Reviewed code changed/);
     assert.ok(stale.result.paths.includes("src/app.ts")); assert.ok(stale.result.paths.includes("src/helper.ts"));
-    assert.equal(f.writes.filter((w) => w.type === "comment" && w.number === 202).length, 0);
+    assert.equal(f.written("comment", (w) => w.number === 202).length, 0);
   } },
   unicode_scope: { title: "Pi filename normalization cannot hide relevant base changes", seed: seedUnicodeScope, run: async () => {
     f.addIssue(1); f.reset(1, "nbsp"); await route(); await success();
@@ -2007,7 +1998,7 @@ export const scenarios = {
     assert.equal(labels204(), 0, "Below the cap there is no exhausted label");
     await route(); assert.equal(repairs(204).length, 0, "The cap blocks further repairs");
     assert.equal(labels204(), 1, "A low grade at the cap is labelled");
-    const labelWrites = () => f.writes.filter((w) => w.type === "label" && w.number === 204 && w.method !== "GET").length;
+    const labelWrites = () => f.written("label", (w) => w.number === 204 && w.method !== "GET").length;
     const written = labelWrites(); await route(); assert.equal(labels204(), 1); assert.equal(labelWrites(), written, "A steady state writes no label");
     db.$client.prepare("update items set self_repair_count = 1 where id = ?").run(prItem(204).id);
     await route(); assert.equal(repairs(204).length, 1); assert.equal(count(204), 1);
@@ -2111,8 +2102,7 @@ export const scenarios = {
     }
     git(resolve("remote.git"), "branch", "human-feature", "main"); const humanFeature = pushFile("human-feature", "src/human.ts", "export const human = 1;\n");
     git(resolve("remote.git"), "update-ref", "refs/pull/303/head", humanFeature);
-    f.prs.push({ id: 303, node_id: "PR_303", number: 303, title: "Human change", body: "Closes #1", state: "open", html_url: "https://github.com/fixture/project/pull/303", labels: [], updated_at: "2026-10-19T00:00:00Z",
-      user: { login: "human" }, head: { ref: "human-feature", sha: humanFeature, repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } } });
+    f.addPr(303, "human-feature", "human", { title: "Human change", body: "Closes #1" });
     await route(); await success();
     const humanPrRequests = f.requests.filter((r) => r.context.action === "review_pr" && r.context.item.number === 303);
     assert.ok(humanPrRequests.length && humanPrRequests.every((r) => !("issue" in r.context.files)), "A human PR naming an issue gets no issue file");
@@ -2124,7 +2114,7 @@ export const scenarios = {
     const { applyEffects } = await f.app("effects.ts");
     const { GitHubRepository } = await f.app("github.ts");
     const github = new GitHubRepository("fixture/project");
-    const created = () => f.writes.filter((write) => write.type === "issue");
+    const created = () => f.written("issue");
     const apply = async (saved, receipts = {}) => {
       let publication = { status: "pending", ...receipts };
       await applyEffects(["issue"], { references: {}, publication: () => publication, saveReceipt: (patch) => { publication = { ...publication, ...patch }; }, github, run: saved });

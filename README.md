@@ -108,7 +108,7 @@ The installer keeps this file across deploys (any other drop-in is moved into th
 | `harness.maxConcurrentValidations` | Maximum `workspace.validate` runs at once (default 3, a positive integer). Further runs wait in a FIFO queue; preparation does not take a slot. |
 | `harness.agentRetry` | Retries for a failed model request inside a Pi session: `maxRetries` (default 3) and `baseDelayMs` (default 2000), both non-negative integers; 0 retries fails the request at once. |
 | `harness.maxStderrBytes` | Stderr kept from a paged git read before further output is dropped (default 8192, a positive integer). |
-| `harness.logTargetChars` | Longest path, pattern, command or revision shown in tool log lines (default 200, a positive integer). |
+| `harness.logTargetChars` | Longest path, pattern, command or revision shown in tool log lines and in the heavy-command refusal message (default 200, a positive integer). |
 | `harness.logErrorChars` | Longest tool error shown in a `pi.tool_failed` log line (default 300, a positive integer). |
 | `harness.reviewCacheLimit` / `harness.treeCacheLimit` | Entries kept in the review-relevance cache and the tree-listing cache (defaults 256 / 8, positive integers). |
 | `harness.databaseHealthRetries` | Failed health checks, one second apart, before a run's database container is declared unhealthy (default 30, a positive integer). |

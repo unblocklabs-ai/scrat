@@ -1266,7 +1266,7 @@ export const scenarios = {
     const publications = () => f.writes.length;
     f.reset(201, "incomplete-once"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Continue", input: { source: "github_items", kind: "manual", manual: true } });
     let writes = publications(); const continued = await success();
-    assert.equal(continued.result.outcome, "complete"); assert.ok(prompts() >= 3); assert.equal(publications() - writes, 3);
+    assert.equal(continued.result.outcome, "complete"); assert.ok(prompts() >= 3); assert.equal(publications() - writes, 1, "an unchanged grade writes only the comment");
     const published = f.comments.get(201).length;
     f.reset(201, "incomplete"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Never completes", input: { source: "github_items", kind: "manual", manual: true } });
     writes = publications(); const spent = prompts(); const exhausted = await run();

@@ -39,27 +39,25 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
   const desired = state.kind === "current" ? state.assessment : undefined;
   const shown = desired ?? (state.kind === "blocked" ? state.attempt : undefined);
   const deliveryReferences = shown ? { ...references, subjectId, taskId: shown.task.id, runId: shown.run.id } : references;
-  let labels = observation.labels;
-  const body = desired ? reviewBody(desired.result.text, desired.task.id)
-    : shown && reviewBody(`This PR is behind ${observation.baseBranch} and does not merge cleanly; update the branch and ${botName} will review it.`, shown.task.id);
-  const replacing = desired && existing?.body !== body;
-  if (!desired || replacing) {
-    await reconcileLabels(github, number, { current: labels, desired: [], managed: Object.values(gradeLabels) }, deliveryReferences);
-    const managed = new Set<string>(Object.values(gradeLabels).map((name) => name.toLowerCase()));
-    labels = labels.filter((label) => !managed.has(label.toLowerCase()));
-  }
+  const labels = observation.labels;
+  const managed = Object.values(gradeLabels);
+  const grade = desired?.result.grade;
+  const gradeLabel = grade ? [gradeLabels[grade]] : [];
+  const kept = gradeLabel.filter((name) => labels.includes(name));
+  await reconcileLabels(github, number, { current: labels, desired: kept, managed }, deliveryReferences);
   if (publication && !desired) throw new Error("Reviewed code changed or PR context changed; enqueue a fresh review");
 
-  if (shown && body) {
+  if (shown) {
+    const body = desired ? reviewBody(desired.result.text, desired.task.id)
+      : reviewBody(`This PR is behind ${observation.baseBranch} and does not merge cleanly; update the branch and ${botName} will review it.`, shown.task.id);
     const { run } = shown;
     const commentId = await upsertComment(github, number, existing, body, deliveryReferences);
     run.publication = { ...run.publication, commentId };
     updateRun(run.id, { publication: run.publication });
   }
 
-  const grade = desired?.result.grade;
   await reconcileLabels(github, number, {
-    current: labels, desired: grade ? [gradeLabels[grade]] : [], managed: Object.values(gradeLabels),
+    current: kept, desired: gradeLabel, managed,
   }, deliveryReferences);
   if (desired) updateRun(desired.run.id, { publication: { ...desired.run.publication, status: "published" } });
   if (publication && publication.run.id !== desired?.run.id) updateRun(publication.run.id, { publication: { ...publication.run.publication, status: "not_needed" } });

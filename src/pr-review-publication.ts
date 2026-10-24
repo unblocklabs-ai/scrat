@@ -5,6 +5,7 @@ import type { EventReferences } from "./events.ts";
 import { git } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
+import { botName } from "./identity.ts";
 import { gradeLabels, reconcileLabels } from "./labels.ts";
 import { isIssueComment, issueCommentId, reviewMarker, taskMarker } from "./markers.ts";
 import { observe, type ItemObservation } from "./observation.ts";
@@ -36,9 +37,11 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
   const mainSha = await git(getRepositoryPath(), ["rev-parse", `refs/remotes/origin/${observation.baseBranch}`]);
   const state = await resolvePrReview(reviews, observation, mainSha);
   const desired = state.kind === "current" ? state.assessment : undefined;
-  const deliveryReferences = desired ? { ...references, subjectId, taskId: desired.task.id, runId: desired.run.id } : references;
+  const shown = desired ?? (state.kind === "blocked" ? state.attempt : undefined);
+  const deliveryReferences = shown ? { ...references, subjectId, taskId: shown.task.id, runId: shown.run.id } : references;
   let labels = observation.labels;
-  const body = desired ? reviewBody(desired.result.text, desired.task.id) : undefined;
+  const body = desired ? reviewBody(desired.result.text, desired.task.id)
+    : shown && reviewBody(`This PR is behind ${observation.baseBranch} and does not merge cleanly; update the branch and ${botName} will review it.`, shown.task.id);
   const replacing = desired && existing?.body !== body;
   if (!desired || replacing) {
     await reconcileLabels(github, number, { current: labels, desired: [], managed: Object.values(gradeLabels) }, deliveryReferences);
@@ -47,8 +50,8 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
   }
   if (publication && !desired) throw new Error("Reviewed code changed or PR context changed; enqueue a fresh review");
 
-  if (desired && body) {
-    const { run } = desired;
+  if (shown && body) {
+    const { run } = shown;
     const commentId = await upsertComment(github, number, existing, body, deliveryReferences);
     run.publication = { ...run.publication, commentId };
     updateRun(run.id, { publication: run.publication });

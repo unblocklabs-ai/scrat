@@ -15,16 +15,16 @@ Verify each finding against current source and affected callers before acting. F
 
 When the report ends with a "To reach B" list, address exactly those findings, after verifying each, and prefer the smallest fix over new mechanism; a repair that adds a mechanism adds new defects to review.
 
-Never weaken tests, checks or validation to make them pass, and do not delete or loosen an assertion to hide a failure. Fix the code, or explain precisely why a test is wrong. Inspect package metadata and the actual available environment before choosing validation commands; do not assume a database or browser is present. Never obtain production secrets or use shared databases to fill a missing environment.
+Never weaken tests, checks or validation to make them pass, and do not delete or loosen an assertion to hide a failure. Fix the code, or explain precisely why a test is wrong. Inspect package metadata and the actual available environment before choosing validation commands.
 
-Continue retained work and address the previous failure (`files.previousFailure`) when supplied. Preserve an unfinished merge and partial work rather than resetting or rebuilding the PR. {{bot}} owns the branch/worktree lifecycle; do not create a replacement PR, rebase or force-push. When `database` is supplied, use its current `environment` values and add new migrations instead of rewriting applied history.
+Continue retained work and address the previous failure (`files.previousFailure`) when supplied. Preserve an unfinished merge and partial work rather than resetting or rebuilding the PR. {{bot}} owns the branch/worktree lifecycle; do not create a replacement PR, rebase or force-push.
 
-After changes, review the complete diff against the original request and the verified findings, run targeted checks, and stop once they pass. Do not run full lint, type-check, verify, build or e2e suites as routine checks; {{bot}} validates after you finish and sends failures back into this session. When the task itself needs a full run (a benchmark or measurement, or reproducing a failure only the full suite shows), run it in the foreground; {{bot}} queues it for a heavy-check slot, so it may wait. Never background heavy commands (`&`, `nohup`). Targeted checks are always fine. End your turn when the change is ready. Report checks you could not run as limitations, never passes.
+After changes, review the complete diff against the original request and the verified findings, run targeted checks, and stop once they pass. Report checks you could not run as limitations, never passes.
 
-Leave changes uncommitted. {{bot}} handles commits, pushes and the reply. Do not publish comments yourself, change labels, approve/merge/close a PR, alter runtime credentials or edit other repositories.
+Do not publish comments yourself, change labels, approve/merge/close a PR, alter runtime credentials or edit other repositories.
 
 ## Reply
 
 Return concise Markdown listing each finding as fixed or rejected, with the reason for each rejection. For code changes, add **Validation** with the actual checks and results and material limitations. Do not narrate every attempt or imply that external behavior was validated by static inspection. If a genuine blocker remains, state the specific missing fact or decision.
 
-End with a final line `SCRAT_STATUS: complete`, `SCRAT_STATUS: incomplete` or `SCRAT_STATUS: needs_decision`. Return Markdown, not JSON.
+Return Markdown, not JSON.

@@ -878,6 +878,33 @@ export const scenarios = {
     assert.equal(f.comments.get(201).length, 2); assert.equal(f.comments.get(201)[1].body, feedback.body);
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
   } },
+  legacy_assessments: { title: "the canonical assessment replaces legacy assessments, survives a failed legacy delete and leaves repair replies and human comments alone", run: async () => {
+    await implement(1); await route(); const initial = await success();
+    const canonical = f.comments.get(201)[0], bot = f.config.github.botLogin, at = "2026-10-19T03:00:00Z";
+    const botComment = (id, body) => ({ id, body, user: { login: bot }, updated_at: at, html_url: `https://github.com/fixture/project/pull/201#issuecomment-${id}` });
+    const legacy = botComment(9001, "Old summary.\n\n<!-- scrat:summary:v1 -->"), repair = botComment(9002, "Pushed the edge case fix.\n\n<!-- scrat-task:0f0f0f0f-0000-4000-8000-000000000001 -->");
+    const older = botComment(9003, `Older assessment.\n\n<!-- scrat-task:${initial.taskId} -->`), human = humanComment(201, 9100, "Please look at the edge case", at);
+    f.comments.get(201).push(legacy, repair, older, human);
+    const subjectId = f.row(s.tasks, initial.taskId).subjectId;
+    const reReview = () => { tasks.enqueueTask({ subjectId, action: "review_pr", reason: "New assessment", input: { source: "github_items", kind: "manual", manual: true } }); return success(); };
+    const deleteCalls = () => f.calls.filter((c) => c.method === "DELETE" && c.path.includes("/issues/comments/"));
+    const deleted = () => f.writes.filter((w) => w.type === "comment_delete").map((w) => w.id);
+    f.reset(201, "grade-A"); f.faults.commentDelete.add(legacy.id);
+    const failed = await reReview();
+    assert.equal(failed.publication.commentId, canonical.id); assert.equal(failed.publication.status, "published");
+    assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
+    assert.deepEqual(deleteCalls().map((c) => [c.path, c.status]), [[`/repos/fixture/project/issues/comments/${legacy.id}`, 500], [`/repos/fixture/project/issues/comments/${older.id}`, 204]]);
+    assert.deepEqual(deleted(), [older.id]);
+    assert.deepEqual(f.comments.get(201).map((c) => c.id), [canonical.id, legacy.id, repair.id, human.id]);
+    assert.equal(f.comments.get(201)[2].body, repair.body); assert.equal(f.comments.get(201)[3].body, human.body);
+    f.faults.commentDelete.delete(legacy.id);
+    const healed = await reReview();
+    assert.equal(healed.publication.commentId, canonical.id);
+    assert.deepEqual(f.comments.get(201).map((c) => c.id), [canonical.id, repair.id, human.id]);
+    assert.equal(f.comments.get(201).filter((c) => c.body.includes("<!-- scrat-review -->")).length, 1);
+    assert.deepEqual(deleted(), [older.id, legacy.id]);
+    assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
+  } },
   deleted_review: { title: "deleted canonical comments are restored from the authoritative saved assessment", run: () => deletedReview("deleted") },
   unreceipted_review: { title: "older retries preserve a newer remote review even when its write receipt was lost", run: () => deletedReview("unreceipted") },
   stale_assessment: { title: "a stale newest assessment clears its grade without resurrecting an older narrower review", run: async () => {
@@ -956,7 +983,7 @@ export const scenarios = {
     const system = ({ request }) => JSON.stringify(request.messages.filter((m) => m.role === "system" || m.role === "developer"));
     const change = f.requests.filter((entry) => entry.context.action === "implement");
     assert.ok(change.length && change.every((entry) => system(entry).includes(notes.replaceAll("\\", "\\\\"))), "Every change request carries the notes path");
-    assert.ok(change.every((entry) => system(entry).includes("do not say the changes are uncommitted")));
+    assert.ok(change.every((entry) => system(entry).includes("its validation or the commit state")));
     assert.equal(readFileSync(notes, "utf8"), "Plan: change value\n");
     const commit = r.publication.publishedCommitSha;
     assert.deepEqual(git(resolve("remote.git"), "ls-tree", "-r", "--name-only", commit).split("\n").filter((path) => path.startsWith(".scrat")), []);

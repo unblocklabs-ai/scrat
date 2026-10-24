@@ -6,6 +6,7 @@ import type { ActionSettings, ScratConfig } from "./config-schema.ts";
 import { deploymentDefaults, skillPath } from "./manifests.ts";
 import { slugOf } from "./identity.ts";
 import { logger } from "./logging.ts";
+import { errorMessage } from "./errors.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 import { loadPlaywright } from "./scoped-tools.ts";
 import { authTest } from "./slack.ts";
@@ -68,7 +69,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
   if (settings.slack?.enabled) {
     if (!settings.slack.channel?.trim()) problems.push("slack.channel must not be empty when slack.enabled is true");
     if (!process.env.SLACK_BOT_TOKEN) problems.push("slack.enabled is true but SLACK_BOT_TOKEN is not set");
-    else await authTest().catch((error: unknown) => { problems.push(`slack: auth.test failed: ${error instanceof Error ? error.message : String(error)}`); });
+    else await authTest().catch((error: unknown) => { problems.push(`slack: auth.test failed: ${errorMessage(error)}`); });
   }
   for (const [name, { apiKey }] of Object.entries(settings.providers ?? {})) {
     if (apiKey && !/\$\{\w+\}/.test(apiKey)) logger.warn({ provider: name }, "Provider apiKey is not a ${VAR} placeholder; it will not be redacted from output");
@@ -90,8 +91,8 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
         if (unknown.length) problems.push(`${action}: unknown startMessage variable ${unknown.map((name) => `{{${name}}}`).join(", ")}`);
       }
       if (entry.agent === "panel" && entry.reviewers?.length !== 2) problems.push(`${action}: agent "panel" requires exactly two reviewers`);
-      if (slack && process.env.SLACK_BOT_TOKEN) await authTest().catch((error: unknown) => { problems.push(`${action}: Slack auth.test failed: ${error instanceof Error ? error.message : String(error)}`); });
-      if (manifest.browser) await loadPlaywright().catch((error: unknown) => { problems.push(`${action}: ${error instanceof Error ? error.message : String(error)}`); });
+      if (slack && process.env.SLACK_BOT_TOKEN) await authTest().catch((error: unknown) => { problems.push(`${action}: Slack auth.test failed: ${errorMessage(error)}`); });
+      if (manifest.browser) await loadPlaywright().catch((error: unknown) => { problems.push(`${action}: ${errorMessage(error)}`); });
       const skill = skillPath(manifest, entry.skill);
       if (!await access(skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${skill}`);
     }

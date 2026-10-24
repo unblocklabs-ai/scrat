@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { git } from "./git.ts";
+import { changedPaths, git } from "./git.ts";
 import { affectsPaths, lockfileChanged } from "./lockfile-impact.ts";
 import { reviewScope } from "./review-paths.ts";
 
@@ -39,7 +39,7 @@ export async function reviewChanges(repository: string, before: string, after: s
 }
 
 async function computeReview(repository: string, before: string, after: string, scope: string[]): Promise<Review> {
-  const paths = (await git(repository, ["diff", "--name-only", "--no-renames", "-z", before, after])).split("\0").filter(Boolean);
+  const paths = await changedPaths(repository, before, after);
   if (!scope.length || scope.includes(".")) return { paths, relevant: paths.length > 0 };
   const tracked = await Promise.all([before, after].map((sha) => listTree(repository, sha)));
   const observed = reviewScope(scope, tracked.flatMap((files) => files.split("\0").filter(Boolean)));

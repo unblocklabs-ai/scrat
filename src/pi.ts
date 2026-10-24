@@ -9,7 +9,7 @@ import { botName, withBotName } from "./identity.ts";
 import { getRun, updateRun } from "./run-history.ts";
 import type { Run } from "./schema.ts";
 import { InterruptedError, parseResult, ResultFormatError, type Reviewer } from "./results.ts";
-import { git } from "./git.ts";
+import { gitList } from "./git.ts";
 import type { Manifest, ToolName } from "./manifests.ts";
 import { createAgentTools } from "./tools.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
@@ -148,9 +148,9 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
           corrections--;
           continue;
         }
-        const tracked = (await git(cwd, ["ls-files", "-z"])).split("\0").filter(Boolean);
+        const tracked = await gitList(cwd, ["ls-files", "-z"]);
         const baseTracked = baseSha && (basePaths.size || gitPaths.size)
-          ? (await git(cwd, ["ls-tree", "-r", "--name-only", "-z", baseSha])).split("\0").filter(Boolean) : [];
+          ? await gitList(cwd, ["ls-tree", "-r", "--name-only", "-z", baseSha]) : [];
         return { ...result, paths: [...new Set([
           ...canonicalReviewPaths([...paths], tracked), ...canonicalReviewPaths([...basePaths], baseTracked),
           ...canonicalReviewPaths([...gitPaths], tracked), ...canonicalReviewPaths([...gitPaths], baseTracked),

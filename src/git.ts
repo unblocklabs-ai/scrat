@@ -21,12 +21,17 @@ function timedOut(label: string) {
   };
 }
 
+const gitCommand = (repositoryPath: string, args: string[], env: NodeJS.ProcessEnv) => inWorkspace(repositoryPath)
+  ? sandboxCommand(repositoryPath, "git", args, env) : { file: "git", args: ["-C", repositoryPath, ...args], env };
 export async function git(repositoryPath: string, args: string[], env = childEnvironment()) {
-  const command = inWorkspace(repositoryPath) ? sandboxCommand(repositoryPath, "git", args, env)
-    : { file: "git", args: ["-C", repositoryPath, ...args], env };
+  const command = gitCommand(repositoryPath, args, env);
   const { stdout } = await executeFile(command.file, command.args, { cwd: repositoryPath, env: command.env, maxBuffer: config.harness.maxOutputBytes, ...(networkCommands.has(args[0]!) ? networkOptions() : {}) }).catch(timedOut(args[0]!));
   return args.includes("-z") || args[0] === "show" ? stdout : stdout.trim();
 }
+
+export const headOf = (repositoryPath: string) => git(repositoryPath, ["rev-parse", "HEAD"]);
+export const gitList = async (repositoryPath: string, args: string[]) => (await git(repositoryPath, args)).split("\0").filter(Boolean);
+export const changedPaths = (repositoryPath: string, ...range: string[]) => gitList(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", ...range]);
 
 export type GitPage = { text: string; end: number; more: boolean; total?: number };
 
@@ -38,8 +43,7 @@ export async function blobSize(repositoryPath: string, object: string) {
 
 export function gitPage(repositoryPath: string, args: string[], offset: number, limit: number) {
   return new Promise<GitPage>((done, fail) => {
-    const command = inWorkspace(repositoryPath) ? sandboxCommand(repositoryPath, "git", args, childEnvironment())
-      : { file: "git", args: ["-C", repositoryPath, ...args], env: childEnvironment() };
+    const command = gitCommand(repositoryPath, args, childEnvironment());
     const child = spawn(command.file, command.args, { cwd: repositoryPath, env: command.env, stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
     let position = 0, kept = 0, stderr = "", stopped = false;
@@ -119,15 +123,11 @@ export async function hasPendingMerge(repositoryPath: string) {
   return existsSync(resolve(repositoryPath, mergeHead));
 }
 
-async function hasConflicts(repositoryPath: string, base: string, head: string) {
-  try {
-    await git(repositoryPath, ["merge-tree", "--write-tree", base, head]);
-    return false;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === 1) return true;
-    throw error;
-  }
-}
+export const mergeHeadOf = async (repositoryPath: string) => await hasPendingMerge(repositoryPath) ? git(repositoryPath, ["rev-parse", "MERGE_HEAD"]) : null;
+
+const exitsOne = (command: Promise<unknown>) => command.then(() => false, (error: unknown) => { if (error instanceof Error && "code" in error && error.code === 1) return true; throw error; });
+
+const hasConflicts = (repositoryPath: string, base: string, head: string) => exitsOne(git(repositoryPath, ["merge-tree", "--write-tree", base, head]));
 
 export async function branchContainsCommit(workspace: { path: string; repositoryPath: string }, remote: string, branch: string, commitSha: string, env = childEnvironment()) {
   const { repositoryPath } = workspace;
@@ -150,17 +150,11 @@ export async function branchContainsCommit(workspace: { path: string; repository
 }
 
 export async function isAncestor(repositoryPath: string, ancestor: string, descendant: string) {
-  try {
-    await git(repositoryPath, ["merge-base", "--is-ancestor", ancestor, descendant]);
-    return true;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === 1) return false;
-    throw error;
-  }
+  return !await exitsOne(git(repositoryPath, ["merge-base", "--is-ancestor", ancestor, descendant]));
 }
 
 type Author = { name: string; email: string };
-const identity = (author: Author) => ["-c", `user.name=${author.name}`, "-c", `user.email=${author.email}`];
+export const identity = (author: Author) => ["-c", `user.name=${author.name}`, "-c", `user.email=${author.email}`];
 
 export async function mergeBase(workspacePath: string, base: string, message: string, author: Author) {
   await git(workspacePath, [...identity(author), "merge", "--no-ff", "-m", message, base]);

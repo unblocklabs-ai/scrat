@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import type { evaluateContext } from "./agent-input.ts";
 import { commitSettings } from "./config.ts";
 import { db } from "./db.ts";
-import { git } from "./git.ts";
+import { changedPaths, git } from "./git.ts";
 import { botName } from "./identity.ts";
 import type { startOperation } from "./logging.ts";
 import { getRun } from "./run-history.ts";
@@ -45,7 +45,7 @@ export async function startCommitThread(subject: Subject, action: string, input:
 export async function describeCommit(repositoryPath: string, subject: Subject, rawInput: Record<string, unknown>) {
   const { sha, previousSha, branch } = commitInput(rawInput);
   const [commitSubject = "", body = ""] = (await git(repositoryPath, ["log", "-1", "--format=%s%x00%b", sha])).split("\0");
-  const diffPaths = (await git(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", `${previousSha}..${sha}`])).split("\0").filter(Boolean);
+  const diffPaths = await changedPaths(repositoryPath, `${previousSha}..${sha}`);
   const evaluated: ReturnType<typeof evaluateContext> = {
     revision: sha, baseBranch: branch, headSha: undefined,
     item: { number: 0, title: commitSubject, body, url: commitMetadata(subject).url }, comments: [], commentRevisions: [],

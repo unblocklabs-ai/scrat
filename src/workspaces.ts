@@ -4,11 +4,11 @@ import { dirname, resolve } from "node:path";
 import { eq } from "drizzle-orm";
 import { db } from "./db.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
-import { git, hasPendingMerge } from "./git.ts";
+import { changedPaths, git, headOf, hasPendingMerge, identity, mergeHeadOf } from "./git.ts";
 import { botSlug } from "./identity.ts";
 import { withOperation } from "./logging.ts";
 import { runs, workspaces, type Run, type Workspace } from "./schema.ts";
-import { errorCode } from "./errors.ts";
+import { ifMissing } from "./errors.ts";
 import { SecretLeakError } from "./results.ts";
 import { containsSecret } from "./secrets.ts";
 
@@ -34,15 +34,15 @@ export async function validateWorkspace(workspace: Workspace) {
 export async function checkpointWorkspace(workspace: Workspace) {
   await git(workspace.path, ["add", "--all"]);
   return {
-    headSha: await git(workspace.path, ["rev-parse", "HEAD"]),
+    headSha: await headOf(workspace.path),
     treeSha: await git(workspace.path, ["write-tree"]),
-    mergeHead: await hasPendingMerge(workspace.path) ? await git(workspace.path, ["rev-parse", "MERGE_HEAD"]) : null,
+    mergeHead: await mergeHeadOf(workspace.path),
   };
 }
 
 export async function validateCheckpoint(workspace: Workspace, checkpoint: NonNullable<Run["agentCheckpoint"]>) {
-  const headSha = await git(workspace.path, ["rev-parse", "HEAD"]);
-  const mergeHead = await hasPendingMerge(workspace.path) ? await git(workspace.path, ["rev-parse", "MERGE_HEAD"]) : null;
+  const headSha = await headOf(workspace.path);
+  const mergeHead = await mergeHeadOf(workspace.path);
   const changed = await git(workspace.path, ["diff", "--name-only", "-z", checkpoint.treeSha, "--"]);
   const untracked = await git(workspace.path, ["ls-files", "--others", "--exclude-standard", "-z"]);
   if (headSha !== checkpoint.headSha || mergeHead !== checkpoint.mergeHead || changed || untracked) {
@@ -51,13 +51,10 @@ export async function validateCheckpoint(workspace: Workspace, checkpoint: NonNu
 }
 
 export async function assertNoCommittedSecrets(workspace: Workspace, base: string, tree: string) {
-  const changed = (await git(workspace.path, ["diff", "--name-only", "--no-renames", "-z", base, tree])).split("\0").filter(Boolean);
+  const changed = await changedPaths(workspace.path, base, tree);
   for (const path of changed) {
     const file = resolve(workspace.path, path);
-    const stats = await lstat(file).catch((error: unknown) => {
-      if (errorCode(error) === "ENOENT") return undefined;
-      throw error;
-    });
+    const stats = await ifMissing(lstat(file), undefined);
     const content = stats?.isSymbolicLink() ? await readlink(file) : stats?.isFile() ? (await readFile(file)).toString("latin1") : "";
     if (containsSecret(content)) {
       throw new SecretLeakError(`Refusing to commit credential material in ${path}`);
@@ -113,22 +110,19 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
       return workspace;
     }
     const { repositoryPath, branch } = workspace;
-    const path = await realpath(workspace.path).catch((error: unknown) => {
-      if (errorCode(error) === "ENOENT") return workspace.path;
-      throw error;
-    });
+    const path = await ifMissing(realpath(workspace.path), workspace.path);
     operation.stage("remove_workspace");
-    const present = await lstat(path).then(() => true, (error: unknown) => { if (errorCode(error) === "ENOENT") return false; throw error; });
+    const present = await ifMissing(lstat(path).then(() => true), false);
     if (present) {
       await validateWorkspace(workspace);
-      const head = await git(path, ["rev-parse", "HEAD"]);
+      const head = await headOf(path);
       const published = db.select().from(runs).where(eq(runs.workspaceId, workspace.id)).all()
         .some((run) => run.publication.publishedCommitSha === head);
       if (head !== workspace.baseSha && !published) throw new Error("Workspace has unpublished commits; retain it for recovery");
       if (path !== resolve(await realpath("data/workspaces"), workspace.id)) throw new Error("Refusing cleanup outside the owned workspace root");
       await rm(path, { recursive: true });
       const home = resolve("data/sandbox-homes", workspace.id);
-      const stats = await lstat(home).catch((error: unknown) => { if (errorCode(error) !== "ENOENT") throw error; });
+      const stats = await ifMissing(lstat(home), undefined);
       if (stats?.isDirectory() && !stats.isSymbolicLink()) await rm(home, { recursive: true });
     }
     operation.stage("unpin");
@@ -154,18 +148,18 @@ export async function commitWorkspace(workspace: Workspace, message: string, aut
   await git(workspace.path, ["add", "--all"]);
   const staged = await git(workspace.path, ["diff", "--cached", "--name-only"]);
   if (staged || await hasPendingMerge(workspace.path)) {
-    await git(workspace.path, ["-c", `user.name=${author.name}`, "-c", `user.email=${author.email}`, "commit", "-m", message]);
-    const commitSha = await git(workspace.path, ["rev-parse", "HEAD"]);
+    await git(workspace.path, [...identity(author), "commit", "-m", message]);
+    const commitSha = await headOf(workspace.path);
     recordEvent({ ...references, type: "workspace.committed", data: { workspaceId: workspace.id, commitSha } });
     return commitSha;
   }
-  return git(workspace.path, ["rev-parse", "HEAD"]);
+  return headOf(workspace.path);
 }
 
 export async function pushWorkspace(workspace: Workspace, remote: string, commitSha: string, env: NodeJS.ProcessEnv, references: EventReferences = {}) {
   const bundle = resolve(workspace.path, ".scrat/publish.bundle");
   const directory = dirname(bundle);
-  const existing = await lstat(directory).catch((error: unknown) => { if (errorCode(error) !== "ENOENT") throw error; });
+  const existing = await ifMissing(lstat(directory), undefined);
   if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) throw new Error("Publication directory is not an owned directory");
   if (!existing) await mkdir(directory);
   const tip = `refs/heads/${workspace.branch}`;

@@ -5,7 +5,7 @@ import { type Action, getManifest, manifests } from "./actions.ts";
 import { config, getActionConfig, isActionEnabled } from "./config.ts";
 import { itemsInRepository, sameRepository } from "./repository.ts";
 import { db } from "./db.ts";
-import { describeError, errorCode, transientInferenceCode } from "./errors.ts";
+import { describeError, errorCode, errorMessage, transientInferenceCode } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { withOperationSync } from "./logging.ts";
 import { entryStage, hasPublicationSnapshot, hasValidationCheckpoint, InterruptedError } from "./results.ts";
@@ -26,7 +26,7 @@ function checkClaimable({ task, subject }: { task: Task; subject: Subject }, dat
   if (!isActionEnabled(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   let trigger;
   try { trigger = parseTriggerInput(task.input); }
-  catch (error) { return { ok: false as const, reason: `Invalid trigger input for ${task.action}: ${error instanceof Error ? error.message : String(error)}` }; }
+  catch (error) { return { ok: false as const, reason: `Invalid trigger input for ${task.action}: ${errorMessage(error)}` }; }
   const { repository } = subject;
   if (!repository) return { ok: false as const, reason: "Subject has no parseable repository" };
   if (!sameRepository(repository, config.github.repository)) return { ok: false as const, reason: `Subject belongs to ${repository}, not ${config.github.repository}` };
@@ -95,7 +95,7 @@ export function enqueueManualTasks(action: string, targets: string[], priority?:
     if (item.state !== "open") return { ...base, error: "Item is closed" };
     if (item.kind !== needs) return { ...base, error: `${action} needs ${needs === "pr" ? "a PR" : "an issue"}, but ${target} is ${item.kind === "pr" ? "a PR" : "an issue"}` };
     try { return { ...base, taskId: enqueueTask({ subjectId: item.id, action, priority, reason: "Manually enqueued", input: { source: "github_items", kind: "manual", manual: true } }).id }; }
-    catch (error) { return { ...base, error: error instanceof Error ? error.message : String(error) }; }
+    catch (error) { return { ...base, error: errorMessage(error) }; }
   });
 }
 

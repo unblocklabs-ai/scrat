@@ -78,7 +78,7 @@ export async function createWorkspace(
     operation.stage("resolve_base");
     repositoryPath = await git(resolve(repositoryPath), ["rev-parse", "--show-toplevel"]);
     const baseSha = await git(repositoryPath, ["rev-parse", "--verify", "--end-of-options", `${baseRef}^{commit}`]);
-    operation.stage("create_worktree");
+    operation.stage("create_workspace");
     await mkdir(dirname(path), { recursive: true });
     path = resolve(await realpath(dirname(path)), workspaceId);
     await git(repositoryPath, ["clone", "--no-checkout", "--shared", "--", repositoryPath, path]);
@@ -117,7 +117,7 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
       if (errorCode(error) === "ENOENT") return workspace.path;
       throw error;
     });
-    operation.stage("remove_worktree");
+    operation.stage("remove_workspace");
     const present = await lstat(path).then(() => true, (error: unknown) => { if (errorCode(error) === "ENOENT") return false; throw error; });
     if (present) {
       await validateWorkspace(workspace);
@@ -131,7 +131,7 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
       const stats = await lstat(home).catch((error: unknown) => { if (errorCode(error) !== "ENOENT") throw error; });
       if (stats?.isDirectory() && !stats.isSymbolicLink()) await rm(home, { recursive: true });
     }
-    operation.stage("delete_branch");
+    operation.stage("unpin");
     await git(repositoryPath, ["update-ref", "-d", pinRef(workspaceId)]);
     operation.stage("persistence");
     const removed = db.transaction((transaction) => {

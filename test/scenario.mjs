@@ -237,7 +237,6 @@ const staleBranch = async () => {
     assert.ok(!f.writes.some((w) => w.type === "pr"));
     assert.equal(f.comments.get(301).length, 1); assert.doesNotMatch(f.comments.get(301)[0].body, /behind|merge/i);
     assert.ok(all(s.workspaces).every((w) => w.removedAt), "review workspaces are cleaned up");
-    assert.equal(git(checkout, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree ")).length, 1);
     f.prs[0].state = "closed"; await route();
     changeMain("src/app.ts", "export const value = 9;\n");
     addPr(302, "feature-b", "human"); await route();

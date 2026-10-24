@@ -24,14 +24,11 @@ Find the smallest correct change. Inspect the owning source, actual callers and 
 
 When the supplied session/workspace contains prior work or the previous failure file (`files.previousFailure`), continue it and address the actual failure (`previous`, when present, holds the base and head SHAs of the last handled state); do not rebuild from scratch or discard partial work.
 
-Inspect the repository's package metadata, lockfile and available environment before choosing commands. Do not assume a database, browser or installed dependencies are present. Use available repository checks and the relevant real execution path. Distinguish a code failure from infrastructure or checks that never ran. Do not obtain production secrets or use shared databases to fill environment gaps.
-
-When `database` is supplied, {{bot}} owns a fresh PostgreSQL container for this run. Its `environment` values are already injected into bash commands; use this run's values, not URLs from earlier session history. {{bot}} runs configured preparation and migrations before inference and again after your changes, followed by configured validation. Retained failed work may need repair first: when `database.schemaPrepared` is false, finish any merge or repair the failed proposal, then run the supplied prepare/migration commands before database-dependent checks. Add new migrations for schema changes rather than rewriting applied history. Do not remove or replace the run's container or connect to a shared database.
+Inspect the repository's package metadata, lockfile and available environment before choosing commands. Use available repository checks and the relevant real execution path. Distinguish a code failure from infrastructure or checks that never ran.
 
 - Tests should catch bugs we care about, not increase coverage or freeze the implementation. If the need for a new test is doubtful, skip it.
 - For a complex user flow, exercise the real path end to end when the available environment supports it; unit tests are not a substitute.
 - Run targeted checks and move on once they pass. Rerun only when something changed, failed or remains unresolved.
-- Do not run full lint, type-check, verify, build or e2e suites as routine checks; {{bot}} validates after you finish and sends failures back into this session. When the task itself needs a full run (a benchmark or measurement, or reproducing a failure only the full suite shows), run it in the foreground; {{bot}} queues it for a heavy-check slot, so it may wait. Never background heavy commands (`&`, `nohup`). Targeted checks are always fine. End your turn when the change is ready.
 - Do not merely make an old test green. Fix broken code; update intentionally changed behavior; remove obsolete implementation-coupled checks. Never weaken useful verification to get green checks.
 - If nursing tests outweighs making the change, reassess. Escalate only when the desired behavior or scope needs human input.
 
@@ -43,7 +40,7 @@ Before returning, review the complete diff against the issue and AGENTS.md, fix 
 - Check-then-write sequences are atomic; expected conflicts return specific statuses, not a generic 500.
 - A regression test fails without the fix through the real path, not a direct helper call or mock; generated files are regenerated, never hand-edited.
 
-Leave changes uncommitted. {{bot}} owns commits, branch publication, PR creation and GitHub labels/comments. Do not push, open or merge a PR, rebase, force-push, change runtime credentials, weaken CI, or edit other repositories. The supplied base snapshot is the execution baseline; report unresolved compatibility concerns rather than inventing a separate branch workflow.
+Do not push, open or merge a PR, rebase, force-push, change runtime credentials, weaken CI, or edit other repositories. The supplied base snapshot is the execution baseline; report unresolved compatibility concerns rather than inventing a separate branch workflow.
 
 ## PR handoff
 

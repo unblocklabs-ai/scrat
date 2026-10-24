@@ -472,7 +472,7 @@ const commitReview = async (variant) => {
     const interrupted = f.row(s.runs, claim.run.id); assert.equal(interrupted.error.code, "RUN_INTERRUPTED");
     tasks.retryTask(interrupted.taskId);
     const done = await success();
-    assert.equal(done.retryOfRunId, interrupted.id); assert.equal(roots().length, 1); assert.equal(posts().length, 2);
+    assert.equal(done.retryOfRunId, null); assert.equal(roots().length, 1); assert.equal(posts().length, 2);
     assert.equal(posts()[1].body.thread_ts, ts); assert.equal(all(s.slackThreads).length, 1); assert.equal(done.publication.slackReplyTs, "1700000000.000002");
     assert.equal(reviewRequests().length, 4);
   } else if (variant === "isolation") {
@@ -1849,13 +1849,14 @@ export const scenarios = {
     }
     assert.equal(outbound(), ""); assert.equal(f.requests.length, modelRequests);
   } },
-  recovery: { title: "recover releases an abandoned claim without rewriting the saved result, and an interrupted commit review is recovered and retried with exactly one root and one reply", configure: [configureCommitSource], run: async () => {
+  recovery: { title: "recover releases an abandoned claim as an interruption without rewriting the saved result, and an interrupted commit review is recovered and retried with exactly one root and one reply", configure: [configureCommitSource], run: async () => {
     await commitReview("restart");
     f.addIssue(1); f.enqueue(1); const claim = tasks.claimTask();
     db.update(s.runs).set({ stage: "publishing", result: { text: "Saved", ready: false, paths: [], outcome: "complete" }, publication: { status: "pending", commentId: 123 } }).where(eq(s.runs.id, claim.run.id)).run();
     execFileSync(process.execPath, [resolve("app/src/recover.ts"), claim.run.id], { stdio: "pipe" });
     const r = f.row(s.runs, claim.run.id); assert.equal(r.error.code, "RUN_INTERRUPTED"); assert.equal(r.result.text, "Saved"); assert.equal(r.publication.commentId, 123);
-    tasks.retryTask(r.taskId); assert.ok(tasks.claimTask());
+    tasks.retryTask(r.taskId); const retried = await success();
+    assert.equal(retried.retryOfRunId, null); assert.ok(!("previousFailure" in f.requests.at(-1).context.files), "a recovered run is retried as an interruption, not as a failure to repair");
   } },
   cleanup: { title: "cleanup failure cannot turn a published review into a failed task, and cleanup never removes a change workspace through a review that stopped early", run: async () => {
     f.addIssue(1); f.enqueue(1); f.faults.cleanup.add(1); const r = await success();

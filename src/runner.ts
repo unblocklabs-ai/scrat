@@ -9,7 +9,7 @@ import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
-import { describeError, type ErrorDetails } from "./errors.ts";
+import { branchConflictCode, describeError, type ErrorDetails } from "./errors.ts";
 import { conventionalTitle, createMergeCommit, fetchPullRequestHead, fetchRepository, git, headOf, hasPendingMerge, mergeBase, prepareTarget } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
@@ -201,7 +201,7 @@ async function prepareReviewCommands({ run, repositoryPath, references, operatio
     const { behind, conflicts } = await prepareTarget(review.workspace.path, review.mainSha, review.headSha);
     if (!behind) throw error;
     const { baseBranch } = observation;
-    if (conflicts) throw new Error(`PR branch is behind ${baseBranch} and does not merge cleanly; the author needs to update it`);
+    if (conflicts) throw Object.assign(new Error(`PR branch is behind ${baseBranch} and does not merge cleanly; the author needs to update it`), { code: branchConflictCode });
     const synthetic = await createMergeCommit(repositoryPath, review.mainSha, review.headSha, `Review merge of ${baseBranch} into the PR head`, botAuthor());
     cleanup.reviewWorkspace = undefined;
     await tryCleanup(operation, { workspaceId: review.workspace.id }, () => removeWorkspace(review.workspace.id, references));

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { and, eq, isNull, or } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "./db.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
 import { git, hasPendingMerge } from "./git.ts";
@@ -11,7 +11,6 @@ import { runs, workspaces, type Run, type Workspace } from "./schema.ts";
 import { errorCode } from "./errors.ts";
 import { SecretLeakError } from "./results.ts";
 import { containsSecret } from "./secrets.ts";
-import { config } from "./config.ts";
 
 export function getWorkspace(workspaceId: string) {
   return db.select().from(workspaces).where(eq(workspaces.id, workspaceId)).get();
@@ -23,50 +22,13 @@ export async function pinWorkspaceBase(workspace: Workspace, sha: string) {
   await git(workspace.repositoryPath, ["update-ref", pinRef(workspace.id), sha]);
 }
 
-export async function backfillWorkspaceLayouts() {
-  for (const workspace of db.select().from(workspaces).where(and(or(isNull(workspaces.layout), eq(workspaces.layout, "worktree")), isNull(workspaces.removedAt))).all()) {
-    const stats = await lstat(resolve(workspace.path, ".git")).catch((error: unknown) => { if (errorCode(error) !== "ENOENT") throw error; });
-    if (stats && (workspace.layout === null || stats.isDirectory())) db.update(workspaces).set({ layout: stats.isDirectory() ? "clone" : "worktree" }).where(eq(workspaces.id, workspace.id)).run();
-  }
-}
-
 export async function validateWorkspace(workspace: Workspace) {
   if (!(await lstat(workspace.path)).isDirectory()) throw new Error("Workspace path is not its original directory");
   const path = await realpath(workspace.path);
   const top = await git(path, ["rev-parse", "--show-toplevel"]);
   const common = await git(path, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
   const branch = await git(path, ["symbolic-ref", "--short", "HEAD"]);
-  if ((await lstat(resolve(path, ".git"))).isDirectory() !== (workspace.layout === "clone")) throw new Error("Workspace Git identity changed");
-  if (workspace.layout === "clone") {
-    if (path !== top || await realpath(common) !== resolve(path, ".git") || branch !== workspace.branch) throw new Error("Workspace Git identity changed");
-    return;
-  }
-  const expected = await git(workspace.repositoryPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-  const registered = await git(workspace.repositoryPath, ["worktree", "list", "--porcelain", "-z"]);
-  if (path !== top || await realpath(common) !== await realpath(expected) || branch !== workspace.branch
-    || !registered.split("\0").includes(`worktree ${path}`)) throw new Error("Workspace Git identity changed");
-}
-
-export async function isolateWorkspace(workspace: Workspace) {
-  if (config.workspace?.layout !== "clone" || workspace.layout === "clone") return;
-  await validateWorkspace(workspace);
-  const head = await git(workspace.path, ["rev-parse", "HEAD"]);
-  const oldGit = await git(workspace.path, ["rev-parse", "--absolute-git-dir"]);
-  await mkdir("data/private-git", { recursive: true });
-  const recovery = await mkdtemp(resolve("data/private-git", `${workspace.id}.`));
-  const staging = resolve(recovery, "clone");
-  await git(workspace.repositoryPath, ["clone", "--no-checkout", "--shared", "--", workspace.repositoryPath, staging]);
-  await git(staging, ["update-ref", `refs/heads/${workspace.branch}`, head]);
-  await writeFile(resolve(staging, ".git/HEAD"), `ref: refs/heads/${workspace.branch}\n`);
-  for (const entry of ["index", "ORIG_HEAD", "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "rebase-apply", "rebase-merge", "sequencer", "logs"]) {
-    await cp(resolve(oldGit, entry), resolve(staging, ".git", entry), { recursive: true }).catch((error: unknown) => { if (errorCode(error) !== "ENOENT") throw error; });
-  }
-  await writeFile(resolve(staging, ".git/info/exclude"), "/.scrat/\n");
-  await rename(resolve(workspace.path, ".git"), resolve(recovery, "linked-git-pointer"));
-  try { await rename(resolve(staging, ".git"), resolve(workspace.path, ".git")); }
-  catch (error) { await rename(resolve(recovery, "linked-git-pointer"), resolve(workspace.path, ".git")); throw error; }
-  const converted = db.update(workspaces).set({ layout: "clone" }).where(eq(workspaces.id, workspace.id)).returning().get() ?? { ...workspace, layout: "clone" as const };
-  await validateWorkspace(converted);
+  if (!(await lstat(resolve(path, ".git"))).isDirectory() || path !== top || await realpath(common) !== resolve(path, ".git") || branch !== workspace.branch) throw new Error("Workspace Git identity changed");
 }
 
 export async function checkpointWorkspace(workspace: Workspace) {
@@ -116,19 +78,17 @@ export async function createWorkspace(
     operation.stage("resolve_base");
     repositoryPath = await git(resolve(repositoryPath), ["rev-parse", "--show-toplevel"]);
     const baseSha = await git(repositoryPath, ["rev-parse", "--verify", "--end-of-options", `${baseRef}^{commit}`]);
-    operation.stage("create_worktree");
+    operation.stage("create_workspace");
     await mkdir(dirname(path), { recursive: true });
     path = resolve(await realpath(dirname(path)), workspaceId);
-    if (config.workspace?.layout === "clone") {
-      await git(repositoryPath, ["clone", "--no-checkout", "--shared", "--", repositoryPath, path]);
-      await git(path, ["checkout", "-B", branch, baseSha]);
-      await writeFile(resolve(path, ".git/info/exclude"), "/.scrat/\n");
-    } else await git(repositoryPath, ["worktree", "add", "-b", branch, "--", path, baseSha]);
+    await git(repositoryPath, ["clone", "--no-checkout", "--shared", "--", repositoryPath, path]);
+    await git(path, ["checkout", "-B", branch, baseSha]);
+    await writeFile(resolve(path, ".git/info/exclude"), "/.scrat/\n");
     await git(repositoryPath, ["update-ref", pinRef(workspaceId), baseSha]);
     operation.stage("persistence");
     const workspace = db.transaction((transaction) => {
       const created = transaction.insert(workspaces).values({
-        id: workspaceId, repositoryPath, path, branch, baseRef, baseSha, layout: config.workspace?.layout === "clone" ? "clone" : "worktree",
+        id: workspaceId, repositoryPath, path, branch, baseRef, baseSha,
       }).returning().get()!;
       recordEvent({
         ...references,
@@ -157,27 +117,21 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
       if (errorCode(error) === "ENOENT") return workspace.path;
       throw error;
     });
-    operation.stage("remove_worktree");
-    const registered = await git(repositoryPath, ["worktree", "list", "--porcelain", "-z"]);
-    const privateClone = workspace.layout === "clone";
+    operation.stage("remove_workspace");
     const present = await lstat(path).then(() => true, (error: unknown) => { if (errorCode(error) === "ENOENT") return false; throw error; });
-    if (privateClone ? present : registered.split("\0").includes(`worktree ${path}`)) {
+    if (present) {
       await validateWorkspace(workspace);
       const head = await git(path, ["rev-parse", "HEAD"]);
       const published = db.select().from(runs).where(eq(runs.workspaceId, workspace.id)).all()
         .some((run) => run.publication.publishedCommitSha === head);
       if (head !== workspace.baseSha && !published) throw new Error("Workspace has unpublished commits; retain it for recovery");
-      if (privateClone) {
-        if (path !== resolve(await realpath("data/workspaces"), workspace.id)) throw new Error("Refusing cleanup outside the owned workspace root");
-        await rm(path, { recursive: true });
-        const home = resolve("data/sandbox-homes", workspace.id);
-        const stats = await lstat(home).catch((error: unknown) => { if (errorCode(error) !== "ENOENT") throw error; });
-        if (stats?.isDirectory() && !stats.isSymbolicLink()) await rm(home, { recursive: true });
-      } else await git(repositoryPath, ["worktree", "remove", "--", path]);
+      if (path !== resolve(await realpath("data/workspaces"), workspace.id)) throw new Error("Refusing cleanup outside the owned workspace root");
+      await rm(path, { recursive: true });
+      const home = resolve("data/sandbox-homes", workspace.id);
+      const stats = await lstat(home).catch((error: unknown) => { if (errorCode(error) !== "ENOENT") throw error; });
+      if (stats?.isDirectory() && !stats.isSymbolicLink()) await rm(home, { recursive: true });
     }
-    operation.stage("delete_branch");
-    const existingBranch = await git(repositoryPath, ["branch", "--list", "--format=%(refname)", branch]);
-    if (existingBranch && !privateClone) await git(repositoryPath, ["branch", "-D", "--", branch]);
+    operation.stage("unpin");
     await git(repositoryPath, ["update-ref", "-d", pinRef(workspaceId)]);
     operation.stage("persistence");
     const removed = db.transaction((transaction) => {
@@ -209,25 +163,23 @@ export async function commitWorkspace(workspace: Workspace, message: string, aut
 }
 
 export async function pushWorkspace(workspace: Workspace, remote: string, commitSha: string, env: NodeJS.ProcessEnv, references: EventReferences = {}) {
-  if (workspace.layout === "clone") {
-    const bundle = resolve(workspace.path, ".scrat/publish.bundle");
-    const directory = dirname(bundle);
-    const existing = await lstat(directory).catch((error: unknown) => { if (errorCode(error) !== "ENOENT") throw error; });
-    if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) throw new Error("Publication directory is not an owned directory");
-    if (!existing) await mkdir(directory);
-    const tip = `refs/heads/${workspace.branch}`;
-    const prerequisite = await git(workspace.repositoryPath, ["rev-parse", "--verify", "--quiet", `${pinRef(workspace.id)}^{commit}`]).catch(() => workspace.baseSha);
-    try {
-      await git(workspace.path, ["bundle", "create", bundle, `${prerequisite}..${tip}`]);
-      await git(workspace.repositoryPath, ["bundle", "verify", bundle]);
-    } catch {
-      await rm(bundle, { force: true });
-      await git(workspace.path, ["bundle", "create", bundle, tip]);
-    }
-    if (!(await lstat(bundle)).isFile() || await realpath(bundle) !== bundle) throw new Error("Publication bundle is not an owned regular file");
-    await git(workspace.repositoryPath, ["fetch", "--no-tags", "--", bundle, `refs/heads/${workspace.branch}`]);
-    await pinWorkspaceBase(workspace, commitSha);
+  const bundle = resolve(workspace.path, ".scrat/publish.bundle");
+  const directory = dirname(bundle);
+  const existing = await lstat(directory).catch((error: unknown) => { if (errorCode(error) !== "ENOENT") throw error; });
+  if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) throw new Error("Publication directory is not an owned directory");
+  if (!existing) await mkdir(directory);
+  const tip = `refs/heads/${workspace.branch}`;
+  const prerequisite = await git(workspace.repositoryPath, ["rev-parse", "--verify", "--quiet", `${pinRef(workspace.id)}^{commit}`]).catch(() => workspace.baseSha);
+  try {
+    await git(workspace.path, ["bundle", "create", bundle, `${prerequisite}..${tip}`]);
+    await git(workspace.repositoryPath, ["bundle", "verify", bundle]);
+  } catch {
+    await rm(bundle, { force: true });
+    await git(workspace.path, ["bundle", "create", bundle, tip]);
   }
+  if (!(await lstat(bundle)).isFile() || await realpath(bundle) !== bundle) throw new Error("Publication bundle is not an owned regular file");
+  await git(workspace.repositoryPath, ["fetch", "--no-tags", "--", bundle, `refs/heads/${workspace.branch}`]);
+  await pinWorkspaceBase(workspace, commitSha);
   await git(workspace.repositoryPath, ["push", "--", remote, `${commitSha}:refs/heads/${workspace.branch}`], env);
   recordEvent({ ...references, type: "workspace.pushed", data: { workspaceId: workspace.id, commitSha } });
   return commitSha;

@@ -88,7 +88,6 @@ CREATE TABLE `workspaces` (
 	`path` text NOT NULL UNIQUE,
 	`base_ref` text NOT NULL,
 	`base_sha` text NOT NULL,
-	`layout` text,
 	`created_at` text NOT NULL,
 	`removed_at` text
 );

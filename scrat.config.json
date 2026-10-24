@@ -48,7 +48,6 @@
     "sandbox": false,
     "commandMemoryMax": null,
     "packageStore": null,
-    "layout": "worktree",
     "environment": {
       "VITEST_MAX_WORKERS": "1"
     },

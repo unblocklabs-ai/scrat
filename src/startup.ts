@@ -10,7 +10,6 @@ import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 import { loadPlaywright } from "./scoped-tools.ts";
 import { authTest } from "./slack.ts";
 import { ensureRunSequences } from "./tasks.ts";
-import { backfillWorkspaceLayouts } from "./workspaces.ts";
 
 const templateVariables = new Set(["sha", "short_sha", "author", "title", "url", "branch", "count", "bot"]);
 
@@ -20,7 +19,6 @@ type Entry = { provider: string; model: string };
 export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, "actions"> & { resolve?: Resolver; actions: Record<string, Partial<ActionSettings>> } = config) {
   const modelRuntime = await sharedModelRuntime();
   const problems: string[] = [];
-  if (settings.workspace?.sandbox && settings.workspace.layout !== "clone") problems.push('workspace.sandbox requires workspace.layout "clone"');
   if (settings.workspace?.sandbox) {
     if (process.platform !== "linux") problems.push("workspace.sandbox requires Linux bubblewrap");
     else await access("/usr/bin/bwrap").catch(() => { problems.push("workspace.sandbox requires /usr/bin/bwrap"); });
@@ -108,5 +106,4 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
 export async function prepareService() {
   await validateStaticConfig();
   ensureRunSequences();
-  await backfillWorkspaceLayouts();
 }

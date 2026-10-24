@@ -16,11 +16,11 @@ Scrat serves the single configured repository and clone: sync and fetch refuse a
 
 GitHub access uses a repository-scoped client with shared, permission-specific authentication. Sync reads up to four issue discussions concurrently (issue metadata comes from the list response) and applies routing effects in order; each PR is observed once, inside its review lock, with its four reads in parallel, and that observation serves both routing and reconciliation. Startup sync still finishes before workers claim tasks. Credentials are cached; responses are revalidated, not trusted: reads send `If-None-Match` and GitHub's 304s (free against the rate limit) reuse the identical cached body, while publication and serialized PR reconciliation still fetch fresh state. When fewer than 10% of the hourly requests remain, sync defers its remaining item reads to the next interval (logged as `github.sync_deferred`, starting at a different item each sync); this also defers that PR's sync-driven reconciliation, but worker publication is never deferred. A rejected credential is refreshed on the next operation, without automatically replaying a failed write.
 
-Implementations use isolated worktrees and branches; follow-ups reuse their workspace and Pi session. Checks must pass against the exact tree being committed before publication. Optional Docker PostgreSQL databases isolate mutating runs. PR closure triggers workspace cleanup; failed work is retained for recovery.
+Implementations use private clones and branches; follow-ups reuse their workspace and Pi session. Checks must pass against the exact tree being committed before publication. Optional Docker PostgreSQL databases isolate mutating runs. PR closure triggers workspace cleanup; failed work is retained for recovery.
 
 Stale branches are brought up to date by merge commit, never rebase. A Scrat PR that is behind its base and failed at preparation (or conflicts) gets a `resolve_conflicts` task: a clean merge is made in code without a model session and validated normally (a validation failure falls back to the agent in the same run), while conflicts go to the agent. Feedback and repair tasks on a behind Scrat PR whose preparation fails merge the base first and ship that merge with their own push. A human-authored PR that cannot be prepared because it is behind, but merges cleanly, is reviewed on a local throwaway merge of its base (the diff stays relative to the base, nothing is pushed or commented); if the merge conflicts, the review fails and asks the author to update the branch.
 
-Repository commands, Git hooks and Pi's Bash receive a minimal inherited environment, never Scrat's credentials. Pi's file tools stay inside the worktree and its run's context directory (`data/runs/<run-id>/`, holding the discussion and larger context outside the worktree). Prompts are small manifests with no patch bodies; read-only sessions inspect changes through a capped, scope-recording read-only `git` tool instead of Bash. Comments, PR bodies and commits that contain configured credentials are refused rather than published.
+Repository commands, Git hooks and Pi's Bash receive a minimal inherited environment, never Scrat's credentials. Pi's file tools stay inside the workspace and its run's context directory (`data/runs/<run-id>/`, holding the discussion and larger context outside the worktree). Prompts are small manifests with no patch bodies; read-only sessions inspect changes through a capped, scope-recording read-only `git` tool instead of Bash. Comments, PR bodies and commits that contain configured credentials are refused rather than published.
 
 The newest complete PR assessment is authoritative. Context and observed source/dependency changes determine freshness—a relevance heuristic, not a full dependency graph. Stale assessments lose their grade and require a fresh review; older opinions never regain authority. Publication-only retries reuse saved results. Scrat does not automatically merge PRs.
 
@@ -169,7 +169,7 @@ Before relying on a new deployment, run it once against a disposable repository 
 
 ### Workspace
 
-On Linux, set `workspace.sandbox: true` (which requires `workspace.layout: "clone"`) in deployment overrides to run repository
+On Linux, set `workspace.sandbox: true` in deployment overrides to run repository
 preparation, validation, agent Bash and workspace Git (including hooks) inside
 Bubblewrap. Enabling it is fail-closed: missing namespaces or runtimes are errors,
 not a fallback to host execution. The installer checks the boundary before stopping
@@ -201,10 +201,7 @@ Commands get the workspace, their own persistent home, private `/tmp`, `/run` an
 process namespace, read-only system/Node/pnpm runtimes, read-only repository Git
 objects, and (for Bash) their own context directory. They do not get controller
 credentials/data, other workspaces, host process environments or the Docker socket.
-`workspace.layout` is `"worktree"` (default; linked worktrees of the shared repository) or `"clone"` (private clones that share objects with the repository clone); `"clone"` works on any OS without Bubblewrap.
-New workspaces in the clone layout are private Git clones that borrow the repository clone's objects (`git clone --shared`; Scrat sets `gc.auto=0` there and pins each workspace base under `refs/scrat/workspaces/<id>`), and the layout is recorded on the workspace row; legacy linked workspaces are
-converted in place with their index, merge state and working files retained. Old
-Git metadata/pointers remain under `data/private-git/` for recovery. The controller
+Workspaces are private Git clones that borrow the repository clone's objects (`git clone --shared`; Scrat sets `gc.auto=0` there and pins each workspace base under `refs/scrat/workspaces/<id>`), which works on any OS without Bubblewrap. The controller
 imports published commits through a checked incremental Git bundle (only the commits the clone lacks) rather than executing Git
 in a writable shared repository. Review-workspace cleanup also removes its private
 home; retained implementation workspaces keep theirs for retries.
@@ -217,12 +214,11 @@ This is OS isolation, not a guarantee against kernel exploits, resource exhausti
 or exfiltration of workspace content over permitted internet access. The service
 account should have no sudo; administration belongs to a separately verified login.
 
-Workspace commands are argument arrays, not shell strings: `["pnpm", "verify"]`. Command lists execute sequentially inside the worktree; a failing command stops the run. Each run stores a measured check per command (name, status, duration, a bounded tail, and the path of the file holding the full output) in `runs.verification`, not the raw output. Runs recorded before this change keep their `stdout` and `stderr` fields.
+Workspace commands are argument arrays, not shell strings: `["pnpm", "verify"]`. Command lists execute sequentially inside the workspace; a failing command stops the run. Each run stores a measured check per command (name, status, duration, a bounded tail, and the path of the file holding the full output) in `runs.verification`, not the raw output. Runs recorded before this change keep their `stdout` and `stderr` fields.
 
 | Setting | Purpose |
 | --- | --- |
 | `workspace.environment` | Environment variables added to Pi's Bash commands and harness preparation/validation commands. These commands inherit only path, home, user, locale, temporary-directory, proxy, certificate and `DOCKER_HOST` settings, so any other variable they need belongs here. Test-process limits belong here too; task concurrency does not serialize tests. |
-| `workspace.layout` | `worktree` (default) or `clone`: linked worktrees of the shared repository, or private clones that share objects with the repository clone. Must be `clone` when `workspace.sandbox` is true; `clone` works on any OS. |
 | `workspace.prepare` | Setup commands, including dependency installation and code generation. Also used for read-only reviews, and rerun before mutating-work validation. |
 | `workspace.heavyCommands` | Optional regular expressions, matched against each shell command segment of Pi's Bash tool, with quoted text ignored and whitespace collapsed (leading `VAR=value`, `env`, `nohup`, `time`, `sudo`, `exec` and `timeout N` are stripped). A foreground match is queued, not refused: it runs in one of the `harness.maxConcurrentValidations` slots, shared with Scrat's own validation, and logs `pi.heavy_command` with its wait. It may hold the slot for at most `harness.commandTimeoutSeconds`, and a cancelled run leaves the queue. A command that backgrounds work (a background `&`, `nohup`, `setsid` or `disown`) is refused instead, because the job would outlive its slot; the agent is told to run it in the foreground. This is a speed bump against accidental parallel lint/type-check/verify runs, not a sandbox: `sh -c '...'` or a script can still evade it. |
 | `workspace.validate` | Required checks for mutating tasks before committing or publishing. Not run as a harness gate for read-only reviews. |

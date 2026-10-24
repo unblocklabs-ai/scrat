@@ -22,7 +22,7 @@ function schemaTemplate(repository) {
   return template;
 }
 
-export async function fixture(scenario, spec, layout) {
+export async function fixture(scenario, spec) {
   const repository = fileURLToPath(new URL("..", import.meta.url));
   const root = mkdtempSync(resolve(tmpdir(), "scrat-integration-"));
   for (const path of ["src", "skills", "actions", "scrat.config.json", "package.json"]) cpSync(resolve(repository, path), resolve(root, "app", path), { recursive: true });
@@ -192,7 +192,6 @@ export async function fixture(scenario, spec, layout) {
   config.actions = Object.fromEntries(readdirSync("app/actions").map((file) => parseYaml(readFileSync("app/actions/" + file, "utf8")))
     .map(({ name, reviewers = [] }) => [name, { provider: "fixture", ...reviewers.length && { reviewers: reviewers.map((reviewer) => ({ ...reviewer, provider: "fixture" })) } }]));
   for (const configure of spec.configure ?? []) configure(config);
-  if (layout) config.workspace.layout = layout;
   const { actions, ...fileSettings } = config;
   writeFileSync("app/scrat.config.json", JSON.stringify(fileSettings));
   writeFileSync("app/scrat.local.json", JSON.stringify({ actions }));
@@ -286,7 +285,7 @@ export async function fixture(scenario, spec, layout) {
       writes.push({ type: "comment", number: n, body: body.body });
       const comment = { id: ++nextCommentId, body: body.body, user: { login: config.github.botLogin }, updated_at: "2026-10-19T01:00:00Z", html_url: `https://github.com/fixture/project/issues/${n}#comment` };
       comments.set(n, [...(comments.get(n) ?? []), comment]);
-      if (faults.cleanup.delete(n)) { const run = db.select().from(schema.runs).all().find((run) => !run.finishedAt); const workspace = db.select().from(schema.workspaces).all().find((w) => w.id === run.workspaceId); writeFileSync(workspace.path + "/keep.txt", "preserve\n"); }
+      if (faults.cleanup.delete(n)) { const run = db.select().from(schema.runs).all().find((run) => !run.finishedAt); const workspace = db.select().from(schema.workspaces).all().find((w) => w.id === run.workspaceId); writeFileSync(workspace.path + "/keep.txt", "preserve\n"); git(workspace.path, "add", "."); commit(workspace.path, "Unpublished"); }
       return faults.comment.delete(n) ? reply({ message: "Lost response" }, 502) : reply(comment, 201);
     }
     match = path.match(/\/issues\/comments\/(\d+)$/);

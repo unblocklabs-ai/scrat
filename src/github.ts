@@ -282,6 +282,13 @@ export class GitHubRepository {
     });
   }
 
+  async deleteComment(commentId: number, references: EventReferences = {}): Promise<void> {
+    await this.write("github.delete_comment", { commentId }, references, "write", {
+      request: ({ github, owner, repo }) => github.rest.issues.deleteComment({ owner, repo, comment_id: commentId }),
+      journal: () => ({ details: { commentId } }),
+    });
+  }
+
   async addLabels(issueNumber: number, labels: string[], references: EventReferences = {}): Promise<void> {
     await this.write("github.add_labels", { issueNumber, labels }, references, "write", {
       request: ({ github, owner, repo }) => github.rest.issues.addLabels({ owner, repo, issue_number: issueNumber, labels }),

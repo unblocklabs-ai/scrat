@@ -109,6 +109,17 @@ function pullRequestView(item: GithubPullRequest): GithubPullRequest {
   }, base: { ref: item.base.ref } };
 }
 
+export async function mapConcurrent<T>(items: readonly T[], run: (item: T, index: number) => Promise<void>, stop: () => boolean = () => false) {
+  let next = 0;
+  const workers = await Promise.allSettled(Array.from({ length: Math.min(config.github.readConcurrency, items.length) }, async () => {
+    while (next < items.length && !stop()) {
+      const index = next++;
+      await run(items[index]!, index);
+    }
+  }));
+  for (const worker of workers) if (worker.status === "rejected") throw worker.reason;
+}
+
 export class GitHubRepository {
   readonly repository: string;
 
@@ -178,15 +189,9 @@ export class GitHubRepository {
 
   async fetchItemContexts(items: readonly { kind: "issue" | "pr"; number: number; item?: GithubItem }[], options: { comments?: boolean; defer?: boolean } = {}) {
     const contexts = new Array<GithubContext | undefined>(items.length);
-    let next = 0;
-    const workers = await Promise.allSettled(Array.from({ length: Math.min(4, items.length) }, async () => {
-      while (next < items.length && !(options.defer && rateLimitLow())) {
-        const index = next++;
-        const { kind, number, item } = items[index];
-        contexts[index] = await this.fetchItemContext(kind, number, { comments: options.comments, item });
-      }
-    }));
-    for (const worker of workers) if (worker.status === "rejected") throw worker.reason;
+    await mapConcurrent(items, async ({ kind, number, item }, index) => {
+      contexts[index] = await this.fetchItemContext(kind, number, { comments: options.comments, item });
+    }, () => options.defer === true && rateLimitLow());
     return contexts;
   }
 

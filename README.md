@@ -125,6 +125,7 @@ The installer keeps this file across deploys (any other drop-in is moved into th
 | `github.appId` | GitHub App ID used for authentication (ignored in PAT mode). |
 | `github.installationId` | App installation granting access to the target repository (ignored in PAT mode). |
 | `github.fetchIntervalSeconds` | Delay between service syncs, in seconds. The service also syncs on startup. |
+| `github.readConcurrency` | Maximum concurrent GitHub item reads during sync (default 4). |
 
 ### GitHub authentication
 

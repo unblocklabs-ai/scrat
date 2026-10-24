@@ -87,8 +87,7 @@ export async function fixture(scenario, spec) {
     if (review && step === 0) tool = mode === "grep" ? { name: "grep", args: { pattern: "value" } } : { name: "read", args: { path: scenario === "unicode_scope" ? "src/a\u00a0b.ts" : scenario === "panel" ? "node_modules/pinned-runtime/package.json" : mode.startsWith("helper") ? "src/helper.ts" : mode === "at" ? "@src/app.ts" : "src/app.ts" } };
     if (review && scenario === "unicode_nfd" && step === 0) tool = { name: "read", args: { path: existsSync("seed/src/cafe\u0301.ts") ? "src/cafe\u0301.ts" : "src/caf\u00e9.ts" } };
     if (review && mode === "grep" && step === 1) tool = { name: "read", args: { path: "src/app.ts" } };
-    if (review && ["relevance", "lockfile_scope", "importer_scope"].includes(scenario) && step >= 2 && step <= 4) tool = { name: "read", args: { path: ["package.json", "pnpm-lock.yaml", "node_modules/wrangler/package.json"][step - 2] } };
-    if (review && scenario === "lockfile_scope" && step === 5) tool = { name: "read", args: { path: "node_modules/string-width-cjs/package.json" } };
+    if (review && scenario === "relevance" && step >= 2 && step <= 4) tool = { name: "read", args: { path: ["package.json", "pnpm-lock.yaml", "node_modules/wrangler/package.json"][step - 2] } };
     if (review && scenario.startsWith("commit_review") && step === 1) tool = { name: "read_base", args: { path: "src/app.ts" } };
     if (review && scenario.startsWith("commit_review") && step === 2) tool = { name: "git", args: { operation: "diff_stat", from: "base", to: "head" } };
     if (review && scenario === "panel" && step === 1) tool = { name: "read_base", args: { path: "src/app.ts" } };

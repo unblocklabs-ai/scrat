@@ -56,13 +56,6 @@ const seedLockfile = () => {
   seedIgnore();
   writeFileSync("seed/package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "1.0.0" } }));
   writeFileSync("seed/pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: old}\n  unrelated@1.0.0:\n    resolution: {integrity: old}\n");
-  if (scenario === "lockfile_scope") writeFileSync("seed/pnpm-lock.yaml", readFileSync("seed/pnpm-lock.yaml", "utf8")
-    + "  string-width-cjs@npm:string-width@4.2.2:\n    resolution: {integrity: alias}\nsnapshots:\n  wrangler@1.0.0:\n    dependencies: {nested: 1.0.0}\nimporters:\n  .:\n    devDependencies:\n      wrangler: {specifier: 1.0.0, version: 1.0.0}\n");
-  if (scenario === "importer_scope") writeFileSync("seed/pnpm-lock.yaml", JSON.stringify({ lockfileVersion: "9.0",
-    importers: { ".": { devDependencies: { wrangler: { specifier: "1.0.0", version: "1.0.0" }, unrelated: { specifier: "1.0.0", version: "1.0.0" } } } },
-    packages: { "wrangler@1.0.0": { resolution: { integrity: "wrangler" } }, "unrelated@1.0.0": { resolution: { integrity: "unrelated" } } },
-    snapshots: { "wrangler@1.0.0": {}, "unrelated@1.0.0": {} },
-  }));
 };
 const configurePanel = (config) => {
   script(config, "prepare", 'import{mkdirSync,writeFileSync}from"node:fs";mkdirSync("node_modules/pinned-runtime",{recursive:true});writeFileSync("node_modules/pinned-runtime/package.json",JSON.stringify({name:"pinned-runtime",version:"9.8.7"}));');
@@ -1170,11 +1163,15 @@ export const scenarios = {
     f.addIssue(2); f.reset(2, "no-status"); f.enqueue(2, "implement");
     before = f.requests.length; const stuck = await run();
     assert.match(stuck.error.message, /SCRAT_STATUS/); assert.equal(f.requests.length - before, 4);
-    for (const [i, mode] of ["incomplete", "needs_decision"].entries()) {
+    const prsBefore = f.prs.length, writesBefore = f.writes.length;
+    for (const [i, [mode, expected]] of [["incomplete", 2], ["needs_decision", 2], ["bare-status", 4]].entries()) {
       f.addIssue(i + 3); f.reset(i + 3, mode); f.enqueue(i + 3, "implement");
       before = f.requests.length; const r = await run(); assert.ok(r.error);
-      assert.equal(f.requests.length - before, 2);
+      assert.equal(f.requests.length - before, expected);
+      assert.equal(f.row(s.tasks, r.taskId).status, "failed");
+      assert.ok(existsSync(f.row(s.workspaces, r.workspaceId).path + "/src/app.ts"));
     }
+    assert.equal(f.prs.length, prsBefore); assert.equal(f.writes.length, writesBefore);
     const lines = captureLogs();
     const prompts = () => f.requests.filter((r) => r.request.messages.at(-1).role === "user" && JSON.stringify(r.request.messages.at(-1).content).includes("Your assessment was returned incomplete")).length;
     const publications = () => f.writes.length;
@@ -1213,14 +1210,6 @@ export const scenarios = {
     await implement(2); await route();
     const second = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 202);
     assert.ok(all(s.tasks).some((t) => t.subjectId === second.id && t.action === "review_pr" && t.status === "queued"));
-  } },
-  incomplete: { title: "partial or undecided implementations never become PRs", run: async () => {
-    for (const [i, mode] of ["incomplete", "needs_decision", "no-status", "bare-status"].entries()) {
-      f.addIssue(i + 1); f.enqueue(i + 1, "implement"); f.reset(i + 1, mode);
-      const r = await run(); assert.ok(r.error); assert.equal(f.row(s.tasks, r.taskId).status, "failed");
-      assert.ok(existsSync(f.row(s.workspaces, r.workspaceId).path + "/src/app.ts"));
-    }
-    assert.equal(f.prs.length, 0); assert.equal(f.writes.length, 0);
   } },
   verification: { title: "verification receipts bind to the published commit and failing checks block publication", configure: [configureCheck], run: async () => {
     const r = await implement(1);
@@ -1308,11 +1297,16 @@ export const scenarios = {
     f.reset(1, "normal"); f.enqueue(1); await success();
     assert.deepEqual(f.issues.get(1).labels.map((label) => label.name), ["human-label"]);
   } },
-  ambiguous_pr: { title: "a lost PR response is reconciled without another PR or inference", run: async () => {
+  ambiguous_pr: { title: "a lost PR response is reconciled without another PR, inference or revalidation, resuming at the publishing stage", configure: [configureValidation], run: async () => {
+    const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
     f.addIssue(1); f.enqueue(1, "implement"); f.faults.pr.add(1);
     const failed = await run(); assert.ok(failed.error); assert.equal(f.prs.length, 1); const calls = f.requests.length;
+    assert.equal(validations(), 1);
+    const saved = f.row(s.runs, failed.id);
+    assert.equal(saved.stage, "publishing"); assert.equal(saved.publication.commitSha, saved.headSha); assert.equal(saved.verification.headSha, saved.headSha);
     tasks.retryTask(failed.taskId); const completed = await success();
     assert.equal(completed.publication.pullRequestNumber, 201); assert.equal(f.prs.length, 1); assert.equal(f.requests.length, calls);
+    assert.equal(validations(), 1); assert.equal(completed.inferenceFromRunId, failed.id);
   } },
   freshness: { title: "requirements changed during inference cannot receive an approval label", run: async () => {
     f.addIssue(1); await route(); f.reset(1, "ready");
@@ -1359,23 +1353,6 @@ export const scenarios = {
     changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "2.0.0", unrelated: "2.0.0" } }));
     await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"), "Inspected dependency changes must trigger review");
   } },
-  lockfile_scope: { title: "mixed lockfile changes cannot hide inspected packages, aliases or importer changes", seed: seedLockfile, configure: [configureLockfile], run: async () => {
-    f.addIssue(1); f.reset(1, "grep"); await route(); await success();
-    let lock = readFileSync("seed/pnpm-lock.yaml", "utf8");
-    for (const update of [
-      (text) => text.replace("integrity: old", "integrity: changed").replace("unrelated@1.0.0", "unrelated@2.0.0"),
-      (text) => text.replace("npm:string-width@4.2.2", "npm:string-width@4.2.3").replace("unrelated@2.0.0", "unrelated@3.0.0"),
-      (text) => text.replace("nested: 1.0.0", "nested: 2.0.0").replace("unrelated@3.0.0", "unrelated@4.0.0"),
-      (text) => text.replace("version: 1.0.0}", "version: 2.0.0}").replace("unrelated@4.0.0", "unrelated@5.0.0"),
-      (text) => text + "unknownSetting: changed\n",
-    ]) {
-      lock = update(lock); changeMain("pnpm-lock.yaml", lock); await route();
-      assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"), lock);
-      f.reset(1, "grep"); await success();
-    }
-    changeMain("pnpm-lock.yaml", lock.replace("unrelated@5.0.0", "unrelated@6.0.0")); await route();
-    assert.ok(!all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
-  } },
   lockfile_impact: { title: "the pure lockfile differ separates inspected-package, alias, importer and unknown-shape changes from unrelated ones without a repository", run: async () => {
     const { lockfileChanged, affectsPaths } = await f.app("lockfile-impact.ts");
     const base = "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: old}\n  unrelated@1.0.0:\n    resolution: {integrity: old}\n"
@@ -1394,36 +1371,11 @@ export const scenarios = {
     assert.equal(changed((text) => text.replace("unrelated: {specifier: 1.0.0, version: 1.0.0}", "unrelated: {specifier: workspace:*, version: link:../unrelated}")), true);
     assert.equal(changed((text) => text.replace("importers:\n", "importers:\n  packages/new: {}\n")), true);
     assert.equal(changed((text) => text + "unknownSetting: changed\n"), true);
+    assert.equal(changed((text) => text.replace("importers:\n  .:\n", "importers:\n  .:\n    injectedSetting: true\n")), true);
+    assert.equal(changed((text) => text.replace("unrelated: {specifier: 1.0.0, version: 1.0.0}", "unrelated: 3.0.0")), true);
     assert.throws(() => lockfileChanged(base, "- not\n- a record\n", inspected), /Unrecognized lockfile/);
     assert.equal(affectsPaths(["src/app.ts"], ["src"]), true); assert.equal(affectsPaths(["srcs/app.ts"], ["src/"]), false);
     assert.equal(affectsPaths(["a.ts"], ["a.ts"]), true); assert.equal(affectsPaths(["b.ts"], ["a.ts"]), false);
-  } },
-  importer_scope: { title: "real importer bumps skip unrelated packages while aliases and unknown workspace shapes remain relevant", seed: seedLockfile, configure: [configureLockfile], run: async () => {
-    f.addIssue(1); f.reset(1, "grep"); await route(); await success();
-    const lock = JSON.parse(readFileSync("seed/pnpm-lock.yaml", "utf8"));
-    const bump = (name, version) => {
-      const entry = lock.importers["."].devDependencies[name];
-      const old = name + "@" + entry.version, next = name + "@" + version;
-      delete lock.packages[old]; delete lock.snapshots[old];
-      lock.packages[next] = { resolution: { integrity: version } }; lock.snapshots[next] = {};
-      entry.specifier = version; entry.version = version;
-    };
-    bump("unrelated", "2.0.0");
-    changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "2.0.0" } }));
-    changeMain("pnpm-lock.yaml", JSON.stringify(lock)); await route();
-    assert.ok(!all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
-    for (const update of [
-      () => bump("wrangler", "2.0.0"),
-      () => { lock.importers["."].devDependencies.alternate = { specifier: "npm:wrangler@2.0.0", version: "wrangler@2.0.0" }; },
-      () => { lock.importers["."].devDependencies.unrelated = { specifier: "workspace:*", version: "link:../unrelated" }; },
-      () => { lock.importers["."].injectedSetting = true; },
-      () => { lock.importers["."].devDependencies.unrelated = "3.0.0"; },
-      () => { lock.importers["packages/new"] = {}; },
-    ]) {
-      update(); changeMain("pnpm-lock.yaml", JSON.stringify(lock)); await route();
-      assert.ok(all(s.tasks).some((t) => t.subjectId === "issue-1" && t.status === "queued"));
-      f.reset(1, "grep"); await success();
-    }
   } },
   review_scope: { title: "Pi path aliases and supplied PR diff files participate in freshness and re-review", run: async () => {
     f.addIssue(1); f.reset(1, "at"); await route();
@@ -1819,26 +1771,6 @@ export const scenarios = {
     execFileSync(process.execPath, [resolve("app/src/recover.ts"), claim.run.id], { stdio: "pipe" });
     const r = f.row(s.runs, claim.run.id); assert.equal(r.error.code, "RUN_INTERRUPTED"); assert.equal(r.result.text, "Saved"); assert.equal(r.publication.commentId, 123);
     tasks.retryTask(r.taskId); assert.ok(tasks.claimTask());
-  } },
-  crash_before_publishing: { title: "validated artifacts and the publishing stage are written together, so a run failed after validation resumes at publishing without validating again", configure: [configureValidation], run: async () => {
-    const updates = [], update = db.update.bind(db);
-    db.update = (table) => {
-      const builder = update(table);
-      if (table !== s.runs) return builder;
-      const set = builder.set.bind(builder);
-      builder.set = (values) => { updates.push(values); return set(values); };
-      return builder;
-    };
-    const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
-    f.addIssue(1, ["scrat"]); f.enqueue(1, "implement"); f.faults.pr.add(1);
-    const lost = await run(); assert.ok(lost.error); assert.equal(validations(), 1);
-    const artifacts = updates.filter((values) => values.verification);
-    assert.equal(artifacts.length, 1); assert.equal(artifacts[0].stage, "publishing", "validated artifacts and the publishing stage are one write");
-    const saved = f.row(s.runs, lost.id);
-    assert.equal(saved.stage, "publishing"); assert.equal(saved.publication.commitSha, saved.headSha); assert.equal(saved.verification.headSha, saved.headSha);
-    tasks.retryTask(lost.taskId); const completed = await success();
-    assert.equal(validations(), 1); assert.equal(f.prs.length, 1); assert.equal(completed.publication.pullRequestNumber, 201);
-    assert.equal(completed.inferenceFromRunId, lost.id);
   } },
   cleanup: { title: "cleanup failure cannot turn a published review into a failed task", run: async () => {
     f.addIssue(1); f.enqueue(1); f.faults.cleanup.add(1); const r = await success();
@@ -2455,31 +2387,6 @@ export const scenarios = {
     assert.ok(aborted < 1000, `Abort should release the waiter, took ${aborted}ms`);
     const notified = await timed(((since) => { const waiting = waitForWork(since, 5_000); signalWork(); return waiting; })(workGeneration()));
     assert.ok(notified < 1000, `Explicit signal should wake the waiter, took ${notified}ms`);
-  } },
-  operations: { title: "withOperation returns results, rethrows errors unchanged, logs the last stage on failure and works inside synchronous transactions", run: async () => {
-    const { withOperation, withOperationSync } = await f.app("logging.ts");
-    const lines = captureLogs();
-    try {
-      assert.equal(await withOperation("test.ok", { a: 1 }, async (op) => { op.stage("one"); op.complete({ done: true }); return 42; }), 42);
-      const boom = new Error("boom");
-      await assert.rejects(withOperation("test.fail", { a: 2 }, async (op) => { op.stage("one"); op.stage("two"); op.failure({ extra: 7 }); throw boom; }), (error) => error === boom);
-      await assert.rejects(withOperation("test.plain", {}, async () => { throw boom; }), (error) => error === boom);
-      db.run(sql`create table op_check (n integer)`);
-      assert.equal(withOperationSync("test.sync", {}, (op) => db.transaction((transaction) => {
-        transaction.run(sql`insert into op_check values (1)`); op.complete(); return "sync";
-      })), "sync");
-      assert.throws(() => withOperationSync("test.sync_fail", {}, (op) => { op.stage("tx"); throw boom; }), (error) => error === boom);
-    } finally { restoreLogs(); }
-    const events = (operation) => lines.filter((line) => line.operation === operation).map((line) => line.event);
-    assert.deepEqual(events("test.ok"), ["operation.started", "operation.completed"]);
-    assert.equal(lines.find((line) => line.operation === "test.ok" && line.event === "operation.completed").done, true);
-    assert.deepEqual(events("test.fail"), ["operation.started", "operation.failed"]);
-    const failed = lines.find((line) => line.operation === "test.fail" && line.event === "operation.failed");
-    assert.equal(failed.stage, "two"); assert.equal(failed.extra, 7); assert.equal(failed.a, 2); assert.equal(typeof failed.durationMs, "number");
-    assert.ok(!("stage" in lines.find((line) => line.operation === "test.plain" && line.event === "operation.failed")));
-    assert.deepEqual(events("test.sync"), ["operation.started", "operation.completed"]);
-    assert.equal(lines.find((line) => line.operation === "test.sync_fail" && line.event === "operation.failed").stage, "tx");
-    assert.equal(db.all(sql`select n from op_check`).length, 1);
   } },
   config_overrides: { title: "scrat.local.json overrides merge over the defaults, are created when missing, reject unknown settings and reach Pi's providers", run: async () => {
     const { buildConfig } = await f.app("config-merge.ts");

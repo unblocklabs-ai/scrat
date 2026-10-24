@@ -371,18 +371,19 @@ async function changeRun(ctx: Ctx, observed: Observed) {
   };
   if (!validationOnly) {
     const evaluated = evaluateContext(run, task, observed.observation);
-    const { diffPaths, diffBaseSha: unmergedBaseSha } = await readDiffScope(workspace.path, mainSha, p.preparedHead, Boolean(observed.pullRequest));
+    let { diffPaths, diffBaseSha } = await readDiffScope(workspace.path, mainSha, p.preparedHead, Boolean(observed.pullRequest));
     updateRun(run.id, { context: evaluated });
     let merged = await mergeBehind(ctx, observed, p, diffPaths, acceptance);
     if (!p.validated) {
       stopBefore(stop, "workspace preparation");
       merged = await prepareChangeCommands(ctx, observed, p) || merged;
+      if (merged) diffBaseSha = mainSha;
       stopBefore(stop, "the agent");
       updateRun(run.id, { stage: "agent" });
       const { result, contextDir, revisions } = await runAgent(ctx, {
         environment, sessionFile: latestSessionRun(workspace.id, run.id)?.piSessionFile ?? undefined,
         input: {
-          workspace, evaluated, diffBaseSha: merged ? mainSha : unmergedBaseSha, diffPaths, mainSha, headSha: p.headSha, baseRef: mainSha, mergeInProgress: p.mergeInProgress, validationFailure: p.validationFailure,
+          workspace, evaluated, diffBaseSha, diffPaths, mainSha, headSha: p.headSha, baseRef: mainSha, mergeInProgress: p.mergeInProgress, validationFailure: p.validationFailure,
           database: database ? { ...database, environment, schemaPrepared: !p.deferred, prepare: config.workspace.prepare, migrate: databaseConfig?.migrate } : undefined,
         },
       });

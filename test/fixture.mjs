@@ -299,7 +299,7 @@ export async function fixture(scenario, spec) {
     if (match) {
       const n = Number(match[1]), item = issues.get(n) ?? prs.find((pr) => pr.number === n);
       if (!item) return reply({ message: "Not Found" }, 404);
-      writes.push({ type: "label", number: n }); if (faults.label.delete(n)) return reply({ message: "Label failure" }, 503);
+      writes.push({ type: "label", number: n, method, name: match[2] && decodeURIComponent(match[2]) }); if (faults.label.delete(n)) return reply({ message: "Label failure" }, 503);
       if (method === "GET") return reply(item.labels);
       if (method === "DELETE") {
         const name = decodeURIComponent(match[2]);

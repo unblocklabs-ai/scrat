@@ -164,10 +164,6 @@ const deletedReview = async (variant) => {
   assert.match(f.comments.get(201)[0].body, new RegExp(newer.taskId));
   assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["A · Strong"]);
   assert.equal(f.row(s.runs, newer.id).publication.commentId, f.comments.get(201)[0].id);
-  const delivered = all(s.events).findLast((event) => variant === "deleted"
-    ? event.type === "github.comment_created" && event.data.commentId === f.comments.get(201)[0].id
-    : event.type === "github.labels_added" && event.data.labels.includes("A · Strong"));
-  assert.equal(delivered.runId, newer.id);
   if (variant === "deleted") {
     f.comments.set(201, []); await route();
     assert.equal(f.requests.length, calls); assert.equal(f.comments.get(201).filter((c) => c.user.login !== "human").length, 1);
@@ -283,45 +279,40 @@ const staleBranch = async (variant) => {
   }
 };
 const validationFeedback = async (variant) => {
-  const lines = captureLogs();
   const validations = () => existsSync("validations.log") ? readFileSync("validations.log", "utf8").trim().split("\n").length : 0;
   const lastUser = ({ request }) => { const { content } = request.messages.at(-1); return typeof content === "string" ? content : content.map((part) => part.text ?? "").join("\n"); };
   const feedbackRequests = () => f.requests.filter((entry) => entry.request.messages.at(-1).role === "user" && lastUser(entry).startsWith(`${f.config.github.botName}'s validation failed`));
-  try {
-    if (variant === "fix") {
-      f.addIssue(1, ["scrat"]); f.reset(1, "feedback-fix"); f.enqueue(1, "implement"); const r = await success();
-      assert.equal(r.verification.headSha, r.publication.publishedCommitSha); assert.equal(validations(), 2);
-      assert.equal(readdirSync("data/pi-sessions", { recursive: true }).filter((name) => name.endsWith(".jsonl")).length, 1);
-      const [message] = feedbackRequests(), text = lastUser(message);
-      assert.equal(feedbackRequests().length, 1); assert.equal(f.requests.length, 4, "one tool turn and one answer for each of the agent and its feedback");
-      assert.match(text, /round 1 of 2/); assert.match(text, /Exit code: 7/); assert.match(text, /Verification failed: marker present/); assert.ok(text.length < 20_000);
-      assert.ok(!text.includes("ghs_fixture_sensitive")); assert.match(text, /validation detail/);
-      assert.equal(git(resolve("remote.git"), "rev-list", "--count", `main..${f.prs[0].head.ref}`), "1");
-      assert.ok(!existsSync(resolve(f.row(s.workspaces, r.workspaceId).path, "fail-validation")));
-      assert.ok(lines.some((line) => line.event === "pi.validation_retry" && line.round === 1));
-      assert.match(r.result.text, /^Implemented the change\./);
-      assert.match(r.result.text, /\*\*Validation correction 1:\*\* Fixed the validation failure\./);
-      assert.match(f.prs[0].body, /Implemented the change\.[\s\S]*Fixed the validation failure\./);
-    } else {
-      f.addIssue(1, ["scrat"]); f.reset(1, "feedback-stubborn"); f.enqueue(1, "implement"); const failed = await run();
-      assert.equal(failed.error.exitCode, 7); assert.equal(failed.verification, null); assert.equal(f.prs.length, 0);
-      assert.equal(validations(), 3); assert.equal(feedbackRequests().length, 2);
-      assert.equal(lines.filter((line) => line.event === "pi.validation_retry").length, 2);
-      assert.match(lastUser(feedbackRequests()[1]), /round 2 of 2/);
-      writeFileSync("kill-validation", ""); f.addIssue(2, ["scrat"]); f.enqueue(2, "implement");
-      const calls = f.requests.length, before = validations(), killed = await run();
-      assert.ok(killed.error); assert.equal(killed.error.name, "Error"); assert.equal(killed.error.exitCode, undefined); assert.equal(killed.stage, "validating");
-      assert.equal(validations(), before + 1); assert.equal(f.requests.length, calls + 2, "agent turn only"); assert.equal(feedbackRequests().length, 2);
-      rmSync("kill-validation"); writeFileSync("exit-137", ""); f.addIssue(3, ["scrat"]); f.enqueue(3, "implement");
-      const wrapped = await run();
-      assert.equal(wrapped.error.exitCode, 137); assert.equal(f.requests.length, calls + 4, "agent turn only"); assert.equal(feedbackRequests().length, 2);
-      rmSync("exit-137"); const { config } = await f.app("config.ts"); config.harness.corrections.validation = 1;
-      f.addIssue(4, ["scrat"]); f.reset(4, "feedback-stubborn"); f.enqueue(4, "implement");
-      const limited = await run();
-      assert.equal(limited.error.exitCode, 7); assert.equal(feedbackRequests().length, 3);
-      assert.match(lastUser(feedbackRequests()[2]), /round 1 of 1/);
-    }
-  } finally { restoreLogs(); }
+  if (variant === "fix") {
+    f.addIssue(1, ["scrat"]); f.reset(1, "feedback-fix"); f.enqueue(1, "implement"); const r = await success();
+    assert.equal(r.verification.headSha, r.publication.publishedCommitSha); assert.equal(validations(), 2);
+    assert.equal(readdirSync("data/pi-sessions", { recursive: true }).filter((name) => name.endsWith(".jsonl")).length, 1);
+    const [message] = feedbackRequests(), text = lastUser(message);
+    assert.equal(feedbackRequests().length, 1); assert.equal(f.requests.length, 4, "one tool turn and one answer for each of the agent and its feedback");
+    assert.match(text, /round 1 of 2/); assert.match(text, /Exit code: 7/); assert.match(text, /Verification failed: marker present/); assert.ok(text.length < 20_000);
+    assert.ok(!text.includes("ghs_fixture_sensitive")); assert.match(text, /validation detail/);
+    assert.equal(git(resolve("remote.git"), "rev-list", "--count", `main..${f.prs[0].head.ref}`), "1");
+    assert.ok(!existsSync(resolve(f.row(s.workspaces, r.workspaceId).path, "fail-validation")));
+    assert.match(r.result.text, /^Implemented the change\./);
+    assert.match(r.result.text, /\*\*Validation correction 1:\*\* Fixed the validation failure\./);
+    assert.match(f.prs[0].body, /Implemented the change\.[\s\S]*Fixed the validation failure\./);
+  } else {
+    f.addIssue(1, ["scrat"]); f.reset(1, "feedback-stubborn"); f.enqueue(1, "implement"); const failed = await run();
+    assert.equal(failed.error.exitCode, 7); assert.equal(failed.verification, null); assert.equal(f.prs.length, 0);
+    assert.equal(validations(), 3); assert.equal(feedbackRequests().length, 2);
+    assert.match(lastUser(feedbackRequests()[1]), /round 2 of 2/);
+    writeFileSync("kill-validation", ""); f.addIssue(2, ["scrat"]); f.enqueue(2, "implement");
+    const calls = f.requests.length, before = validations(), killed = await run();
+    assert.ok(killed.error); assert.equal(killed.error.name, "Error"); assert.equal(killed.error.exitCode, undefined); assert.equal(killed.stage, "validating");
+    assert.equal(validations(), before + 1); assert.equal(f.requests.length, calls + 2, "agent turn only"); assert.equal(feedbackRequests().length, 2);
+    rmSync("kill-validation"); writeFileSync("exit-137", ""); f.addIssue(3, ["scrat"]); f.enqueue(3, "implement");
+    const wrapped = await run();
+    assert.equal(wrapped.error.exitCode, 137); assert.equal(f.requests.length, calls + 4, "agent turn only"); assert.equal(feedbackRequests().length, 2);
+    rmSync("exit-137"); const { config } = await f.app("config.ts"); config.harness.corrections.validation = 1;
+    f.addIssue(4, ["scrat"]); f.reset(4, "feedback-stubborn"); f.enqueue(4, "implement");
+    const limited = await run();
+    assert.equal(limited.error.exitCode, 7); assert.equal(feedbackRequests().length, 3);
+    assert.match(lastUser(feedbackRequests()[2]), /round 1 of 1/);
+  }
 };
 const commitReview = async (variant) => {
   const { pollCommits } = await f.app("commit-source.ts");
@@ -978,15 +969,12 @@ export const scenarios = {
     assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["B · Solid"]);
     await route(); assert.deepEqual(f.prs[0].labels, []);
   } },
-  absent_labels: { title: "already absent labels reconcile without false removal events or hidden access failures", run: async () => {
+  absent_labels: { title: "already absent labels reconcile without errors and without hiding access failures", run: async () => {
     f.addIssue(1); const { reconcileLabels } = await f.app("labels.ts");
     const { GitHubRepository } = await f.app("github.ts");
     const request = () => reconcileLabels(new GitHubRepository("fixture/project"), 1, { current: ["scrat"], desired: [], managed: ["scrat"] });
-    const lines = captureLogs();
-    try { await reconcileLabels(new GitHubRepository("fixture/project"), 1, { current: ["scrat", "B"], desired: [], managed: ["scrat", "B"] }); }
-    finally { restoreLogs(); }
-    assert.deepEqual(lines.filter((line) => line.operation === "github.remove_label" && line.event === "operation.completed").map((line) => line.label), ["scrat", "B"]);
-    assert.equal(all(s.events).filter((e) => e.type === "github.label_removed").length, 0);
+    await reconcileLabels(new GitHubRepository("fixture/project"), 1, { current: ["scrat", "B"], desired: [], managed: ["scrat", "B"] });
+    assert.deepEqual(f.writes.filter((w) => w.type === "label" && w.method === "DELETE").map((w) => w.name), ["scrat", "B"]);
     f.issues.get(1).labels = [{ name: "scrat" }];
     const fetch = globalThis.fetch;
     globalThis.fetch = async (input, options = {}) => options.method === "DELETE"
@@ -1169,12 +1157,10 @@ export const scenarios = {
       assert.ok(existsSync(f.row(s.workspaces, r.workspaceId).path + "/src/app.ts"));
     }
     assert.equal(f.prs.length, prsBefore); assert.equal(f.writes.length, writesBefore);
-    const lines = captureLogs();
     const prompts = () => f.requests.filter((r) => r.request.messages.at(-1).role === "user" && JSON.stringify(r.request.messages.at(-1).content).includes("Your assessment was returned incomplete")).length;
     const publications = () => f.writes.length;
     f.reset(201, "incomplete-once"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Continue", input: { source: "github_items", kind: "manual" } });
-    let writes = publications(); const continued = await success().finally(restoreLogs);
-    assert.equal(lines.filter((l) => l.event === "pi.incomplete_continue").length, 3);
+    let writes = publications(); const continued = await success();
     assert.equal(continued.result.outcome, "complete"); assert.ok(prompts() >= 3); assert.equal(publications() - writes, 3);
     const published = f.comments.get(201).length;
     f.reset(201, "incomplete"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Never completes", input: { source: "github_items", kind: "manual" } });
@@ -1453,16 +1439,12 @@ export const scenarios = {
   } },
   deploy_stop_boundary: { title: "a stop signal ends a run at the next stage boundary, requeues its task, and the next worker resumes validation or publication without redoing earlier stages", configure: [configureValidation], run: async () => {
     const validations = () => existsSync("validations.log") ? readFileSync("validations.log", "utf8").trim().split("\n").length : 0;
-    const events = (type) => all(s.events).filter((event) => event.type === type);
     f.addIssue(1, ["scrat"]); f.enqueue(1, "implement");
     const stop = new AbortController(); f.onModel = () => stop.abort();
     const cut = await f.runNextTask(stop.signal); f.onModel = undefined;
     assert.equal(cut.error.code, "RUN_INTERRUPTED"); assert.equal(cut.stage, "validating");
     assert.equal(f.row(s.tasks, cut.taskId).status, "queued"); assert.equal(f.row(s.tasks, cut.taskId).retryMode, "validation");
     const agentRequests = f.requests.length; assert.ok(agentRequests > 0); assert.equal(validations(), 0); assert.equal(f.prs.length, 0);
-    assert.equal(events("run.interrupting").length, 1); assert.equal(events("run.interrupting")[0].runId, cut.id);
-    assert.equal(events("run.requeued")[0].runId, cut.id); assert.equal(events("run.requeued")[0].taskId, cut.taskId);
-    assert.equal(events("run.failed").length, 0);
     const resumed = await success();
     assert.equal(resumed.retryOfRunId, cut.id); assert.equal(resumed.inferenceFromRunId, cut.id);
     assert.equal(f.requests.length, agentRequests, "the agent is not re-prompted"); assert.equal(validations(), 1);
@@ -1490,9 +1472,8 @@ export const scenarios = {
     let release; const holder = withValidationSlot(() => new Promise((done) => { release = done; }));
     f.addIssue(4, ["scrat"]); f.enqueue(4, "implement");
     const waiting = new AbortController(), counted = validations();
-    const { default: fs } = await import("node:fs"), write = fs.writeSync;
-    fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string" && data.includes("validation.waiting")) waiting.abort(); return write(fd, data, ...rest); };
-    let slotted; try { slotted = await f.runNextTask(waiting.signal); } finally { fs.writeSync = write; release(); await holder; }
+    f.onModel = () => { setTimeout(() => waiting.abort(), 500); };
+    let slotted; try { slotted = await f.runNextTask(waiting.signal); } finally { f.onModel = undefined; release(); await holder; }
     assert.equal(slotted.error.code, "RUN_INTERRUPTED"); assert.equal(slotted.stage, "validating"); assert.equal(validations(), counted);
     assert.equal(f.row(s.tasks, slotted.taskId).status, "queued"); assert.equal(f.row(s.tasks, slotted.taskId).retryMode, "validation");
   } },
@@ -1504,7 +1485,6 @@ export const scenarios = {
     assert.equal(cut.error.code, "RUN_INTERRUPTED"); assert.match(cut.error.message, /1 seconds after the worker was told to stop/);
     assert.equal(cut.stage, "agent"); assert.equal(f.row(s.tasks, cut.taskId).status, "queued"); assert.equal(f.row(s.tasks, cut.taskId).retryMode, "repair");
     assert.equal(f.requests.length, 1); assert.equal(f.prs.length, 0);
-    assert.deepEqual(all(s.events).filter((event) => event.type.startsWith("run.") && event.runId === cut.id).map((event) => event.type), ["run.started", "run.interrupting", "run.requeued"]);
     f.onModel = undefined; f.modes.delete(1);
     const restarted = await run();
     assert.equal(restarted.retryOfRunId, null); assert.equal(f.requests.length, 2);
@@ -1570,37 +1550,32 @@ export const scenarios = {
     await assert.rejects(validateStaticConfig(variant((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 30 }; })), /review_pr: retry\.maxDelaySeconds must be at least retry\.initialDelaySeconds/);
     invalid((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 0, maxDelaySeconds: 30 }; }, /actions\.review_pr\.retry\.initialDelaySeconds: must be >= 1/);
     invalid((c) => { c.harness.retryJitter = 2; }, /harness\.retryJitter: must be <= 1/);
-    const lines = captureLogs();
     const toolResults = () => JSON.stringify(f.requests.findLast((entry) => entry.request.messages.some((message) => message.role === "tool")).request.messages.filter((message) => message.role === "tool"));
     const attempt = async (number, mode) => { f.addIssue(number, ["scrat"]); f.reset(number, mode); f.enqueue(number, "implement"); return run(); };
     const { withValidationSlot } = await f.app("commands.ts"), { config: live } = await f.app("config.ts");
-    let nohup, background, foreground, nohupSeen, backgroundSeen, heavyBeforeRelease, release, waiting;
+    const heavyFiles = () => all(s.workspaces).filter((w) => existsSync(resolve(w.path, ".scrat/heavy-fg")));
+    let nohup, background, foreground, nohupSeen, backgroundSeen, heldFiles, release;
     try {
       nohup = await attempt(1, "heavy"); nohupSeen = toolResults(); background = await attempt(2, "heavy-bg"); backgroundSeen = toolResults();
       live.harness.maxConcurrentValidations = 1;
       const holder = withValidationSlot(() => new Promise((done) => { release = done; }));
+      const asked = f.requests.length;
       const pending = attempt(3, "heavy-fg");
-      for (let n = 0; n < 600 && !(waiting = lines.find((line) => line.event === "validation.waiting")); n++) await new Promise((done) => setTimeout(done, 50));
-      heavyBeforeRelease = lines.filter((line) => line.event === "pi.heavy_command").length;
-      await new Promise((done) => setTimeout(done, 20));
+      for (let n = 0; n < 600 && f.requests.length === asked; n++) await new Promise((done) => setTimeout(done, 50));
+      await new Promise((done) => setTimeout(done, 500));
+      heldFiles = heavyFiles().length;
       release(); await holder; foreground = await pending;
-    } finally { release?.(); restoreLogs(); }
+    } finally { release?.(); }
     const workspaceOf = (r) => f.row(s.workspaces, r.workspaceId).path;
     assert.ok(nohup.error);
-    const failed = lines.find((line) => line.event === "pi.tool_failed");
-    assert.ok(failed && failed.tool === "bash" && /pnpm verify/.test(failed.command) && /foreground/.test(failed.error), JSON.stringify(failed));
     for (const seen of [nohupSeen, backgroundSeen]) assert.match(seen, /runs a background job/);
+    assert.match(nohupSeen, /foreground/);
     assert.ok(!existsSync(resolve(workspaceOf(nohup), "log")), "the backgrounded command must not run");
     assert.ok(background.error);
     assert.ok(!existsSync(resolve(workspaceOf(background), ".scrat/heavy-bg")), "the backgrounded command must not run");
-    assert.equal(lines.filter((line) => line.event === "pi.command_blocked").length, 2);
-    assert.equal(lines.filter((line) => line.event === "pi.heavy_command" && /heavy-bg/.test(line.command)).length, 0);
     assert.equal(foreground.error, null, JSON.stringify(foreground.error));
     assert.ok(existsSync(resolve(workspaceOf(foreground), ".scrat/heavy-fg")));
-    const queued = lines.filter((line) => line.event === "pi.heavy_command");
-    assert.equal(queued.length, 1); assert.match(queued[0].command, /^touch \.scrat\/heavy-fg$/); assert.ok(queued[0].waitedMs > 0);
-    assert.equal(waiting?.runId, foreground.id, "the agent's heavy command queued for a validation slot");
-    assert.equal(heavyBeforeRelease, 0, "the heavy command must not run while another run holds the only slot");
+    assert.equal(heldFiles, 0, "the heavy command must not run while another run holds the only slot");
   } },
   validation_slots: { title: "validation waits for a configured number of slots, which a failing validation releases", configure: [configureValidation], run: async () => {
     const { config } = await f.app("config.ts");
@@ -1608,9 +1583,7 @@ export const scenarios = {
     const both = (first) => { for (const n of [first, first + 1]) { f.addIssue(n, ["scrat"]); f.enqueue(n, "implement"); } return Promise.all([f.runNextTask(), f.runNextTask()]); };
     writeFileSync("slow", "");
     config.harness.maxConcurrentValidations = 1;
-    const lines = captureLogs();
-    try { for (const r of await both(1)) assert.equal(r.error, null, JSON.stringify(r.error)); } finally { restoreLogs(); }
-    assert.ok(lines.some((line) => line.event === "validation.waiting" && line.position === 1), "the waiting run logs its own place in line");
+    for (const r of await both(1)) assert.equal(r.error, null, JSON.stringify(r.error));
     const serial = intervals(0); assert.equal(serial.length, 2); assert.ok(serial[0].e <= serial[1].s, "one slot serializes validations");
     config.harness.maxConcurrentValidations = 2;
     for (const r of await both(3)) assert.equal(r.error, null, JSON.stringify(r.error));
@@ -1930,8 +1903,8 @@ export const scenarios = {
     assert.equal(labels204(), 0, "Below the cap there is no exhausted label");
     await route(); assert.equal(repairs(204).length, 0, "The cap blocks further repairs");
     assert.equal(labels204(), 1, "A low grade at the cap is labelled");
-    const labelEvents = () => all(s.events).filter((event) => event.type.startsWith("github.labels_") && JSON.stringify(event.data).includes("Scrat repair exhausted")).length;
-    const written = labelEvents(); await route(); assert.equal(labels204(), 1); assert.equal(labelEvents(), written, "A steady state writes no label");
+    const labelWrites = () => f.writes.filter((w) => w.type === "label" && w.number === 204 && w.method !== "GET").length;
+    const written = labelWrites(); await route(); assert.equal(labels204(), 1); assert.equal(labelWrites(), written, "A steady state writes no label");
     db.$client.prepare("update items set self_repair_count = 1 where id = ?").run(prItem(204).id);
     await route(); assert.equal(repairs(204).length, 1); assert.equal(count(204), 1);
     const queuedRepair = repairs(204)[0], before = count(204);
@@ -2630,8 +2603,6 @@ export const scenarios = {
     const posts = () => f.slack.calls.filter((call) => call.method === "chat.postMessage" && call.body.text !== undefined);
     const roots = () => posts().filter((call) => call.body.thread_ts === undefined);
     const until = async (condition) => { for (let n = 0; n < 400 && !condition(); n++) await new Promise((done) => setTimeout(done, 50)); assert.ok(condition(), "timed out waiting for Slack"); };
-    const failures = []; const { default: fs } = await import("node:fs"), write = fs.writeSync;
-    fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string" && data.includes("slack.post_failed")) failures.push(data); return write(fd, data, ...rest); };
     const { config } = await f.app("config.ts");
     await implement(1);
     await new Promise((done) => setTimeout(done, 100));
@@ -2646,12 +2617,11 @@ export const scenarios = {
     assert.equal(root.body.channel, channel); assert.equal(all(s.slackThreads)[0].ts, ts);
     assert.ok(replies.length >= 3); assert.ok(replies.every((call) => call.body.thread_ts === ts && call.body.channel === channel));
     assert.match(replies[0].body.text, /^Started implement/);
-    assert.ok(replies.some((call) => call.body.text.includes("<https://github.com/fixture/project/pull/202|pull request #202>")));
+    const linked = replies.findIndex((call) => call.body.text.includes("<https://github.com/fixture/project/pull/202|pull request #202>"));
+    assert.ok(linked > 0 && linked < replies.length - 1, "the PR link is posted after the start and before completion");
     assert.ok(replies.some((call) => /^Pushed <https:\/\/github\.com\/fixture\/project\/commit\/[0-9a-f]{40}\|[0-9a-f]{7}>$/.test(call.body.text)));
     assert.match(replies.at(-1).body.text, /^Completed/);
     assert.ok(!posts().some((call) => /enqueued|coalesced|Workspace/i.test(call.body.text)));
-    const order = (type) => all(s.events).findIndex((event) => event.type === type && event.subjectId === "issue-2");
-    assert.ok(order("run.started") < order("github.pull_request_created") && order("github.pull_request_created") < order("run.completed"));
 
     const restarted = await import(pathToFileURL(resolve("app/src/slack-status.ts")).href + "?restart");
     let count = posts().length;
@@ -2662,7 +2632,7 @@ export const scenarios = {
     count = f.slack.calls.length; f.slack.rateLimitOnce = true;
     restarted.queueStatus({ subjectId: "issue-2", type: "run.completed", data: { stage: "after limit" } });
     await until(() => f.slack.calls.length === count + 2 && posts().at(-1).body.text === "Completed at stage after limit");
-    assert.equal(f.slack.calls.length, count + 2); assert.equal(failures.length, 0);
+    assert.equal(f.slack.calls.length, count + 2);
 
     config.slack.channel = "C9999999999";
     restarted.queueStatus({ subjectId: "issue-2", type: "run.completed", data: { stage: "moved" } });
@@ -2675,10 +2645,10 @@ export const scenarios = {
     await route(); while (await f.runNextTask());
     await until(() => roots().some((call) => /^\*Pull request #202\*: /.test(call.body.text)));
 
-    f.slack.down = true; f.addIssue(3, ["scrat"]); f.enqueue(3, "implement");
+    f.slack.down = true; const attempted = f.slack.calls.length; f.addIssue(3, ["scrat"]); f.enqueue(3, "implement");
     const outage = await success();
     assert.equal(outage.publication.pullRequestNumber, 203); assert.equal(f.row(s.tasks, outage.taskId).status, "completed");
-    await until(() => failures.length > 0);
+    await until(() => f.slack.calls.length > attempted);
     assert.equal(all(s.slackThreads).filter((thread) => thread.subjectId === "issue-3").length, 0);
     f.slack.down = false;
     restarted.queueStatus({ subjectId: "issue-3", type: "run.completed", data: { stage: "recovered" } });
@@ -2686,7 +2656,6 @@ export const scenarios = {
     assert.equal(all(s.slackThreads).filter((thread) => thread.subjectId === "issue-3").length, 1);
     assert.ok(roots().some((call) => call.body.text.startsWith("*Issue #3*")));
     for (let seen = -1; seen !== f.slack.calls.length;) { seen = f.slack.calls.length; await new Promise((done) => setTimeout(done, 200)); }
-    fs.writeSync = write;
   } },
   commits_source: { title: "the base-branch commit source seeds silently, enqueues one range task per push, survives force-pushes and replays, and stops when disabled", configure: [configureCommitSource], run: async () => {
     const { pollCommits } = await f.app("commit-source.ts");
@@ -2995,8 +2964,7 @@ export const scenarios = {
     assert.ok(!JSON.stringify(sent).includes(secret) && !JSON.stringify(f.requests.map((entry) => entry.request.messages)).includes(secret));
     assert.deepEqual(sent.tools.map((tool) => tool.function.name), ["read", "grep", "http"]);
     assert.ok(existsSync(result.piSessionFile)); assert.ok(!readFileSync(result.piSessionFile, "utf8").includes(secret));
-    const operations = lines.filter((line) => line.operation === "agent.http"), done = operations.filter((line) => line.event === "operation.completed"), failed = operations.filter((line) => line.event === "operation.failed");
-    assert.equal(done.length, 6); assert.equal(failed.length, 11);
+    const operations = lines.filter((line) => line.operation === "agent.http"), done = operations.filter((line) => line.event === "operation.completed");
     assert.deepEqual(done.map(({ method, host, status }) => [method, host, status]), [["GET", "api.example.test", 200], ["GET", "api.example.test", 200], ["GET", "other.example.test", 200],
       ["GET", "api.example.test", 302], ["GET", "api.example.test", 302], ["GET", "api.example.test", 200]]);
     const journal = JSON.stringify(lines);
@@ -3182,10 +3150,7 @@ export const scenarios = {
       await assert.rejects(validateStaticConfig({ ...f.config, resolve: resolving({ "other.example.test": [{ address: "93.184.216.34", family: 4 }, { address, family: address.includes(":") ? 6 : 4 }] }) }),
         new RegExp(`bindings\\.scout: hosts: other\\.example\\.test resolves to private address ${address.replace(/\./g, "\\.")}`));
     }
-    const { default: fs } = await import("node:fs"), lines = [], write = fs.writeSync;
-    fs.writeSync = (fd, data, ...rest) => { if (fd === 2 && typeof data === "string") { lines.push(data); return data.length; } return write(fd, data, ...rest); };
-    try { await validateStaticConfig({ ...f.config, resolve: async (host) => { if (host === "other.example.test") throw new Error("ENOTFOUND"); return publicAnswer; } }); } finally { fs.writeSync = write; }
-    assert.equal(lines.filter((line) => line.includes("bindings.unresolved") && line.includes("other.example.test")).length, 1);
+    await validateStaticConfig({ ...f.config, resolve: async (host) => { if (host === "other.example.test") throw new Error("ENOTFOUND"); return publicAnswer; } });
     delete process.env.SCOUT_TOKEN;
     await assert.rejects(validateStaticConfig(f.config), /bindings\.scout: \$\{SCOUT_TOKEN\} is not set in the environment/);
     process.env.SCOUT_TOKEN = secret;

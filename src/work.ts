@@ -1,11 +1,10 @@
 import { config } from "./config.ts";
-import { db } from "./db.ts";
 import { logger } from "./logging.ts";
 import { runNextTask } from "./runner.ts";
 import { prepareService } from "./startup.ts";
-import { drainStatus } from "./slack-status.ts";
+import { runCommand } from "./cli.ts";
 
-try {
+await runCommand("Work failed", async () => {
   await prepareService();
   const workers = Array.from({ length: config.harness.maxConcurrency }, async () => {
     while (true) {
@@ -21,10 +20,4 @@ try {
       process.exitCode = 1;
     }
   }
-} catch (error) {
-  logger.error({ err: error, event: "work.failed" }, "Work failed");
-  process.exitCode = 1;
-} finally {
-  await drainStatus();
-  db.$client.close();
-}
+}, { event: "work.failed" });

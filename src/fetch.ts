@@ -1,10 +1,6 @@
-import { db } from "./db.ts";
 import { syncGitHub } from "./github-sync.ts";
+import { runCommand } from "./cli.ts";
 
-try {
+await runCommand("Fetch failed", async () => {
   await syncGitHub(process.argv[2], false);
-} catch {
-  process.exitCode = 1;
-} finally {
-  db.$client.close();
-}
+});

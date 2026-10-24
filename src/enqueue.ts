@@ -1,8 +1,7 @@
-import { db } from "./db.ts";
-import { logger } from "./logging.ts";
 import { enqueueManualTasks } from "./tasks.ts";
+import { runCommand } from "./cli.ts";
 
-try {
+await runCommand("Task enqueue failed", async () => {
   const args = process.argv.slice(2);
   const inline = args.findIndex((arg) => arg.startsWith("--priority="));
   const flag = args.indexOf("--priority");
@@ -15,9 +14,4 @@ try {
     console.log([target, number ?? "-", itemId ?? "-", error ? `error: ${error}` : taskId].join("\t"));
     if (error) process.exitCode = 1;
   }
-} catch (error) {
-  logger.error({ err: error }, "Task enqueue failed");
-  process.exitCode = 1;
-} finally {
-  db.$client.close();
-}
+});

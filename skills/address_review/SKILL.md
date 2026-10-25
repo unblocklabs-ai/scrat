@@ -15,7 +15,7 @@ Verify each finding against current source and affected callers before acting. F
 
 When the report ends with a "To reach B" list, address exactly those findings, after verifying each, with the smallest fix. Reject a finding whose fix needs a new mechanism for a rare trigger and name it as a follow-up; a new mechanism adds new defects to review.
 
-Never weaken tests, checks or validation to make them pass; fix the code, or explain precisely why a test is wrong. Inspect package metadata and the actual available environment before choosing validation commands.
+Never weaken tests, checks or validation to make them pass; fix the code, or explain precisely why a test is wrong. A finding that asks for coverage is met only by a test that passes the test bar in your instructions (one, at the owning boundary, with a credible regression); otherwise reject it with that reason. A finding that names excess or implementation-coupled tests is fixed by deleting them. Inspect package metadata and the actual available environment before choosing validation commands.
 
 Continue retained work and address the previous failure (`files.previousFailure`) when supplied. Preserve an unfinished merge and partial work rather than resetting or rebuilding the PR. {{bot}} owns the branch/worktree lifecycle; do not create a replacement PR, rebase or force-push. If a verified fix needs code only on the base (`git merge-base --is-ancestor <workspace.mainSha> HEAD` exits 1), run `git merge --no-commit --no-ff <workspace.baseRef>`; {{bot}} commits it with your fix. On conflict run `git merge --abort` and report the dependency. Never merge the base otherwise.
 

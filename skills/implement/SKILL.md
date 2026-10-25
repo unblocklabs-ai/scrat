@@ -26,7 +26,7 @@ When the supplied session/workspace contains prior work or the previous failure 
 
 Inspect the repository's package metadata, lockfile and available environment before choosing commands. Use available repository checks and the relevant real execution path. Distinguish a code failure from infrastructure or checks that never ran.
 
-- Tests should catch bugs we care about, not increase coverage or freeze the implementation. If the need for a new test is doubtful, skip it.
+- New tests follow the test bar in your instructions: none by default; one at the owning boundary when all four questions have answers. A regression test uses the repository's existing test setup; if that setup does not cover the changed path, skip the test and say so under Validation rather than building a substitute harness.
 - For a complex user flow, exercise the real path end to end when the available environment supports it.
 - Run targeted checks and move on once they pass. Rerun only when something changed, failed or remains unresolved.
 - Do not merely make an old test green. Fix broken code; update intentionally changed behavior; remove obsolete implementation-coupled checks. Never weaken useful verification to get green checks.
@@ -38,7 +38,6 @@ Before returning, review the complete diff against the issue and the repository 
 - Every output that new secrets or metadata reach (responses, errors, logs, notifications) uses the existing sanitizer.
 - Every state in which a new control is shown (pending, disabled, empty) works, or the control is disabled or explained.
 - Check-then-write sequences are atomic; expected conflicts return specific statuses, not a generic 500.
-- A regression test uses the repository's existing test setup and fails without the fix. If the repository's test setup does not cover the changed path, do not build a substitute harness; skip the test and say so under Validation.
 - Generated files are regenerated, never hand-edited. When the repository commits generated output (check recent source commits), regenerate it and keep only the final build's files; otherwise leave it out.
 
 Do not push, open or merge a PR, rebase, force-push, change runtime credentials, weaken CI, or edit other repositories. The supplied base snapshot is the execution baseline; report unresolved compatibility concerns rather than inventing a separate branch workflow.

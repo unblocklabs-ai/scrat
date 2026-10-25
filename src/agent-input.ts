@@ -90,15 +90,16 @@ export async function buildAgentInput(options: {
   const triage = listed.includes("triage") ? completedRunsOfAction(task.subjectId, actionsPublishing("labels"), 1)[0]?.result : undefined;
   const issue = listed.includes("issue") ? issueOfPullRequest(config.github.repository, evaluated.item.number) : undefined;
   const found = listed.includes("validation") ? verificationOfCommit(headSha) : undefined, verification = found?.commands.length ? found : undefined;
-  const checks = listed.includes("validation") && evaluated.headSha
-    ? await new GitHubRepository(config.github.repository).checkRunConclusions(evaluated.headSha).catch((error) => {
-      logger.warn({ err: error, sha: evaluated.headSha }, "check runs unavailable; reviewing without them");
+  const reviewedSha = evaluated.headSha;
+  const checks = listed.includes("validation") && reviewedSha
+    ? await new GitHubRepository(config.github.repository).checkRunConclusions(reviewedSha).catch((error) => {
+      logger.warn({ event: "github.check_runs_failed", err: error, sha: reviewedSha });
       return [];
     })
     : [];
   const validation = [
     verification && `# Validation run by ${botName} on ${headSha}\n\n${verification.commands.map((check) => `- ${check.name}: ${check.status} (${(check.durationMs / 1000).toFixed(1)}s)`).join("\n")}\n`,
-    checks.length && `## GitHub checks on ${evaluated.headSha}\n\n${checks.map((check) => `- ${check.name}: ${check.conclusion}`).join("\n")}\n`,
+    checks.length && `## GitHub checks on ${reviewedSha}\n\n${checks.map((check) => `- ${check.name}: ${check.conclusion}`).join("\n")}\n`,
   ].filter(Boolean).join("\n");
   await Promise.all([
     validation && writeContext("validation", "validation.md", validation),

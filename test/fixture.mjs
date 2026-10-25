@@ -311,7 +311,7 @@ export async function fixture(scenario, spec) {
       return reply(item.labels);
     }
     match = path.match(/\/commits\/([0-9a-f]+)\/check-runs$/);
-    if (match) { const runs = checkRuns.get(match[1]) ?? []; return Object.defineProperty(reply({ total_count: runs.length, check_runs: runs }), "url", { value: url.href }); }
+    if (match) { if (tokens.get(credential)?.checks !== "read") return reply({ message: "Resource not accessible by integration" }, 403); const runs = checkRuns.get(match[1]) ?? []; return Object.defineProperty(reply({ total_count: runs.length, check_runs: runs }), "url", { value: url.href }); }
     if (path.endsWith("/pulls") && method === "GET") return reply(prs.filter((pr) => (!url.searchParams.get("head") || pr.head.ref === url.searchParams.get("head").split(":").slice(1).join(":")) && (url.searchParams.get("state") !== "open" || pr.state === "open")));
     if (path.endsWith("/pulls") && method === "POST") {
       if (!can("pull_requests") || !["read", "write"].includes(tokens.get(credential)?.contents)) {

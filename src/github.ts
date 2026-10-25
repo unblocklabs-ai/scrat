@@ -18,6 +18,7 @@ const permissions = {
   pull_request: { pull_requests: "write", contents: "read", metadata: "read" },
   contents_read: { contents: "read", metadata: "read" },
   contents_write: { contents: "write", metadata: "read" },
+  checks: { checks: "read", metadata: "read" },
 } as const;
 let authenticate: ReturnType<typeof createAppAuth> | undefined;
 
@@ -211,7 +212,7 @@ export class GitHubRepository {
   }
 
   async checkRunConclusions(sha: string) {
-    const { github, owner, repo } = await this.read();
+    const { github, owner, repo } = await githubForRepository(this.repository, "checks");
     const runs = await github.paginate(github.rest.checks.listForRef, { owner, repo, ref: sha, per_page: 100 });
     return runs.flatMap((run) => run.conclusion ? [{ name: run.name, conclusion: run.conclusion }] : []);
   }

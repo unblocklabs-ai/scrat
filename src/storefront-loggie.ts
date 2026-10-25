@@ -5,8 +5,8 @@ type Reply<T> = { data?: T; errors?: { message: string; extensions?: { code?: st
 
 const failure = (message: string, code: string, status: number, data?: unknown) => Object.assign(new Error(message), { code, status, data });
 
-export function loggie<T>(request: string, query: string, variables: Record<string, unknown> = {}, { stop }: { stop?: AbortSignal } = {}) {
-  const { store, loggie: { url, slug, timeoutSeconds } } = config.storefront;
+export function loggie<T>(request: string, query: string, variables: Record<string, unknown> = {}, { stop, timeoutSeconds = config.storefront.loggie.timeoutSeconds }: { stop?: AbortSignal; timeoutSeconds?: number } = {}) {
+  const { store, loggie: { url, slug } } = config.storefront;
   return withOperation("storefront.loggie", { store, request }, async (operation) => {
     const key = process.env.LOGGIE_API_KEY;
     if (!key) throw new Error("LOGGIE_API_KEY is not set");

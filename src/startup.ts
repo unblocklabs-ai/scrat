@@ -80,10 +80,12 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
   if (storefront?.enabled) {
     if (!process.env.LOGGIE_API_KEY) problems.push("storefront.enabled is true but LOGGIE_API_KEY is not set");
     if (!settings.workspace?.sandbox) problems.push("storefront.enabled requires workspace.sandbox");
-    for (const [key, value] of Object.entries({ "storefront.store": storefront.store, "storefront.loggie.slug": storefront.loggie.slug })) {
+    for (const [key, value] of Object.entries({ "storefront.store": storefront.store, "storefront.publicHost": storefront.publicHost, "storefront.loggie.slug": storefront.loggie.slug })) {
       if (!value.trim()) problems.push(`${key} must not be empty when storefront.enabled is true`);
     }
+    if (storefront.publicHost.trim() && !/^[\w.-]+(?::\d+)?$/.test(storefront.publicHost)) problems.push("storefront.publicHost must be a host name, without a scheme or path");
     if (!URL.canParse(storefront.loggie.url)) problems.push("storefront.loggie.url must be an absolute URL");
+    try { new RegExp(storefront.preview.themePaths); } catch { problems.push("storefront.preview.themePaths is not a valid regular expression"); }
   }
   for (const [name, { apiKey }] of Object.entries(settings.providers ?? {})) {
     if (apiKey && !/\$\{\w+\}/.test(apiKey)) logger.warn({ provider: name }, "Provider apiKey is not a ${VAR} placeholder; it will not be redacted from output");

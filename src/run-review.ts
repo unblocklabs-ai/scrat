@@ -65,11 +65,12 @@ async function prepareReviewCommands({ run, repositoryPath, references, operatio
   }
 }
 
-async function refreshPreview({ subject, manifest, operation, stop }: Ctx, { pullRequest }: Observed) {
+async function refreshPreview({ manifest, operation, stop, references, repositoryPath }: Ctx, { pullRequest, github, context }: Observed, review: Review) {
   if (!config.storefront.enabled || !manifest.publish.includes("pr_assessment") || !pullRequest || !isBotLogin(pullRequest.user?.login)) return;
   const { ensurePreview } = await import("./storefront.ts");
-  try { await ensurePreview(subject.id, pullRequest.number, stop); }
-  catch (error) { if (!stop?.aborted) operation.log.warn({ event: "storefront.preview_failed", subjectId: subject.id, number: pullRequest.number, err: error }); }
+  const { number } = pullRequest;
+  try { await ensurePreview({ github, number, comments: context.comments, references }, { repositoryPath, baseSha: review.diffBaseSha, headSha: review.headSha }, stop); }
+  catch (error) { if (!stop?.aborted) operation.log.warn({ event: "storefront.preview_failed", subjectId: references.subjectId, number, err: error }); }
 }
 
 export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
@@ -86,7 +87,7 @@ export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   const environment: Environment = observed ? { ...config.workspace.environment } : {};
   stopBefore(stop, "workspace preparation");
   if (observed) await prepareReviewCommands(ctx, observed, review, { ...childEnvironment(), ...environment });
-  if (observed) await refreshPreview(ctx, observed);
+  if (observed) await refreshPreview(ctx, observed, review);
   stopBefore(stop, "the agent");
   const changeContext = manifest.context === "change";
   if (observed) await settleReviewPlan(ctx, observed);

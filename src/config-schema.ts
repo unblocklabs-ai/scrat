@@ -31,9 +31,12 @@ const schema = Type.Object({
     redactionMarginBytes: positive,
   }, strict),
   storefront: Type.Object({
-    enabled: Type.Boolean(), store: Type.String(),
+    enabled: Type.Boolean(), store: Type.String(), publicHost: Type.String(),
     loggie: Type.Object({ url: Type.String(), slug: Type.String(), timeoutSeconds: positive }, strict),
-    preview: Type.Object({ themeNamePrefix: Type.String(), processingWaitSeconds: positive, processingPollSeconds: positive, filesPageSize: Type.Integer({ minimum: 1, maximum: 250 }) }, strict),
+    preview: Type.Object({
+      themeNamePrefix: Type.String(), themePaths: Type.String(), processingWaitSeconds: positive, processingPollSeconds: positive,
+      filesPageSize: Type.Integer({ minimum: 1, maximum: 250 }), uploadBatch: Type.Integer({ minimum: 1, maximum: 50 }), uploadBatchBytes: positive, requestTimeoutSeconds: positive,
+    }, strict),
   }, strict),
   slack: Type.Object({ enabled: Type.Boolean(), channel: Type.String(), maxRetryAfterSeconds: positive, minimumGapMs: Type.Integer({ minimum: 0 }), maxErrorLength: positive }, strict),
   workspace: Type.Object({

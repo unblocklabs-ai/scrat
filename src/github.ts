@@ -19,6 +19,7 @@ const permissions = {
   contents_read: { contents: "read", metadata: "read" },
   contents_write: { contents: "write", metadata: "read" },
   checks: { checks: "read", metadata: "read" },
+  deployments: { deployments: "write", metadata: "read" },
 } as const;
 let authenticate: ReturnType<typeof createAppAuth> | undefined;
 
@@ -312,6 +313,36 @@ export class GitHubRepository {
         journal: ({ status }) => ({ event: status === 404 ? undefined : { type: "github.label_removed", data: { repository: this.repository, issueNumber, label } } }),
       });
     }
+  }
+
+  async createDeployment({ ref, environment, description }: { ref: string; environment: string; description: string }, references: EventReferences = {}) {
+    const response = await this.write("github.create_deployment", { ref, environment }, references, "deployments", {
+      inspect: () => assertPublishable(description),
+      request: ({ github, owner, repo }) => github.rest.repos.createDeployment({
+        owner, repo, ref, environment, description, auto_merge: false, required_contexts: [], transient_environment: true, production_environment: false,
+      }),
+      journal: ({ data }) => "id" in data
+        ? { event: { type: "github.deployment_created", data: { repository: this.repository, deploymentId: data.id, environment, ref } }, details: { deploymentId: data.id } } : {},
+    });
+    if (!("id" in response.data)) throw new Error(`GitHub did not create a deployment for ${ref}: ${response.data.message}`);
+    return response.data.id;
+  }
+
+  async setDeploymentStatus(deploymentId: number, { state, environmentUrl, description }: { state: "success" | "failure" | "inactive"; environmentUrl?: string; description: string }, references: EventReferences = {}) {
+    await this.write("github.create_deployment_status", { deploymentId, state }, references, "deployments", {
+      inspect: () => assertPublishable(description, environmentUrl ?? ""),
+      request: async ({ github, owner, repo }) => {
+        try {
+          return await github.rest.repos.createDeploymentStatus({
+            owner, repo, deployment_id: deploymentId, state, description, auto_inactive: false, ...(environmentUrl ? { environment_url: environmentUrl } : {}),
+          });
+        } catch (error) {
+          if (state !== "inactive" || errorStatus(error) !== 404) throw error;
+          return { status: 404, headers: {} };
+        }
+      },
+      journal: ({ status }) => ({ event: status === 404 ? undefined : { type: "github.deployment_status_created", data: { repository: this.repository, deploymentId, state } } }),
+    });
   }
 
   async createIssue(

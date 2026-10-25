@@ -30,6 +30,11 @@ export async function git(repositoryPath: string, args: string[], env = childEnv
   return args.includes("-z") || args[0] === "show" ? stdout : stdout.trim();
 }
 
+export async function blobBytes(repositoryPath: string, oid: string) {
+  const command = gitCommand(repositoryPath, ["cat-file", "blob", oid], childEnvironment());
+  return (await executeFile(command.file, command.args, { cwd: repositoryPath, env: command.env, maxBuffer: config.harness.maxOutputBytes, encoding: "buffer" })).stdout;
+}
+
 export const headOf = (repositoryPath: string) => git(repositoryPath, ["rev-parse", "HEAD"]);
 export const gitList = async (repositoryPath: string, args: string[]) => (await git(repositoryPath, args)).split("\0").filter(Boolean);
 export const changedPaths = (repositoryPath: string, ...range: string[]) => gitList(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", ...range]);

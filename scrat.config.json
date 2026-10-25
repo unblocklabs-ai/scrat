@@ -48,7 +48,7 @@
     "readBytes": { "default": 32768, "max": 65536 },
     "git": { "maxCommits": 200, "maxScopeBytes": 1048576 },
     "http": { "timeoutSeconds": 30, "maxRequestBytes": 65536 },
-    "browser": { "steps": 40, "sessionSeconds": 300, "stepSeconds": 30 },
+    "browser": { "steps": 40, "sessionSeconds": 300, "stepSeconds": 30, "defaultViewport": "desktop", "viewports": { "desktop": { "width": 1280, "height": 800 }, "mobile": { "width": 390, "height": 844 } } },
     "search": { "pageSize": 20, "excerptChars": 300, "maxQueryLength": 256 },
     "redactionMarginBytes": 4096
   },

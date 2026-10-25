@@ -20,16 +20,16 @@ Think like a systems designer, not a code generator. Optimize for abstractions t
 
 ## Implementation and validation
 
-When `files.triage` is present, follow its cause, solution and validation plan unless the source contradicts it. Find the smallest correct change. Inspect the owning source, actual callers and existing patterns before choosing the repair. Routine choices supported by those patterns do not need human signoff. Name a genuine unresolved requirement or product/security/compatibility decision rather than inventing an answer or broadening the change. Unless the acceptance criteria require it, do not fix defects the issue does not name, handle failure modes the base already had (outages, retries, concurrent edits), or add or edit repository docs, READMEs or conventions; name them in the handoff as follow-ups. Do not leave comments that describe the change or removed code.
+When `files.triage` is present, follow its cause, solution and validation plan unless the source contradicts it; a test it proposes is added only if it passes the test bar. Find the smallest correct change. Inspect the owning source, actual callers and existing patterns before choosing the repair. Routine choices supported by those patterns do not need human signoff. Name a genuine unresolved requirement or product/security/compatibility decision rather than inventing an answer or broadening the change. Unless the acceptance criteria require it, do not fix defects the issue does not name, handle failure modes the base already had (outages, retries, concurrent edits), or add or edit repository docs, READMEs or conventions; name them in the handoff as follow-ups. Do not leave comments that describe the change or removed code.
 
 When the supplied session/workspace contains prior work or the previous failure file (`files.previousFailure`), continue it and address the actual failure (`previous`, when present, holds the base and head SHAs of the last handled state); do not rebuild from scratch or discard partial work.
 
 Inspect the repository's package metadata, lockfile and available environment before choosing commands. Use available repository checks and the relevant real execution path. Distinguish a code failure from infrastructure or checks that never ran.
 
-- New tests follow the test bar in your instructions: none by default; one at the owning boundary when all four questions have answers. A regression test uses the repository's existing test setup; if that setup does not cover the changed path, skip the test and say so under Validation rather than building a substitute harness.
+- A new test must pass the test bar in your system prompt and use the repository's existing test setup; if that setup does not cover the changed path, skip the test and say so under Validation rather than building a substitute harness. Never add assertion-free probes, copied fixtures or inventories, mocks that implement the asserted behavior, or a test that would break under a behavior-preserving refactor (private call shapes, exact source strings).
 - For a complex user flow, exercise the real path end to end when the available environment supports it.
 - Run targeted checks and move on once they pass. Rerun only when something changed, failed or remains unresolved.
-- Do not merely make an old test green. Fix broken code; update intentionally changed behavior; remove obsolete implementation-coupled checks. Never weaken useful verification to get green checks.
+- Do not merely make an old test green: fix broken code, and never weaken useful verification to get green checks.
 - If nursing tests outweighs making the change, reassess. Escalate only when the desired behavior or scope needs human input.
 
 Before returning, review the complete diff against the issue and the repository guidance, fix concrete self-review findings and run targeted verification. Never certify external-provider behavior from offline checks or claim a browser/test check you did not run. State checks that cannot run in this workspace, not full suites you skipped as routine, and their effect on confidence. Self-review against these recurring defects:
@@ -38,6 +38,7 @@ Before returning, review the complete diff against the issue and the repository 
 - Every output that new secrets or metadata reach (responses, errors, logs, notifications) uses the existing sanitizer.
 - Every state in which a new control is shown (pending, disabled, empty) works, or the control is disabled or explained.
 - Check-then-write sequences are atomic; expected conflicts return specific statuses, not a generic 500.
+- Every test the diff adds passes the test bar; delete any that does not, including specs or scripts written only to exercise the change.
 - Generated files are regenerated, never hand-edited. When the repository commits generated output (check recent source commits), regenerate it and keep only the final build's files; otherwise leave it out.
 
 Do not push, open or merge a PR, rebase, force-push, change runtime credentials, weaken CI, or edit other repositories. The supplied base snapshot is the execution baseline; report unresolved compatibility concerns rather than inventing a separate branch workflow.

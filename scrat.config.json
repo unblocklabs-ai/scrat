@@ -52,6 +52,12 @@
     "search": { "pageSize": 20, "excerptChars": 300, "maxQueryLength": 256 },
     "redactionMarginBytes": 4096
   },
+  "storefront": {
+    "enabled": false,
+    "store": "",
+    "loggie": { "url": "https://app.loggie.ai", "slug": "", "timeoutSeconds": 60 },
+    "preview": { "themeNamePrefix": "scrat/", "processingWaitSeconds": 300, "processingPollSeconds": 5, "filesPageSize": 250 }
+  },
   "slack": {
     "enabled": false,
     "channel": "",

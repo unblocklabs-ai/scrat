@@ -51,8 +51,13 @@ function applyDecisions(subjectId: string, decisions: RoutingDecision[]) {
 let syncRound = 0;
 const limitLogged = new Set<string>();
 
-async function cleanupClosedItem(item: Item) {
+async function cleanupClosedItem(item: Item, log: Logger) {
   cancelQueuedTasks(item.id, "GitHub item closed");
+  if (item.kind === "pr" && config.storefront.enabled) {
+    const { deletePreview } = await import("./storefront.ts");
+    try { await deletePreview(item.id); }
+    catch (error) { log.warn({ event: "storefront.delete_failed", subjectId: item.id, err: error }); }
+  }
   if (item.kind !== "pr" || !item.workspaceId) return;
   const active = db.select().from(runs).where(and(eq(runs.workspaceId, item.workspaceId), isNull(runs.finishedAt))).get();
   const workspace = getWorkspace(item.workspaceId);
@@ -201,7 +206,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
   const issueContexts = new Map(reviewable.map((item, index) => [item.id, contexts[index]]));
   const routeItem = async (item: Item) => {
     if (item.state === "closed") {
-      await cleanupClosedItem(item);
+      await cleanupClosedItem(item, log);
       return;
     }
     if (item.workspaceId && getWorkspace(item.workspaceId)?.removedAt) {

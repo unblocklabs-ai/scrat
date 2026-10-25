@@ -29,7 +29,7 @@ Requires Node.js **22.19+**, Git, and the tools used by the target repository's 
 
 1. Run `npm ci`.
 2. Edit `scrat.config.json`: GitHub repository/App installation, model provider, action skills, concurrency, and workspace preparation/validation commands.
-3. Create an untracked `.env` containing `CODEX_LB_API_KEY` and the GitHub credential for the chosen `github.auth` mode: `GITHUB_APP_PRIVATE_KEY` (`"app"`; install the GitHub App on the target repository with the necessary contents, issues, pull-request, and checks (read) permissions) or `GITHUB_PAT` (`"pat"`; see GitHub authentication below). Add `SLACK_BOT_TOKEN` when `review_base_change` is enabled (see Slack status below).
+3. Create an untracked `.env` containing `CODEX_LB_API_KEY` and the GitHub credential for the chosen `github.auth` mode: `GITHUB_APP_PRIVATE_KEY` (`"app"`; install the GitHub App on the target repository with the necessary contents, issues, pull-request, and checks (read) permissions) or `GITHUB_PAT` (`"pat"`; see GitHub authentication below). Add `SLACK_BOT_TOKEN` when `review_base_change` is enabled (see Slack status below), and `LOGGIE_API_KEY` when storefront previews are enabled (see Storefront previews below).
 4. Initialize the local schema and start the service:
 
    ```sh
@@ -404,3 +404,39 @@ Failures:
 - Slack is unreachable when the reply is posted: the run fails at publishing. `npm run retry -- <task-id>` reuses the saved review and posts only the reply to the thread, without running the agent again.
 - The reaction fails after the reply is posted: the run fails at publishing and the `slack.add_reaction` operation logs `operation.failed`. `npm run retry -- <task-id>` adds only the reaction, without posting the reply or running the agent again; a reaction that is already there counts as added.
 - Slack has no idempotency key. A crash after Slack accepts a message but before Scrat records its timestamp can post that message again on retry, either the opening message or the reply.
+
+### Storefront previews
+
+For a Shopify theme repository, Scrat can give each pull request it opened an unpublished preview theme in the store. It is opt-in and off by default: while `storefront.enabled` is `false` Scrat does not load the storefront code and makes no Loggie or Shopify call, and manifests, prompts and actions are the same either way.
+
+```json
+{ "storefront": { "enabled": true, "store": "perelel.myshopify.com", "loggie": { "slug": "shopify-perelel-myshopify-com" } } }
+```
+
+All Shopify access goes through Loggie's HTTP proxy (`POST <loggie.url>/api/proxy/<loggie.slug>/`, Admin GraphQL), authenticated with a Loggie API key in the `x-api-key` header:
+
+1. In Loggie, create a profile for Scrat on the store's Shopify integration, separate from other tools' profiles (rate limits are per profile), whose policy allows exactly six operations: `themes`, `theme`, `themeDuplicate`, `themeFilesUpsert`, `themeFilesDelete` and `themeDelete`. Everything else, including `themePublish`, `themeUpdate` and `themeFilesCopy`, is refused with `403 ENDPOINT_RESTRICTED`.
+2. Put the profile's key in `.env` as `LOGGIE_API_KEY=...` and restart the service.
+
+Startup fails when `storefront.enabled` is true and `LOGGIE_API_KEY`, `storefront.store` or `storefront.loggie.slug` is missing, `storefront.loggie.url` is not an absolute URL, or `workspace.sandbox` is off. Without the sandbox the agent's Bash runs as the service user and could read the key from `.env` or the service's environment, and the key can change the live theme.
+
+- Before each review that publishes `pr_assessment` (`review_pr`) of a PR authored by `github.botLogin`, Scrat gets or creates the PR's preview. It records the preview in the `theme_previews` table, reads the `MAIN` theme's ID at run time, duplicates it as `<preview.themeNamePrefix>pr-<number>`, records the new theme's ID (also when Shopify's reply carries errors next to it), and polls its `processing` flag every `preview.processingPollSeconds` until Shopify has processed it (about two and a half minutes for a 650-file theme), for at most `preview.processingWaitSeconds` per review. It then stores the duplicate's own file checksums as the preview's baseline. A later review reuses the recorded preview without calling Loggie; one that found it still processing waits again. If the duplicate's reply was lost (a timeout, a proxy error or a restart), the next review adopts the unpublished theme with exactly that name instead of duplicating again.
+- Human-authored PRs get no preview, since their code would run on the store's domain.
+- When the PR is merged or closed, the closed-PR cleanup that runs on every sync deletes the theme and marks its row deleted, so a PR closed while Scrat was down is cleaned up on the next sync. A recorded theme that Scrat finds gone from the store while waiting for it to process, or at cleanup, is marked deleted, and the next review creates a new one.
+- Scrat writes only to themes it created and recorded, duplicates only `MAIN`, and never publishes a theme. The Loggie policy cannot tell Scrat's themes from the team's, so this guard is Scrat's own.
+- Previews never fail a review. A refused or failed Loggie call is logged as `storefront.preview_failed` (`storefront.delete_failed` during cleanup) and the review goes on; the next review or sync tries again. A stopping service ends the wait without logging a failure. Each Loggie request is logged as a `storefront.loggie` operation with the store and the GraphQL root field (`request`, for example `themeDuplicate`), and creations, adoptions and deletions as `storefront.preview_created`, `storefront.preview_adopted` and `storefront.preview_deleted`.
+- Disabling the storefront also pauses the cleanup. Previews of PRs closed while it was off are deleted on the first sync after it is turned back on.
+
+The agent has no path to Loggie: no tool, no binding and no environment variable reaches its session, and its input never contains the proxy address or the key. The environment allowlist keeps `LOGGIE_API_KEY` out of workspace commands, hooks and the agent's Bash, and the sandbox keeps them from reading it elsewhere. Registering it as a secret adds redaction from logs and errors and the refusal to publish content that contains it.
+
+| Setting | Purpose |
+| --- | --- |
+| `storefront.enabled` | Turns preview themes on; `false` by default. |
+| `storefront.store` | The store's `myshopify.com` host, logged with every Loggie request. Required when enabled. |
+| `storefront.loggie.url` | Loggie server. Requests go only to `<url>/api/proxy/<slug>/`; redirects are refused, so the key never reaches another host. |
+| `storefront.loggie.slug` | The store's Loggie integration slug, as `loggie discover` lists it. Required when enabled. |
+| `storefront.loggie.timeoutSeconds` | Timeout of one Loggie request. |
+| `storefront.preview.themeNamePrefix` | Prefix of preview theme names; a PR's theme is `<prefix>pr-<number>`. |
+| `storefront.preview.processingWaitSeconds` | Longest one review waits for a new duplicate to finish processing. |
+| `storefront.preview.processingPollSeconds` | Interval between processing checks. |
+| `storefront.preview.filesPageSize` | Files per request when reading the duplicate's checksums, at most 250 (Shopify's page limit). |

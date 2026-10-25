@@ -14,14 +14,17 @@ const bodyMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const sentHeaders = new Set(["accept", "content-type", "if-none-match", "if-modified-since", "accept-language"]);
 const keptHeaders = ["content-type", "content-length", "retry-after", "etag", "last-modified", "link"];
 
+type Hosts = readonly string[] | "any";
+export type BrowserScope = { navigationHosts: Hosts; resourceHosts: Hosts; binding?: string; limits?: { steps: number; milliseconds: number } };
+
 const text = (value: string, details: Record<string, unknown> = {}) => ({ content: [{ type: "text" as const, text: value }], details });
 const hostOf = (raw: string) => { try { return new URL(raw).hostname || "invalid"; } catch { return "invalid"; } };
 
-function usableHost(url: URL, hosts?: readonly string[]) {
-  return url.protocol === "https:" && !url.username && !url.password && !url.port && !hostProblem(url.hostname) && (!hosts || hosts.includes(url.hostname));
+function usableHost(url: URL, hosts: Hosts) {
+  return url.protocol === "https:" && !url.username && !url.password && !url.port && !hostProblem(url.hostname) && (hosts === "any" || hosts.includes(url.hostname));
 }
 
-function allowedUrl(raw: string, hosts?: readonly string[]) {
+function allowedUrl(raw: string, hosts: Hosts) {
   let url: URL;
   try { url = new URL(raw); } catch { throw new Error("url must be an absolute https URL"); }
   if (url.protocol !== "https:") throw new Error("Refused: only https URLs are allowed");
@@ -29,7 +32,7 @@ function allowedUrl(raw: string, hosts?: readonly string[]) {
   if (url.port) throw new Error("Refused: URLs with an explicit port are not allowed");
   const problem = hostProblem(url.hostname);
   if (problem) throw new Error(`Refused: ${problem}`);
-  if (hosts && !hosts.includes(url.hostname)) throw new Error(`Refused: ${url.hostname} is not an allowed host`);
+  if (hosts !== "any" && !hosts.includes(url.hostname)) throw new Error(`Refused: ${url.hostname} is not an allowed host`);
   return url;
 }
 
@@ -164,7 +167,7 @@ const themeIdOf = (html: string) => {
 };
 
 export function createBrowserTool({ settings, binding, contextDir, runId, launch = launchChromium, resolve = resolveHost, limits = { steps: config.tools.browser.steps, milliseconds: config.tools.browser.sessionSeconds * 1000 }, log }: {
-  settings?: { navigationHosts: readonly string[]; resourceHosts: readonly string[] };
+  settings: { navigationHosts: Hosts; resourceHosts: Hosts };
   binding?: Binding;
   contextDir?: string;
   runId: string;
@@ -173,11 +176,16 @@ export function createBrowserTool({ settings, binding, contextDir, runId, launch
   limits?: { steps: number; milliseconds: number };
   log?: { warn(details: Record<string, unknown>): void };
 }) {
-  const resourceHosts = settings && [...settings.resourceHosts, ...settings.navigationHosts], viewports: Record<string, { width: number; height: number }> = config.tools.browser.viewports, viewportNames = Object.keys(viewports);
+  const { navigationHosts } = settings, resourceHosts = settings.resourceHosts === "any" || navigationHosts === "any" ? "any" : [...settings.resourceHosts, ...navigationHosts], viewports: Record<string, { width: number; height: number }> = config.tools.browser.viewports, viewportNames = Object.keys(viewports);
   if (!Object.hasOwn(viewports, config.tools.browser.defaultViewport)) throw new Error(`tools.browser.defaultViewport must be one of: ${viewportNames.join(", ")}`);
   let blockedNavigation: string | undefined;
   const secret = binding && bindingSecret(binding);
   let session: { browser: BrowserLike; page: PageLike; startedAt: number } | undefined, halted: string | undefined, steps = 0, shots = 0;
+  const answered = new Map<string, Promise<boolean>>();
+  const resolvesPublicly = (host: string) => {
+    if (!answered.has(host)) answered.set(host, publicAnswers(host, resolve).then(Boolean, () => false));
+    return answered.get(host)!;
+  };
 
   async function close() {
     const open = session;
@@ -192,7 +200,8 @@ export function createBrowserTool({ settings, binding, contextDir, runId, launch
   async function route(request: ReturnType<RouteLike["request"]>) {
     let url: URL;
     try { url = new URL(request.url()); } catch { return undefined; }
-    if (!usableHost(url, request.isNavigationRequest() ? settings?.navigationHosts : resourceHosts)) return { blocked: url.hostname };
+    const hosts = request.isNavigationRequest() ? navigationHosts : resourceHosts;
+    if (!usableHost(url, hosts) || (hosts === "any" && !await resolvesPublicly(url.hostname))) return { blocked: url.hostname };
     if (!binding || !secret) return { headers: undefined };
     const credential = binding.header.toLowerCase(), { [credential]: _dropped, ...rest } = request.headers();
     return { headers: binding.hosts.includes(url.hostname) ? { ...rest, [credential]: `${binding.prefix ?? ""}${secret}` } : rest };
@@ -200,7 +209,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, launch
   async function open() {
     if (session) return session;
     const rules: string[] = [];
-    for (const host of resourceHosts ?? []) {
+    for (const host of resourceHosts === "any" ? [] : resourceHosts) {
       const answer = (await publicAnswers(host, resolve))?.[0];
       rules.push(`MAP ${host} ${answer ? (answer.family === 6 ? `[${answer.address}]` : answer.address) : "~NOTFOUND"}`);
     }
@@ -226,8 +235,8 @@ export function createBrowserTool({ settings, binding, contextDir, runId, launch
     name: "browser",
     label: "Browser",
     description: [
-      settings ? `Drive a headless browser. Pages may be visited on: ${settings.navigationHosts.join(", ")}. Other hosts, and page resources outside the allowlist, are blocked.`
-        : "Drive a headless browser on public https sites. IP addresses, local host names, explicit ports and URLs with credentials are blocked.",
+      navigationHosts === "any" ? "Drive a headless browser on public https sites. IP addresses, local host names, explicit ports, URLs with credentials and names that resolve to private addresses are blocked."
+        : `Drive a headless browser. Pages may be visited on: ${navigationHosts.join(", ")}. Other hosts, and page resources outside the allowlist, are blocked.`,
       `action=goto: open \`url\`. action=text: the visible text of the page (capped at ${config.tools.readBytes.default} characters).`,
       `action=screenshot: save a PNG and return its path, the final URL and the page's Shopify.theme id when it declares one. \`viewport\` is one of: ${viewportNames.join(", ")}; \`fullPage\` captures the whole page.`,
       "action=click: click the element matching `selector`. action=fill: put `text` in the field matching `selector`. action=select: choose the option `text` in the select matching `selector`. They return the resulting URL and title, plus how many elements `selector` matched before the action when the page did not navigate, `popupClosed: true` when a new window opened (it is closed), and `blocked: <url>` when a navigation was refused because its host is not allowed. The viewport stays as last set.",
@@ -252,7 +261,8 @@ export function createBrowserTool({ settings, binding, contextDir, runId, launch
         if (halted) throw new Error(halted);
         if (++steps > limits.steps) await halt(`the browser is limited to ${limits.steps} actions per session`);
         if (session && Date.now() - session.startedAt > limits.milliseconds) await halt(`the browser is limited to ${Math.round(limits.milliseconds / 1000)} seconds per session`);
-        const target = action === "goto" ? allowedUrl(raw ?? "", settings?.navigationHosts) : undefined;
+        const target = action === "goto" ? allowedUrl(raw ?? "", navigationHosts) : undefined;
+        if (target && navigationHosts === "any" && !await resolvesPublicly(target.hostname)) throw new Error(`Refused: ${target.hostname} does not resolve to a public address`);
         const { page } = await open(), timeout = { timeout: config.tools.browser.stepSeconds * 1000 };
         if (target) {
           const response = await page.goto(target.href, { waitUntil: "load", ...timeout });

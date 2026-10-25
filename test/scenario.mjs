@@ -130,7 +130,7 @@ const configureStorefront = (config) => {
   Object.assign(config.storefront, { enabled: true, store: "fixture.myshopify.com", publicHost: "shop.example.test" });
   Object.assign(config.storefront.preview, { processingPollSeconds: 1, uploadBatch: 2 });
   mkdirSync("deployment"); config.actions.directory = resolve("deployment");
-  writeFileSync("deployment/review_pr.yaml", readFileSync("app/actions/review_pr.yaml", "utf8").replace(/^files: \[(.*)\]$/m, "files: [$1, storefront]").replace(/^skill: .*$/m, `skill: ${resolve("app/skills/review_pr/SKILL.md")}`));
+  writeFileSync("deployment/review_pr.yaml", readFileSync("app/actions/review_pr.yaml", "utf8").replace(/^files: \[(.*)\]$/m, "tools: [read, grep, find, ls, git, read_base, browser]\nfiles: [$1, storefront]").replace(/^skill: .*$/m, `skill: ${resolve("app/skills/review_pr/SKILL.md")}`));
 };
 const withTools = (text, tools) => text.replace(/^tools: .*\n/m, "").trimEnd() + `\ntools: ${tools}\n`;
 const configureManifestDirectory = (config) => {
@@ -3377,13 +3377,17 @@ export const scenarios = {
     }
     assert.ok(bound.state.timeouts.length > 0 && bound.state.timeouts.every((timeout) => timeout === 30000));
     await assert.rejects(act(make({ contextDir: undefined }), { action: "screenshot" }), /no context directory/);
-    const unrestricted = make({ settings: undefined });
-    assert.match(unrestricted.tool.description, /^Drive a headless browser on public https sites\. IP addresses, local host names, explicit ports and URLs with credentials are blocked\./);
+    const lookups = [], inside = [{ address: "10.0.0.5", family: 4 }];
+    const unrestricted = make({ settings: { navigationHosts: "any", resourceHosts: "any" }, resolve: async (host) => { lookups.push(host); return host.startsWith("inside.") ? inside : host.startsWith("nowhere.") ? [] : publicAnswer; } });
+    assert.match(unrestricted.tool.description, /^Drive a headless browser on public https sites\. IP addresses, local host names, explicit ports, URLs with credentials and names that resolve to private addresses are blocked\./);
+    for (const host of ["inside.example.net", "nowhere.example.net"]) await assert.rejects(act(unrestricted, { action: "goto", url: `https://${host}/` }), new RegExp(`Refused: ${host.replaceAll(".", "\\.")} does not resolve to a public address`));
     for (const [url, refusal] of [["https://127.0.0.1/", /IP address/], ["http://anywhere.example.net/", /only https/], ["https://anywhere.example.net:8443/", /explicit port/], ["https://metadata.google.internal/", /Refused/]]) await assert.rejects(act(unrestricted, { action: "goto", url }), refusal);
     assert.deepEqual(JSON.parse(textOf(await act(unrestricted, { action: "goto", url: "https://anywhere.example.net/p" }))).url, "https://anywhere.example.net/p");
     assert.deepEqual(unrestricted.state.args, [], "an unrestricted browser pins no hosts");
-    assert.deepEqual([await unrestricted.page.request("https://cdn.elsewhere.example.org/a.js", false), await unrestricted.page.request("https://frame.example.org/", true), await unrestricted.page.request("http://cdn.elsewhere.example.org/a.js", false), await unrestricted.page.request("https://10.0.0.8/", false)],
-      [open, open, blocked, blocked]);
+    assert.deepEqual([await unrestricted.page.request("https://cdn.elsewhere.example.org/a.js", false), await unrestricted.page.request("https://frame.example.org/", true), await unrestricted.page.request("http://cdn.elsewhere.example.org/a.js", false), await unrestricted.page.request("https://10.0.0.8/", false),
+      await unrestricted.page.request("https://inside.example.org/a.js", false), await unrestricted.page.request("https://inside.example.org/frame", true), await unrestricted.page.request("https://cdn.elsewhere.example.org/b.js", false)],
+      [open, open, blocked, blocked, blocked, blocked, open]);
+    assert.deepEqual(lookups.filter((host) => host === "cdn.elsewhere.example.org" || host === "inside.example.org"), ["cdn.elsewhere.example.org", "inside.example.org"], "each host is resolved once per session");
     await bound.close(); assert.equal(bound.state.closed, true);
 
     const capped = make({ limits: { steps: 3, milliseconds: 60_000 } });
@@ -3808,36 +3812,55 @@ export const scenarios = {
     assert.equal(f.loggie.requests.length, from);
     for (const { field, variables } of f.loggie.requests) if (field === "themeFilesUpsert" || field === "themeFilesDelete") assert.equal(variables.themeId, preview.themeGid);
   } },
-  storefront_site_map: { title: "an enabled storefront queues one discovery per missing or stale site map, whose read-only session gets the storefront browser with its own budget and the live URL, stores the response with its date as data/storefront/site.md, and hands it to later storefront reviews and to the next discovery, which runs after siteMapMaxAgeDays or when the file is gone", seed: seedTheme, configure: [configureStorefront], run: async () => {
-    const { pollSiteMap } = await f.app("storefront-site.ts");
+  storefront_site_map: { title: "the service poll queues no discovery while the storefront is off and one per missing or stale site map while it is on; the read-only session gets the storefront browser with its own budget and the live URL, its response is stored with its date as data/storefront/site.md and handed to later storefront reviews and to the next discovery after siteMapMaxAgeDays or once the file is gone; an incomplete discovery stores nothing and is not queued again, one left queued when the storefront is turned off is refused, and a manifest listing browser alone gets the browser only in a review of a preview that matches the head", seed: seedTheme, configure: [configureStorefront], run: async () => {
+    const { pollSiteMap } = await f.app("storefront-site.ts"), { pollSources } = await f.app("poll-sources.ts"), { config: live } = await f.app("config.ts");
     const day = 86_400_000, start = Date.parse("2026-10-25T00:00:00Z"), at = (iso, days = 0) => (Date.parse(iso) - start) / day + days, poll = (days) => pollSiteMap(undefined, new Date(start + days * day));
     const discoveries = () => all(s.tasks).filter((task) => task.action === "storefront_discover");
     const sessions = () => f.requests.filter((request) => request.context.action === "storefront_discover");
     const site = resolve("data/storefront/site.md"), written = () => all(s.sourceCursors).find((row) => row.action === "storefront_discover" && row.branch === "site_map")?.sha;
     const stored = (iso) => `Site map of https://shop.example.test/, written by Scrat on ${iso}.\n\n- \`/products/<handle>\`: product page with add to cart.\n`;
+    const names = (request) => request.request.tools.map((tool) => tool.function.name), panel = JSON.stringify(["read", "grep", "find", "ls", "git", "read_base"]);
+    const reviewed = async () => { const from = f.requests.length; await route(); await success(); return f.requests.slice(from).filter((request) => request.context.action === "review_pr"); };
     f.loggie.processingPolls = 0;
-    assert.equal(await poll(0), 1); assert.equal(await poll(0), 0, "a queued discovery is not queued again");
+    live.storefront.enabled = false;
+    await pollSources();
+    assert.equal(discoveries().length, 0, "the service poll queues no discovery while the storefront is off");
+    live.storefront.enabled = true;
+    await pollSources();
+    assert.equal(discoveries().length, 1); assert.equal(await poll(0), 0, "a queued discovery is not queued again");
     const [task] = discoveries();
     assert.deepEqual(task.input, { source: "storefront", kind: "site_map", triggerKey: "none" });
     assert.deepEqual({ kind: f.row(s.subjects, task.subjectId).kind, key: f.row(s.subjects, task.subjectId).key, priority: task.priority }, { kind: "window", key: "storefront_discover:none", priority: 20 });
     const first = await success();
     assert.equal(first.publication.status, "published"); assert.ok(f.row(s.workspaces, first.workspaceId).removedAt);
     const [session] = sessions(), browser = session.request.tools.find((tool) => tool.function.name === "browser");
-    assert.deepEqual(session.request.tools.map((tool) => tool.function.name), ["read", "grep", "find", "ls", "browser"]);
+    assert.deepEqual(names(session), ["read", "grep", "find", "ls", "browser"]);
     assert.match(browser.function.description, /public https sites.*At most 40 actions and 600 seconds per session/s);
-    assert.match(JSON.stringify(session.request.messages.filter((m) => m.role === "system" || m.role === "developer")), /read\/search\/git and browser tools.*or browser checks you did not perform/);
-    assert.match(session.text, /# Storefront site map/);
+    assert.match(JSON.stringify(session.request.messages.filter((m) => m.role === "system" || m.role === "developer")), /read\/search\/git and browser tools; do not modify files, implement a fix, or claim to have run shell commands, tests or live integrations; report only the browser checks you performed/);
+    assert.match(session.text, /# Storefront site map.*Visit only URLs on the `liveUrl` host/s);
     assert.deepEqual(JSON.parse(readFileSync(session.context.files.storefront, "utf8")), { liveUrl: "https://shop.example.test/" });
     assert.equal(session.context.files.siteMap, undefined, "the first discovery has no previous map");
     const firstWritten = written();
     assert.equal(readFileSync(site, "utf8"), stored(firstWritten));
     assert.equal(await poll(at(firstWritten, 29)), 0, "a fresh map is kept");
-    await implement(1); await route(); await success();
-    const review = f.requests.findLast((request) => request.context.action === "review_pr");
-    assert.equal(review.context.files.siteMap, resolve(dirname(review.context.files.storefront), "site.md"));
-    assert.equal(readFileSync(review.context.files.siteMap, "utf8"), stored(firstWritten), "a later storefront review gets the stored map");
-    assert.equal(JSON.parse(readFileSync(review.context.files.storefront, "utf8")).liveUrl, "https://shop.example.test/");
-    assert.ok(!review.request.tools.some((tool) => tool.function.name === "browser"), "a storefront manifest that lists no browser gets none");
+
+    await implement(1);
+    const pr = f.prs[0], review = await reviewed();
+    assert.equal(review.at(-1).context.files.siteMap, resolve(dirname(review.at(-1).context.files.storefront), "site.md"));
+    assert.equal(readFileSync(review.at(-1).context.files.siteMap, "utf8"), stored(firstWritten), "a later storefront review gets the stored map");
+    assert.equal(JSON.parse(readFileSync(review.at(-1).context.files.storefront, "utf8")).liveUrl, "https://shop.example.test/");
+    assert.equal(new Set(review.map((request) => `${request.request.model}/${request.consolidating}`)).size, 3);
+    assert.ok(review.every((request) => names(request).includes("browser")), "every panel session reviewing a matching preview gets the browser");
+    assert.match(review[0].request.tools.find((tool) => tool.function.name === "browser").function.description, /public https sites.*At most 40 actions and 600 seconds per session/s);
+    f.loggie.wrongMd5.add("snippets/badge.liquid"); pushFile(pr.head.ref, "snippets/badge.liquid", "<span>new</span>\n");
+    const mismatched = await reviewed();
+    assert.equal(JSON.parse(readFileSync(mismatched[0].context.files.storefront, "utf8")).available, false);
+    assert.ok(mismatched.length && mismatched.every((request) => JSON.stringify(names(request)) === panel), "a preview that does not match the head gives no browser");
+    f.loggie.wrongMd5.clear();
+    branchOff("human-7", "assets/app.css", "body { color: blue; }\n"); f.addPr(7, "human-7", "human");
+    const human = await reviewed();
+    assert.ok(human.length && human.every((request) => request.context.item.number === 7 && request.context.files.storefront === undefined && JSON.stringify(names(request)) === panel), "a human PR gets no browser");
+
     assert.equal(await poll(at(firstWritten, 31)), 1);
     assert.equal(discoveries().at(-1).input.triggerKey, firstWritten);
     assert.equal(f.row(s.subjects, discoveries().at(-1).subjectId).key, `storefront_discover:${firstWritten}`);
@@ -3848,7 +3871,21 @@ export const scenarios = {
     assert.equal(await poll(at(secondWritten, 1)), 0);
     rmSync(site);
     assert.equal(await poll(at(secondWritten, 1)), 1, "a stored map that is gone is rediscovered");
-    assert.equal(discoveries().length, 3); assert.equal(all(s.sourceCursors).filter((row) => row.action === "storefront_discover").length, 1);
+    f.reset(0, "incomplete");
+    const incomplete = await run();
+    assert.equal(incomplete.error.code, "AGENT_INCOMPLETE"); assert.equal(f.row(s.tasks, incomplete.taskId).status, "failed");
+    assert.equal(existsSync(site), false, "an incomplete discovery stores nothing"); assert.equal(written(), secondWritten);
+    assert.equal(await poll(at(secondWritten, 2)), 0, "a failed discovery is not queued again");
+    assert.equal(discoveries().length, 3);
+
+    f.reset(0, "normal"); tasks.retryTask(incomplete.taskId); live.storefront.enabled = false;
+    const before = sessions().length, refused = await run();
+    assert.match(refused.error.message, /storefront_discover runs only while storefront\.enabled is true/);
+    assert.equal(sessions().length, before, "a discovery refused while the storefront is off reaches no agent"); assert.equal(existsSync(site), false);
+    pushFile(pr.head.ref, "snippets/badge.liquid", "<span>off</span>\n");
+    const off = await reviewed();
+    assert.ok(off.length && off.every((request) => request.context.item.number === 201 && request.context.files.storefront === undefined && JSON.stringify(names(request)) === panel), "a disabled storefront gives no browser");
+    assert.equal(all(s.sourceCursors).filter((row) => row.action === "storefront_discover").length, 1);
   } },
   database: { title: "real PostgreSQL runs isolate databases, apply new migrations and remove resources", needsDocker: true, configure: [configureDatabase], run: async () => {
     const original = process.env.DATABASE_URL; f.addIssue(1); f.addIssue(2); f.enqueue(1, "implement"); f.enqueue(2, "implement");

@@ -1,13 +1,11 @@
 import { setTimeout } from "node:timers/promises";
-import { pollCommits } from "./commit-source.ts";
-import { attempt, runCommand } from "./cli.ts";
+import { runCommand } from "./cli.ts";
 import { config } from "./config.ts";
-import { syncGitHub } from "./github-sync.ts";
 import { logger } from "./logging.ts";
+import { pollSources } from "./poll-sources.ts";
 import { runNextTask } from "./runner.ts";
-import { pollSchedules } from "./schedule-source.ts";
 import { validateStaticConfig } from "./startup.ts";
-import { signalWork, waitForWork, workGeneration } from "./work-signal.ts";
+import { waitForWork, workGeneration } from "./work-signal.ts";
 
 const shutdown = new AbortController();
 const wait = (ms: number) => setTimeout(ms, undefined, { signal: shutdown.signal }).catch((error: unknown) => {
@@ -17,12 +15,6 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => 
   logger.info({ event: "worker.draining", signal });
   shutdown.abort();
 });
-async function pollSources() {
-  await attempt(async () => { await syncGitHub(); signalWork(); });
-  await attempt(async () => { if (await pollCommits()) signalWork(); });
-  await attempt(async () => { if (await pollSchedules()) signalWork(); });
-  if (config.storefront.enabled) await attempt(async () => { if (await (await import("./storefront-site.ts")).pollSiteMap()) signalWork(); });
-}
 async function poll() {
   while (!shutdown.signal.aborted) {
     await wait(config.github.fetchIntervalSeconds * 1000);

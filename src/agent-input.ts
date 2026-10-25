@@ -65,6 +65,7 @@ export async function buildAgentInput(options: {
   const { run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha } = options;
   const { action } = task;
   const trigger = parseTriggerInput(run.input);
+  if (trigger.source === "storefront" && !config.storefront.enabled) throw new Error(`${action} runs only while storefront.enabled is true`);
   const input = { ...run.input };
   delete input.manual;
   delete input.source;

@@ -12,18 +12,17 @@ import { errorCode, ifMissing, redactSecrets } from "./errors.ts";
 import { childEnvironment } from "./secrets.ts";
 import { blobSize, gitPage } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
-import { createBrowserTool, createGithubSearchTool, createHttpTool } from "./scoped-tools.ts";
+import { type BrowserScope, createBrowserTool, createGithubSearchTool, createHttpTool } from "./scoped-tools.ts";
 import { createReviewGitTool, pageText } from "./review-git.ts";
 import { sandboxCommand } from "./sandbox.ts";
 
 type ScopedToolName = "http" | "browser" | "github_search";
 
-export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, storefront = false, baseSha, revisions = {}, environment = {}, log, runId }: {
+export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, baseSha, revisions = {}, environment = {}, log, runId }: {
   cwd: string;
   contextDir?: string;
   tools: readonly ToolName[];
-  scoped?: Pick<Manifest, "http" | "browser">;
-  storefront?: boolean;
+  scoped?: Pick<Manifest, "http"> & { browser?: BrowserScope };
   baseSha?: string;
   revisions?: Record<string, string>;
   environment?: NodeJS.ProcessEnv;
@@ -148,9 +147,8 @@ export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, st
     read_base: readBase, bash: quiet(bash), edit: quiet(edit), write: quiet(write),
   } satisfies Record<Exclude<ToolName, ScopedToolName>, object>;
   const binding = (name?: string) => name === undefined ? undefined : config.bindings[name];
-  const { browserSteps, browserSeconds } = config.storefront.limits;
-  const browser = scoped.browser || (storefront && tools.includes("browser"))
-    ? createBrowserTool({ settings: scoped.browser, binding: binding(scoped.browser?.binding), contextDir, runId, log, ...storefront && { limits: { steps: browserSteps, milliseconds: browserSeconds * 1000 } } }) : undefined;
+  const browser = scoped.browser
+    ? createBrowserTool({ settings: scoped.browser, binding: binding(scoped.browser.binding), contextDir, runId, log, limits: scoped.browser.limits }) : undefined;
   const table = {
     ...core,
     ...scoped.http && { http: createHttpTool({ settings: scoped.http, binding: binding(scoped.http.binding)!, runId }) },

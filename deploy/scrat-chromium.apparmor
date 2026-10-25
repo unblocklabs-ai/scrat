@@ -1,0 +1,5 @@
+abi <abi/4.0>,
+include <tunables/global>
+profile scrat-chromium @{HOME}/{.local/share/scrat-v2/browsers,.cache/ms-playwright}/chromium*/chrome-linux64/chrome* flags=(unconfined) {
+  userns,
+}

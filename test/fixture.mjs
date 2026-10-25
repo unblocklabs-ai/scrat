@@ -61,7 +61,7 @@ export async function fixture(scenario, spec) {
   let onModel, script, nextCommentId = 1000, nextIssueNumber = 500;
   const external = [], searches = [];
   const md5 = (text) => createHash("md5").update(text).digest("hex"), mainTheme = "gid://shopify/OnlineStoreTheme/1";
-  const loggie = { key: "loggie-" + "Z8wQ4nR2tY".repeat(3), slug: "shop-fixture", requests: [], restricted: new Set(), processingPolls: 1, nextId: 9000, mainTheme,
+  const loggie = { key: "loggie-" + "Z8wQ4nR2tY".repeat(3), slug: "shop-fixture", requests: [], restricted: new Set(), lostDuplicate: false, processingPolls: 1, nextId: 9000, mainTheme,
     themes: new Map([[mainTheme, { id: mainTheme, name: "live", role: "MAIN", polls: 0, files: new Map(["layout/theme.liquid", "assets/app.css", "config/settings_data.json"].map((name) => [name, md5(name)])) }]]) };
   if (scenario.startsWith("storefront")) process.env.LOGGIE_API_KEY = loggie.key;
   const shopify = (req, res, body) => {
@@ -74,10 +74,11 @@ export async function fixture(scenario, spec) {
       return send({ error: { code: "ENDPOINT_RESTRICTED", message: `${field} is not allowed by this profile` } }, 403);
     }
     const theme = loggie.themes.get(variables.id);
-    if (field === "themes") return send({ data: { themes: { nodes: [...loggie.themes.values()].filter((entry) => entry.role === "MAIN").map(({ id }) => ({ id })) } } });
+    if (field === "themes") return send({ data: { themes: { nodes: [...loggie.themes.values()].filter((entry) => variables.names ? entry.role === "UNPUBLISHED" && variables.names.includes(entry.name) : entry.role === "MAIN").map(({ id, name }) => ({ id, name })) } } });
     if (field === "themeDuplicate") {
       const id = "gid://shopify/OnlineStoreTheme/" + ++loggie.nextId;
       loggie.themes.set(id, { id, name: variables.name, role: "UNPUBLISHED", polls: loggie.processingPolls, files: new Map(theme.files) });
+      if (loggie.lostDuplicate) { loggie.lostDuplicate = false; res.writeHead(502, { "content-type": "text/html" }); return res.end("<html>Bad Gateway</html>"); }
       return send({ data: { themeDuplicate: { newTheme: { id, name: variables.name }, userErrors: [] } } });
     }
     if (field === "themeDelete") return send({ data: { themeDelete: loggie.themes.delete(variables.id) ? { deletedThemeId: variables.id, userErrors: [] } : { deletedThemeId: null, userErrors: [{ field: ["id"], message: "Theme does not exist" }] } } });

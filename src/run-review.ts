@@ -69,7 +69,7 @@ async function refreshPreview({ subject, manifest, operation, stop }: Ctx, { pul
   if (!config.storefront.enabled || !manifest.publish.includes("pr_assessment") || !pullRequest || !isBotLogin(pullRequest.user?.login)) return;
   const { ensurePreview } = await import("./storefront.ts");
   try { await ensurePreview(subject.id, pullRequest.number, stop); }
-  catch (error) { operation.log.warn({ event: "storefront.preview_failed", subjectId: subject.id, number: pullRequest.number, err: error }); }
+  catch (error) { if (!stop?.aborted) operation.log.warn({ event: "storefront.preview_failed", subjectId: subject.id, number: pullRequest.number, err: error }); }
 }
 
 export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {

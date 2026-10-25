@@ -33,7 +33,7 @@ const schema = Type.Object({
   storefront: Type.Object({
     enabled: Type.Boolean(), store: Type.String(),
     loggie: Type.Object({ url: Type.String(), slug: Type.String(), timeoutSeconds: positive }, strict),
-    preview: Type.Object({ themeNamePrefix: Type.String(), processingWaitSeconds: positive, processingPollSeconds: positive, filesPageSize: positive }, strict),
+    preview: Type.Object({ themeNamePrefix: Type.String(), processingWaitSeconds: positive, processingPollSeconds: positive, filesPageSize: Type.Integer({ minimum: 1, maximum: 250 }) }, strict),
   }, strict),
   slack: Type.Object({ enabled: Type.Boolean(), channel: Type.String(), maxRetryAfterSeconds: positive, minimumGapMs: Type.Integer({ minimum: 0 }), maxErrorLength: positive }, strict),
   workspace: Type.Object({

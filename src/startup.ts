@@ -79,6 +79,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
   const storefront = settings.storefront;
   if (storefront?.enabled) {
     if (!process.env.LOGGIE_API_KEY) problems.push("storefront.enabled is true but LOGGIE_API_KEY is not set");
+    if (!settings.workspace?.sandbox) problems.push("storefront.enabled requires workspace.sandbox");
     for (const [key, value] of Object.entries({ "storefront.store": storefront.store, "storefront.loggie.slug": storefront.loggie.slug })) {
       if (!value.trim()) problems.push(`${key} must not be empty when storefront.enabled is true`);
     }

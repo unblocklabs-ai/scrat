@@ -106,7 +106,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
         if (unknown.length) problems.push(`${action}: unknown startMessage variable ${unknown.map((name) => `{{${name}}}`).join(", ")}`);
       }
       if (slack && process.env.SLACK_BOT_TOKEN) await checkSlackAuth(`${action}: Slack`);
-      if (manifest.browser) await loadPlaywright().catch((error: unknown) => { problems.push(`${action}: ${errorMessage(error)}`); });
+      if (manifest.browser || (storefront?.enabled && manifest.tools.includes("browser"))) await loadPlaywright().catch((error: unknown) => { problems.push(`${action}: ${errorMessage(error)}`); });
       const skill = skillPath(manifest, entry.skill);
       if (!await access(skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${skill}`);
     }

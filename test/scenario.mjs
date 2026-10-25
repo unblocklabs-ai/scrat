@@ -2719,6 +2719,9 @@ export const scenarios = {
       /storefront\.enabled is true but LOGGIE_API_KEY is not set\n- storefront\.enabled requires workspace\.sandbox\n- storefront\.store must not be empty when storefront\.enabled is true\n- storefront\.publicHost must not be empty when storefront\.enabled is true\n- storefront\.loggie\.slug must not be empty when storefront\.enabled is true\n- storefront\.loggie\.url must be an absolute URL\n- storefront\.preview\.themePaths is not a valid regular expression/);
     schema((c) => { c.storefront.preview.uploadBatch = 51; }, /storefront\.preview\.uploadBatch: must be <= 50/);
     await startup((c) => { c.storefront.enabled = true; c.storefront.publicHost = "https://shop.example.com"; }, /storefront\.publicHost must be a host name, without a scheme or path/);
+    if (!await import("playwright-core").then(() => true, () => false)) await startup((c) => { c.storefront.enabled = true; }, /storefront_discover: The browser tool needs the optional playwright-core package/);
+    schema((c) => { c.storefront.limits.runSeconds = 0; }, /storefront\.limits\.runSeconds: must be >= 1/);
+    schema((c) => { c.storefront.siteMapMaxAgeDays = 1.5; }, /storefront\.siteMapMaxAgeDays: must be integer/);
     const key = process.env.GITHUB_APP_PRIVATE_KEY;
     delete process.env.GITHUB_APP_PRIVATE_KEY;
     await assert.rejects(validateStaticConfig(f.config), /github\.auth is "app" but GITHUB_APP_PRIVATE_KEY is not set/);
@@ -3085,7 +3088,7 @@ export const scenarios = {
   manifest_directory: { title: "a deployment manifest directory adds an action for a freed trigger, rejects duplicate enabled triggers, unknown tools and files, and bad directories", configure: [configureManifestDirectory], run: async () => {
     const { manifests, routeFor } = await f.app("actions.ts");
     const { validateStaticConfig } = await f.app("startup.ts");
-    assert.deepEqual(manifests.map((m) => m.name).sort(), ["address_pr_feedback", "address_review", "implement", "my_pr_review", "resolve_conflicts", "review_base_change", "review_issue", "review_pr", "review_triage"]);
+    assert.deepEqual(manifests.map((m) => m.name).sort(), ["address_pr_feedback", "address_review", "implement", "my_pr_review", "resolve_conflicts", "review_base_change", "review_issue", "review_pr", "review_triage", "storefront_discover"]);
     await validateStaticConfig(f.config);
     await assert.rejects(validateStaticConfig({ ...f.config, actions: { ...f.config.actions, review_issue: { ...f.config.actions.review_issue, enabled: true } } }), /review_issue, review_triage would share one review comment on each issue; enable only one/);
     const issue = { source: "github_items", kind: "item_changed", item: "issue", author: "other" };
@@ -3151,7 +3154,11 @@ export const scenarios = {
     rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [review]"), /files: review requires trigger.kind low_grade/);
     rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [labels]"), /files: previous_assessment requires the pr_assessment effect or a review that publishes comment/);
     rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [discussion, previous_repair]"), /files: previous_repair requires the pr_assessment effect/);
-    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [discussion, previous_assessment, storefront]"), /files: storefront requires the pr_assessment effect/);
+    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [discussion, previous_assessment, storefront]"), /files: storefront requires the pr_assessment effect or a storefront trigger/);
+    rejects("storefront_discover", (text) => text.replace("files: [storefront]", "files: []"), /the browser tool and the browser setting require each other, except that a manifest listing the storefront file may list browser alone/);
+    rejects("storefront_discover", (text) => text.replace("publish: [site_map]", "publish: [issue]"), /the site_map effect and a storefront trigger require each other/);
+    rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [comment, labels, site_map]"), /the site_map effect and a storefront trigger require each other/);
+    rejects("storefront_discover", (text) => withTools(text.replace("mode: review", "mode: change"), "[read, browser]") + "acceptance: complete\n", /a storefront trigger requires mode review/);
     rejects("implement", (text) => withTools(text, "[read, git]"), /mode change forbids the git and read_base tools/);
     rejects("implement", (text) => text.replace("item: issue", "item: pr"), /trigger.kind label requires item: issue/);
     rejects("review_issue", (text) => text + "failedLabel: Scrat failed\n", /rule_check\.yaml: failedLabel requires mode change/);
@@ -3370,6 +3377,13 @@ export const scenarios = {
     }
     assert.ok(bound.state.timeouts.length > 0 && bound.state.timeouts.every((timeout) => timeout === 30000));
     await assert.rejects(act(make({ contextDir: undefined }), { action: "screenshot" }), /no context directory/);
+    const unrestricted = make({ settings: undefined });
+    assert.match(unrestricted.tool.description, /^Drive a headless browser on public https sites\. IP addresses, local host names, explicit ports and URLs with credentials are blocked\./);
+    for (const [url, refusal] of [["https://127.0.0.1/", /IP address/], ["http://anywhere.example.net/", /only https/], ["https://anywhere.example.net:8443/", /explicit port/], ["https://metadata.google.internal/", /Refused/]]) await assert.rejects(act(unrestricted, { action: "goto", url }), refusal);
+    assert.deepEqual(JSON.parse(textOf(await act(unrestricted, { action: "goto", url: "https://anywhere.example.net/p" }))).url, "https://anywhere.example.net/p");
+    assert.deepEqual(unrestricted.state.args, [], "an unrestricted browser pins no hosts");
+    assert.deepEqual([await unrestricted.page.request("https://cdn.elsewhere.example.org/a.js", false), await unrestricted.page.request("https://frame.example.org/", true), await unrestricted.page.request("http://cdn.elsewhere.example.org/a.js", false), await unrestricted.page.request("https://10.0.0.8/", false)],
+      [open, open, blocked, blocked]);
     await bound.close(); assert.equal(bound.state.closed, true);
 
     const capped = make({ limits: { steps: 3, milliseconds: 60_000 } });
@@ -3671,7 +3685,7 @@ export const scenarios = {
     assert.equal(f.deployments.length, 0, "an App without the deployments permission loses only the deployment");
     const [comment] = previewComments();
     assert.equal(previewComments().length, 1); assert.ok([url, String(preview.themeId), head()].every((text) => comment.body.includes(text)));
-    assert.deepEqual(storefront(first.run), { url, themeId: preview.themeId, headSha: head(), available: true, problems: [] });
+    assert.deepEqual(storefront(first.run), { url, themeId: preview.themeId, headSha: head(), available: true, problems: [], liveUrl: "https://shop.example.test/" });
     f.faults.permissions.clear(); f.loggie.wrongMd5.add("assets/app.css");
     let from = f.loggie.requests.length;
     pushFile(pr.head.ref, "assets/app.css", "body { color: red; }\n");
@@ -3681,7 +3695,7 @@ export const scenarios = {
     assert.equal(previewComments().length, 1); assert.equal(previewComments()[0].id, comment.id);
     assert.match(previewComments()[0].body, new RegExp(`preview unavailable for ${secondHead}.*\\n\\n- \`assets/app\\.css\` does not match the commit`, "s"));
     assert.deepEqual(states(), [{ ref: secondHead, environment: "shopify-preview", states: ["failure"] }]);
-    assert.deepEqual(storefront(second.run), { url: null, themeId: preview.themeId, headSha: secondHead, available: false, problems: mismatch });
+    assert.deepEqual(storefront(second.run), { url: null, themeId: preview.themeId, headSha: secondHead, available: false, problems: mismatch, liveUrl: "https://shop.example.test/" });
     f.loggie.wrongMd5.clear(); from = f.loggie.requests.length;
     pushFile(pr.head.ref, "snippets/badge.liquid", "<span>new</span>\n");
     const third = await reviewed();
@@ -3793,6 +3807,48 @@ export const scenarios = {
     from = f.loggie.requests.length; await route();
     assert.equal(f.loggie.requests.length, from);
     for (const { field, variables } of f.loggie.requests) if (field === "themeFilesUpsert" || field === "themeFilesDelete") assert.equal(variables.themeId, preview.themeGid);
+  } },
+  storefront_site_map: { title: "an enabled storefront queues one discovery per missing or stale site map, whose read-only session gets the storefront browser with its own budget and the live URL, stores the response with its date as data/storefront/site.md, and hands it to later storefront reviews and to the next discovery, which runs after siteMapMaxAgeDays or when the file is gone", seed: seedTheme, configure: [configureStorefront], run: async () => {
+    const { pollSiteMap } = await f.app("storefront-site.ts");
+    const day = 86_400_000, start = Date.parse("2026-10-25T00:00:00Z"), at = (iso, days = 0) => (Date.parse(iso) - start) / day + days, poll = (days) => pollSiteMap(undefined, new Date(start + days * day));
+    const discoveries = () => all(s.tasks).filter((task) => task.action === "storefront_discover");
+    const sessions = () => f.requests.filter((request) => request.context.action === "storefront_discover");
+    const site = resolve("data/storefront/site.md"), written = () => all(s.sourceCursors).find((row) => row.action === "storefront_discover" && row.branch === "site_map")?.sha;
+    const stored = (iso) => `Site map of https://shop.example.test/, written by Scrat on ${iso}.\n\n- \`/products/<handle>\`: product page with add to cart.\n`;
+    f.loggie.processingPolls = 0;
+    assert.equal(await poll(0), 1); assert.equal(await poll(0), 0, "a queued discovery is not queued again");
+    const [task] = discoveries();
+    assert.deepEqual(task.input, { source: "storefront", kind: "site_map", triggerKey: "none" });
+    assert.deepEqual({ kind: f.row(s.subjects, task.subjectId).kind, key: f.row(s.subjects, task.subjectId).key, priority: task.priority }, { kind: "window", key: "storefront_discover:none", priority: 20 });
+    const first = await success();
+    assert.equal(first.publication.status, "published"); assert.ok(f.row(s.workspaces, first.workspaceId).removedAt);
+    const [session] = sessions(), browser = session.request.tools.find((tool) => tool.function.name === "browser");
+    assert.deepEqual(session.request.tools.map((tool) => tool.function.name), ["read", "grep", "find", "ls", "browser"]);
+    assert.match(browser.function.description, /public https sites.*At most 40 actions and 600 seconds per session/s);
+    assert.match(JSON.stringify(session.request.messages.filter((m) => m.role === "system" || m.role === "developer")), /read\/search\/git and browser tools.*or browser checks you did not perform/);
+    assert.match(session.text, /# Storefront site map/);
+    assert.deepEqual(JSON.parse(readFileSync(session.context.files.storefront, "utf8")), { liveUrl: "https://shop.example.test/" });
+    assert.equal(session.context.files.siteMap, undefined, "the first discovery has no previous map");
+    const firstWritten = written();
+    assert.equal(readFileSync(site, "utf8"), stored(firstWritten));
+    assert.equal(await poll(at(firstWritten, 29)), 0, "a fresh map is kept");
+    await implement(1); await route(); await success();
+    const review = f.requests.findLast((request) => request.context.action === "review_pr");
+    assert.equal(review.context.files.siteMap, resolve(dirname(review.context.files.storefront), "site.md"));
+    assert.equal(readFileSync(review.context.files.siteMap, "utf8"), stored(firstWritten), "a later storefront review gets the stored map");
+    assert.equal(JSON.parse(readFileSync(review.context.files.storefront, "utf8")).liveUrl, "https://shop.example.test/");
+    assert.ok(!review.request.tools.some((tool) => tool.function.name === "browser"), "a storefront manifest that lists no browser gets none");
+    assert.equal(await poll(at(firstWritten, 31)), 1);
+    assert.equal(discoveries().at(-1).input.triggerKey, firstWritten);
+    assert.equal(f.row(s.subjects, discoveries().at(-1).subjectId).key, `storefront_discover:${firstWritten}`);
+    await success();
+    assert.equal(readFileSync(sessions().at(-1).context.files.siteMap, "utf8"), stored(firstWritten), "the next discovery starts from the previous map");
+    const secondWritten = written();
+    assert.ok(secondWritten > firstWritten); assert.equal(readFileSync(site, "utf8"), stored(secondWritten));
+    assert.equal(await poll(at(secondWritten, 1)), 0);
+    rmSync(site);
+    assert.equal(await poll(at(secondWritten, 1)), 1, "a stored map that is gone is rediscovered");
+    assert.equal(discoveries().length, 3); assert.equal(all(s.sourceCursors).filter((row) => row.action === "storefront_discover").length, 1);
   } },
   database: { title: "real PostgreSQL runs isolate databases, apply new migrations and remove resources", needsDocker: true, configure: [configureDatabase], run: async () => {
     const original = process.env.DATABASE_URL; f.addIssue(1); f.addIssue(2); f.enqueue(1, "implement"); f.enqueue(2, "implement");

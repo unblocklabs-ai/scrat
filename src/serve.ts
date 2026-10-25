@@ -21,6 +21,7 @@ async function pollSources() {
   await attempt(async () => { await syncGitHub(); signalWork(); });
   await attempt(async () => { if (await pollCommits()) signalWork(); });
   await attempt(async () => { if (await pollSchedules()) signalWork(); });
+  if (config.storefront.enabled) await attempt(async () => { if (await (await import("./storefront-site.ts")).pollSiteMap()) signalWork(); });
 }
 async function poll() {
   while (!shutdown.signal.aborted) {

@@ -36,12 +36,13 @@ export function saveReviewer(runId: string, index: number, patch: Partial<Review
   });
 }
 
-export async function executePi({ run, cwd, context, tools, scoped, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {}, requireGrade = false, followUp, stop }: {
+export async function executePi({ run, cwd, context, tools, scoped, storefront = false, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {}, requireGrade = false, followUp, stop }: {
   run: Run;
   cwd: string;
   context: string;
   tools: readonly ToolName[];
   scoped: Pick<Manifest, "mode" | "http" | "browser">;
+  storefront?: boolean;
   log: Logger;
   sessionFile?: string;
   environment?: NodeJS.ProcessEnv;
@@ -61,6 +62,8 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
     throw new Error(modelRuntime.getError() ?? `Configure a Pi model for ${run.provider}/${run.model}`);
   }
   const thinkingLevel = run.thinkingLevel as ThinkingLevel;
+  const { names, customTools, paths, gitPaths, basePaths, close } = await createAgentTools({ cwd, contextDir, tools, scoped, storefront, baseSha, revisions, environment, log, runId: run.id });
+  const browsing = names.includes("browser");
   const settingsManager = SettingsManager.inMemory({ retry: config.harness.agentRetry });
   const resourceLoader = new DefaultResourceLoader({
     cwd, agentDir: getAgentDir(), settingsManager, noExtensions: true, noSkills: true,
@@ -74,7 +77,7 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
         `Do not run full lint, type-check, verify, build or e2e suites as routine checks; ${botName} validates after you finish and sends failures back into this session. When the task itself needs a full run (a benchmark or measurement, or reproducing a failure only the full suite shows), run it in the foreground; ${botName} queues it for a heavy-check slot, so it may wait. Never background heavy commands (\`&\`, \`nohup\`). Targeted checks are always fine. End your turn when the change is ready.`,
         "Do not assume a database, browser or installed dependencies are present. Do not obtain production secrets or use shared databases to fill environment gaps.",
         `When \`database\` is supplied, ${botName} owns a fresh PostgreSQL container for this run. Its \`environment\` values are already injected into bash commands; use this run's values, not URLs from earlier session history. ${botName} runs configured preparation and migrations before inference and again after your changes, followed by configured validation. Retained failed work may need repair first: when \`database.schemaPrepared\` is false, finish any merge or repair the failed proposal, then run the supplied prepare/migration commands before database-dependent checks. Add new migrations for schema changes rather than rewriting applied history. Do not remove or replace the run's container or connect to a shared database.`],
-      ...readOnly ? ["This session is read-only. Use the available read/search/git tools; do not modify files, implement a fix, or claim to have run shell commands, tests, browser checks or live integrations."] : [],
+      ...readOnly ? [`This session is read-only. Use the available read/search/git${browsing ? " and browser" : ""} tools; do not modify files, implement a fix, or claim to have run shell commands, tests${browsing ? " or browser checks you did not perform" : ", browser checks or live integrations"}.`] : [],
       "Tool rules:",
       ...tools.includes("git") ? [
         "- git `show` needs both `path` and `revision`; `log` takes `revision`; `diff` and `diff_stat` need both `from` and `to`. `head`, `base` and `main` are accepted; there are no defaults for `show` or `diff`.",
@@ -93,7 +96,6 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
   const sessionManager = sessionFile
     ? SessionManager.open(sessionFile, resolve("data/pi-sessions"), cwd)
     : SessionManager.create(cwd, resolve("data/pi-sessions"));
-  const { names, customTools, paths, gitPaths, basePaths, close } = await createAgentTools({ cwd, contextDir, tools, scoped, baseSha, revisions, environment, log, runId: run.id });
   const { session } = await createAgentSession({
     cwd, modelRuntime, model, thinkingLevel, settingsManager, sessionManager, resourceLoader,
     tools: names, customTools,

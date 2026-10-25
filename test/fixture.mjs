@@ -142,7 +142,7 @@ export async function fixture(scenario, spec) {
     const step = steps.get(key) ?? 0; steps.set(key, step + 1);
     requests.push({ request, text, context, consolidating });
     onModel?.(context, step);
-    const review = context.action.startsWith("review");
+    const review = context.action.startsWith("review") || context.action === "storefront_discover";
     let tool;
     if (review && step === 0) tool = mode === "grep" ? { name: "grep", args: { pattern: "value" } } : { name: "read", args: { path: mode === "nbsp" ? "src/a\u00a0b.ts" : scenario === "panel" ? "node_modules/pinned-runtime/package.json" : mode.startsWith("helper") ? "src/helper.ts" : mode === "at" ? "@src/app.ts" : "src/app.ts" } };
     if (review && scenario === "unicode_nfd" && step === 0) tool = { name: "read", args: { path: existsSync("seed/src/cafe\u0301.ts") ? "src/cafe\u0301.ts" : "src/caf\u00e9.ts" } };
@@ -219,7 +219,7 @@ export async function fixture(scenario, spec) {
       || (mode === "consolidation-grade-once" && consolidating));
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : mode === "incomplete-once" && !continued ? "incomplete" : "complete";
     const verdict = scenario.startsWith("commit_review") ? (consolidating && verdicts.consolidating) || verdicts[request.model] || verdicts.default : undefined;
-    const output = (review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : feedback ? "Fixed the validation failure." : "Implemented the change.")
+    const output = (context.action === "storefront_discover" ? "- `/products/<handle>`: product page with add to cart." : review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : feedback ? "Fixed the validation failure." : "Implemented the change.")
       + (scenario === "commit_review_e2e" ? " <!channel>" : "")
       + (mode === "leak-report" ? "\n" + process.env.GITHUB_APP_PRIVATE_KEY : "")
       + (mode.startsWith("quoted-") ? "\n```\nSCRAT_GRADE: F\nSCRAT_READY\n```" : "")

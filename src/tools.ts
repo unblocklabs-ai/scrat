@@ -18,11 +18,12 @@ import { sandboxCommand } from "./sandbox.ts";
 
 type ScopedToolName = "http" | "browser" | "github_search";
 
-export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, baseSha, revisions = {}, environment = {}, log, runId }: {
+export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, storefront = false, baseSha, revisions = {}, environment = {}, log, runId }: {
   cwd: string;
   contextDir?: string;
   tools: readonly ToolName[];
   scoped?: Pick<Manifest, "http" | "browser">;
+  storefront?: boolean;
   baseSha?: string;
   revisions?: Record<string, string>;
   environment?: NodeJS.ProcessEnv;
@@ -147,14 +148,15 @@ export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, ba
     read_base: readBase, bash: quiet(bash), edit: quiet(edit), write: quiet(write),
   } satisfies Record<Exclude<ToolName, ScopedToolName>, object>;
   const binding = (name?: string) => name === undefined ? undefined : config.bindings[name];
-  const browser = scoped.browser
-    ? createBrowserTool({ settings: scoped.browser, binding: binding(scoped.browser.binding), contextDir, runId, log }) : undefined;
+  const { browserSteps, runSeconds } = config.storefront.limits;
+  const browser = scoped.browser || (storefront && tools.includes("browser"))
+    ? createBrowserTool({ settings: scoped.browser, binding: binding(scoped.browser?.binding), contextDir, runId, log, ...storefront && { limits: { steps: browserSteps, milliseconds: runSeconds * 1000 } } }) : undefined;
   const table = {
     ...core,
     ...scoped.http && { http: createHttpTool({ settings: scoped.http, binding: binding(scoped.http.binding)!, runId }) },
     ...browser && { browser: browser.tool },
     ...tools.includes("github_search") && { github_search: createGithubSearchTool(new GitHubRepository(config.github.repository)) },
   };
-  const names = tools.filter((name) => name !== "read_base" || baseSha);
+  const names = tools.filter((name) => (name !== "read_base" || baseSha) && (name !== "browser" || browser));
   return { names, customTools: names.flatMap((name) => { const tool = table[name as keyof typeof table]; return tool ? [tool] : []; }), paths, gitPaths, basePaths, close: async () => { await browser?.close(); } };
 }

@@ -90,7 +90,7 @@ export async function buildAgentInput(options: {
   const triage = listed.includes("triage") ? completedRunsOfAction(task.subjectId, actionsPublishing("labels"), 1)[0]?.result : undefined;
   const issue = listed.includes("issue") ? issueOfPullRequest(config.github.repository, evaluated.item.number) : undefined;
   const found = listed.includes("validation") ? verificationOfCommit(headSha) : undefined, verification = found?.commands.length ? found : undefined;
-  const storefront = listed.includes("storefront") && config.storefront.enabled ? (await import("./storefront.ts")).previewContext(task.subjectId, headSha) : undefined;
+  const storefront = listed.includes("storefront") && config.storefront.enabled ? await (await import("./storefront-site.ts")).storefrontContext(task.subjectId, headSha, trigger.source === "storefront") : undefined;
   const reviewedSha = evaluated.headSha;
   const checks = listed.includes("validation") && reviewedSha
     ? await new GitHubRepository(config.github.repository).checkRunConclusions(reviewedSha).catch((error) => {
@@ -111,7 +111,8 @@ export async function buildAgentInput(options: {
     triage?.ready && writeContext("triage", "triage.md", triage.text),
     issue && writeContext("issue", "issue.md", `# ${issue.title} (#${issue.number})\n\n${issue.body ?? ""}\n`),
     history && writeContext("history", "history.md", history),
-    storefront && writeContext("storefront", "storefront.json", storefront),
+    storefront && writeContext("storefront", "storefront.json", JSON.stringify(storefront.context, null, 2)),
+    storefront?.siteMap && writeContext("siteMap", "site.md", storefront.siteMap),
     failure && writeContext("previousFailure", "previous-failure.json", JSON.stringify(failure, null, 2)),
     options.validationFailure && writeContext("validationFailure", "validation-failure.json", JSON.stringify(options.validationFailure, null, 2)),
     diffPaths.length > config.context.inlinePaths && writeContext("diffPaths", "diff-paths.txt", diffPaths.join("\n") + "\n"),
@@ -132,5 +133,5 @@ export async function buildAgentInput(options: {
     files,
     database: options.database,
   }, null, 2);
-  return { prompt, contextDir, revisions };
+  return { prompt, contextDir, revisions, storefront: storefront?.browse ?? false };
 }

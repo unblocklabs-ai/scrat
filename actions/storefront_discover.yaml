@@ -1,0 +1,10 @@
+name: storefront_discover
+trigger: { source: storefront, kind: site_map }
+mode: review
+tools: [read, grep, find, ls, browser]
+files: [storefront]
+publish: [site_map]
+skill: skills/storefront_discover/SKILL.md
+model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }
+priority: 20
+retry: { initialDelaySeconds: 60, maxDelaySeconds: 3600 }

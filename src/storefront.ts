@@ -280,5 +280,5 @@ export function previewContext(subjectId: string, headSha: string) {
   const preview = livePreview(subjectId);
   if (preview?.headSha !== headSha) return undefined;
   const available = !preview.problems.length;
-  return JSON.stringify({ url: available ? previewUrl(preview) : null, themeId: preview.themeId, headSha, available, problems: preview.problems }, null, 2);
+  return { url: available ? previewUrl(preview) : null, themeId: preview.themeId, headSha, available, problems: preview.problems };
 }

@@ -54,8 +54,8 @@ export async function runAgent({ run, task, manifest, operation, stop }: Ctx, { 
   sessionFile?: string; baseSha?: string; panel?: { baseSha: string; requireGrade: boolean };
 }) {
   const { workspace } = input;
-  const { prompt, contextDir, revisions } = await buildAgentInput({ run, task, ...input });
-  const shared = { tools: manifest.tools, scoped: manifest, contextDir, revisions, stop };
+  const { prompt, contextDir, revisions, storefront } = await buildAgentInput({ run, task, ...input });
+  const shared = { tools: manifest.tools, scoped: manifest, contextDir, revisions, storefront, stop };
   const agentResult = panel
     ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { ...shared, ...panel })
     : await executePi({ run, cwd: workspace.path, context: prompt, log: operation.log, sessionFile, environment, baseSha, ...shared });

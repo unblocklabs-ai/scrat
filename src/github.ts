@@ -210,6 +210,12 @@ export class GitHubRepository {
     return found ? pullRequestView(found) : undefined;
   }
 
+  async checkRunConclusions(sha: string) {
+    const { github, owner, repo } = await this.read();
+    const runs = await github.paginate(github.rest.checks.listForRef, { owner, repo, ref: sha, per_page: 100 });
+    return runs.flatMap((run) => run.conclusion ? [{ name: run.name, conclusion: run.conclusion }] : []);
+  }
+
   async searchIssues(query: string) {
     if (/(repo|org|user|owner):/i.test(query)) throw new Error(`The query must not contain repo:, org: or user: qualifiers; the search is limited to ${this.repository}`);
     return withOperation("github.search", { repository: this.repository }, async (operation) => {

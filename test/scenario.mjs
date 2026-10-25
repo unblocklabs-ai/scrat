@@ -1991,7 +1991,11 @@ export const scenarios = {
     await implement(2); db.$client.prepare("update runs set verification = null").run(); await review(202, "normal");
     assert.equal(f.requests.findLast((r) => r.context.action === "review_pr").context.files.validation, undefined, "A head with no stored verification gets no validation file"); await route(); assert.equal(repairs(202).length, 0, "Grade B does not trigger");
     await implement(3); f.prs.find((pr) => pr.number === 203).user.login = "human";
-    await review(203, "grade-C"); await route(); assert.equal(repairs(203).length, 0, "Human-authored PRs never trigger");
+    f.checkRuns.set(f.prs.find((pr) => pr.number === 203).head.sha, [{ name: "ci / build", conclusion: "success" }, { name: "ci / lint", conclusion: "failure" }, { name: "ci / deploy", conclusion: null }]);
+    await review(203, "grade-C");
+    const combined = readFileSync(f.requests.findLast((r) => r.context.action === "review_pr").context.files.validation, "utf8");
+    assert.ok(combined.includes("- ci / build: success\n- ci / lint: failure\n") && !combined.includes("ci / deploy") && combined.includes("# Validation run by"), "Scrat and GitHub checks share the validation file");
+    await route(); assert.equal(repairs(203).length, 0, "Human-authored PRs never trigger");
     await implement(4); await review(204, "grade-C");
     db.$client.prepare("update items set self_repair_count = 2 where id = ?").run(prItem(204).id);
     const labels204 = () => f.prs.find((pr) => pr.number === 204).labels.map((label) => label.name).filter((name) => name === "Scrat repair exhausted").length;

@@ -54,7 +54,7 @@ export async function fixture(scenario, spec) {
   if (scoped) process.env.SCOUT_TOKEN = "scout-" + "k9Xq2LmPz7".repeat(3);
   if (scenario.startsWith("commit_review") || scenario === "recovery" || scenario === "isolation" || scenario.startsWith("slack_status") || scenario === "publish_effects") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
-  const modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
+  const modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), checkRuns = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set() };
   const tokens = new Map(patMode ? [[pat, { issues: "write", pull_requests: "write", contents: "write" }]] : []);
   const transient = { failures: 0, seen: new Map() };
@@ -310,6 +310,8 @@ export async function fixture(scenario, spec) {
       } else for (const name of body.labels) if (!item.labels.some((label) => label.name === name)) item.labels.push({ name });
       return reply(item.labels);
     }
+    match = path.match(/\/commits\/([0-9a-f]+)\/check-runs$/);
+    if (match) { const runs = checkRuns.get(match[1]) ?? []; return Object.defineProperty(reply({ total_count: runs.length, check_runs: runs }), "url", { value: url.href }); }
     if (path.endsWith("/pulls") && method === "GET") return reply(prs.filter((pr) => (!url.searchParams.get("head") || pr.head.ref === url.searchParams.get("head").split(":").slice(1).join(":")) && (url.searchParams.get("state") !== "open" || pr.state === "open")));
     if (path.endsWith("/pulls") && method === "POST") {
       if (!can("pull_requests") || !["read", "write"].includes(tokens.get(credential)?.contents)) {
@@ -332,7 +334,7 @@ export async function fixture(scenario, spec) {
   const addPr = (number, branch, login, extra = {}) => { prs.push(githubItem("pr", number, { title: "PR " + number, body: "", user: { login }, head: { ref: branch, sha: git(resolve("remote.git"), "rev-parse", branch), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } }, ...extra })); };
   const botComments = (number) => (comments.get(number) ?? []).filter((c) => c.user.login !== "human");
   const written = (type, predicate = () => true) => writes.filter((write) => write.type === type && predicate(write));
-  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, pat, user, githubApp, modes, requests, calls, slack, rate, issues, prs, comments, reviews, writes, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
+  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, pat, user, githubApp, modes, requests, calls, slack, rate, issues, prs, comments, reviews, writes, checkRuns, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
     set onModel(value) { onModel = value; },
     set script(value) { script = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },

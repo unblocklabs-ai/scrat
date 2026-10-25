@@ -4,7 +4,9 @@ import { actionsPublishing, manifestOf } from "./actions.ts";
 import { config } from "./config.ts";
 import type { ErrorDetails } from "./errors.ts";
 import { changedPaths, git } from "./git.ts";
+import { GitHubRepository } from "./github.ts";
 import { botName } from "./identity.ts";
+import { logger } from "./logging.ts";
 import { commentKey, parseCommentKey } from "./markers.ts";
 import type { ItemObservation } from "./observation.ts";
 import { priorReviewTexts } from "./pr-assessment.ts";
@@ -88,8 +90,18 @@ export async function buildAgentInput(options: {
   const triage = listed.includes("triage") ? completedRunsOfAction(task.subjectId, actionsPublishing("labels"), 1)[0]?.result : undefined;
   const issue = listed.includes("issue") ? issueOfPullRequest(config.github.repository, evaluated.item.number) : undefined;
   const found = listed.includes("validation") ? verificationOfCommit(headSha) : undefined, verification = found?.commands.length ? found : undefined;
+  const checks = listed.includes("validation") && evaluated.headSha
+    ? await new GitHubRepository(config.github.repository).checkRunConclusions(evaluated.headSha).catch((error) => {
+      logger.warn({ err: error, sha: evaluated.headSha }, "check runs unavailable; reviewing without them");
+      return [];
+    })
+    : [];
+  const validation = [
+    verification && `# Validation run by ${botName} on ${headSha}\n\n${verification.commands.map((check) => `- ${check.name}: ${check.status} (${(check.durationMs / 1000).toFixed(1)}s)`).join("\n")}\n`,
+    checks.length && `## GitHub checks on ${evaluated.headSha}\n\n${checks.map((check) => `- ${check.name}: ${check.conclusion}`).join("\n")}\n`,
+  ].filter(Boolean).join("\n");
   await Promise.all([
-    verification && writeContext("validation", "validation.md", `# Validation run by ${botName} on ${headSha}\n\n${verification.commands.map((check) => `- ${check.name}: ${check.status} (${(check.durationMs / 1000).toFixed(1)}s)`).join("\n")}\n`),
+    validation && writeContext("validation", "validation.md", validation),
     listed.includes("discussion") && writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),
     listed.includes("review") && report && writeContext("review", "review.md", report),
     listed.includes("previous_assessment") && previousAssessment && writeContext("previous_assessment", "previous-assessment.md", previousAssessment),

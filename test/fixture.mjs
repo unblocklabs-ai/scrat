@@ -55,11 +55,11 @@ export async function fixture(scenario, spec) {
   if (scenario.startsWith("commit_review") || scenario === "recovery" || scenario === "isolation" || scenario.startsWith("slack_status") || scenario === "publish_effects") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
   const verdicts = {}, modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), checkRuns = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [], deployments = [];
-  const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set(), permissions: new Set() };
+  const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set(), permissions: new Set(), commitComment: new Set() };
   const tokens = new Map(patMode ? [[pat, { issues: "write", pull_requests: "write", contents: "write" }]] : []);
   const transient = { failures: 0, seen: new Map() };
   let onModel, script, nextCommentId = 1000, nextIssueNumber = 500;
-  const external = [], searches = [];
+  const external = [], searches = [], commitComments = new Map();
   const md5 = (text) => createHash("md5").update(text).digest("hex"), mainTheme = "gid://shopify/OnlineStoreTheme/1";
   const store = (theme, filename, type, value, checksum) => { theme.files.set(filename, checksum ?? md5(Buffer.from(value, type === "TEXT" ? "utf8" : "base64"))); theme.bodies.set(filename, { type, value }); };
   const loggie = { key: "loggie-" + "Z8wQ4nR2tY".repeat(3), slug: "shop-fixture", requests: [], restricted: new Set(), lostDuplicate: false, wrongMd5: new Set(), upsertErrors: new Set(), stuckDeletes: new Set(), processingPolls: 1, nextId: 9000, mainTheme, md5,
@@ -220,6 +220,8 @@ export async function fixture(scenario, spec) {
       "storefront-missing-once": [corrections ? "verified" : "", "A"], "storefront-flip": [["regression", "verified", "regression"][corrections], regressionGrade(corrections > 1)],
       "storefront-split": [consolidating || !request.model.includes("deepseek") ? "regression" : "verified", regressionGrade(consolidating)] };
     const [storefrontLine = "verified", storefrontGrade] = storefrontModes[mode] ?? [];
+    const scriptedReply = typeof tool === "string" ? tool : undefined;
+    if (scriptedReply !== undefined) tool = undefined;
     const fumble = !corrected && (mode === "format-once" || (mode === "reviewer-grade-once" && review && !consolidating && request.model.includes("deepseek"))
       || (mode === "consolidation-grade-once" && consolidating));
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : mode === "incomplete-once" && !continued ? "incomplete" : "complete";
@@ -237,7 +239,7 @@ export async function fixture(scenario, spec) {
       + (["review_pr", "my_pr_review"].includes(context.action) && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : storefrontGrade ?? (["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : mode === "grade-C" ? "C" : "B")}` : "")
       + (verdict ? `\nSCRAT_VERDICT: ${verdict}` : "")
       + (mode === "no-status" || (fumble && mode === "format-once" && !review) ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
-    const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] } : { role: "assistant", content: output };
+    const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] } : { role: "assistant", content: scriptedReply ?? output };
     if (mode === "stall") {
       await new Promise((done) => { const timer = setTimeout(done, 60_000); res.on("close", () => { clearTimeout(timer); done(); }); });
       if (res.destroyed) return;
@@ -406,6 +408,20 @@ export async function fixture(scenario, spec) {
       const pr = githubItem("pr", 200 + n, { node_id: "PR_" + n, title: body.title, body: body.body, updated_at: "2026-10-19T01:00:00Z", user: { login: config.github.botLogin }, head: { ref: body.head, sha: git(resolve("remote.git"), "rev-parse", body.head), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } } });
       prs.push(pr); git(resolve("remote.git"), "update-ref", `refs/pull/${pr.number}/head`, pr.head.sha);
       return lostResponse(faults.pr, n, "Lost PR response", pr);
+    }
+    match = path.match(/\/commits\/([0-9a-f]+)\/comments$/);
+    if (match) {
+      if (method === "GET") return reply(commitComments.get(match[1]) ?? []);
+      if (!can("contents") || faults.commitComment.delete(match[1])) return reply({ message: "Resource not accessible by integration" }, 403);
+      const comment = { id: ++nextCommentId, body: body.body, user: { login: config.github.botLogin }, html_url: `https://github.com/fixture/project/commit/${match[1]}#commitcomment-${nextCommentId}` };
+      commitComments.set(match[1], [...(commitComments.get(match[1]) ?? []), comment]); writes.push({ type: "commit_comment", sha: match[1], body: body.body });
+      return reply(comment, 201);
+    }
+    match = path.match(/\/repos\/fixture\/project\/comments\/(\d+)$/);
+    if (match && method === "PATCH") {
+      const comment = [...commitComments.values()].flat().find((entry) => entry.id === Number(match[1]));
+      comment.body = body.body; writes.push({ type: "commit_comment_update", id: comment.id, body: body.body });
+      return reply(comment);
     }
     throw new Error(`Unexpected GitHub call: ${method} ${path}`);
   };

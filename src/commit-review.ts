@@ -54,11 +54,11 @@ export async function describeCommit(repositoryPath: string, subject: Subject, r
   return { evaluated, diffPaths, diffBaseSha: previousSha };
 }
 
-export async function postCommitReply(subject: Subject, action: string, run: Run) {
+export async function postCommitReply(subject: Subject, action: string, run: Run, text?: string) {
   const input = commitInput(run.input);
   if (!run.result) throw new Error("Run has no saved result to publish");
   const thread = await threadRoot(subject, action, input);
-  return postMessage({ channel: thread.channel, text: escapeSlack(run.result.text), threadTs: thread.ts });
+  return postMessage({ channel: thread.channel, text: text ?? escapeSlack(run.result.text), threadTs: thread.ts });
 }
 
 const verdictReactions = { clean: "white_check_mark", concerns: "large_orange_square", breaking: "large_red_square" } as const;

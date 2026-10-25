@@ -19,6 +19,9 @@ import { botAuthor, type Ctx, type Environment, itemRevisions, type Observed, pr
 
 type Review = { workspace: Workspace; mainSha: string; headSha: string; diffBaseSha: string };
 
+const reviewsStorefront = ({ subject, manifest, run }: Ctx) => config.storefront.enabled && subject.kind === "commit"
+  && manifest.publish.includes("slack_reply") && commitInput(run.input).branch === config.github.baseBranch;
+
 async function settleReviewPlan(ctx: Ctx, { item, observation, mainSha }: Observed) {
   const { run, task } = ctx;
   if (run.reviewers.length !== 1) return;
@@ -99,5 +102,6 @@ export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   });
   updateRun(run.id, { result, stage: "validating" });
   assertComplete(result);
+  if (reviewsStorefront(ctx)) updateRun(run.id, { result: await (await import("./storefront-main.ts")).reviewStorefront(ctx, { ...review, diffPaths, item: evaluated.item }, result) });
   updateRun(run.id, { stage: "publishing" });
 }

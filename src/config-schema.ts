@@ -40,6 +40,7 @@ const schema = Type.Object({
       themeNamePrefix: Type.String(), themePaths: Type.String(), processingWaitSeconds: positive, processingPollSeconds: positive,
       filesPageSize: Type.Integer({ minimum: 1, maximum: 250 }), uploadBatch: Type.Integer({ minimum: 1, maximum: 50 }), uploadBatchBytes: positive, requestTimeoutSeconds: positive,
     }, strict),
+    lighthouse: Type.Object({ runs: positive, pages: Type.Array(Type.String({ pattern: "^/(?!/)" }), { minItems: 1, uniqueItems: true }), timeoutSeconds: positive }, strict),
   }, strict),
   slack: Type.Object({ enabled: Type.Boolean(), channel: Type.String(), maxRetryAfterSeconds: positive, minimumGapMs: Type.Integer({ minimum: 0 }), maxErrorLength: positive }, strict),
   workspace: Type.Object({

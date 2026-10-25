@@ -362,7 +362,7 @@ PLAYWRIGHT_BROWSERS_PATH=$HOME/.local/share/scrat-v2/browsers npx playwright-cor
 sudo env PLAYWRIGHT_BROWSERS_PATH=$HOME/.local/share/scrat-v2/browsers npx playwright-core install-deps chromium   # system libraries, once, as root
 ```
 
-Run the service with the same `PLAYWRIGHT_BROWSERS_PATH`. `npm ci` (run by `scrat update` in each new release) removes packages installed with `--no-save`, so repeat the first command in `current` after each update. Chromium is launched with its sandbox enabled (`chromiumSandbox: true`). On Ubuntu 24.04,
+Run the service with the same `PLAYWRIGHT_BROWSERS_PATH`. `npm ci` (run by `scrat update` in each new release) removes packages installed with `--no-save`, so repeat the first command in `current` after each update. Chromium is launched with its sandbox enabled (`chromiumSandbox: true`) and as the full Chromium build (`channel: "chromium"`, new headless mode) rather than Playwright's separate headless shell, so one AppArmor attachment covers it; `npx playwright-core install chromium` installs both the full build and the headless shell, and the profile covers both. On Ubuntu 24.04,
 where `kernel.apparmor_restrict_unprivileged_userns = 1` blocks the sandbox, `scrat install`
 installs `deploy/scrat-chromium.apparmor` as `/etc/apparmor.d/scrat-chromium` and loads it with
 `apparmor_parser -r`; it attaches to Chromium under

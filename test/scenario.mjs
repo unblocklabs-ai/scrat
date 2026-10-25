@@ -137,7 +137,7 @@ const configureMainStorefront = (config) => {
 };
 const storefrontScores = (performance, accessibility, practices, seo) => ({ performance, accessibility, "best-practices": practices, seo });
 const mainStorefront = async () => {
-  const fakes = globalThis.storefrontFakes = { launches: [], visits: [], audits: [], scores: { mobile: [], desktop: [] }, look: "v1" };
+  const fakes = globalThis.storefrontFakes = { launches: [], launchOptions: [], visits: [], audits: [], scores: { mobile: [], desktop: [] }, look: "v1" };
   const pkg = (name, source) => {
     const directory = resolve("app/src/node_modules", name); mkdirSync(directory, { recursive: true });
     writeFileSync(resolve(directory, "package.json"), JSON.stringify({ name, type: "module", main: "index.js" })); writeFileSync(resolve(directory, "index.js"), source);
@@ -146,8 +146,8 @@ const mainStorefront = async () => {
 const fakes = globalThis.storefrontFakes;
 export const chromium = {
   executablePath: () => process.execPath,
-  async launch({ args }) {
-    fakes.launches.push(args);
+  async launch({ args, ...options }) {
+    fakes.launches.push(args); fakes.launchOptions.push(options);
     let current = "about:blank", width = 0;
     const page = {
       goto: async (url) => { current = url; fakes.visits.push(url); return { status: () => 200 }; },
@@ -3192,6 +3192,7 @@ export const scenarios = {
       [...Array(2).fill([site + "/", "mobile", "json", "performance,accessibility,best-practices,seo", false]), ...Array(2).fill([site + "/", "desktop", "json", "performance,accessibility,best-practices,seo", false])]);
     const debugging = fakes.launches.filter((args) => args.length), browsing = fakes.launches.filter((args) => !args.length);
     assert.deepEqual(debugging.map(([flag]) => Number(/^--remote-debugging-port=(\d+)$/.exec(flag)[1])), fakes.audits.map(({ port }) => port), "each Lighthouse run drives its own Chromium through its debugging port");
+    assert.deepEqual([...new Set(fakes.launchOptions.map((options) => JSON.stringify(options)))], [JSON.stringify({ headless: true, channel: "chromium", chromiumSandbox: true })], "every launch asks Playwright for the full Chromium build with its sandbox");
     assert.equal(browsing.length, 1, "the storefront browser pins no hosts, and its reset keeps the same Chromium");
     assert.deepEqual(fakes.visits, [site + "/", site + "/products/tee?variant=1", site + "/cart"]);
 

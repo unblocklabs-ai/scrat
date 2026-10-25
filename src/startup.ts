@@ -76,6 +76,14 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
     if (!process.env.SLACK_BOT_TOKEN) problems.push("slack.enabled is true but SLACK_BOT_TOKEN is not set");
     else await checkSlackAuth("slack:");
   }
+  const storefront = settings.storefront;
+  if (storefront?.enabled) {
+    if (!process.env.LOGGIE_API_KEY) problems.push("storefront.enabled is true but LOGGIE_API_KEY is not set");
+    for (const [key, value] of Object.entries({ "storefront.store": storefront.store, "storefront.loggie.slug": storefront.loggie.slug })) {
+      if (!value.trim()) problems.push(`${key} must not be empty when storefront.enabled is true`);
+    }
+    if (!URL.canParse(storefront.loggie.url)) problems.push("storefront.loggie.url must be an absolute URL");
+  }
   for (const [name, { apiKey }] of Object.entries(settings.providers ?? {})) {
     if (apiKey && !/\$\{\w+\}/.test(apiKey)) logger.warn({ provider: name }, "Provider apiKey is not a ${VAR} placeholder; it will not be redacted from output");
   }

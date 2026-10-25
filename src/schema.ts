@@ -131,6 +131,23 @@ export const slackThreads = sqliteTable("slack_threads", {
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
 });
 
+export const themePreviews = sqliteTable("theme_previews", {
+  id: text("id").primaryKey().$defaultFn(randomUUID),
+  subjectId: text("subject_id").notNull().references(() => subjects.id),
+  pullRequestNumber: integer("pull_request_number").notNull(),
+  themeGid: text("theme_gid").notNull().unique(),
+  themeId: integer("theme_id").notNull(),
+  name: text("name").notNull(),
+  baseline: text("baseline", { mode: "json" }).$type<Record<string, string | null>>(),
+  createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
+  updatedAt: text("updated_at").notNull().$defaultFn(() => new Date().toISOString()),
+  deletedAt: text("deleted_at"),
+}, (table) => [
+  uniqueIndex("theme_previews_live_subject_unique")
+    .on(table.subjectId)
+    .where(sql`${table.deletedAt} is null`),
+]);
+
 export const events = sqliteTable("events", {
   id: integer("id").primaryKey(),
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
@@ -147,3 +164,4 @@ export type Task = typeof tasks.$inferSelect;
 export type Subject = typeof subjects.$inferSelect;
 export type Item = typeof items.$inferSelect;
 export type Workspace = typeof workspaces.$inferSelect;
+export type ThemePreview = typeof themePreviews.$inferSelect;

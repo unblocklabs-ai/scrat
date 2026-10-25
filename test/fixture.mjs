@@ -60,8 +60,37 @@ export async function fixture(scenario, spec) {
   const transient = { failures: 0, seen: new Map() };
   let onModel, script, nextCommentId = 1000, nextIssueNumber = 500;
   const external = [], searches = [];
+  const md5 = (text) => createHash("md5").update(text).digest("hex"), mainTheme = "gid://shopify/OnlineStoreTheme/1";
+  const loggie = { key: "loggie-" + "Z8wQ4nR2tY".repeat(3), slug: "shop-fixture", requests: [], restricted: new Set(), processingPolls: 1, nextId: 9000, mainTheme,
+    themes: new Map([[mainTheme, { id: mainTheme, name: "live", role: "MAIN", polls: 0, files: new Map(["layout/theme.liquid", "assets/app.css", "config/settings_data.json"].map((name) => [name, md5(name)])) }]]) };
+  if (scenario.startsWith("storefront")) process.env.LOGGIE_API_KEY = loggie.key;
+  const shopify = (req, res, body) => {
+    const send = (data, status = 200) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
+    const { query, variables = {} } = JSON.parse(body), field = query.match(/\{\s*(\w+)/)?.[1], key = req.headers["x-api-key"];
+    loggie.requests.push({ field, variables, key, path: req.url });
+    if (key !== loggie.key) return send({ error: { code: "UNAUTHORIZED", message: "Invalid API key" } }, 401);
+    if (req.url !== `/api/proxy/${loggie.slug}/`) return send({ error: { code: "NOT_FOUND", message: "Unknown integration" } }, 404);
+    if (!["themes", "theme", "themeDuplicate", "themeFilesUpsert", "themeFilesDelete", "themeDelete"].includes(field) || loggie.restricted.has(field)) {
+      return send({ error: { code: "ENDPOINT_RESTRICTED", message: `${field} is not allowed by this profile` } }, 403);
+    }
+    const theme = loggie.themes.get(variables.id);
+    if (field === "themes") return send({ data: { themes: { nodes: [...loggie.themes.values()].filter((entry) => entry.role === "MAIN").map(({ id }) => ({ id })) } } });
+    if (field === "themeDuplicate") {
+      const id = "gid://shopify/OnlineStoreTheme/" + ++loggie.nextId;
+      loggie.themes.set(id, { id, name: variables.name, role: "UNPUBLISHED", polls: loggie.processingPolls, files: new Map(theme.files) });
+      return send({ data: { themeDuplicate: { newTheme: { id, name: variables.name }, userErrors: [] } } });
+    }
+    if (field === "themeDelete") return send({ data: { themeDelete: loggie.themes.delete(variables.id) ? { deletedThemeId: variables.id, userErrors: [] } : { deletedThemeId: null, userErrors: [{ field: ["id"], message: "Theme does not exist" }] } } });
+    if (field !== "theme") return send({ errors: [{ message: `The fixture does not implement ${field}` }] });
+    if (!theme) return send({ data: { theme: null } });
+    const processing = theme.polls > 0;
+    if (processing && query.includes("processing")) theme.polls--;
+    const files = [...theme.files].map(([filename, checksumMd5]) => ({ filename, checksumMd5 })), start = Number(variables.after ?? 0), end = start + (variables.first ?? files.length);
+    return send({ data: { theme: { id: theme.id, name: theme.name, processing, files: { nodes: files.slice(start, end), pageInfo: { hasNextPage: end < files.length, endCursor: String(end) } } } } });
+  };
   const server = createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
+    if (req.url.startsWith("/api/proxy/")) return shopify(req, res, body);
     const request = JSON.parse(body);
     const texts = request.messages.filter((message) => message.role === "user")
       .map((message) => typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("\n"));
@@ -192,6 +221,7 @@ export async function fixture(scenario, spec) {
     { id: "gpt-6.1-sol", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
     { id: "deepseek/deepseek-v4.1-flash", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
   ] } };
+  config.storefront.loggie = { ...config.storefront.loggie, url: `http://127.0.0.1:${server.address().port}`, slug: loggie.slug };
   config.actions = Object.fromEntries(readdirSync("app/actions").map((file) => parseYaml(readFileSync("app/actions/" + file, "utf8")))
     .map(({ name, reviewers = [] }) => [name, { provider: "fixture", ...reviewers.length && { reviewers: reviewers.map((reviewer) => ({ ...reviewer, provider: "fixture" })) } }]));
   for (const configure of spec.configure ?? []) configure(config);
@@ -338,7 +368,7 @@ export async function fixture(scenario, spec) {
   const addPr = (number, branch, login, extra = {}) => { prs.push(githubItem("pr", number, { title: "PR " + number, body: "", user: { login }, head: { ref: branch, sha: git(resolve("remote.git"), "rev-parse", branch), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } }, ...extra })); };
   const botComments = (number) => (comments.get(number) ?? []).filter((c) => c.user.login !== "human");
   const written = (type, predicate = () => true) => writes.filter((write) => write.type === type && predicate(write));
-  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, pat, user, githubApp, modes, verdicts, requests, calls, slack, rate, issues, prs, comments, reviews, writes, checkRuns, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
+  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, loggie, pat, user, githubApp, modes, verdicts, requests, calls, slack, rate, issues, prs, comments, reviews, writes, checkRuns, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
     set onModel(value) { onModel = value; },
     set script(value) { script = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },

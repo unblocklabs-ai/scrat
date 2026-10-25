@@ -2703,6 +2703,9 @@ export const scenarios = {
 
     await startup((c) => { c.github.botLogin = " "; }, /github\.botLogin must not be empty/);
     await startup((c) => { c.github.botName = " !! "; }, /github\.botName must contain a letter or digit/);
+    await startup((c) => { c.storefront.enabled = true; c.storefront.loggie.slug = " "; c.storefront.loggie.url = "app.loggie.ai"; },
+      /storefront\.enabled is true but LOGGIE_API_KEY is not set\n- storefront\.store must not be empty when storefront\.enabled is true\n- storefront\.loggie\.slug must not be empty when storefront\.enabled is true\n- storefront\.loggie\.url must be an absolute URL/);
+    process.env.LOGGIE_API_KEY = "loggie-fixture-key"; await validateStaticConfig(variant((c) => { Object.assign(c.storefront, { enabled: true, store: "fixture.myshopify.com" }); })); delete process.env.LOGGIE_API_KEY;
     const key = process.env.GITHUB_APP_PRIVATE_KEY;
     delete process.env.GITHUB_APP_PRIVATE_KEY;
     await assert.rejects(validateStaticConfig(f.config), /github\.auth is "app" but GITHUB_APP_PRIVATE_KEY is not set/);
@@ -3505,6 +3508,56 @@ export const scenarios = {
     const history = readFileSync(later.files.history, "utf8");
     assert.match(history, /## 2026-10-21T12:00:00\.000Z/); assert.match(history, /link:docs-a/);
     assert.equal(all(s.items).length, 0); assert.equal(all(s.subjects).length, 2); assert.equal(all(s.runs).length, 2);
+  } },
+  storefront_preview: { title: "an enabled storefront gives each Scrat PR review one recorded MAIN duplicate through Loggie, resumes its processing wait, reuses it and deletes it when the PR closes; a refused Loggie call only logs, and a disabled storefront or a human PR makes no Loggie call", configure: [(config) => { Object.assign(config.storefront, { store: "fixture.myshopify.com" }); Object.assign(config.storefront.preview, { processingPollSeconds: 1, filesPageSize: 2 }); }], run: async () => {
+    const { config: live } = await f.app("config.ts"), { loggie } = await f.app("storefront-loggie.ts"), { childEnvironment, containsSecret } = await f.app("secrets.ts");
+    const fields = () => f.loggie.requests.map((request) => request.field), previews = () => all(s.themePreviews);
+    const pr = (number) => f.prs.find((entry) => entry.number === number), review = async (number) => { tasks.enqueueManualTasks("review_pr", [String(number)]); return success(); };
+    const logged = async (work) => { const lines = captureLogs(); try { await work(); } finally { restoreLogs(); } return lines.find((line) => line.event === "storefront.preview_failed"); };
+    await implement(1); await route(); await success();
+    branchOff("human-7", "src/app.ts", "export const value = 7;\n"); f.addPr(7, "human-7", "human"); await route();
+    pr(7).state = "closed"; await route();
+    assert.equal(f.loggie.requests.length, 0, "a disabled storefront makes no Loggie call");
+    live.storefront.enabled = true;
+    f.loggie.restricted.add("themeDuplicate");
+    const restricted = await logged(async () => assert.equal((await review(201)).publication.status, "published"));
+    assert.equal(restricted.err.code, "ENDPOINT_RESTRICTED"); assert.equal(restricted.err.status, 403); assert.equal(restricted.number, 201);
+    assert.deepEqual(fields(), ["themes", "themeDuplicate"]); assert.equal(previews().length, 0);
+    f.loggie.restricted.clear(); f.loggie.processingPolls = 5; live.storefront.preview.processingWaitSeconds = 1;
+    const waiting = await logged(() => review(201));
+    assert.match(waiting.err.message, /still processing after 1s/);
+    const [preview] = previews(), theme = f.loggie.themes.get(preview.themeGid);
+    assert.equal(previews().length, 1); assert.equal(preview.baseline, null);
+    assert.deepEqual({ subjectId: preview.subjectId, pullRequestNumber: preview.pullRequestNumber, name: preview.name, themeId: preview.themeId },
+      { subjectId: all(s.items).find((item) => item.payload.number === 201).id, pullRequestNumber: 201, name: "scrat/pr-201", themeId: Number(preview.themeGid.split("/").at(-1)) });
+    assert.equal(theme.name, "scrat/pr-201"); assert.equal(theme.role, "UNPUBLISHED");
+    theme.polls = 1; live.storefront.preview.processingWaitSeconds = 300;
+    const resumed = f.loggie.requests.length;
+    assert.equal(await logged(() => review(201)), undefined);
+    assert.deepEqual(fields().slice(resumed), ["theme", "theme", "theme", "theme"], "the next review resumes the wait on the recorded theme, then lists its files page by page");
+    assert.deepEqual(f.row(s.themePreviews, preview.id).baseline, Object.fromEntries(f.loggie.themes.get(f.loggie.mainTheme).files));
+    const settled = f.loggie.requests.length;
+    await review(201);
+    branchOff("human-8", "src/app.ts", "export const value = 8;\n"); f.addPr(8, "human-8", "human"); await route();
+    const human = f.row(s.tasks, (await success()).taskId);
+    assert.equal(all(s.items).find((item) => item.id === human.subjectId).payload.number, 8);
+    assert.equal(f.loggie.requests.length, settled, "a recorded preview is reused and a human PR gets none");
+    pr(201).state = "closed"; await route();
+    assert.ok(f.row(s.themePreviews, preview.id).deletedAt);
+    assert.equal(fields().at(-1), "themeDelete"); assert.equal(f.loggie.themes.has(preview.themeGid), false); assert.ok(f.loggie.themes.has(f.loggie.mainTheme));
+    const deleted = f.loggie.requests.length; await route();
+    assert.equal(f.loggie.requests.length, deleted, "a deleted preview is not deleted again");
+    for (const { field, variables, key } of f.loggie.requests) {
+      assert.equal(key, f.loggie.key);
+      if (field === "themeDuplicate") assert.deepEqual(variables, { id: f.loggie.mainTheme, name: "scrat/pr-201" });
+      if (field === "theme" || field === "themeDelete") assert.equal(variables.id, preview.themeGid);
+    }
+    assert.equal("LOGGIE_API_KEY" in childEnvironment(), false); assert.ok(containsSecret("key " + f.loggie.key));
+    assert.ok(f.requests.every(({ request }) => !JSON.stringify(request).includes(f.loggie.key) && !JSON.stringify(request).includes("/api/proxy/")), "the agent never sees the key or the proxy");
+    assert.ok(!JSON.stringify(all(s.events)).includes(f.loggie.key));
+    await assert.rejects(loggie("themePublish", "mutation Publish($id: ID!) { themePublish(id: $id) { theme { id } } }", { id: preview.themeGid }), { code: "ENDPOINT_RESTRICTED", status: 403 });
+    const wrong = process.env.LOGGIE_API_KEY = "wrong-" + "k".repeat(24);
+    await assert.rejects(loggie("themes", "query { themes(first: 1) { nodes { id } } }"), (error) => error.code === "UNAUTHORIZED" && error.status === 401 && !error.message.includes(wrong));
   } },
   database: { title: "real PostgreSQL runs isolate databases, apply new migrations and remove resources", needsDocker: true, configure: [configureDatabase], run: async () => {
     const original = process.env.DATABASE_URL; f.addIssue(1); f.addIssue(2); f.enqueue(1, "implement"); f.enqueue(2, "implement");

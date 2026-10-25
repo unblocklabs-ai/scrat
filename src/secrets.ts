@@ -12,7 +12,7 @@ export function childEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJ
   return Object.fromEntries(Object.entries(source).filter(([name]) => inheritedVariables.has(name) || name.startsWith("LC_")));
 }
 
-const secretVariables = ["GITHUB_APP_PRIVATE_KEY", "GITHUB_PAT", "SLACK_BOT_TOKEN", ...Object.values(config.providers)
+const secretVariables = ["GITHUB_APP_PRIVATE_KEY", "GITHUB_PAT", "SLACK_BOT_TOKEN", "LOGGIE_API_KEY", ...Object.values(config.providers)
   .map((provider) => provider.apiKey ?? "").concat(Object.values(config.bindings).map((binding) => typeof binding?.secret === "string" ? binding.secret : ""))
   .flatMap((text) => [...text.matchAll(/\$\{(\w+)\}/g)].map((match) => match[1]))];
 

@@ -36,7 +36,7 @@ On a follow-up whose conclusion is unchanged and whose cited evidence is still a
 Return concise Markdown for the person deciding what to do next:
 - A conclusion and main reason, leading with what changed on a follow-up.
 - Acceptance-criterion coverage and source evidence, with `path:line` locations in backticks (never Markdown links) on the supplied snapshot.
-- The smallest recommended solution and relevant validation plan, or the specific missing decision.
+- The smallest recommended solution and the checks that would prove it, or the specific missing decision. Propose a new test only for a credible regression that existing coverage misses, one at the boundary that owns it; never one per criterion or per layer.
 - Material assumptions, limitations and unrun checks.
 
 Give each fact one primary home. Avoid filler, repeated conclusions, inventories of unaffected files and internal progress narration. Return Markdown, not JSON.

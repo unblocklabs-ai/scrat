@@ -18,8 +18,8 @@ Check these areas where the changed code makes them relevant:
 - **Over-engineering:** single-consumer abstractions, configuration that does not vary and defensive checks impossible at actual call sites.
 - **Duplication:** repeated logic, types, validation or error handling whose consolidation materially improves correctness or maintainability.
 - **Modularization:** mixed responsibilities where a concrete extraction would materially simplify maintenance.
-- **Consistency:** departures from surrounding naming, errors, logging, tests, APIs or state patterns with a correctness or maintenance consequence. A source change whose committed generated output was not regenerated does not ship; report it as P2.
-- **Test gaps:** high-risk changed behavior or recurring regressions without meaningful coverage, and tests that do not check the behavior they claim. Test code is code: tests with their own harness instead of the repository's setup, undeclared imports or assertions on styling internals are P3. Do not demand tests for coverage alone.
+- **Consistency:** departures from surrounding naming, errors, logging, APIs or state patterns with a correctness or maintenance consequence. A source change whose committed generated output was not regenerated does not ship; report it as P2.
+- **Tests:** high-risk changed behavior or a recurring regression with no meaningful coverage, and tests that do not check the behavior they claim. Excess tests the change adds are a P3 whose fix is deleting them: a test with no credible regression to catch or that repeats existing coverage, the same scenario replayed at several layers, mocks that implement the asserted behavior, tests of private call shapes or exact source strings, assertion-free probes, assertions on styling internals, tests with their own harness instead of the repository's setup, and production seams (exports, flags, hooks) that exist only for tests. An undeclared test import is P3. Do not demand tests for coverage alone, never ask for a test that would break under a behavior-preserving refactor, and do not list missing tests as a "Not defects" concern.
 
 Follow changed contracts through persisted records, wire formats, configuration gates and background jobs. Evaluate upgrade compatibility, mixed-version operation and failure recovery where affected. Unresolved possibilities are not demonstrated defects.
 
@@ -32,7 +32,7 @@ Order findings by severity: P1 breaks functionality or security; P2 is a likely 
 Give a patch grade with one concise reason, graded only on verified defects: source-backed, with a reachable trigger and consequence, introduced or worsened by this PR. Grade the patch, not the author.
 - S: exceptional, no findings.
 - A: strong, no verified defects and nothing for the "Not defects" line.
-- B: solid, no verified defects, but an unverified concern, thin tests or a human decision remains; list them in one "Not defects" line. A check a read-only review cannot run is not a concern.
+- B: solid, no verified defects, but an unverified concern or a human decision remains; list them in one "Not defects" line. A check a read-only review cannot run is not a concern.
 - C: at least one verified P3, or exactly one contained P2.
 - D: two or more verified P2s, or a P2 that breaks the change's main flow.
 - F: any verified P0 or P1. A security flaw or data loss is F only at P1 or higher; at P2 it is graded as C or D.

@@ -394,10 +394,12 @@ const commitReview = async (variant) => {
     git(seed, "push", remote, "main"); return pollCommits();
   };
   const reviewRequests = () => f.requests.filter((request) => request.context.action === "review_base_change");
+  const reactions = () => f.slack.calls.filter((call) => call.method === "reactions.add");
   const bot = f.config.github.botName;
   assert.equal(await pollCommits(), 0); assert.equal(f.slack.calls.length, 0);
   const previous = tip();
   if (variant === "e2e") {
+    f.verdicts.default = "clean";
     assert.equal(await push("Fix a<b & c>d"), 1);
     const head = tip(); assert.equal(f.slack.calls.length, 0);
     const r = await success();
@@ -423,16 +425,60 @@ const commitReview = async (variant) => {
     assert.equal(context.input.previousSha, previous); assert.equal(context.input.sha, head); assert.equal(context.input.commitCount, 1);
     assert.equal(context.commentRevisions.length, 0);
     assert.equal(f.writes.length, 0); assert.equal(all(s.runs).length, 1);
+    const rootTs = "1700000000.000001", reacted = (calls) => calls.map((call) => [call.body.channel, call.body.timestamp, call.body.name]);
+    assert.deepEqual(reacted(reactions()), [[channel, rootTs, "white_check_mark"]]);
+    assert.equal(r.result.verdict, "clean"); assert.equal(r.publication.slackReaction, "white_check_mark"); assert.ok(!reply.body.text.includes("SCRAT_VERDICT"));
+    assert.ok(reactions().every((call) => call.token === process.env.SLACK_BOT_TOKEN));
+    const review = async (value, verdict) => {
+      f.verdicts.default = verdict; assert.equal(await push("Verdict " + value, value), 1);
+      const before = reactions().length, done = await success();
+      const root = all(s.slackThreads).find((row) => row.subjectId === f.row(s.tasks, done.taskId).subjectId);
+      return { done, root: root.ts, added: reacted(reactions().slice(before)) };
+    };
+    const concerns = await review(3, "concerns");
+    assert.deepEqual(concerns.added, [[channel, concerns.root, "large_orange_square"]]);
+    const missing = await review(4, undefined);
+    assert.deepEqual(missing.added, []); assert.equal(missing.done.result.verdict, undefined); assert.equal(missing.done.publication.slackReaction, undefined);
+    const { parseResult } = await f.app("results.ts");
+    assert.throws(() => parseResult("Fine.\nSCRAT_VERDICT: safe\nSCRAT_STATUS: complete", []), /SCRAT_VERDICT/);
+    assert.equal(parseResult("Fine.\nSCRAT_VERDICT: breaking\nSCRAT_STATUS: complete", []).verdict, "breaking");
+    f.slack.reactionFail = ["already_reacted"];
+    const repeated = await review(5, "breaking");
+    assert.deepEqual(repeated.added, [[channel, repeated.root, "large_red_square"]]); assert.equal(repeated.done.publication.slackReaction, "large_red_square");
+    f.verdicts.default = "clean"; f.modes.set(0, "incomplete");
+    assert.equal(await push("Incomplete", 6), 1);
+    const reactionsBefore = reactions().length, incomplete = await run();
+    assert.ok(incomplete.error); assert.equal(reactions().length, reactionsBefore);
+    f.modes.delete(0); tasks.retryTask(incomplete.taskId); await success();
+    f.verdicts.default = "concerns"; f.slack.reactionFail = ["service_unavailable"];
+    assert.equal(await push("Reaction down", 7), 1);
+    const replies = () => posts().filter((call) => call.body.thread_ts !== undefined).length, postsBefore = replies(), callsBefore = reactions().length, failed = await run();
+    assert.ok(failed.error); assert.equal(failed.stage, "publishing");
+    assert.equal(failed.publication.slackReplyTs !== undefined, true); assert.equal(failed.publication.slackReaction, undefined);
+    assert.equal(replies() - postsBefore, 1); assert.equal(f.row(s.tasks, failed.taskId).status, "failed");
+    const used = f.requests.length; tasks.retryTask(failed.taskId);
+    const retried = await success();
+    assert.equal(f.requests.length, used); assert.equal(replies() - postsBefore, 1);
+    const failedRoot = all(s.slackThreads).find((row) => row.subjectId === f.row(s.tasks, failed.taskId).subjectId);
+    assert.deepEqual(reacted(reactions().slice(callsBefore)), [[channel, failedRoot.ts, "large_orange_square"], [channel, failedRoot.ts, "large_orange_square"]]);
+    assert.equal(retried.publication.slackReaction, "large_orange_square");
+    assert.equal(retried.publication.slackReplyTs, failed.publication.slackReplyTs);
   } else if (variant === "no_start") {
+    f.verdicts.default = "concerns";
     let before;
     f.onModel = (_context, step) => { if (step === 0 && before === undefined) before = posts().length; };
     assert.equal(await push("No start slot"), 1);
     await success();
     assert.equal(before, 0, "no root is posted before the agent runs");
     assert.equal(posts().length, 2); assert.equal(roots().length, 1); assert.equal(all(s.slackThreads).length, 1);
+    assert.deepEqual(reactions().map((call) => [call.body.channel, call.body.timestamp, call.body.name]), [[channel, all(s.slackThreads)[0].ts, "large_orange_square"]]);
+    assert.equal(all(s.slackThreads)[0].ts, posts()[1].body.thread_ts);
     } else if (variant === "panel") {
+    f.verdicts["gpt-6.1-sol"] = "clean"; f.verdicts["deepseek/deepseek-v4.1-flash"] = "breaking"; f.verdicts.consolidating = "concerns";
     assert.equal(await push("Panel change"), 1);
     const r = await success();
+    assert.deepEqual(r.reviewers.map((reviewer) => reviewer.result.verdict).sort(), ["breaking", "clean"]);
+    assert.equal(r.result.verdict, "concerns"); assert.deepEqual(reactions().map((call) => [call.body.timestamp, call.body.name]), [["1700000000.000001", "large_orange_square"]]);
     assert.equal(r.reviewers.length, 2); assert.ok(r.reviewers.every((reviewer) => reviewer.result?.outcome === "complete"));
     assert.equal(new Set([...r.reviewers.map((reviewer) => reviewer.piSessionId), r.piSessionId]).size, 3);
     const requests = reviewRequests(), consolidation = requests.filter((request) => request.consolidating);
@@ -443,6 +489,7 @@ const commitReview = async (variant) => {
     assert.equal(posts().length, 2); assert.equal(posts()[1].body.text, "Consolidated source-verified review."); assert.equal(posts()[1].body.thread_ts, "1700000000.000001");
     assert.equal(f.writes.length, 0);
   } else if (variant === "slack_down") {
+    f.verdicts.default = "clean";
     assert.equal(await push("Root down"), 1);
     f.slack.down = true; f.onModel = () => { f.slack.down = false; };
     const first = await success(); f.onModel = undefined;
@@ -459,10 +506,11 @@ const commitReview = async (variant) => {
     const used = f.requests.length; tasks.retryTask(failed.taskId);
     const retried = await success();
     assert.equal(f.requests.length, used); assert.equal(retried.retryOfRunId, failed.id); assert.equal(retried.stage, "publishing");
-    const added = f.slack.calls.slice(mark);
+    const added = f.slack.calls.slice(mark).filter((call) => call.method === "chat.postMessage");
     assert.equal(added.length, 3); assert.equal(added.filter((call) => call.body.thread_ts === undefined).length, 1);
     const second = all(s.slackThreads).find((row) => row.subjectId === f.row(s.tasks, failed.taskId).subjectId);
     assert.equal(added[2].body.thread_ts, second.ts); assert.equal(retried.publication.slackReplyTs, "1700000000.000004");
+    assert.deepEqual(reactions().map((call) => [call.body.channel, call.body.timestamp, call.body.name]), [[channel, "1700000000.000001", "white_check_mark"], [channel, second.ts, "white_check_mark"]]);
     assert.equal(all(s.slackThreads).length, 2); assert.equal(f.writes.length, 0);
   } else if (variant === "restart") {
     assert.equal(await push("Restart"), 1);
@@ -2990,7 +3038,7 @@ export const scenarios = {
     mutate("review_issue", extend("author: alice"), /trigger\.author must be "bot" for github_items/);
     mutate("review_issue", extend("author: bot"));
   } },
-  commit_review_e2e: { title: "a push to the base branch posts one templated root, runs one diff-only review and replies once in the thread without any GitHub write", configure: [configureCommitSource], run: () => commitReview("e2e") },
+  commit_review_e2e: { title: "a push to the base branch posts one templated root, runs one diff-only review, replies once in the thread and reacts on the root with the verdict, without any GitHub write", configure: [configureCommitSource], run: () => commitReview("e2e") },
   commit_review_no_start: { title: "a commit manifest without a start slot posts no thread root before the agent and the reply creates the root", configure: [configureCommitSource, configureNoStart], run: () => commitReview("no_start") },
   commit_review_panel: { title: "a panel commit review runs two reviewers and a consolidator without requiring a grade and replies once", configure: [configureCommitSource, configureCommitPanel], run: () => commitReview("panel") },
   commit_review_slack_down: { title: "a failed root post still reviews and the reply creates the root, while a failed reply fails at publishing and retries without a new session or second root", configure: [configureCommitSource], run: () => commitReview("slack_down") },

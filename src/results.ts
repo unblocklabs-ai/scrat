@@ -23,6 +23,9 @@ export function entryStage(previousRun: Run | undefined, retryMode: "repair" | "
 export const prGrades = ["S", "A", "B", "C", "D", "F"] as const;
 export type PrGrade = typeof prGrades[number];
 
+const reviewVerdicts = ["clean", "concerns", "breaking"] as const;
+type ReviewVerdict = typeof reviewVerdicts[number];
+
 type ReportedIssue = { title: string; body: string; fingerprint: string };
 
 export type AgentResult = {
@@ -31,6 +34,7 @@ export type AgentResult = {
   paths: string[];
   outcome: "complete" | "incomplete" | "needs_decision";
   grade?: PrGrade;
+  verdict?: ReviewVerdict;
   issues?: ReportedIssue[];
 };
 
@@ -109,6 +113,12 @@ export function parseResult(output: string, paths: string[], { requireGrade = fa
   if (outcome !== "complete" && outcome !== "incomplete" && outcome !== "needs_decision") {
     throw new ResultFormatError("Pi must end its response with SCRAT_STATUS: complete, incomplete, or needs_decision");
   }
+  const verdictLine = lines.at(-1)?.trim();
+  const verdict = reviewVerdicts.find((value) => verdictLine === `SCRAT_VERDICT: ${value}`);
+  if (verdictLine?.startsWith("SCRAT_VERDICT:")) {
+    if (!verdict) throw new ResultFormatError("Pi must return a valid SCRAT_VERDICT: clean, concerns, or breaking");
+    lines.pop();
+  }
   const gradeLine = lines.at(-1)?.trim();
   const grade = prGrades.find((value) => gradeLine === `SCRAT_GRADE: ${value}`);
   if (gradeLine?.startsWith("SCRAT_GRADE:")) {
@@ -121,5 +131,5 @@ export function parseResult(output: string, paths: string[], { requireGrade = fa
   const text = lines.join("\n").trim();
   if (!text) throw new ResultFormatError("Pi returned no report");
   if (requireGrade && outcome === "complete" && !grade) throw new ResultFormatError("A complete consolidated PR review must include SCRAT_GRADE");
-  return { text, ready, paths, outcome, grade, issues: issues.length ? issues : undefined };
+  return { text, ready, paths, outcome, grade, verdict, issues: issues.length ? issues : undefined };
 }

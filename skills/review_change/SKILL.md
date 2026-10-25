@@ -31,4 +31,12 @@ Write Slack mrkdwn that a teammate can skim in ten seconds: plain text, `*bold*`
 
 Write only what the reader needs to act. Do not describe your method, do not list what you did not run, and do not add disclaimers about the limits of a read-only review. An absent or skipped test run belongs in a bullet only when it is itself a finding, for example a commit that claims a green run while its committed report shows every test skipped.
 
-`SCRAT_READY` and `SCRAT_GRADE` are not used for this review; do not emit them. Use only `SCRAT_STATUS: complete`, or `SCRAT_STATUS: incomplete` if the review itself could not be finished.
+`SCRAT_READY` and `SCRAT_GRADE` are not used for this review; do not emit them.
+
+End with `SCRAT_VERDICT: <value>` on its own line, immediately before the final status line. Choose from your own findings in this range:
+
+- `breaking`: the change makes an incompatible change to a contract that callers or consumers use (an API, wire format, persisted record, configuration or job interface). A large diff or an unfinished run is not breaking.
+- `concerns`: any other finding or material uncertainty, with no breaking change.
+- `clean`: no findings and nothing material left unchecked.
+
+Then use only `SCRAT_STATUS: complete`, or `SCRAT_STATUS: incomplete` if the review itself could not be finished.

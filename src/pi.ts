@@ -18,7 +18,7 @@ import { redactSecrets, transientInferenceCode } from "./errors.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 
 function footerRules(requireGrade: boolean) {
-  return `SCRAT_READY (optional, only when ready)\nSCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of S, A, B, C, D, F, with no plus or minus)\nSCRAT_STATUS: complete, incomplete, or needs_decision (required, and the very last line)`;
+  return `SCRAT_READY (optional, only when ready)\nSCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of S, A, B, C, D, F, with no plus or minus)\nSCRAT_VERDICT: clean, concerns, or breaking (only when your instructions ask for it)\nSCRAT_STATUS: complete, incomplete, or needs_decision (required, and the very last line)`;
 }
 
 function correctionMessage(error: string, requireGrade: boolean) {

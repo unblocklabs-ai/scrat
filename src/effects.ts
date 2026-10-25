@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { manifestOf } from "./actions.ts";
-import { postCommitReply } from "./commit-review.ts";
+import { postCommitReply, reactToCommitRoot, verdictReaction } from "./commit-review.ts";
 import { upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
@@ -139,9 +139,13 @@ const issue = {
 } satisfies Effect<GithubEffectContext>;
 
 const slackReply = {
-  receipted: (publication) => Boolean(publication.slackReplyTs),
-  async apply({ subject, task, run, saveReceipt }) {
-    saveReceipt({ slackReplyTs: await postCommitReply(subject, task.action, run) });
+  receipted: (publication, { run }) => Boolean(publication.slackReplyTs) && publication.slackReaction === verdictReaction(run),
+  async apply({ subject, task, run, publication, saveReceipt }) {
+    if (!publication().slackReplyTs) saveReceipt({ slackReplyTs: await postCommitReply(subject, task.action, run) });
+    const name = verdictReaction(run);
+    if (!name) return;
+    await reactToCommitRoot(subject, name);
+    saveReceipt({ slackReaction: name });
   },
 } satisfies Effect<SlackEffectContext>;
 

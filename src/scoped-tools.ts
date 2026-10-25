@@ -147,7 +147,7 @@ type PageLike = {
 };
 type ContextLike = { route(pattern: string, handler: (route: RouteLike) => Promise<void>): Promise<void>; newPage(): Promise<PageLike>; close(): Promise<void> };
 type BrowserLike = { newContext(options: Record<string, unknown>): Promise<ContextLike>; close(): Promise<void> };
-type Playwright = { chromium: { launch(options: { headless: boolean; chromiumSandbox: boolean; args: string[] }): Promise<BrowserLike>; executablePath(): string } };
+type Playwright = { chromium: { launch(options: { headless: boolean; channel: string; chromiumSandbox: boolean; args: string[] }): Promise<BrowserLike>; executablePath(): string } };
 
 export async function loadPlaywright(): Promise<Playwright> {
   const specifier = "playwright-core";
@@ -158,7 +158,7 @@ export async function loadPlaywright(): Promise<Playwright> {
   return playwright;
 }
 
-export const launchChromium = async (args: string[]) => (await loadPlaywright()).chromium.launch({ headless: true, chromiumSandbox: true, args });
+export const launchChromium = async (args: string[]) => (await loadPlaywright()).chromium.launch({ headless: true, channel: "chromium", chromiumSandbox: true, args });
 const browserActions = ["goto", "text", "screenshot", "click", "fill", "select", "reset"];
 const themeIdOf = (html: string) => {
   const opening = /Shopify\.theme\s*=\s*\{/.exec(html);

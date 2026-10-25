@@ -169,7 +169,9 @@ not a fallback to host execution. The installer checks the boundary before stopp
 the old service. On Ubuntu 24.04, an administrator installs `bubblewrap`, installs
 `deploy/scrat-bwrap.apparmor` as `/etc/apparmor.d/scrat-bwrap`, and loads it with
 `apparmor_parser -r /etc/apparmor.d/scrat-bwrap`. Do not disable the global userns
-restriction. Provision Node and the pinned pnpm version with Corepack first.
+restriction. Provision Node and the pinned pnpm version with Corepack first. The browser
+tool's Chromium has its own profile, `deploy/scrat-chromium.apparmor`; see the browser
+tool section.
 
 `workspace.packageStore` (off unless set) is an absolute directory, not a symlink, that is bind-mounted read-write at pnpm's store
 location in every sandboxed command, with a `storeDir` entry written to the sandbox home's pnpm `config.yaml` so
@@ -318,7 +320,12 @@ PLAYWRIGHT_BROWSERS_PATH=$HOME/.local/share/scrat-v2/browsers npx playwright-cor
 sudo env PLAYWRIGHT_BROWSERS_PATH=$HOME/.local/share/scrat-v2/browsers npx playwright-core install-deps chromium   # system libraries, once, as root
 ```
 
-Run the service with the same `PLAYWRIGHT_BROWSERS_PATH`. `npm ci` (run by the installer on each deploy) removes packages installed with `--no-save`, so repeat the first command after each release. Chromium is launched with its sandbox enabled (`chromiumSandbox: true`); if the host cannot support that unprivileged, fix the host rather than disabling it.
+Run the service with the same `PLAYWRIGHT_BROWSERS_PATH`. `npm ci` (run by the installer on each deploy) removes packages installed with `--no-save`, so repeat the first command after each release. Chromium is launched with its sandbox enabled (`chromiumSandbox: true`). On Ubuntu 24.04,
+where `kernel.apparmor_restrict_unprivileged_userns = 1` blocks the sandbox, an administrator
+installs `deploy/scrat-chromium.apparmor` as `/etc/apparmor.d/scrat-chromium` and loads it with
+`apparmor_parser -r /etc/apparmor.d/scrat-chromium`; it attaches to Chromium under
+`$HOME/.local/share/scrat-v2/browsers` or Playwright's default `~/.cache/ms-playwright`, so a
+browser installed elsewhere needs the path adjusted. Do not disable the global userns restriction.
 
 When a session's browser starts, each allowed host is resolved and Chromium is launched with `--host-resolver-rules` mapping it to that address (`~NOTFOUND` when it does not resolve); the browser tool refuses the run if any host resolves to a private address. A network namespace with no route to private ranges is the stronger boundary and belongs to the VM deployment, not the code.
 

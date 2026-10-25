@@ -3245,7 +3245,7 @@ export const scenarios = {
     mkdirSync("ctx");
     const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
     const fake = () => {
-      const state = { closed: false, handler: undefined, contextOptions: undefined, visited: [], typed: [], viewport: undefined, html: "<html></html>" };
+      const state = { closed: false, handler: undefined, contextOptions: undefined, visited: [], typed: [], viewport: undefined, html: "<html></html>", timeouts: [], popups: [], listeners: [] };
       let current = "about:blank";
       const page = {
         async request(url, navigation, headers = { accept: "*/*" }) {
@@ -3256,10 +3256,15 @@ export const scenarios = {
         },
         async goto(url) { const outcome = await page.request(url, true); if (outcome.aborted) throw new Error("net::ERR_BLOCKED_BY_CLIENT"); state.visited.push(url); current = url; return { status: () => 200 }; },
         title: async () => "Shop", url: () => current, innerText: async () => "Cart total 5. token " + secret,
-        screenshot: async ({ path, fullPage }) => { writeFileSync(path, `png ${state.viewport?.width ?? "default"} ${fullPage ?? false}`); },
-        content: async () => state.html, setViewportSize: async (size) => { state.viewport = size; },
+        screenshot: async ({ path, fullPage, timeout }) => { state.timeouts.push(timeout); writeFileSync(path, `png ${state.viewport?.width ?? "default"} ${fullPage ?? false}`); },
+        innerHTML: async (_selector, { timeout }) => { state.timeouts.push(timeout); return state.html; }, waitForLoadState: async () => {},
+        on: (_event, listener) => { state.listeners.push(listener); }, off: (_event, listener) => { state.listeners = state.listeners.filter((entry) => entry !== listener); },
+        setViewportSize: async (size) => { state.viewport = size; },
         locator: (selector) => ({ count: async () => selector === "#missing" ? 0 : 2 }),
-        click: async (selector) => {
+        click: async (selector, { timeout }) => {
+          state.timeouts.push(timeout);
+          if (selector === "#boom") throw new Error("element detached");
+          if (selector === "#popup") for (const listener of state.listeners) listener({ close: async () => { state.popups.push("closed"); } });
           if (selector === "#checkout") await page.goto("https://shop.example.test/checkout");
           if (selector === "#escape") { const outcome = await page.request("https://evil.example.net/", true); if (outcome.aborted) return; }
         },
@@ -3324,7 +3329,11 @@ export const scenarios = {
     assert.deepEqual(JSON.parse(textOf(await act(bound, { action: "click", selector: "#missing" }))), { url: "https://shop.example.test/cart?x=1", title: "Shop", matched: 0 });
     assert.deepEqual(JSON.parse(textOf(await act(bound, { action: "click", selector: "#noop" }))), { url: "https://shop.example.test/cart?x=1", title: "Shop", matched: 2 });
     assert.deepEqual(JSON.parse(textOf(await act(bound, { action: "click", selector: "#checkout" }))), { url: "https://shop.example.test/checkout", title: "Shop" });
-    assert.deepEqual(JSON.parse(textOf(await act(bound, { action: "click", selector: "#escape" }))), { url: "https://shop.example.test/checkout", title: "Shop", matched: 2 });
+    assert.deepEqual(JSON.parse(textOf(await act(bound, { action: "click", selector: "#escape" }))), { url: "https://shop.example.test/checkout", title: "Shop", matched: 2, blocked: "https://evil.example.net/" });
+    assert.deepEqual(JSON.parse(textOf(await act(bound, { action: "click", selector: "#popup" }))), { url: "https://shop.example.test/checkout", title: "Shop", matched: 2, popupClosed: true });
+    assert.deepEqual(bound.state.popups, ["closed"]); assert.equal(bound.state.listeners.length, 0);
+    await assert.rejects(act(bound, { action: "click", selector: "#boom" }), /element detached/); assert.equal(bound.state.listeners.length, 0);
+    await assert.rejects(act(bound, { action: "screenshot", viewport: "constructor" }), /viewport must be one of: desktop, mobile/);
     assert.equal(bound.state.visited.at(-1), "https://shop.example.test/checkout");
     assert.deepEqual(JSON.parse(textOf(await act(bound, { action: "fill", selector: "#q", text: "socks" }))).matched, 2);
     await act(bound, { action: "select", selector: "#size", text: "M" });
@@ -3338,14 +3347,17 @@ export const scenarios = {
     assert.equal(readFileSync(mobileShot.path, "utf8"), "png 390 true"); assert.deepEqual(bound.state.viewport, { width: 390, height: 844 });
     const desktopShot = JSON.parse(textOf(await act(bound, { action: "screenshot", viewport: "desktop" })));
     assert.equal(desktopShot.path, resolve("ctx/screenshot-desktop-3.png")); assert.deepEqual(bound.state.viewport, { width: 1280, height: 800 });
-    bound.state.html = "<script>Shopify.theme = {broken</script>";
-    assert.equal(JSON.parse(textOf(await act(bound, { action: "screenshot" }))).themeId, undefined);
+    for (const html of ["<script>Shopify.theme = {broken</script>", '<script>Shopify.theme = {"id":"1234"};</script>', '<script>Shopify.theme = {"id":1e400};</script>', "<script>Shopify.theme = {</script>"]) {
+      bound.state.html = html;
+      assert.equal(JSON.parse(textOf(await act(bound, { action: "screenshot" }))).themeId, undefined, html);
+    }
+    assert.ok(bound.state.timeouts.length > 0 && bound.state.timeouts.every((timeout) => timeout === 30000));
     await assert.rejects(act(make({ contextDir: undefined }), { action: "screenshot" }), /no context directory/);
     await bound.close(); assert.equal(bound.state.closed, true);
 
     const capped = make({ limits: { steps: 3, milliseconds: 60_000 } });
     await act(capped, { action: "goto", url: "https://shop.example.test/" });
-    await act(capped, { action: "click", selector: "#noop" }); await act(capped, { action: "fill", selector: "#q", text: "x" });
+    await assert.rejects(act(capped, { action: "click", selector: "#boom" }), /element detached/); await act(capped, { action: "fill", selector: "#q", text: "x" });
     await assert.rejects(act(capped, { action: "click", selector: "#noop" }), /Refused: the browser is limited to 3 actions per session/);
     assert.equal(capped.state.closed, true);
     const slow = make({ limits: { steps: 10, milliseconds: 1000 } });

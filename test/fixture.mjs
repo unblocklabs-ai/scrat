@@ -215,6 +215,11 @@ export async function fixture(scenario, spec) {
       { name: "write", args: { path: "src/app.ts", content: "export const value = 5;\n" } }][step];
     if (!review && mode === "leak-file") tool = step === 0 ? { name: "write", args: { path: "src/app.ts", content: process.env.GITHUB_APP_PRIVATE_KEY } } : undefined;
     if (script) tool = script[step];
+    const corrections = texts.filter((entry) => entry.startsWith("Your previous final answer was not accepted")).length, regressionGrade = (cleared) => cleared ? "C" : "A";
+    const storefrontModes = { "storefront-verified": ["verified", "A"], "storefront-unavailable": ["unavailable", "A"], "storefront-regression": ["regression", regressionGrade(corrections > 0)],
+      "storefront-missing-once": [corrections ? "verified" : "", "A"], "storefront-flip": [["regression", "verified", "regression"][corrections], regressionGrade(corrections > 1)],
+      "storefront-split": [consolidating || !request.model.includes("deepseek") ? "regression" : "verified", regressionGrade(consolidating)] };
+    const [storefrontLine = "verified", storefrontGrade] = storefrontModes[mode] ?? [];
     const fumble = !corrected && (mode === "format-once" || (mode === "reviewer-grade-once" && review && !consolidating && request.model.includes("deepseek"))
       || (mode === "consolidation-grade-once" && consolidating));
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : mode === "incomplete-once" && !continued ? "incomplete" : "complete";
@@ -228,7 +233,8 @@ export async function fixture(scenario, spec) {
       + (mode === "issues-bad" ? '\nSCRAT_ISSUE_BEGIN\ntitle: Bad\nfingerprint: a --> <!-- b\n\nBad fingerprint.\nSCRAT_ISSUE_END' : "")
       + (mode === "revised" ? "\nRevised after the latest changes." : "")
       + (mode === "ready" ? "\nSCRAT_READY" : "")
-      + (["review_pr", "my_pr_review"].includes(context.action) && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : ["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : mode === "grade-C" ? "C" : "B"}` : "")
+      + (text.includes("\n## Storefront preview\n") && storefrontLine ? `\nSCRAT_STOREFRONT: ${storefrontLine}` : "")
+      + (["review_pr", "my_pr_review"].includes(context.action) && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : storefrontGrade ?? (["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : mode === "grade-C" ? "C" : "B")}` : "")
       + (verdict ? `\nSCRAT_VERDICT: ${verdict}` : "")
       + (mode === "no-status" || (fumble && mode === "format-once" && !review) ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
     const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] } : { role: "assistant", content: output };

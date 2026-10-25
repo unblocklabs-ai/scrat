@@ -25,6 +25,7 @@ export type PrGrade = typeof prGrades[number];
 
 const reviewVerdicts = ["clean", "concerns", "breaking"] as const;
 type ReviewVerdict = typeof reviewVerdicts[number];
+const storefrontResults = ["verified", "regression", "unavailable"] as const;
 
 type ReportedIssue = { title: string; body: string; fingerprint: string };
 
@@ -35,6 +36,7 @@ export type AgentResult = {
   outcome: "complete" | "incomplete" | "needs_decision";
   grade?: PrGrade;
   verdict?: ReviewVerdict;
+  storefront?: typeof storefrontResults[number];
   issues?: ReportedIssue[];
 };
 
@@ -125,11 +127,25 @@ export function parseResult(output: string, paths: string[], { requireGrade = fa
     if (!grade) throw new ResultFormatError("Pi must return a valid SCRAT_GRADE: S, A, B, C, D, or F");
     lines.pop();
   }
+  const storefrontLine = lines.at(-1)?.trim();
+  const storefront = storefrontResults.find((value) => storefrontLine === `SCRAT_STOREFRONT: ${value}`);
+  if (storefrontLine?.startsWith("SCRAT_STOREFRONT:")) {
+    if (!storefront) throw new ResultFormatError("Pi must return a valid SCRAT_STOREFRONT: verified, regression, or unavailable");
+    lines.pop();
+  }
   const ready = lines.at(-1)?.trim() === "SCRAT_READY";
   if (ready) lines.pop();
   const issues = popIssues(lines);
   const text = lines.join("\n").trim();
   if (!text) throw new ResultFormatError("Pi returned no report");
   if (requireGrade && outcome === "complete" && !grade) throw new ResultFormatError("A complete consolidated PR review must include SCRAT_GRADE");
-  return { text, ready, paths, outcome, grade, verdict, issues: issues.length ? issues : undefined };
+  return { text, ready, paths, outcome, grade, verdict, storefront, issues: issues.length ? issues : undefined };
+}
+
+export function storefrontProblem({ storefront, grade }: AgentResult, regressionMaxGrade: PrGrade, regressionReported: boolean) {
+  if (!storefront) return "A complete storefront review must include SCRAT_STOREFRONT immediately before SCRAT_GRADE";
+  if (regressionReported && storefront !== "regression") return "An earlier answer reported SCRAT_STOREFRONT: regression; keep that line and lower the grade instead of changing the result";
+  if (storefront === "regression" && grade && prGrades.indexOf(grade) < prGrades.indexOf(regressionMaxGrade)) {
+    return `SCRAT_STOREFRONT: regression caps the grade at ${regressionMaxGrade}; lower SCRAT_GRADE and the grade in the assessment to ${regressionMaxGrade} or below and keep the confirmed regression among the findings`;
+  }
 }

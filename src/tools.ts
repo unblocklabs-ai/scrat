@@ -18,11 +18,12 @@ import { sandboxCommand } from "./sandbox.ts";
 
 type ScopedToolName = "http" | "browser" | "github_search";
 
-export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, baseSha, revisions = {}, environment = {}, log, runId }: {
+export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, reviewerIndex, baseSha, revisions = {}, environment = {}, log, runId }: {
   cwd: string;
   contextDir?: string;
   tools: readonly ToolName[];
   scoped?: Pick<Manifest, "http"> & { browser?: BrowserScope };
+  reviewerIndex?: number;
   baseSha?: string;
   revisions?: Record<string, string>;
   environment?: NodeJS.ProcessEnv;
@@ -148,7 +149,7 @@ export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, ba
   } satisfies Record<Exclude<ToolName, ScopedToolName>, object>;
   const binding = (name?: string) => name === undefined ? undefined : config.bindings[name];
   const browser = scoped.browser
-    ? createBrowserTool({ settings: scoped.browser, binding: binding(scoped.browser.binding), contextDir, runId, log, limits: scoped.browser.limits }) : undefined;
+    ? createBrowserTool({ settings: scoped.browser, binding: binding(scoped.browser.binding), contextDir, runId, log, limits: scoped.browser.limits, prefix: reviewerIndex === undefined ? undefined : `reviewer-${reviewerIndex + 1}` }) : undefined;
   const table = {
     ...core,
     ...scoped.http && { http: createHttpTool({ settings: scoped.http, binding: binding(scoped.http.binding)!, runId }) },

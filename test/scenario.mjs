@@ -129,8 +129,6 @@ const seedTheme = () => { for (const [path, text] of Object.entries(themeFiles))
 const configureStorefront = (config) => {
   Object.assign(config.storefront, { enabled: true, store: "fixture.myshopify.com", publicHost: "shop.example.test" });
   Object.assign(config.storefront.preview, { processingPollSeconds: 1, uploadBatch: 2 });
-  mkdirSync("deployment"); config.actions.directory = resolve("deployment");
-  writeFileSync("deployment/review_pr.yaml", readFileSync("app/actions/review_pr.yaml", "utf8").replace(/^files: \[(.*)\]$/m, "tools: [read, grep, find, ls, git, read_base, browser]\nfiles: [$1, storefront]").replace(/^skill: .*$/m, `skill: ${resolve("app/skills/review_pr/SKILL.md")}`));
 };
 const withTools = (text, tools) => text.replace(/^tools: .*\n/m, "").trimEnd() + `\ntools: ${tools}\n`;
 const configureManifestDirectory = (config) => {
@@ -2722,6 +2720,8 @@ export const scenarios = {
     if (!await import("playwright-core").then(() => true, () => false)) await startup((c) => { c.storefront.enabled = true; }, /storefront_discover: The browser tool needs the optional playwright-core package/);
     schema((c) => { c.storefront.limits.browserSeconds = 0; }, /storefront\.limits\.browserSeconds: must be >= 1/);
     schema((c) => { c.storefront.siteMapMaxAgeDays = 1.5; }, /storefront\.siteMapMaxAgeDays: must be integer/);
+    schema((c) => { c.storefront.limits.regressionMaxGrade = "C+"; }, /storefront\.limits\.regressionMaxGrade: must be equal to one of the allowed values/);
+    await startup((c) => { c.storefront.enabled = true; c.storefront.devices = ["desktop", "tablet"]; }, /storefront\.devices: tablet is not a tools\.browser\.viewports preset/);
     const key = process.env.GITHUB_APP_PRIVATE_KEY;
     delete process.env.GITHUB_APP_PRIVATE_KEY;
     await assert.rejects(validateStaticConfig(f.config), /github\.auth is "app" but GITHUB_APP_PRIVATE_KEY is not set/);
@@ -3148,8 +3148,8 @@ export const scenarios = {
     };
     rejects("review_issue", (text) => withTools(text, "[read, bash]"), /rule_check\.yaml: mode review forbids the bash, edit and write tools/);
     rejects("review_issue", (text) => withTools(text, "[read, git, read_base]"), /read_base requires a review with agent: panel or context: change/);
-    rejects("review_pr", (text) => text.replace("[discussion, previous_assessment, previous_repair, validation, issue]", "[history]"), /files: history is not allowed with the pr_assessment effect/);
-    rejects("review_pr", (text) => text.replace("validation, issue]", "validation, triage]"), /files: triage requires trigger.item issue/);
+    rejects("review_pr", (text) => text.replace("[discussion, previous_assessment, previous_repair, validation, issue, storefront]", "[history]"), /files: history is not allowed with the pr_assessment effect/);
+    rejects("review_pr", (text) => text.replace("validation, issue, storefront]", "validation, triage, storefront]"), /files: triage requires trigger.item issue/);
     rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [issue]"), /files: issue requires trigger.item pr/);
     rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [review]"), /files: review requires trigger.kind low_grade/);
     rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [labels]"), /files: previous_assessment requires the pr_assessment effect or a review that publishes comment/);
@@ -3269,7 +3269,7 @@ export const scenarios = {
     mkdirSync("ctx");
     const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
     const fake = () => {
-      const state = { closed: false, handler: undefined, contextOptions: undefined, visited: [], typed: [], viewport: undefined, html: "<html></html>", timeouts: [], popups: [], listeners: [] };
+      const state = { closed: false, contexts: 0, launches: 0, handler: undefined, contextOptions: undefined, visited: [], typed: [], viewport: undefined, html: "<html></html>", timeouts: [], popups: [], listeners: [] };
       let current = "about:blank";
       const page = {
         async request(url, navigation, headers = { accept: "*/*" }) {
@@ -3295,8 +3295,8 @@ export const scenarios = {
         fill: async (selector, value) => { state.typed.push(["fill", selector, value]); },
         selectOption: async (selector, value) => { state.typed.push(["select", selector, value]); },
       };
-      const browser = { async newContext(options) { state.contextOptions = options; return { route: async (_pattern, handler) => { state.handler = handler; }, newPage: async () => page, close: async () => {} }; }, close: async () => { state.closed = true; } };
-      return { state, page, launch: async (args) => { state.args = args; return browser; } };
+      const browser = { async newContext(options) { state.contextOptions = options; state.contexts++; return { route: async (_pattern, handler) => { state.handler = handler; }, newPage: async () => page, close: async () => {} }; }, close: async () => { state.closed = true; } };
+      return { state, page, launch: async (args) => { state.args = args; state.launches++; return browser; } };
     };
     const warnings = [], settings = { navigationHosts: ["shop.example.test"], resourceHosts: ["cdn.example.test", "api.example.test"] };
     const publicAnswer = [{ address: "93.184.216.34", family: 4 }];
@@ -3388,6 +3388,22 @@ export const scenarios = {
       await unrestricted.page.request("https://inside.example.org/a.js", false), await unrestricted.page.request("https://inside.example.org/frame", true), await unrestricted.page.request("https://cdn.elsewhere.example.org/b.js", false)],
       [open, open, blocked, blocked, blocked, blocked, open]);
     assert.deepEqual(lookups.filter((host) => host === "cdn.elsewhere.example.org" || host === "inside.example.org"), ["cdn.elsewhere.example.org", "inside.example.org"], "each host is resolved once per session");
+    unrestricted.state.html = '<script>Shopify.theme = {"name":"Preview","id":42};</script>';
+    assert.equal(JSON.parse(textOf(await act(unrestricted, { action: "goto", url: "https://anywhere.example.net/t" }))).themeId, 42, "goto reports the served theme");
+    assert.equal(JSON.parse(textOf(await act(unrestricted, { action: "click", selector: "#noop" }))).themeId, 42, "click reports the served theme");
+    await act(unrestricted, { action: "screenshot", viewport: "mobile" });
+    assert.deepEqual(JSON.parse(textOf(await act(unrestricted, { action: "reset" }))), { reset: true });
+    assert.deepEqual({ closed: unrestricted.state.closed, contexts: unrestricted.state.contexts }, { closed: false, contexts: 1 });
+    await act(unrestricted, { action: "goto", url: "https://anywhere.example.net/q" });
+    assert.deepEqual({ launches: unrestricted.state.launches, contexts: unrestricted.state.contexts, viewport: unrestricted.state.contextOptions.viewport }, { launches: 1, contexts: 2, viewport: { width: 390, height: 844 } }, "a reset opens a fresh context in the same browser at the viewport last set");
+    const named = make({ prefix: "reviewer-2" });
+    assert.equal(JSON.parse(textOf(await act(named, { action: "screenshot" }))).path, resolve("ctx/screenshot-reviewer-2-current-1.png"), "each reviewer's screenshots are named apart");
+    const counted = make({ limits: { steps: 2, milliseconds: 60_000 } });
+    await act(counted, { action: "goto", url: "https://shop.example.test/" }); await act(counted, { action: "reset" });
+    await assert.rejects(act(counted, { action: "text" }), /limited to 2 actions per session/, "a reset counts as an action");
+    const resetting = make({ limits: { steps: 10, milliseconds: 600 } });
+    await act(resetting, { action: "goto", url: "https://shop.example.test/" }); await act(resetting, { action: "reset" }); await sleep(650);
+    await assert.rejects(act(resetting, { action: "goto", url: "https://shop.example.test/" }), /limited to 1 seconds per session/, "a reset does not restart the session's time");
     await bound.close(); assert.equal(bound.state.closed, true);
 
     const capped = make({ limits: { steps: 3, milliseconds: 60_000 } });
@@ -3689,7 +3705,7 @@ export const scenarios = {
     assert.equal(f.deployments.length, 0, "an App without the deployments permission loses only the deployment");
     const [comment] = previewComments();
     assert.equal(previewComments().length, 1); assert.ok([url, String(preview.themeId), head()].every((text) => comment.body.includes(text)));
-    assert.deepEqual(storefront(first.run), { url, themeId: preview.themeId, headSha: head(), available: true, problems: [], liveUrl: "https://shop.example.test/" });
+    assert.deepEqual(storefront(first.run), { url, themeId: preview.themeId, headSha: head(), available: true, problems: [], liveUrl: "https://shop.example.test/", devices: ["desktop", "mobile"], confirmationRuns: 1, regressionMaxGrade: "C" });
     f.faults.permissions.clear(); f.loggie.wrongMd5.add("assets/app.css");
     let from = f.loggie.requests.length;
     pushFile(pr.head.ref, "assets/app.css", "body { color: red; }\n");
@@ -3699,7 +3715,7 @@ export const scenarios = {
     assert.equal(previewComments().length, 1); assert.equal(previewComments()[0].id, comment.id);
     assert.match(previewComments()[0].body, new RegExp(`preview unavailable for ${secondHead}.*\\n\\n- \`assets/app\\.css\` does not match the commit`, "s"));
     assert.deepEqual(states(), [{ ref: secondHead, environment: "shopify-preview", states: ["failure"] }]);
-    assert.deepEqual(storefront(second.run), { url: null, themeId: preview.themeId, headSha: secondHead, available: false, problems: mismatch, liveUrl: "https://shop.example.test/" });
+    assert.deepEqual(storefront(second.run), { url: null, themeId: preview.themeId, headSha: secondHead, available: false, problems: mismatch, liveUrl: "https://shop.example.test/", devices: ["desktop", "mobile"], confirmationRuns: 1, regressionMaxGrade: "C" });
     f.loggie.wrongMd5.clear(); from = f.loggie.requests.length;
     pushFile(pr.head.ref, "snippets/badge.liquid", "<span>new</span>\n");
     const third = await reviewed();
@@ -3886,6 +3902,81 @@ export const scenarios = {
     const off = await reviewed();
     assert.ok(off.length && off.every((request) => request.context.item.number === 201 && request.context.files.storefront === undefined && JSON.stringify(names(request)) === panel), "a disabled storefront gives no browser");
     assert.equal(all(s.sourceCursors).filter((row) => row.action === "storefront_discover").length, 1);
+  } },
+  storefront_review: { title: "a review of a Scrat PR whose preview matches the head gives every panel session the storefront section, the storefront browser and the preview, live and limits context; a confirmed regression caps the grade through the format correction and stays sticky, a missing line is corrected, unavailable keeps the grade, the line never reaches the comment, the consolidator sees each reviewer's result and its own line wins, and an unavailable preview, a human PR or a disabled storefront get neither section nor browser", seed: seedTheme, configure: [configureStorefront], run: async () => {
+    const { config: live } = await f.app("config.ts"), { parseResult, storefrontProblem } = await f.app("results.ts");
+    const parsed = (footer) => parseResult(`R.\n${footer}\nSCRAT_STATUS: complete`, [], { requireGrade: true });
+    assert.throws(() => parsed("SCRAT_STOREFRONT: maybe\nSCRAT_GRADE: B"), /valid SCRAT_STOREFRONT: verified, regression, or unavailable/);
+    assert.equal(parsed("```\nSCRAT_STOREFRONT: verified\n```\nSCRAT_GRADE: B").storefront, undefined, "a quoted line is report text");
+    assert.match(storefrontProblem(parsed("SCRAT_GRADE: B"), "C", false), /must include SCRAT_STOREFRONT/);
+    assert.match(storefrontProblem(parsed("SCRAT_STOREFRONT: regression\nSCRAT_GRADE: B"), "C", false), /regression caps the grade at C/);
+    assert.deepEqual(["C", "D", "F"].map((grade) => storefrontProblem(parsed(`SCRAT_STOREFRONT: regression\nSCRAT_GRADE: ${grade}`), "C", false)), [undefined, undefined, undefined]);
+    assert.match(storefrontProblem(parsed("SCRAT_STOREFRONT: verified\nSCRAT_GRADE: C"), "C", true), /An earlier answer reported SCRAT_STOREFRONT: regression/);
+    assert.equal(storefrontProblem(parsed("SCRAT_STOREFRONT: unavailable\nSCRAT_GRADE: A"), "C", false), undefined);
+    assert.deepEqual(parsed("SCRAT_STOREFRONT: unavailable\nSCRAT_GRADE: A"), { text: "R.", ready: false, paths: [], outcome: "complete", grade: "A", verdict: undefined, storefront: "unavailable", issues: undefined });
+    f.loggie.processingPolls = 0;
+    await implement(1);
+    const pr = f.prs[0], names = (request) => request.request.tools.map((tool) => tool.function.name);
+    let pushes = 0;
+    const reviewOf = async (mode) => { if (pushes++) pushFile(pr.head.ref, "snippets/badge.liquid", `<span>${pushes}</span>\n`); f.reset(201, mode); const from = f.requests.length; await route(); const run = await success(); return { run, requests: f.requests.slice(from).filter((request) => request.context.action === "review_pr") }; };
+    const comment = () => f.botComments(201).find((entry) => entry.body.includes("<!-- scrat-review -->")).body;
+    const label = () => pr.labels.map((entry) => entry.name).filter((name) => / · /.test(name));
+    const corrections = (requests) => requests.filter((request) => JSON.stringify(request.request.messages.at(-1)).includes("Your previous final answer was not accepted"));
+    const outcome = ({ run }) => ({ grade: run.result.grade, storefront: run.result.storefront, line: comment().includes("SCRAT_STOREFRONT"), label: label() });
+    const section = "\n## Storefront preview\n", panel = JSON.stringify(["read", "grep", "find", "ls", "git", "read_base"]);
+
+    const verified = await reviewOf("storefront-verified");
+    assert.equal(new Set(verified.requests.map((request) => `${request.request.model}/${request.consolidating}`)).size, 3, "both reviewers and the consolidator ran");
+    for (const request of verified.requests) {
+      assert.deepEqual(names(request), [...JSON.parse(panel), "browser"]);
+      assert.match(request.request.tools.find((tool) => tool.function.name === "browser").function.description, /public https sites.*action=reset.*At most 40 actions and 600 seconds per session/s);
+      assert.ok(request.text.includes(section) && !request.text.includes("{{#storefront}}") && !request.text.includes("{{/storefront}}"));
+    }
+    const context = JSON.parse(readFileSync(verified.requests[0].context.files.storefront, "utf8")), preview = all(s.themePreviews).find((row) => !row.deletedAt);
+    assert.deepEqual(context, { url: `https://shop.example.test/?preview_theme_id=${preview.themeId}`, themeId: preview.themeId, headSha: pr.head.sha, available: true, problems: [], liveUrl: "https://shop.example.test/", devices: ["desktop", "mobile"], confirmationRuns: 1, regressionMaxGrade: "C" });
+    assert.ok(verified.requests[0].context.files.issue, "the reviewer has the linked issue");
+    assert.deepEqual(outcome(verified), { grade: "A", storefront: "verified", line: false, label: ["A · Strong"] }); assert.equal(corrections(verified.requests).length, 0);
+
+    const regression = await reviewOf("storefront-regression");
+    assert.deepEqual(outcome(regression), { grade: "C", storefront: "regression", line: false, label: ["C · Needs work"] });
+    const [correction] = corrections(regression.requests);
+    assert.equal(corrections(regression.requests).length, 1); assert.equal(correction.consolidating, true);
+    assert.match(JSON.stringify(correction.request.messages.at(-1)), /SCRAT_STOREFRONT: regression caps the grade at C.*SCRAT_STOREFRONT: verified, regression, or unavailable \(required for a complete review\)\\nSCRAT_GRADE/);
+    assert.deepEqual(regression.run.reviewers.map((reviewer) => [reviewer.result.storefront, reviewer.result.grade]), [["regression", "A"], ["regression", "A"]], "reviewers are not capped; the consolidated grade is");
+
+    const flip = await reviewOf("storefront-flip");
+    assert.deepEqual(outcome(flip), { grade: "C", storefront: "regression", line: false, label: ["C · Needs work"] });
+    assert.deepEqual(corrections(flip.requests).map((request) => /An earlier answer reported SCRAT_STOREFRONT: regression/.test(JSON.stringify(request.request.messages.at(-1)))), [false, true], "dropping regression after the cap is refused");
+
+    const missing = await reviewOf("storefront-missing-once");
+    assert.deepEqual(outcome(missing), { grade: "A", storefront: "verified", line: false, label: ["A · Strong"] });
+    assert.deepEqual(corrections(missing.requests).map((request) => [request.consolidating, /must include SCRAT_STOREFRONT/.test(JSON.stringify(request.request.messages.at(-1)))]), [[true, true]]);
+
+    const unavailable = await reviewOf("storefront-unavailable");
+    assert.deepEqual(outcome(unavailable), { grade: "A", storefront: "unavailable", line: false, label: ["A · Strong"] }); assert.equal(corrections(unavailable.requests).length, 0);
+
+    const split = await reviewOf("storefront-split");
+    assert.deepEqual(split.run.reviewers.map((reviewer) => reviewer.result.storefront), ["regression", "verified"]);
+    assert.deepEqual(outcome(split), { grade: "C", storefront: "regression", line: false, label: ["C · Needs work"] }, "the consolidator's line decides");
+    const consolidation = split.requests.find((request) => request.consolidating);
+    assert.match(consolidation.text, /re-run in the browser, after reset, only the storefront regressions and fix claims the reviewers report or disagree on/);
+    assert.match(consolidation.text, /"grade": "A",\s*"storefront": "regression"[\s\S]*"grade": "A",\s*"storefront": "verified"/);
+
+    f.loggie.wrongMd5.add("snippets/badge.liquid");
+    const mismatched = await reviewOf("normal");
+    assert.ok(mismatched.requests.length && mismatched.requests.every((request) => JSON.parse(readFileSync(request.context.files.storefront, "utf8")).available === false && !request.text.includes(section) && JSON.stringify(names(request)) === panel), "an unavailable preview lists storefront.json but gets no section and no browser");
+    assert.equal(mismatched.run.result.storefront, undefined); assert.equal(mismatched.run.result.grade, "B");
+    f.loggie.wrongMd5.clear();
+
+    branchOff("human-7", "assets/app.css", "body { color: blue; }\n"); f.addPr(7, "human-7", "human");
+    f.reset(7, "normal"); const from = f.requests.length; await route(); await success();
+    const human = f.requests.slice(from).filter((request) => request.context.action === "review_pr");
+    assert.ok(human.length && human.every((request) => request.context.item.number === 7 && request.context.files.storefront === undefined && !request.text.includes(section) && JSON.stringify(names(request)) === panel), "a human PR gets neither");
+
+    live.storefront.enabled = false;
+    const disabled = await reviewOf("normal");
+    const skill = readFileSync(resolve("app/skills/review_pr/SKILL.md"), "utf8").replace(/^\{\{#storefront\}\}\n[\s\S]*?^\{\{\/storefront\}\}\n/m, "").replaceAll("{{bot}}", "Scrat");
+    assert.ok(disabled.requests.length && disabled.requests.every((request) => request.context.item.number === 201 && request.context.files.storefront === undefined && request.text.startsWith(skill) && JSON.stringify(names(request)) === panel), "a disabled storefront gets the unchanged skill and tools");
   } },
   database: { title: "real PostgreSQL runs isolate databases, apply new migrations and remove resources", needsDocker: true, configure: [configureDatabase], run: async () => {
     const original = process.env.DATABASE_URL; f.addIssue(1); f.addIssue(2); f.enqueue(1, "implement"); f.enqueue(2, "implement");

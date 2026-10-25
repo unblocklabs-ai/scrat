@@ -11,7 +11,7 @@ import { triggerKinds, triggerSource } from "./triggers.ts";
 export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const toolNames = ["read", "grep", "find", "ls", "git", "read_base", "bash", "edit", "write", "http", "browser", "github_search"] as const;
 const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "history", "validation", "triage", "issue", "storefront"] as const;
-const effectNames = ["push", "pull_request", "comment", "labels", "pr_assessment", "issue", "slack_reply"] as const;
+const effectNames = ["push", "pull_request", "comment", "labels", "pr_assessment", "issue", "slack_reply", "site_map"] as const;
 const startEffectNames = ["slack_post"] as const;
 export type ThinkingLevel = (typeof thinkingLevels)[number];
 export type ToolName = (typeof toolNames)[number];
@@ -23,7 +23,7 @@ const list = <T extends TSchema>(items: T, minItems = 0) => Type.Array(items, { 
 export const modelSettings = Type.Object({ provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels) }, strict);
 export const retrySettings = Type.Object({ initialDelaySeconds: Type.Integer({ minimum: 1 }), maxDelaySeconds: Type.Integer({ minimum: 1 }) }, strict);
 const trigger = Type.Object({
-  source: Type.Enum(["github_items", "github_commits", "schedule"]), kind: Type.Enum(triggerKinds),
+  source: Type.Enum(["github_items", "github_commits", "schedule", "storefront"]), kind: Type.Enum(triggerKinds),
   item: Type.Optional(Type.Enum(["issue", "pr"])), author: Type.Optional(Type.String({ minLength: 1 })),
   grades: Type.Optional(list(Type.Enum(prGrades), 1)),
   manual: Type.Optional(Type.Boolean()), branch: Type.Optional(Type.String()),
@@ -73,7 +73,7 @@ function crossChecks(m: Resolved) {
   const problems: string[] = [];
   const need = (ok: boolean, message: string) => { if (!ok) problems.push(message); };
   const any = (list: readonly string[], names: readonly string[]) => names.some((name) => list.includes(name));
-  const items = t.source === "github_items", commits = t.source === "github_commits", scheduled = t.source === "schedule", slack = [...m.start ?? [], ...publish];
+  const items = t.source === "github_items", commits = t.source === "github_commits", scheduled = t.source === "schedule", storefront = t.source === "storefront", slack = [...m.start ?? [], ...publish];
   need(triggerSource(t.kind) === t.source, `trigger.kind ${t.kind} does not belong to source ${t.source}`);
   need(items === (t.item !== undefined), "trigger.item is required for github_items and forbidden for github_commits");
   need(!["pr_conflicts", "pr_feedback", "low_grade"].includes(t.kind) || (t.item === "pr" && t.author === "bot"), `trigger.kind ${t.kind} requires item: pr and author: bot`);
@@ -87,6 +87,8 @@ function crossChecks(m: Resolved) {
     try { nextTick(parseCron(t.cron), new Date(0)); parseWindow(t.window); } catch (error) { problems.push((error as Error).message); }
   }
   need(!scheduled || mode === "review", "a schedule trigger requires mode review");
+  need(!storefront || mode === "review", "a storefront trigger requires mode review");
+  need(storefront === publish.includes("site_map"), "the site_map effect and a storefront trigger require each other");
   need(t.grades === undefined || t.kind === "low_grade", "trigger.grades is only allowed with kind low_grade");
   need(t.kind !== "low_grade" || m.maxSelfRepairs !== undefined, "kind low_grade requires maxSelfRepairs");
   need(!commits || m.maxRangeCommits !== undefined, "source github_commits requires maxRangeCommits");
@@ -98,7 +100,7 @@ function crossChecks(m: Resolved) {
   problems.push(...entryProblems(m, m));
   need(tools.includes("read"), "tools must include read");
   need(tools.includes("http") === (m.http !== undefined), "the http tool and the http setting require each other");
-  need(tools.includes("browser") === (m.browser !== undefined), "the browser tool and the browser setting require each other");
+  need(tools.includes("browser") === (m.browser !== undefined) || (!m.browser && files.includes("storefront")), "the browser tool and the browser setting require each other, except that a manifest listing the storefront file may list browser alone");
   for (const host of [...m.browser?.navigationHosts ?? [], ...m.browser?.resourceHosts ?? []]) { const problem = hostProblem(host); if (problem) problems.push(`browser: ${problem}`); }
   need(!tools.includes("github_search") || mode === "review", "github_search requires mode review");
   need(!tools.includes("read_base") || (mode === "review" && (agent === "panel" || m.context === "change")), "read_base requires a review with agent: panel or context: change");
@@ -119,7 +121,7 @@ function crossChecks(m: Resolved) {
   need(!files.includes("history") || !publish.includes("pr_assessment"), "files: history is not allowed with the pr_assessment effect");
   need(!files.includes("triage") || t.item === "issue", "files: triage requires trigger.item issue");
   need(!files.includes("issue") || t.item === "pr", "files: issue requires trigger.item pr");
-  need(!files.includes("storefront") || publish.includes("pr_assessment"), "files: storefront requires the pr_assessment effect");
+  need(!files.includes("storefront") || publish.includes("pr_assessment") || storefront, "files: storefront requires the pr_assessment effect or a storefront trigger");
   return problems;
 }
 

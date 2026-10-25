@@ -38,7 +38,7 @@ type GithubEffectContext = EffectContext & {
   commitSha?: string;
 };
 
-type SlackEffectContext = EffectContext & {
+type SubjectEffectContext = EffectContext & {
   subject: Subject;
   task: Task;
   run: Run;
@@ -147,9 +147,13 @@ const slackReply = {
     await reactToCommitRoot(subject, name);
     saveReceipt({ slackReaction: name });
   },
-} satisfies Effect<SlackEffectContext>;
+} satisfies Effect<SubjectEffectContext>;
 
-const effects = { push, pull_request: pullRequest, comment, labels, pr_assessment: prAssessment, issue, slack_reply: slackReply } satisfies Record<EffectName, Effect<never>>;
+const siteMap = {
+  apply: async (context) => (await import("./storefront-site.ts")).saveSiteMap(context),
+} satisfies Effect<SubjectEffectContext>;
+
+const effects = { push, pull_request: pullRequest, comment, labels, pr_assessment: prAssessment, issue, slack_reply: slackReply, site_map: siteMap } satisfies Record<EffectName, Effect<never>>;
 
 export async function applyEffects<Context extends EffectContext>(names: readonly EffectName[], context: Context) {
   const list = names.map((name) => effects[name]) as unknown as readonly Effect<Context>[];

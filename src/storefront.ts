@@ -149,7 +149,11 @@ async function syncFiles(preview: ThemePreview, { repositoryPath, baseSha, headS
     }
     if (!live?.checksums.has(path)) return { checksum: null };
     if (live.checksums.get(path) === current(path)) return { checksum: current(path) };
-    const bytes = await live.bytes(path);
+    const bytes = await live.bytes(path), expected = live.checksums.get(path);
+    if (expected && md5(bytes) !== expected) {
+      problems.push(`\`${path}\` read from the live theme does not match its checksum, so Scrat did not copy it`);
+      return { checksum: current(path) };
+    }
     return { bytes, checksum: md5(bytes) };
   };
   const mark = (paths: string[]) => {

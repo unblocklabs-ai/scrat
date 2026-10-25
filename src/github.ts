@@ -331,10 +331,17 @@ export class GitHubRepository {
   async setDeploymentStatus(deploymentId: number, { state, environmentUrl, description }: { state: "success" | "failure" | "inactive"; environmentUrl?: string; description: string }, references: EventReferences = {}) {
     await this.write("github.create_deployment_status", { deploymentId, state }, references, "deployments", {
       inspect: () => assertPublishable(description, environmentUrl ?? ""),
-      request: ({ github, owner, repo }) => github.rest.repos.createDeploymentStatus({
-        owner, repo, deployment_id: deploymentId, state, description, auto_inactive: false, ...(environmentUrl ? { environment_url: environmentUrl } : {}),
-      }),
-      journal: () => ({ event: { type: "github.deployment_status_created", data: { repository: this.repository, deploymentId, state } } }),
+      request: async ({ github, owner, repo }) => {
+        try {
+          return await github.rest.repos.createDeploymentStatus({
+            owner, repo, deployment_id: deploymentId, state, description, auto_inactive: false, ...(environmentUrl ? { environment_url: environmentUrl } : {}),
+          });
+        } catch (error) {
+          if (state !== "inactive" || errorStatus(error) !== 404) throw error;
+          return { status: 404, headers: {} };
+        }
+      },
+      journal: ({ status }) => ({ event: status === 404 ? undefined : { type: "github.deployment_status_created", data: { repository: this.repository, deploymentId, state } } }),
     });
   }
 

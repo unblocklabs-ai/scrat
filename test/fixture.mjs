@@ -384,6 +384,7 @@ export async function fixture(scenario, spec) {
         return reply({ id: deployment.id, ref: body.ref, environment: body.environment }, 201);
       }
       const deployment = deployments.find((entry) => entry.id === Number(match[1]));
+      if (!deployment) return reply({ message: "Not Found" }, 404);
       deployment.statuses.push({ state: body.state, environmentUrl: body.environment_url, description: body.description, autoInactive: body.auto_inactive });
       writes.push({ type: "deployment_status", id: deployment.id, state: body.state });
       return reply({ id: deployment.statuses.length, state: body.state }, 201);

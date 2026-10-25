@@ -3782,8 +3782,9 @@ export const scenarios = {
     assert.deepEqual(live().problems, [`theme \`scrat/pr-201\` (ID ${preview.themeId}) is no longer unpublished (role MAIN), so Scrat does not write to it`]);
     assert.match(comment(), /preview unavailable for .*is no longer unpublished \(role MAIN\)/s); assert.equal(states().at(-1), "failure");
     from = f.loggie.requests.length;
-    pr.state = "closed";
+    pr.state = "closed"; f.deployments.pop();
     const closed = await logged(route);
+    assert.ok(!closed.some((line) => line.event === "storefront.deployment_failed"), "a deployment GitHub no longer has counts as inactive");
     assert.deepEqual(f.loggie.requests.slice(from).map((request) => request.field), ["theme"], "a published preview is not deleted");
     assert.ok(f.loggie.themes.has(preview.themeGid)); assert.equal(closed.find((line) => line.event === "storefront.preview_kept").role, "MAIN");
     assert.match(comment(), /Shopify preview removed:.*is no longer unpublished \(role MAIN\), so Scrat left it in the store/s);

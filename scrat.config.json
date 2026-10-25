@@ -57,7 +57,7 @@
     "store": "",
     "publicHost": "",
     "siteMapMaxAgeDays": 30,
-    "limits": { "browserSteps": 40, "browserSeconds": 600 },
+    "limits": { "browserSteps": 40, "browserSeconds": 600, "confirmationRuns": 1 },
     "loggie": { "url": "https://app.loggie.ai", "slug": "", "timeoutSeconds": 60 },
     "preview": {
       "themeNamePrefix": "scrat/",
@@ -68,7 +68,9 @@
       "uploadBatch": 50,
       "uploadBatchBytes": 8388608,
       "requestTimeoutSeconds": 180
-    }
+    },
+    "devices": ["desktop", "mobile"],
+    "lighthouse": { "runs": 3, "pages": ["/"], "timeoutSeconds": 600 }
   },
   "slack": {
     "enabled": false,

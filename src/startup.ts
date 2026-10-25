@@ -86,6 +86,8 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
     if (storefront.publicHost.trim() && !/^[\w.-]+(?::\d+)?$/.test(storefront.publicHost)) problems.push("storefront.publicHost must be a host name, without a scheme or path");
     if (!URL.canParse(storefront.loggie.url)) problems.push("storefront.loggie.url must be an absolute URL");
     try { new RegExp(storefront.preview.themePaths); } catch { problems.push("storefront.preview.themePaths is not a valid regular expression"); }
+    const viewports = Object.keys(settings.tools?.browser.viewports ?? {}), unknown = storefront.devices.filter((device) => !viewports.includes(device));
+    if (unknown.length) problems.push(`storefront.devices ${unknown.join(", ")} must name tools.browser.viewports presets (${viewports.join(", ")})`);
   }
   for (const [name, { apiKey }] of Object.entries(settings.providers ?? {})) {
     if (apiKey && !/\$\{\w+\}/.test(apiKey)) logger.warn({ provider: name }, "Provider apiKey is not a ${VAR} placeholder; it will not be redacted from output");
@@ -107,6 +109,9 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
       }
       if (slack && process.env.SLACK_BOT_TOKEN) await checkSlackAuth(`${action}: Slack`);
       if (manifest.browser || (storefront?.enabled && manifest.tools.includes("browser"))) await loadPlaywright().catch((error: unknown) => { problems.push(`${action}: ${errorMessage(error)}`); });
+      if (storefront?.enabled && manifest.publish.includes("slack_reply")) {
+        for (const load of [loadPlaywright, (await import("./lighthouse.ts")).loadLighthouse]) await load().catch((error: unknown) => { problems.push(`${action}: storefront: ${errorMessage(error)}`); });
+      }
       const skill = skillPath(manifest, entry.skill);
       if (!await access(skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${skill}`);
     }

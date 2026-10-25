@@ -132,6 +132,45 @@ const configureStorefront = (config) => {
   mkdirSync("deployment"); config.actions.directory = resolve("deployment");
   writeFileSync("deployment/review_pr.yaml", readFileSync("app/actions/review_pr.yaml", "utf8").replace(/^files: \[(.*)\]$/m, "files: [$1, storefront]").replace(/^skill: .*$/m, `skill: ${resolve("app/skills/review_pr/SKILL.md")}`));
 };
+const configureMainStorefront = (config) => {
+  Object.assign(config.storefront, { enabled: true, store: "fixture.myshopify.com", publicHost: "shop.example.test" });
+  config.storefront.lighthouse.runs = 2;
+};
+const fakeStorefrontPackages = () => {
+  const fakes = globalThis.storefrontFakes = { launches: [], visits: [], audits: [], scores: { mobile: [], desktop: [] }, look: "v1" };
+  const pkg = (name, source) => {
+    const directory = resolve("app/src/node_modules", name); mkdirSync(directory, { recursive: true });
+    writeFileSync(resolve(directory, "package.json"), JSON.stringify({ name, type: "module", main: "index.js" })); writeFileSync(resolve(directory, "index.js"), source);
+  };
+  pkg("playwright-core", `import { writeFileSync } from "node:fs";
+const fakes = globalThis.storefrontFakes;
+export const chromium = {
+  executablePath: () => process.execPath,
+  async launch({ args }) {
+    fakes.launches.push(args);
+    let current = "about:blank", width = 0;
+    const page = {
+      goto: async (url) => { current = url; fakes.visits.push(url); return { status: () => 200 }; },
+      title: async () => "Fixture shop", url: () => current, innerText: async () => "Shop", innerHTML: async () => "<html></html>",
+      screenshot: async ({ path }) => writeFileSync(path, "png " + new URL(current).pathname + " " + width + " " + fakes.look),
+      waitForLoadState: async () => {}, on: () => {}, off: () => {}, setViewportSize: async (size) => { width = size.width; },
+      locator: () => ({ count: async () => 1 }), click: async () => {}, fill: async () => {}, selectOption: async () => {},
+    };
+    return { newContext: async ({ viewport }) => { width = viewport.width; return { route: async () => {}, newPage: async () => page, close: async () => {} }; }, close: async () => {} };
+  },
+};
+`);
+  pkg("lighthouse", `const fakes = globalThis.storefrontFakes;
+export const desktopConfig = { extends: "lighthouse:default", settings: { formFactor: "desktop" } };
+export default async function lighthouse(url, flags, settings) {
+  const device = settings === desktopConfig ? "desktop" : "mobile", next = fakes.scores[device].shift();
+  fakes.audits.push({ url, device, port: flags.port, output: flags.output, categories: flags.onlyCategories });
+  if (typeof next === "string") throw new Error(next);
+  return { lhr: { categories: Object.fromEntries(Object.entries(next).map(([id, score]) => [id, { score }])) }, report: JSON.stringify({ url, device, next }) };
+}
+`);
+  return fakes;
+};
 const withTools = (text, tools) => text.replace(/^tools: .*\n/m, "").trimEnd() + `\ntools: ${tools}\n`;
 const configureManifestDirectory = (config) => {
   const directory = resolve("deployment"), shipped = (name) => readFileSync(`app/actions/${name}.yaml`, "utf8"), field = (text, key, value) => text.replace(new RegExp(`^${key}: .*$`, "m"), `${key}: ${value}`);
@@ -2722,6 +2761,12 @@ export const scenarios = {
     if (!await import("playwright-core").then(() => true, () => false)) await startup((c) => { c.storefront.enabled = true; }, /storefront_discover: The browser tool needs the optional playwright-core package/);
     schema((c) => { c.storefront.limits.browserSeconds = 0; }, /storefront\.limits\.browserSeconds: must be >= 1/);
     schema((c) => { c.storefront.siteMapMaxAgeDays = 1.5; }, /storefront\.siteMapMaxAgeDays: must be integer/);
+    schema((c) => { c.storefront.lighthouse.pages = ["home"]; }, /storefront\.lighthouse\.pages\.0: must match pattern/);
+    schema((c) => { c.storefront.limits.confirmationRuns = 0; }, /storefront\.limits\.confirmationRuns: must be >= 1/);
+    await startup((c) => { c.storefront.enabled = true; c.storefront.devices = ["desktop", "tablet"]; }, /storefront\.devices tablet must name tools\.browser\.viewports presets \(desktop, mobile\)/);
+    if (!await import("lighthouse").then(() => true, () => false)) {
+      await startup((c) => { c.storefront.enabled = true; Object.assign(c.actions.review_base_change, { enabled: true, channel: "C0123456789" }); }, /review_base_change: storefront: Storefront Lighthouse runs need the optional lighthouse package, which is not installed/);
+    }
     const key = process.env.GITHUB_APP_PRIVATE_KEY;
     delete process.env.GITHUB_APP_PRIVATE_KEY;
     await assert.rejects(validateStaticConfig(f.config), /github\.auth is "app" but GITHUB_APP_PRIVATE_KEY is not set/);
@@ -3061,6 +3106,143 @@ export const scenarios = {
   commit_review_no_start: { title: "a commit manifest without a start slot posts no thread root before the agent and the reply creates the root", configure: [configureCommitSource, configureNoStart], run: () => commitReview("no_start") },
   commit_review_panel: { title: "a panel commit review runs two reviewers and a consolidator without requiring a grade and replies once", configure: [configureCommitSource, configureCommitPanel], run: () => commitReview("panel") },
   commit_review_slack_down: { title: "a failed root post still reviews and the reply creates the root, while a failed reply fails at publishing and retries without a new session or second root", configure: [configureCommitSource], run: () => commitReview("slack_down") },
+  commit_review_storefront: { title: "with the storefront enabled, a main change whose theme files match the live MAIN theme gets a browser review of the live store against stored baselines and Lighthouse averages with deltas, reported as a concise Slack block and a full commit comment edited in place; a confirmed breakage turns the verdict red once per fingerprint, a live theme that does not match yet skips with one line, and a disabled storefront changes nothing", seed: seedTheme, configure: [configureCommitSource, configureMainStorefront], run: async () => {
+    const fakes = fakeStorefrontPackages(); process.env.LOGGIE_API_KEY = f.loggie.key;
+    const { pollCommits } = await f.app("commit-source.ts"), { config: live } = await f.app("config.ts");
+    const seed = resolve("seed"), remote = resolve("remote.git"), site = "https://shop.example.test";
+    const theme = Object.fromEntries(Object.entries(themeFiles).filter(([path]) => path !== "README.md"));
+    const replies = () => f.slack.calls.filter((call) => call.method === "chat.postMessage" && call.body.thread_ts).map((call) => call.body.text);
+    const reactions = () => f.slack.calls.filter((call) => call.method === "reactions.add").map((call) => call.body.name);
+    const sessions = () => f.requests.filter((request) => request.context.storefront);
+    const reports = () => f.written("commit_comment");
+    const state = (path) => readFileSync(resolve("data/storefront", path), "utf8"), json = (path) => JSON.parse(state(path));
+    const scores = (performance, accessibility, practices, seo) => ({ performance, accessibility, "best-practices": practices, seo });
+    const code = "The change looks safe on `main`.\nSCRAT_VERDICT: clean\nSCRAT_STATUS: complete", codeText = "The change looks safe on `main`.";
+    const push = async (files, synced = true) => {
+      for (const [path, text] of Object.entries(files)) { mkdirSync(resolve(seed, dirname(path)), { recursive: true }); writeFileSync(resolve(seed, path), text); }
+      git(seed, "add", "."); commit(seed, "Change " + Object.keys(files).join(", ")); git(seed, "push", remote, "main");
+      if (synced) { Object.assign(theme, Object.fromEntries(Object.entries(files).filter(([path]) => path !== "README.md"))); f.loggie.setLive(theme); }
+      f.reset(0, "normal"); f.loggie.requests.length = 0;
+      assert.equal(await pollCommits(), 1);
+      return git(remote, "rev-parse", "main");
+    };
+    const breakage = (verdict) => "Add to cart is broken on product pages.\n\n## Checked\n- `/products/tee` on the purchase path.\nSCRAT_ISSUE_BEGIN\ntitle: Add to cart does nothing on mobile\nfingerprint: cart:add\n\nClicked Add to cart three times after reset; the cart stayed empty.\nSCRAT_ISSUE_END\n"
+      + `SCRAT_VERDICT: ${verdict}\nSCRAT_STATUS: complete`;
+    const link = (run) => `\n<${run.publication.storefrontReportUrl}|Full storefront report>`;
+    f.loggie.setLive(theme);
+    assert.equal(await pollCommits(), 0);
+    const previous = git(remote, "rev-parse", "main");
+
+    fakes.scores.mobile.push(scores(0.6, 0.9, 0.96, 1), scores(0.7, 0.9, 0.96, 1));
+    fakes.scores.desktop.push(scores(0.9, 0.95, 1, 1), scores(0.95, 0.95, 1, 1));
+    const first = await push({ "sections/hero.liquid": "<section>Hero</section>\n", "assets/app.css": "body { color: red; }\n", "README.md": "# Theme v2\n" });
+    f.script = [code,
+      { name: "browser", args: { action: "goto", url: site + "/" } },
+      { name: "browser", args: { action: "screenshot", viewport: "desktop", fullPage: true } },
+      { name: "browser", args: { action: "screenshot", viewport: "mobile", fullPage: true } },
+      { name: "browser", args: { action: "goto", url: site + "/products/tee?variant=1" } },
+      { name: "browser", args: { action: "screenshot", viewport: "desktop", fullPage: true } },
+      { name: "browser", args: { action: "reset" } },
+      { name: "browser", args: { action: "goto", url: site + "/cart" } },
+      "The home page shows the new hero; nothing else changed.\n• `/` desktop and mobile: a hero section sits above the collection grid, as the commit intends.\n\n## Checked\n- `/` because the commit adds `sections/hero.liquid`.\nSCRAT_VERDICT: clean\nSCRAT_STATUS: complete"];
+    const r1 = await success();
+    assert.deepEqual(f.loggie.requests.map(({ field, variables }) => [field, variables.filenames]), [["themes", undefined], ["theme", ["assets/app.css", "sections/hero.liquid"]]], "only the changed theme files are compared, and nothing is written");
+    const [session] = sessions(), browserTool = session.request.tools.find((tool) => tool.function.name === "browser");
+    assert.deepEqual(session.context.storefront, { liveUrl: site + "/", sha: first, previousSha: previous, devices: ["desktop", "mobile"], confirmationRuns: 1, knownBreakages: [] });
+    assert.deepEqual(session.context.diffPaths, ["README.md", "assets/app.css", "sections/hero.liquid"]);
+    assert.deepEqual([session.context.files.siteMap, session.context.files.baselines], [undefined, undefined], "the first run has no site map and no baselines");
+    assert.deepEqual(session.request.tools.map((tool) => tool.function.name), ["read", "git", "browser"]); assert.match(session.text, /# Live storefront review/);
+    assert.match(browserTool.function.description, /public https sites.*action=reset.*At most 40 actions and 600 seconds per session/s);
+    assert.ok(f.requests.filter((request) => !request.context.storefront).every((request) => !request.request.tools.some((tool) => tool.function.name === "browser")), "the code review itself gets no browser");
+    assert.match(r1.publication.storefrontReportUrl, new RegExp(`^https://github\\.com/fixture/project/commit/${first}#commitcomment-\\d+$`));
+    assert.deepEqual(replies(), [`${codeText}\n\n*Storefront* on ${first.slice(0, 7)}: The home page shows the new hero; nothing else changed.\n`
+      + "• `/` desktop and mobile: a hero section sits above the collection grid, as the commit intends.\n"
+      + "• Lighthouse mobile (2 runs, no previous run): Performance 65, Accessibility 90, Best Practices 96, SEO 100\n"
+      + "• Lighthouse desktop (2 runs, no previous run): Performance 93, Accessibility 95, Best Practices 100, SEO 100" + link(r1)]);
+    assert.deepEqual(reactions(), ["white_check_mark"]); assert.equal(r1.result.verdict, "clean");
+    const [report] = reports(), runs = `data/runs/${r1.id}`;
+    assert.equal(report.sha, first); assert.ok(report.body.endsWith("<!-- scrat-storefront -->"));
+    for (const text of [`## Storefront review of ${first}\n\nThe live \`MAIN\` theme matches this commit for the 2 theme file(s) the change touches.\n\nThe home page shows the new hero`,
+      "## Checked\n- `/` because the commit adds `sections/hero.liquid`.", "| mobile | 2 of 2 | 65 | 90 | 96 | 100 |", "| desktop | 2 of 2 | 93 | 95 | 100 | 100 |",
+      `| mobile | \`/\` | 1 | 60 | 90 | 96 | 100 | \`${runs}/lighthouse/mobile-1-1.json\` |`, `| desktop | \`/\` | 2 | 95 | 95 | 100 | 100 | \`${runs}/lighthouse/desktop-1-2.json\` |`,
+      `3 screenshot(s) under \`${runs}\`:\n- \`${site}/\` at desktop: \`${runs}/screenshot-desktop-1.png\`\n- \`${site}/\` at mobile: \`${runs}/screenshot-mobile-2.png\`\n- \`${site}/products/tee?variant=1\` at desktop: \`${runs}/screenshot-desktop-3.png\``,
+      "3 baseline screenshot(s) updated under `data/storefront/baselines`."]) assert.ok(report.body.includes(text), text);
+    assert.deepEqual([state("baselines/home/desktop.png"), state("baselines/home/mobile.png"), state("baselines/products_tee/desktop.png")], ["png / 1280 v1", "png / 390 v1", "png /products/tee 1280 v1"]);
+    assert.deepEqual(json("baselines/index.json"), { home: { url: site + "/", devices: { desktop: first, mobile: first } }, products_tee: { url: site + "/products/tee", devices: { desktop: first } } });
+    assert.deepEqual(json("lighthouse.json"), { mobile: { sha: first, scores: scores(65, 90, 96, 100) }, desktop: { sha: first, scores: scores(93, 95, 100, 100) } });
+    assert.deepEqual(JSON.parse(readFileSync(`${runs}/lighthouse/mobile-1-1.json`, "utf8")), { url: site + "/", device: "mobile", next: scores(0.6, 0.9, 0.96, 1) }, "each run's report is kept as evidence");
+    assert.deepEqual(fakes.audits.map(({ url, device, output, categories }) => [url, device, output, categories.join(",")]),
+      [...Array(2).fill([site + "/", "mobile", "json", "performance,accessibility,best-practices,seo"]), ...Array(2).fill([site + "/", "desktop", "json", "performance,accessibility,best-practices,seo"])]);
+    const debugging = fakes.launches.filter((args) => args.length), browsing = fakes.launches.filter((args) => !args.length);
+    assert.deepEqual(debugging.map(([flag]) => Number(/^--remote-debugging-port=(\d+)$/.exec(flag)[1])), fakes.audits.map(({ port }) => port), "each Lighthouse run drives its own Chromium through its debugging port");
+    assert.equal(browsing.length, 2, "the storefront browser pins no hosts and a reset opens a fresh one");
+    assert.deepEqual(fakes.visits, [site + "/", site + "/products/tee?variant=1", site + "/cart"]);
+
+    mkdirSync("data/storefront", { recursive: true }); writeFileSync("data/storefront/site.md", "Site map\n- `/products/<handle>`: product page\n");
+    fakes.look = "v2";
+    fakes.scores.mobile.push(scores(0.62, 0.9, 0.96, 1), scores(0.62, 0.9, 0.96, 1)); fakes.scores.desktop.push(scores(0.9, 0.95, 1, 1), scores(0.9, 0.95, 1, 1));
+    const second = await push({ "sections/hero.liquid": "<section>Hero 2</section>\n" });
+    f.script = [code, { name: "browser", args: { action: "goto", url: site + "/" } }, { name: "browser", args: { action: "screenshot", viewport: "desktop", fullPage: true } }, breakage("breaking")];
+    const r2 = await success(), secondSession = sessions().at(-1);
+    assert.equal(readFileSync(secondSession.context.files.siteMap, "utf8"), "Site map\n- `/products/<handle>`: product page\n");
+    const baselines = JSON.parse(readFileSync(secondSession.context.files.baselines, "utf8"));
+    assert.deepEqual(Object.keys(baselines), ["home", "products_tee"]); assert.deepEqual(baselines.home.screenshots.mobile.sha, first);
+    assert.equal(readFileSync(baselines.home.screenshots.desktop.path, "utf8"), "png / 1280 v1", "the agent reads the previous run's screenshot from its own context directory");
+    assert.equal(replies().at(-1), `${codeText}\n\n*Storefront* on ${second.slice(0, 7)}: Add to cart is broken on product pages.\n• New breakage \`cart:add\`: Add to cart does nothing on mobile\n`
+      + "• Lighthouse mobile (2 runs): Performance 62 (-3), Accessibility 90 (±0), Best Practices 96 (±0), SEO 100 (±0)\n"
+      + "• Lighthouse desktop (2 runs): Performance 90 (-3), Accessibility 95 (±0), Best Practices 100 (±0), SEO 100 (±0)" + link(r2));
+    assert.equal(reactions().at(-1), "large_red_square"); assert.equal(r2.result.verdict, "breaking");
+    assert.equal(state("baselines/home/desktop.png"), "png / 1280 v1", "a run with a breakage keeps the baselines");
+    assert.deepEqual(json("alerts.json"), { "cart:add": { title: "Add to cart does nothing on mobile", sha: second } });
+    for (const text of ["### Confirmed breakage\n\n- **Add to cart does nothing on mobile** (`cart:add`, new on this commit)\n\n  Clicked Add to cart three times after reset", "were kept, because this run found a breakage"]) assert.ok(reports().at(-1).body.includes(text), text);
+
+    fakes.scores.mobile.push(scores(0.62, 0.9, 0.96, 1), scores(0.62, 0.9, 0.96, 1)); fakes.scores.desktop.push("Chrome crashed", scores(0.92, 0.95, 1, 1));
+    const third = await push({ "snippets/price.liquid": "<span>price</span>\n" });
+    f.script = [code, breakage("breaking")];
+    const r3 = await success();
+    assert.deepEqual(sessions().at(-1).context.storefront.knownBreakages, [{ fingerprint: "cart:add", title: "Add to cart does nothing on mobile", since: second }]);
+    assert.equal(replies().at(-1), `${codeText}\n\n*Storefront* on ${third.slice(0, 7)}: Add to cart is broken on product pages.\n• Still broken since ${second.slice(0, 7)} \`cart:add\`: Add to cart does nothing on mobile\n`
+      + "• Lighthouse mobile (2 runs): Performance 62 (±0), Accessibility 90 (±0), Best Practices 96 (±0), SEO 100 (±0)\n"
+      + "• Lighthouse desktop (1 of 2 runs): Performance 92 (+2), Accessibility 95 (±0), Best Practices 100 (±0), SEO 100 (±0)" + link(r3));
+    assert.equal(reactions().at(-1), "large_orange_square", "a breakage already reported raises no new red alert"); assert.equal(r3.result.verdict, "concerns");
+    assert.deepEqual(json("alerts.json"), { "cart:add": { title: "Add to cart does nothing on mobile", sha: second } });
+    for (const text of [`(\`cart:add\`, first reported on ${second})`, "| desktop | `/` | 1 | - | - | - | - | Chrome crashed |", "| desktop | 1 of 2 | 92 (+2) | 95 (±0) | 100 (±0) | 100 (±0) |"]) assert.ok(reports().at(-1).body.includes(text), text);
+
+    fakes.scores.mobile.push(scores(0.6, 0.9, 0.96, 1), scores(0.6, 0.9, 0.96, 1)); fakes.scores.desktop.push(scores(0.9, 0.95, 1, 1), scores(0.9, 0.95, 1, 1));
+    const fourth = await push({ "snippets/price.liquid": "<span>price 2</span>\n" });
+    f.script = [code, "The cart works again.\n\n## Checked\n- `/cart`.\nSCRAT_VERDICT: clean\nSCRAT_STATUS: complete"];
+    f.slack.down = true;
+    const failed = await run(), commented = reports().length, used = f.requests.length;
+    assert.equal(failed.stage, "publishing"); assert.ok(failed.publication.storefrontReportUrl); assert.equal(failed.publication.slackReplyTs, undefined);
+    f.slack.down = false; tasks.retryTask(failed.taskId);
+    const r4 = await success();
+    assert.equal(reports().length, commented, "a retried publication posts the commit comment once"); assert.equal(f.requests.length, used);
+    assert.equal(replies().at(-1), `${codeText}\n\n*Storefront* on ${fourth.slice(0, 7)}: The cart works again.\n`
+      + "• Lighthouse mobile (2 runs): Performance 60 (-2), Accessibility 90 (±0), Best Practices 96 (±0), SEO 100 (±0)\n"
+      + "• Lighthouse desktop (2 runs): Performance 90 (-2), Accessibility 95 (±0), Best Practices 100 (±0), SEO 100 (±0)" + link(r4));
+    assert.deepEqual(json("alerts.json"), {}, "a clean run clears the alerts");
+    assert.ok(reports().at(-1).body.includes("0 baseline screenshot(s) updated"));
+    fakes.scores.mobile.push(scores(0.6, 0.9, 0.96, 1), scores(0.6, 0.9, 0.96, 1)); fakes.scores.desktop.push(scores(0.9, 0.95, 1, 1), scores(0.9, 0.95, 1, 1));
+    f.reset(0, "normal"); f.script = [code, "The cart still works.\nSCRAT_VERDICT: clean\nSCRAT_STATUS: complete"];
+    tasks.enqueueTask({ subjectId: f.row(s.tasks, r4.taskId).subjectId, action: "review_base_change", reason: "Review again", input: f.row(s.tasks, r4.taskId).input });
+    await success();
+    assert.equal(reports().length, commented, "a second review of the same commit edits its storefront comment");
+    assert.deepEqual(f.written("commit_comment_update").map(({ body }) => body.includes("The cart still works.")), [true]);
+
+    const counts = () => [sessions().length, fakes.audits.length, reports().length];
+    const before = counts(), fifth = await push({ "assets/app.css": "body { color: blue; }\n" }, false);
+    f.script = [code];
+    await success();
+    assert.equal(replies().at(-1), `${codeText}\n\n*Storefront*: the live theme does not match ${fifth.slice(0, 7)} yet (1 of 1 changed theme files differ), so the visual review and Lighthouse were skipped.`);
+    assert.deepEqual(counts(), before, "a live theme that does not match yet gets no browser review, Lighthouse run or commit comment");
+    assert.equal(reactions().at(-1), "white_check_mark");
+
+    live.storefront.enabled = false;
+    await push({ "assets/app.css": "body { color: green; }\n" });
+    f.script = [code];
+    await success();
+    assert.equal(replies().at(-1), codeText); assert.equal(f.loggie.requests.length, 0); assert.deepEqual(counts(), before, "a disabled storefront changes nothing");
+  } },
   manifests: { title: "every action is loaded from a validated manifest, malformed manifests are rejected with file and path, and local overrides reach the runtime", run: async () => {
     const { readManifests } = await f.app("manifests.ts");
     const { config: live, isActionEnabled } = await f.app("config.ts");
@@ -3376,6 +3558,9 @@ export const scenarios = {
       assert.equal(JSON.parse(textOf(await act(bound, { action: "screenshot" }))).themeId, undefined, html);
     }
     assert.ok(bound.state.timeouts.length > 0 && bound.state.timeouts.every((timeout) => timeout === 30000));
+    const ledger = readFileSync(resolve("ctx/screenshots.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(ledger.slice(0, 3), [plainShot, { path: mobileShot.path, viewport: "mobile", url: mobileShot.url }, { path: desktopShot.path, viewport: "desktop", url: desktopShot.url }]);
+    assert.equal(ledger.length, 7, "every screenshot is recorded with its viewport and URL");
     await assert.rejects(act(make({ contextDir: undefined }), { action: "screenshot" }), /no context directory/);
     const unrestricted = make({ settings: undefined });
     assert.match(unrestricted.tool.description, /^Drive a headless browser on public https sites\. IP addresses, local host names, explicit ports and URLs with credentials are blocked\./);
@@ -3396,6 +3581,14 @@ export const scenarios = {
     await assert.rejects(act(slow, { action: "text" }), /limited to 1 seconds per session/);
     await assert.rejects(act(slow, { action: "goto", url: "https://shop.example.test/" }), /limited to 1 seconds per session/);
     assert.equal(slow.state.closed, true); assert.equal(slow.state.visited.length, 1);
+    const fresh = make({ limits: { steps: 10, milliseconds: 1000 } });
+    await act(fresh, { action: "goto", url: "https://shop.example.test/" });
+    assert.deepEqual(JSON.parse(textOf(await act(fresh, { action: "reset" }))), { reset: true });
+    assert.equal(fresh.state.closed, true); fresh.state.contextOptions = undefined;
+    await act(fresh, { action: "goto", url: "https://shop.example.test/cart" });
+    assert.ok(fresh.state.contextOptions, "the action after a reset opens a fresh browser context");
+    await sleep(1100);
+    await assert.rejects(act(fresh, { action: "reset" }), /limited to 1 seconds per session/, "a reset does not restart the session clock");
     const { config: liveConfig } = await f.app("config.ts"); liveConfig.tools.browser.steps = 2;
     const configured = make();
     for (let n = 0; n < 2; n++) await act(configured, { action: "goto", url: "https://shop.example.test/" });

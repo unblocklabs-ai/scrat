@@ -5,7 +5,7 @@ import { config, isBotLogin } from "./config.ts";
 import { recordEvent, type EventReferences, type JournalEvent } from "./events.ts";
 import { labelName } from "./labels.ts";
 import { logger, withOperation } from "./logging.ts";
-import { fingerprintMarker, inlineCommentId, issueCommentId, reviewCommentId, withMarker } from "./markers.ts";
+import { endsWithMarker, fingerprintMarker, inlineCommentId, issueCommentId, reviewCommentId, withMarker } from "./markers.ts";
 import type { GithubComment, GithubContext, GithubIssue, GithubItem, GithubPullRequest } from "./github-types.ts";
 import { errorStatus } from "./errors.ts";
 import { assertConfiguredRepository } from "./repository.ts";
@@ -376,5 +376,24 @@ export class GitHubRepository {
       }),
     });
     return pullRequestView(response.data);
+  }
+
+  async upsertCommitComment(sha: string, body: string, marker: string, references: EventReferences = {}) {
+    const marked = withMarker(body, marker);
+    const response = await this.write("github.commit_comment", { sha }, references, "contents_write", {
+      inspect: () => assertPublishable(marked),
+      request: async ({ github, owner, repo }) => {
+        const existing = (await github.paginate(github.rest.repos.listCommentsForCommit, { owner, repo, commit_sha: sha, per_page: 100 }))
+          .findLast((comment) => isBotLogin(comment.user?.login) && endsWithMarker(comment.body, marker));
+        return existing
+          ? github.rest.repos.updateCommitComment({ owner, repo, comment_id: existing.id, body: marked })
+          : github.rest.repos.createCommitComment({ owner, repo, commit_sha: sha, body: marked });
+      },
+      journal: ({ data }) => ({
+        event: { type: "github.commit_comment_written", data: { repository: this.repository, sha, commentId: data.id, url: data.html_url } },
+        details: { commentId: data.id },
+      }),
+    });
+    return response.data.html_url;
   }
 }

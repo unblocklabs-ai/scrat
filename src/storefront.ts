@@ -39,7 +39,7 @@ const environment = "shopify-preview", unverified = "";
 
 const refused = (request: string, { userErrors }: UserErrors) => Object.assign(new Error(`Shopify refused ${request}: ${userErrors.map((error) => error.message).join("; ") || "no result"}`), { code: "USER_ERRORS" });
 const now = () => new Date().toISOString();
-const md5 = (bytes: Buffer) => createHash("md5").update(bytes).digest("hex");
+export const md5 = (bytes: Buffer) => createHash("md5").update(bytes).digest("hex");
 const fileBody = (bytes: Buffer) => isUtf8(bytes) && !bytes.includes(0) ? { type: "TEXT", value: bytes.toString("utf8") } : { type: "BASE64", value: bytes.toString("base64") };
 const previewUrl = (preview: ThemePreview) => `https://${config.storefront.publicHost}/?preview_theme_id=${preview.themeId}`;
 const themeLabel = (preview: ThemePreview) => `theme \`${preview.name}\`${preview.themeId ? ` (ID ${preview.themeId})` : ""}`;
@@ -106,11 +106,11 @@ async function settle(preview: ThemePreview, stop?: AbortSignal) {
   return savePreview(preview, { baseline });
 }
 
-async function liveFiles(paths: string[], stop?: AbortSignal) {
+export async function liveFiles(paths: string[], stop?: AbortSignal) {
   const { filesPageSize, requestTimeoutSeconds } = config.storefront.preview;
   const { themes } = await loggie<{ themes: { nodes: { id: string }[] } }>("themes", mainThemeQuery, {}, { stop });
   const id = themes.nodes[0]?.id;
-  if (!id) throw new Error("The store has no MAIN theme to copy files back from");
+  if (!id) throw new Error("The store has no MAIN theme");
   const read = async <T>(query: string, filenames: string[]) =>
     (await loggie<{ theme: { files: { nodes: T[] } } | null }>("theme", query, { id, filenames, first: filenames.length }, { stop })).theme?.files.nodes ?? [];
   const checksums = new Map<string, string | null>();

@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { manifestOf } from "./actions.ts";
-import { postCommitReply, reactToCommitRoot, verdictReaction } from "./commit-review.ts";
+import { commitInput, postCommitReply, reactToCommitRoot, verdictReaction } from "./commit-review.ts";
 import { upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
@@ -12,7 +12,7 @@ import { botSlug } from "./identity.ts";
 import type { EffectName } from "./manifests.ts";
 import { upsertItem } from "./items.ts";
 import { reconcileLabels } from "./labels.ts";
-import { endsWithMarker, fingerprintMarker, isIssueComment, reviewMarker, taskMarker, withMarker } from "./markers.ts";
+import { endsWithMarker, fingerprintMarker, isIssueComment, reviewMarker, storefrontMarker, taskMarker, withMarker } from "./markers.ts";
 import { observe } from "./observation.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
 import { remoteUrl } from "./repository.ts";
@@ -39,6 +39,7 @@ type GithubEffectContext = EffectContext & {
 };
 
 type SlackEffectContext = EffectContext & {
+  github: GitHubRepository;
   subject: Subject;
   task: Task;
   run: Run;
@@ -140,8 +141,12 @@ const issue = {
 
 const slackReply = {
   receipted: (publication, { run }) => Boolean(publication.slackReplyTs) && publication.slackReaction === verdictReaction(run),
-  async apply({ subject, task, run, publication, saveReceipt }) {
-    if (!publication().slackReplyTs) saveReceipt({ slackReplyTs: await postCommitReply(subject, task.action, run) });
+  async apply({ github, subject, task, run, references, publication, saveReceipt }) {
+    const report = run.result?.storefront?.report;
+    if (report && !publication().storefrontReportUrl) {
+      saveReceipt({ storefrontReportUrl: await github.upsertCommitComment(commitInput(run.input).sha, report, storefrontMarker, references) });
+    }
+    if (!publication().slackReplyTs) saveReceipt({ slackReplyTs: await postCommitReply(subject, task.action, run, publication().storefrontReportUrl) });
     const name = verdictReaction(run);
     if (!name) return;
     await reactToCommitRoot(subject, name);

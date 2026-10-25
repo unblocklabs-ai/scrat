@@ -36,6 +36,7 @@ export type AgentResult = {
   grade?: PrGrade;
   verdict?: ReviewVerdict;
   issues?: ReportedIssue[];
+  storefront?: { slack: string; report?: string };
 };
 
 export type Reviewer = {

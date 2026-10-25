@@ -86,6 +86,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
     if (storefront.publicHost.trim() && !/^[\w.-]+(?::\d+)?$/.test(storefront.publicHost)) problems.push("storefront.publicHost must be a host name, without a scheme or path");
     if (!URL.canParse(storefront.loggie.url)) problems.push("storefront.loggie.url must be an absolute URL");
     try { new RegExp(storefront.preview.themePaths); } catch { problems.push("storefront.preview.themePaths is not a valid regular expression"); }
+    for (const device of storefront.devices) if (!Object.hasOwn(settings.tools?.browser.viewports ?? {}, device)) problems.push(`storefront.devices: ${device} is not a tools.browser.viewports preset`);
   }
   for (const [name, { apiKey }] of Object.entries(settings.providers ?? {})) {
     if (apiKey && !/\$\{\w+\}/.test(apiKey)) logger.warn({ provider: name }, "Provider apiKey is not a ${VAR} placeholder; it will not be redacted from output");

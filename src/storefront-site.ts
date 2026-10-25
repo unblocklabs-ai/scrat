@@ -36,5 +36,9 @@ export async function saveSiteMap({ subject, task, run }: { subject: Subject; ta
 export async function storefrontContext(subjectId: string, headSha: string, discovery: boolean) {
   const preview = discovery ? undefined : previewContext(subjectId, headSha);
   if (!discovery && !preview) return undefined;
-  return { context: { ...preview, liveUrl: liveUrl() }, siteMap: await ifMissing(readFile(siteMapPath(), "utf8"), undefined), browse: preview?.available ?? true };
+  const { devices, limits: { confirmationRuns, regressionMaxGrade } } = config.storefront;
+  return {
+    context: preview ? { ...preview, liveUrl: liveUrl(), devices, confirmationRuns, regressionMaxGrade } : { liveUrl: liveUrl() },
+    siteMap: await ifMissing(readFile(siteMapPath(), "utf8"), undefined), browse: preview?.available ?? true,
+  };
 }

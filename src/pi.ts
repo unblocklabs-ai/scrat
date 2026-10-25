@@ -9,7 +9,7 @@ import { db } from "./db.ts";
 import { botName, withBotName } from "./identity.ts";
 import { getRun, updateRun } from "./run-history.ts";
 import type { Run } from "./schema.ts";
-import { InterruptedError, parseResult, ResultFormatError, type Reviewer } from "./results.ts";
+import { InterruptedError, parseResult, ResultFormatError, type Reviewer, storefrontProblem } from "./results.ts";
 import { gitList } from "./git.ts";
 import type { Manifest, ToolName } from "./manifests.ts";
 import { createAgentTools } from "./tools.ts";
@@ -18,16 +18,18 @@ import { canonicalReviewPaths } from "./review-paths.ts";
 import { redactSecrets, transientInferenceCode } from "./errors.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 
-function footerRules(requireGrade: boolean) {
-  return `SCRAT_READY (optional, only when ready)\nSCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of S, A, B, C, D, F, with no plus or minus)\nSCRAT_VERDICT: clean, concerns, or breaking (only when your instructions ask for it)\nSCRAT_STATUS: complete, incomplete, or needs_decision (required, and the very last line)`;
+const withStorefront = (skill: string, shown: boolean) => skill.replace(/^\{\{#storefront\}\}\n([\s\S]*?)^\{\{\/storefront\}\}\n/gm, (_, body: string) => shown ? body : "");
+
+function footerRules(requireGrade: boolean, storefront: boolean) {
+  return `SCRAT_READY (optional, only when ready)\n${storefront ? "SCRAT_STOREFRONT: verified, regression, or unavailable (required for a complete review)\n" : ""}SCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of S, A, B, C, D, F, with no plus or minus)\nSCRAT_VERDICT: clean, concerns, or breaking (only when your instructions ask for it)\nSCRAT_STATUS: complete, incomplete, or needs_decision (required, and the very last line)`;
 }
 
-function correctionMessage(error: string, requireGrade: boolean) {
-  return `Your previous final answer was not accepted: ${error}.\n\nSend your complete final answer again, with the same content, correctly formatted. It must end with these footer lines, in this order:\n${footerRules(requireGrade)}`;
+function correctionMessage(error: string, requireGrade: boolean, storefront: boolean) {
+  return `Your previous final answer was not accepted: ${error}.\n\nSend your complete final answer again, with the same content, correctly formatted. It must end with these footer lines, in this order:\n${footerRules(requireGrade, storefront)}`;
 }
 
-function continuationMessage(requireGrade: boolean) {
-  return `Your assessment was returned incomplete. Finish the remaining inspection, then return the full final assessment. It must end with these footer lines, in this order:\n${footerRules(requireGrade)}`;
+function continuationMessage(requireGrade: boolean, storefront: boolean) {
+  return `Your assessment was returned incomplete. Finish the remaining inspection, then return the full final assessment. It must end with these footer lines, in this order:\n${footerRules(requireGrade, storefront)}`;
 }
 
 export function saveReviewer(runId: string, index: number, patch: Partial<Reviewer>) {
@@ -37,12 +39,13 @@ export function saveReviewer(runId: string, index: number, patch: Partial<Review
   });
 }
 
-export async function executePi({ run, cwd, context, tools, scoped, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {}, requireGrade = false, followUp, stop }: {
+export async function executePi({ run, cwd, context, tools, scoped, storefront = false, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {}, requireGrade = false, followUp, stop }: {
   run: Run;
   cwd: string;
   context: string;
   tools: readonly ToolName[];
   scoped: Pick<Manifest, "mode" | "http"> & { browser?: BrowserScope };
+  storefront?: boolean;
   log: Logger;
   sessionFile?: string;
   environment?: NodeJS.ProcessEnv;
@@ -62,8 +65,8 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
     throw new Error(modelRuntime.getError() ?? `Configure a Pi model for ${run.provider}/${run.model}`);
   }
   const thinkingLevel = run.thinkingLevel as ThinkingLevel;
-  const { names, customTools, paths, gitPaths, basePaths, close } = await createAgentTools({ cwd, contextDir, tools, scoped, baseSha, revisions, environment, log, runId: run.id });
-  const browsing = names.includes("browser");
+  const { names, customTools, paths, gitPaths, basePaths, close } = await createAgentTools({ cwd, contextDir, tools, scoped, reviewerIndex, baseSha, revisions, environment, log, runId: run.id });
+  const browsing = names.includes("browser"), graded = storefront && requireGrade;
   const settingsManager = SettingsManager.inMemory({ retry: config.harness.agentRetry });
   const resourceLoader = new DefaultResourceLoader({
     cwd, agentDir: getAgentDir(), settingsManager, noExtensions: true, noSkills: true,
@@ -137,8 +140,8 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
       if (timedOut) throw Object.assign(new Error(`Agent turn exceeded ${config.harness.agentTimeoutSeconds} seconds and was aborted after ${Math.round((performance.now() - started) / 1000)} seconds`), { code: "AGENT_TIMEOUT" });
       if (drained) throw new InterruptedError(`Agent turn was still running ${config.harness.drainTimeoutSeconds} seconds after the worker was told to stop and was aborted`);
     };
-    await prompt(followUp ?? `${withBotName(await readFile(run.skill, "utf8"))}\n\n${context}`);
-    let continuations = 0;
+    await prompt(followUp ?? `${withStorefront(withBotName(await readFile(run.skill, "utf8")), storefront)}\n\n${context}`);
+    let continuations = 0, regressionReported = false;
     for (let corrections = 0; ; corrections++) {
       const last = session.messages.findLast((message) => message.role === "assistant");
       if (!last || last.role !== "assistant" || last.stopReason !== "stop") {
@@ -150,10 +153,13 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
         const output = session.getLastAssistantText()?.trim();
         if (!output) throw new ResultFormatError("Pi returned an empty response");
         const result = parseResult(output, [], { requireGrade });
+        const problem = graded && result.outcome === "complete" ? storefrontProblem(result, config.storefront.limits.regressionMaxGrade, regressionReported) : undefined;
+        regressionReported ||= result.storefront === "regression";
+        if (problem) throw new ResultFormatError(problem);
         if (readOnly && result.outcome === "incomplete" && continuations < config.harness.corrections.incomplete) {
           continuations++;
           log.warn({ event: "pi.incomplete_continue", attempt: continuations });
-          await prompt(continuationMessage(requireGrade));
+          await prompt(continuationMessage(requireGrade, graded));
           corrections--;
           continue;
         }
@@ -167,7 +173,7 @@ export async function executePi({ run, cwd, context, tools, scoped, log, session
       } catch (error) {
         if (!(error instanceof ResultFormatError) || corrections >= config.harness.corrections.format) throw error;
         log.warn({ event: "pi.format_retry", attempt: corrections + 1, err: error });
-        await prompt(correctionMessage(error.message, requireGrade));
+        await prompt(correctionMessage(error.message, requireGrade, graded));
       }
     }
   } finally {

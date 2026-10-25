@@ -58,7 +58,7 @@ export async function runAgent({ run, task, manifest, operation, stop }: Ctx, { 
   const { browserSteps, browserSeconds } = config.storefront.limits;
   const browser = storefront && manifest.tools.includes("browser")
     ? { navigationHosts: "any" as const, resourceHosts: "any" as const, ...manifest.browser, limits: { steps: browserSteps, milliseconds: browserSeconds * 1000 } } : manifest.browser;
-  const shared = { tools: manifest.tools, scoped: { ...manifest, browser }, contextDir, revisions, stop };
+  const shared = { tools: manifest.tools, scoped: { ...manifest, browser }, storefront, contextDir, revisions, stop };
   const agentResult = panel
     ? await reviewPullRequest(run, workspace.path, prompt, operation.log, { ...shared, ...panel })
     : await executePi({ run, cwd: workspace.path, context: prompt, log: operation.log, sessionFile, environment, baseSha, ...shared });

@@ -57,7 +57,8 @@
     "store": "",
     "publicHost": "",
     "siteMapMaxAgeDays": 30,
-    "limits": { "browserSteps": 40, "browserSeconds": 600 },
+    "devices": ["desktop", "mobile"],
+    "limits": { "browserSteps": 40, "browserSeconds": 600, "confirmationRuns": 1, "regressionMaxGrade": "C" },
     "loggie": { "url": "https://app.loggie.ai", "slug": "", "timeoutSeconds": 60 },
     "preview": {
       "themeNamePrefix": "scrat/",

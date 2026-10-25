@@ -39,6 +39,7 @@ type GithubEffectContext = EffectContext & {
 };
 
 type SubjectEffectContext = EffectContext & {
+  github: GitHubRepository;
   subject: Subject;
   task: Task;
   run: Run;
@@ -139,9 +140,11 @@ const issue = {
 } satisfies Effect<GithubEffectContext>;
 
 const slackReply = {
-  receipted: (publication, { run }) => Boolean(publication.slackReplyTs) && publication.slackReaction === verdictReaction(run),
-  async apply({ subject, task, run, publication, saveReceipt }) {
+  receipted: (publication, { run }) => Boolean(publication.slackReplyTs) && (!run.result?.storefrontReview || Boolean(publication.storefrontReplyTs)) && publication.slackReaction === verdictReaction(run),
+  async apply(context) {
+    const { subject, task, run, publication, saveReceipt } = context;
     if (!publication().slackReplyTs) saveReceipt({ slackReplyTs: await postCommitReply(subject, task.action, run) });
+    if (run.result?.storefrontReview && !publication().storefrontReplyTs) await (await import("./storefront-main.ts")).publishStorefront(context);
     const name = verdictReaction(run);
     if (!name) return;
     await reactToCommitRoot(subject, name);

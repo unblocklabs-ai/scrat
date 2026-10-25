@@ -6,6 +6,6 @@
     "test/{integration.test,scenario,database-command}.mjs",
     "deploy/prepare-tools.mjs"
   ],
-  "ignoreDependencies": ["playwright-core"],
+  "ignoreDependencies": ["lighthouse", "playwright-core"],
   "project":["src/**/*.ts", "test/**/*.mjs", "deploy/**/*.mjs"]
 }

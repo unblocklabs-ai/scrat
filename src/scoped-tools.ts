@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { appendFile } from "node:fs/promises";
 import type { LookupFunction } from "node:net";
 import { join } from "node:path";
 import { defineTool } from "@earendil-works/pi-coding-agent";
@@ -157,7 +158,7 @@ export async function loadPlaywright(): Promise<Playwright> {
   return playwright;
 }
 
-const launchChromium = async (args: string[]) => (await loadPlaywright()).chromium.launch({ headless: true, chromiumSandbox: true, args });
+export const launchChromium = async (args: string[]) => (await loadPlaywright()).chromium.launch({ headless: true, chromiumSandbox: true, args });
 const browserActions = ["goto", "text", "screenshot", "click", "fill", "select", "reset"];
 const themeIdOf = (html: string) => {
   const opening = /Shopify\.theme\s*=\s*\{/.exec(html);
@@ -313,7 +314,9 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
         const path = join(contextDir, `screenshot-${prefix ? `${prefix}-` : ""}${viewport ?? "current"}-${++shots}.png`);
         await page.screenshot({ path, fullPage, ...timeout });
         operation.complete();
-        return text(JSON.stringify({ path, viewport: viewport ?? null, url: redactSecrets(page.url()), ...await servedTheme(page, timeout) }));
+        const shot = { path, viewport: viewport ?? null, url: redactSecrets(page.url()) };
+        await appendFile(join(contextDir, "screenshots.jsonl"), JSON.stringify(shot) + "\n");
+        return text(JSON.stringify({ ...shot, ...await servedTheme(page, timeout) }));
       });
     },
   });

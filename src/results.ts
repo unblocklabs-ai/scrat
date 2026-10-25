@@ -38,6 +38,7 @@ export type AgentResult = {
   verdict?: ReviewVerdict;
   storefront?: typeof storefrontResults[number];
   issues?: ReportedIssue[];
+  storefrontReview?: { slack: string; report?: string; session?: Pick<Reviewer, "piSessionId" | "piSessionFile" | "thinkingLevel"> };
 };
 
 export type Reviewer = {

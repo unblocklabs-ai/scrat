@@ -39,7 +39,7 @@ export function saveReviewer(runId: string, index: number, patch: Partial<Review
   });
 }
 
-export async function executePi({ run, cwd, context, tools, scoped, storefront = false, log, sessionFile, environment = {}, reviewerIndex, baseSha, contextDir, revisions = {}, requireGrade = false, followUp, stop }: {
+export async function executePi({ run, cwd, context, tools, scoped, storefront = false, log, sessionFile, environment = {}, reviewerIndex, onSession, baseSha, contextDir, revisions = {}, requireGrade = false, followUp, stop }: {
   run: Run;
   cwd: string;
   context: string;
@@ -50,6 +50,7 @@ export async function executePi({ run, cwd, context, tools, scoped, storefront =
   sessionFile?: string;
   environment?: NodeJS.ProcessEnv;
   reviewerIndex?: number;
+  onSession?: (details: Pick<Reviewer, "piSessionId" | "piSessionFile" | "thinkingLevel">) => void;
   baseSha?: string;
   contextDir?: string;
   revisions?: Record<string, string>;
@@ -108,7 +109,8 @@ export async function executePi({ run, cwd, context, tools, scoped, storefront =
       piSessionId: session.sessionId, piSessionFile: session.sessionFile,
       thinkingLevel: session.thinkingLevel,
     };
-    if (reviewerIndex === undefined) updateRun(run.id, sessionDetails);
+    if (onSession) onSession(sessionDetails);
+    else if (reviewerIndex === undefined) updateRun(run.id, sessionDetails);
     else saveReviewer(run.id, reviewerIndex, sessionDetails);
     const brief = (value: unknown) => typeof value === "string" ? redactSecrets(value).slice(0, config.harness.logTargetChars) : undefined;
     const targets = new Map<string, Record<string, unknown>>();

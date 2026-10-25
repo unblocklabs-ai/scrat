@@ -2,6 +2,7 @@ import type { GithubComment } from "./github-types.ts";
 
 export const reviewMarker = "<!-- scrat-review -->";
 export const previewMarker = "<!-- scrat-preview -->";
+export const storefrontMarker = "<!-- scrat-storefront -->";
 const taskMarkerParts = ["<!-- scrat-task:", " -->"] as const;
 export const taskMarker = (taskId: string) => `${taskMarkerParts[0]}${taskId}${taskMarkerParts[1]}`;
 const issuePrefix = "issue:";

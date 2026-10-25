@@ -1,11 +1,13 @@
 import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { and, eq, isNotNull, isNull } from "drizzle-orm";
 import { upsertComment } from "./comments.ts";
 import { config, isBotLogin } from "./config.ts";
 import { db } from "./db.ts";
-import { errorMessage } from "./errors.ts";
+import { errorMessage, ifMissing } from "./errors.ts";
 import type { EventReferences } from "./events.ts";
 import { blobBytes, changedPaths, gitList } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
@@ -39,10 +41,36 @@ const environment = "shopify-preview", unverified = "";
 
 const refused = (request: string, { userErrors }: UserErrors) => Object.assign(new Error(`Shopify refused ${request}: ${userErrors.map((error) => error.message).join("; ") || "no result"}`), { code: "USER_ERRORS" });
 const now = () => new Date().toISOString();
-const md5 = (bytes: Buffer) => createHash("md5").update(bytes).digest("hex");
+export const md5 = (bytes: Buffer) => createHash("md5").update(bytes).digest("hex");
 const fileBody = (bytes: Buffer) => isUtf8(bytes) && !bytes.includes(0) ? { type: "TEXT", value: bytes.toString("utf8") } : { type: "BASE64", value: bytes.toString("base64") };
 const previewUrl = (preview: ThemePreview) => `https://${config.storefront.publicHost}/?preview_theme_id=${preview.themeId}`;
 const themeLabel = (preview: ThemePreview) => `theme \`${preview.name}\`${preview.themeId ? ` (ID ${preview.themeId})` : ""}`;
+
+export const statePath = (...parts: string[]) => resolve("data/storefront", ...parts);
+
+export async function readState<T>(name: string, fallback: T) {
+  const text = await ifMissing(readFile(statePath(name), "utf8"), undefined);
+  if (text === undefined) return fallback;
+  try { return JSON.parse(text) as T; }
+  catch (error) {
+    logger.warn({ event: "storefront.state_unreadable", path: statePath(name), err: error });
+    return undefined;
+  }
+}
+
+export async function writeState(name: string, value: unknown) {
+  const path = statePath(name);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(`${path}.tmp`, JSON.stringify(value, null, 2) + "\n");
+  await rename(`${path}.tmp`, path);
+}
+
+export async function treeBlobs(repositoryPath: string, sha: string, paths: string[] = []) {
+  return new Map((await gitList(repositoryPath, ["ls-tree", "-r", "-z", sha, ...paths.length ? ["--", ...paths] : []])).flatMap((entry) => {
+    const tab = entry.indexOf("\t"), [mode, type, oid] = entry.slice(0, tab).split(" ");
+    return type === "blob" && mode !== "120000" ? [[entry.slice(tab + 1), oid!] as const] : [];
+  }));
+}
 
 const livePreview = (subjectId: string) => db.select().from(themePreviews)
   .where(and(eq(themePreviews.subjectId, subjectId), isNull(themePreviews.deletedAt))).get();
@@ -106,11 +134,11 @@ async function settle(preview: ThemePreview, stop?: AbortSignal) {
   return savePreview(preview, { baseline });
 }
 
-async function liveFiles(paths: string[], stop?: AbortSignal) {
+export async function liveFiles(paths: string[], stop?: AbortSignal) {
   const { filesPageSize, requestTimeoutSeconds } = config.storefront.preview;
   const { themes } = await loggie<{ themes: { nodes: { id: string }[] } }>("themes", mainThemeQuery, {}, { stop });
   const id = themes.nodes[0]?.id;
-  if (!id) throw new Error("The store has no MAIN theme to copy files back from");
+  if (!id) throw new Error("The store has no MAIN theme");
   const read = async <T>(query: string, filenames: string[]) =>
     (await loggie<{ theme: { files: { nodes: T[] } } | null }>("theme", query, { id, filenames, first: filenames.length }, { stop })).theme?.files.nodes ?? [];
   const checksums = new Map<string, string | null>();
@@ -134,10 +162,7 @@ async function liveFiles(paths: string[], stop?: AbortSignal) {
 async function syncFiles(preview: ThemePreview, { repositoryPath, baseSha, headSha }: Revision, stop?: AbortSignal) {
   const { themePaths, uploadBatch, uploadBatchBytes, requestTimeoutSeconds } = config.storefront.preview;
   const themePath = new RegExp(themePaths), synced = { ...preview.synced }, problems: string[] = [];
-  const tree = new Map((await gitList(repositoryPath, ["ls-tree", "-r", "-z", headSha])).flatMap((entry) => {
-    const tab = entry.indexOf("\t"), [mode, type, oid] = entry.slice(0, tab).split(" ");
-    return type === "blob" && mode !== "120000" ? [[entry.slice(tab + 1), oid!] as const] : [];
-  }));
+  const tree = await treeBlobs(repositoryPath, headSha);
   const changed = new Set((await changedPaths(repositoryPath, baseSha, headSha)).filter((path) => themePath.test(path)));
   const reverted = Object.keys(synced).filter((path) => !changed.has(path) && themePath.test(path));
   const live = reverted.length ? await liveFiles(reverted, stop) : undefined;

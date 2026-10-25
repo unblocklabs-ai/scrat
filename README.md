@@ -62,6 +62,48 @@ Normal retries rerun Pi for pre-publication failures, reusing the workspace/sess
 
 Use `--validation-only` for a transient validation failure after a mutating agent returned complete. It requires a saved checkpoint with unchanged task input, workspace identity, HEAD, source tree, merge state, GitHub context, and base SHA. Scrat skips the agent's turn, creates a fresh disposable database when configured, reruns preparation/migrations and all checks, and still enforces action postconditions before publication; a check that exits nonzero goes back into the saved session. Ignored files are outside the source checkpoint; configured preparation must restore any required dependency/generated state. Changed or incomplete work requires a normal repair retry.
 
+## Install and update
+
+A VM serves one repository. Scrat lives in its service user's `~/.local/share/scrat-v2` (`releases/<commit>/`, `current`, `data/`, `backups/`, `.env`, `scrat.local.json`, `deploy.json`) and is managed by `deploy/scrat`, a bash CLI that runs on the VM as that user. `scrat install` copies it to `~/.local/bin/scrat` and every update refreshes it. Add `--dry-run` to either command to print the script it would run instead of running it.
+
+First install, on Ubuntu or Debian:
+
+1. In `~/.local/share/scrat-v2`, write `.env` (secrets only, see Configure and run), `scrat.local.json` (the repository's settings, see Deployment overrides) and `deploy.json`, for example:
+
+   ```json
+   { "unit": "user", "repositoryPath": "/home/scrat/.local/share/scrat-v2/repository", "packageManager": "pnpm@11.7.0", "keepReleases": 3, "memoryMax": "20G", "docker": true }
+   ```
+
+2. Fetch the CLI and run the installer, which asks for the sudo password when a host step is missing:
+
+   ```sh
+   mkdir -p ~/.local/bin && curl -fsSLo ~/.local/bin/scrat https://raw.githubusercontent.com/unblocklabs-ai/scrat/main/deploy/scrat && chmod 755 ~/.local/bin/scrat
+   ~/.local/bin/scrat install --node 24.22.1
+   ```
+
+3. Start the service with the command it prints.
+
+`scrat install` uses sudo only for what is missing: apt packages (including `bubblewrap`), the AppArmor profiles `deploy/scrat-bwrap.apparmor` and `deploy/scrat-chromium.apparmor` (plus `deploy/scrat-rootlesskit.apparmor` with Docker) in `/etc/apparmor.d`, and linger. It installs `--node <version>` into `runtime/`, checked against nodejs.org's `SHASUMS256.txt`, and points `runtime/node` at it; without `--node` it keeps the existing `runtime/node`. It activates `packageManager` through Corepack, installs rootless Docker as the user unit `scrat-docker.service` when `docker` is true (`deploy/docker.sha256` pins the version and checksums; the user needs subordinate id ranges), and writes `scrat.service`. Then it installs the latest release as `scrat update` does, leaves the service stopped, fetches the repository's open issues and pull requests, and prints how many there are, how many the bot login authored, and the enabled actions: the first sync reviews all of them. Running it again on a host it set up changes nothing.
+
+Updates need no sudo for a user unit. From a laptop: `ssh <host> '~/.local/bin/scrat update v2.0.47'`; with no version it installs the latest GitHub release, and an older version downgrades the same way. It runs detached, so an ssh drop does not stop it, streams its log, and keeps it in `~/.local/share/scrat-v2/update.log`, whose last line is `Deployed <commit>`. Running it for the deployed release changes nothing.
+
+1. It downloads the tag's tarball from GitHub, takes the commit from the tarball's header, extracts it into `releases/<commit>/`, and refuses it unless `package.json` has the tag's version.
+2. While the old release keeps running, it runs `npm ci`, prepares the search tools, links `data`, `.env` and `scrat.local.json`, checks the config and the sandbox, and rehearses the schema push on a copy of the database, which must converge and pass `pragma integrity_check`. A failure here leaves the running service and everything it uses untouched.
+3. It stops the service, backs up the unit, `.env`, `scrat.local.json`, `deploy.json`, the wrapper and the database into `backups/<time>/`, pushes the schema, switches `current`, and starts the service again if it was running.
+4. It removes releases beyond `keepReleases` and prints the space freed. Backups are not pruned.
+
+| `deploy.json` key | Purpose |
+| --- | --- |
+| `unit` | `"user"`: `scrat.service` is a systemd user unit. `"system"`: a system unit with `User=` set to the service user; `scrat update` then runs `sudo systemctl`, which must not prompt. |
+| `repositoryPath` | Absolute path of the target repository's clone, passed to the service as `SCRAT_REPOSITORY_PATH`. Scrat clones it on the first sync. |
+| `packageManager` | `"pnpm@<version>"` (the target repository's `packageManager` field), activated through Corepack with its shims in `bin/`, or `"npm"`, for which the sandbox preflight checks `npm` instead of `pnpm`. |
+| `keepReleases` | Releases kept after an update, newest first. The current and previous releases are always kept. |
+| `memoryMax` | Optional `MemoryMax=` of the unit that `scrat install` writes. |
+| `wrapper` | Optional absolute path of a program the unit runs instead of `node src/recover-active.ts && node src/serve.ts`, for example to load secrets kept elsewhere; it must exec both. Each update backs it up. |
+| `docker` | Optional. `true` installs rootless Docker for per-run databases; needs `"unit": "user"`. |
+
+`scrat update` uses `runtime/node/bin/node`, or `node` on `PATH` when that link does not exist, and never rewrites the unit: rerun `scrat install` (or edit the unit by hand) after changing `deploy.json` keys that shape it.
+
 ## Configuration
 
 `scrat.config.json` controls runtime behavior (deployment overrides: see below). Restart the service after changing it; action settings are captured when a run is claimed, and retries retain their saved settings.
@@ -73,11 +115,9 @@ Use `--validation-only` for a transient validation failure after a mutating agen
 - Plain objects merge recursively; arrays and primitives replace the default. `null` is accepted only where the schema allows it: `workspace.database` (`"workspace":{"database":null}` disables the database), `workspace.commandMemoryMax`, `workspace.packageStore`, and an action's `exhaustedLabel` or `failedLabel`.
 - The merged config is validated against one schema (`src/config-schema.ts`): an unknown key, a wrong type or an out-of-range number stops startup with the setting path, for example `harness.maxConcurency: unknown setting` or `harness.maxConcurrentValidations: must be >= 1`. `workspace.environment` (variable names) and `providers` are open: they accept keys the defaults do not show, so a provider can be overridden or added.
 - Relative paths in overrides resolve from the config directory, like the defaults.
-- Overrides live in `scrat.local.json`, linked into each release by the installer, which checks it before stopping the service; check an edit with `node src/config.ts`, then restart the service.
+- Overrides live in `scrat.local.json`, linked into each release by `scrat update`, which checks it before stopping the service; check an edit with `node src/config.ts`, then restart the service.
 
-Per-install systemd overrides (for example a lower `MemoryMax` than the unit's 20G on a smaller host) go in `~/.config/systemd/user/scrat.service.d/local.conf`. The installer keeps it across deploys; apply an edit with `systemctl --user daemon-reload && systemctl --user restart scrat.service`.
-
-`deploy/install.sh` installs a staged release on the existing worker: it drains the service, backs up SQLite, applies schema updates, and switches to the selected release. It refuses anything but a tagged release: the commit must be the one that its `package.json` version's `vX.Y.Z` tag points to, checked through the GitHub API before the service is touched. It contains host-specific paths, so review it before reuse.
+Per-install systemd overrides (for example a lower `MemoryMax` on a smaller host) go in a drop-in, `~/.config/systemd/user/scrat.service.d/local.conf` (`/etc/systemd/system/scrat.service.d/local.conf` for a system unit). `scrat install` and `scrat update` never touch it; apply an edit with `systemctl --user daemon-reload && systemctl --user restart scrat.service`.
 
 ### Harness and GitHub
 
@@ -165,18 +205,17 @@ Renaming the bot: the label (`github.botName` slug) and branch prefix apply to n
 On Linux, `workspace.sandbox: true` (set in deployment overrides) runs repository
 preparation, validation, agent Bash and workspace Git (including hooks) inside
 Bubblewrap. Enabling it is fail-closed: missing namespaces or runtimes are errors,
-not a fallback to host execution. The installer checks the boundary before stopping
-the old service. On Ubuntu 24.04, an administrator installs `bubblewrap`, installs
-`deploy/scrat-bwrap.apparmor` as `/etc/apparmor.d/scrat-bwrap`, and loads it with
-`apparmor_parser -r /etc/apparmor.d/scrat-bwrap`. Do not disable the global userns
-restriction. Provision Node and the pinned pnpm version with Corepack first. The browser
-tool's Chromium has its own profile, `deploy/scrat-chromium.apparmor`; see the browser
-tool section.
+not a fallback to host execution. `scrat update` checks the boundary before stopping
+the old service. On Ubuntu 24.04, `scrat install` installs `bubblewrap` and loads
+`deploy/scrat-bwrap.apparmor` as `/etc/apparmor.d/scrat-bwrap` (`apparmor_parser -r`).
+Do not disable the global userns restriction. The sandbox mounts the pnpm that Corepack
+activated for `packageManager` in `deploy.json`. The browser tool's Chromium has its own
+profile, `deploy/scrat-chromium.apparmor`; see the browser tool section.
 
 `workspace.packageStore` (off unless set) is an absolute directory, not a symlink, that is bind-mounted read-write at pnpm's store
 location in every sandboxed command, with a `storeDir` entry written to the sandbox home's pnpm `config.yaml` so
 pnpm uses it. A lockfile's packages are then downloaded once per install instead of once per workspace. It requires
-`workspace.sandbox`, and the installer's preflight writes to it. This is opt-in and meant for repositories whose
+`workspace.sandbox`, and the sandbox preflight of `scrat update` writes to it. This is opt-in and meant for repositories whose
 contributors are trusted: the store is shared mutable state across that install's sandboxes. pnpm's integrity check
 (`verify-store-integrity`, on by default) only re-hashes file contents, so a malicious repository command could rewrite a
 package's index entry and poison later installs of the same lockfile; a read-only store filled by a trusted fetch step
@@ -258,7 +297,7 @@ Each action is one manifest, `actions/<name>.yaml`, validated at startup (`src/m
 
 ### Adding an action
 
-A deployment adds or changes actions without a code release. Set `actions.directory` in `scrat.local.json` to an absolute path outside the release (on the VM, `~/.local/share/scrat-v2/actions`, which the installer creates):
+A deployment adds or changes actions without a code release. Set `actions.directory` in `scrat.local.json` to an absolute path outside the release (on the VM, `~/.local/share/scrat-v2/actions`, which `scrat install` and `scrat update` create):
 
 ```json
 { "actions": { "directory": "/home/bek/.local/share/scrat-v2/actions", "review_issue": { "enabled": false } } }
@@ -320,10 +359,10 @@ PLAYWRIGHT_BROWSERS_PATH=$HOME/.local/share/scrat-v2/browsers npx playwright-cor
 sudo env PLAYWRIGHT_BROWSERS_PATH=$HOME/.local/share/scrat-v2/browsers npx playwright-core install-deps chromium   # system libraries, once, as root
 ```
 
-Run the service with the same `PLAYWRIGHT_BROWSERS_PATH`. `npm ci` (run by the installer on each deploy) removes packages installed with `--no-save`, so repeat the first command after each release. Chromium is launched with its sandbox enabled (`chromiumSandbox: true`). On Ubuntu 24.04,
-where `kernel.apparmor_restrict_unprivileged_userns = 1` blocks the sandbox, an administrator
+Run the service with the same `PLAYWRIGHT_BROWSERS_PATH`. `npm ci` (run by `scrat update` in each new release) removes packages installed with `--no-save`, so repeat the first command in `current` after each update. Chromium is launched with its sandbox enabled (`chromiumSandbox: true`). On Ubuntu 24.04,
+where `kernel.apparmor_restrict_unprivileged_userns = 1` blocks the sandbox, `scrat install`
 installs `deploy/scrat-chromium.apparmor` as `/etc/apparmor.d/scrat-chromium` and loads it with
-`apparmor_parser -r /etc/apparmor.d/scrat-chromium`; it attaches to Chromium under
+`apparmor_parser -r`; it attaches to Chromium under
 `$HOME/.local/share/scrat-v2/browsers` or Playwright's default `~/.cache/ms-playwright`, so a
 browser installed elsewhere needs the path adjusted. Do not disable the global userns restriction.
 

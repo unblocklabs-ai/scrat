@@ -2720,7 +2720,7 @@ export const scenarios = {
     schema((c) => { c.storefront.preview.uploadBatch = 51; }, /storefront\.preview\.uploadBatch: must be <= 50/);
     await startup((c) => { c.storefront.enabled = true; c.storefront.publicHost = "https://shop.example.com"; }, /storefront\.publicHost must be a host name, without a scheme or path/);
     if (!await import("playwright-core").then(() => true, () => false)) await startup((c) => { c.storefront.enabled = true; }, /storefront_discover: The browser tool needs the optional playwright-core package/);
-    schema((c) => { c.storefront.limits.runSeconds = 0; }, /storefront\.limits\.runSeconds: must be >= 1/);
+    schema((c) => { c.storefront.limits.browserSeconds = 0; }, /storefront\.limits\.browserSeconds: must be >= 1/);
     schema((c) => { c.storefront.siteMapMaxAgeDays = 1.5; }, /storefront\.siteMapMaxAgeDays: must be integer/);
     const key = process.env.GITHUB_APP_PRIVATE_KEY;
     delete process.env.GITHUB_APP_PRIVATE_KEY;

@@ -32,7 +32,7 @@ const schema = Type.Object({
   }, strict),
   storefront: Type.Object({
     enabled: Type.Boolean(), store: Type.String(), publicHost: Type.String(), siteMapMaxAgeDays: positive,
-    limits: Type.Object({ browserSteps: positive, runSeconds: positive }, strict),
+    limits: Type.Object({ browserSteps: positive, browserSeconds: positive }, strict),
     loggie: Type.Object({ url: Type.String(), slug: Type.String(), timeoutSeconds: positive }, strict),
     preview: Type.Object({
       themeNamePrefix: Type.String(), themePaths: Type.String(), processingWaitSeconds: positive, processingPollSeconds: positive,

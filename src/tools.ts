@@ -148,9 +148,9 @@ export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, st
     read_base: readBase, bash: quiet(bash), edit: quiet(edit), write: quiet(write),
   } satisfies Record<Exclude<ToolName, ScopedToolName>, object>;
   const binding = (name?: string) => name === undefined ? undefined : config.bindings[name];
-  const { browserSteps, runSeconds } = config.storefront.limits;
+  const { browserSteps, browserSeconds } = config.storefront.limits;
   const browser = scoped.browser || (storefront && tools.includes("browser"))
-    ? createBrowserTool({ settings: scoped.browser, binding: binding(scoped.browser?.binding), contextDir, runId, log, ...storefront && { limits: { steps: browserSteps, milliseconds: runSeconds * 1000 } } }) : undefined;
+    ? createBrowserTool({ settings: scoped.browser, binding: binding(scoped.browser?.binding), contextDir, runId, log, ...storefront && { limits: { steps: browserSteps, milliseconds: browserSeconds * 1000 } } }) : undefined;
   const table = {
     ...core,
     ...scoped.http && { http: createHttpTool({ settings: scoped.http, binding: binding(scoped.http.binding)!, runId }) },

@@ -3,23 +3,28 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scrat install [--node <version>] [--dry-run]
+Usage: scrat install [--node <version>] [--force] [--dry-run]
        scrat update [<version>] [--dry-run]
 
 Run on the Scrat host as its service user. Both commands read
 ~/.local/share/scrat-v2/deploy.json and need .env and scrat.local.json there.
 
-install    Set up the host: apt packages, AppArmor profiles and linger through
+install    Set up a new host: apt packages, AppArmor profiles and linger through
            sudo; Node <version> (checked against nodejs.org SHASUMS256.txt) as
            runtime/node; pnpm through Corepack; rootless Docker when deploy.json
            asks for it; scrat.service. Then install the latest release, leave
            the service stopped and print the first-sync plan. Running it again
-           on a host that is set up changes nothing.
+           on a host it set up changes nothing, the release included. It refuses
+           a host set up before the CLI (one with a release or a scrat unit).
+--force    Let install take over such a host and rewrite its units.
 update     Install release <version> (a tag such as v2.0.47; default: the latest
            release), upgrading or downgrading. Everything is checked before the
            running service is stopped. It runs detached, so an ssh drop does not
-           stop it, and logs to ~/.local/share/scrat-v2/update.log.
+           stop it, and logs to ~/.local/share/scrat-v2/update.log, which each
+           run overwrites; reattach with tail -n +1 -f on that file.
 --dry-run  Print the script the command would run instead of running it.
+
+Downloads give up after 30 s without a connection or 60 s below 1 KB/s.
 EOF
 }
 
@@ -35,16 +40,22 @@ fail() {
   exit 1
 }
 
+download() {
+  curl --fail --silent --show-error --location --connect-timeout 30 --speed-limit 1024 --speed-time 60 "$@"
+}
+
 open_work() {
   if (($(id -u) == 0)); then fail "Run scrat as the service user, not as root"; fi
   export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
   export PATH=$root/runtime/node/bin:$PATH
   mkdir -p "$root/releases" "$root/backups" "$root/data" "$root/actions"
-  exec 9> "$root/update.lock"
+  if [[ ${SCRAT_LOCKED:-} != 1 ]]; then exec 9> "$root/update.lock"; fi
+  unset SCRAT_LOCKED
   flock --nonblock 9 || fail "Another scrat install or update is running"
   rm -rf "$root"/.work-*
   work=$(mktemp -d "$root/.work-XXXXXX")
   stopped=false
+  pushed=false
   backup=
   trap on_exit EXIT
 }
@@ -53,11 +64,21 @@ on_exit() {
   local status=$?
   rm -rf "$work"
   if ((status == 0)); then return; fi
-  if [[ $stopped == true ]]; then
-    log "Failed after stopping scrat.service: it stays stopped, current points at $(readlink -f "$root/current"), the backup is in ${backup:-no backup yet}"
-  else
-    log "Failed; scrat.service was left as it was"
-  fi
+  case $stopped in
+    false) log "Failed before stopping scrat.service, which was left as it was" ;;
+    stopping) log "Failed to stop scrat.service; check it with: $(systemctl_command) status scrat.service" ;;
+    *)
+      if [[ $pushed == false ]] && scrat_unit start; then
+        log "Failed after stopping scrat.service and before the schema push: started the old release $(readlink -f "$root/current") again"
+      else
+        log "Failed after stopping scrat.service: it stays stopped, current points at $(readlink -f "$root/current"), the backup is in ${backup:-no backup yet}. Start it with: $(systemctl_command) start scrat.service"
+      fi
+      ;;
+  esac
+}
+
+systemctl_command() {
+  if [[ $unit == user ]]; then printf 'systemctl --user'; else printf 'sudo systemctl'; fi
 }
 
 load_deployment() {
@@ -78,7 +99,7 @@ load_deployment() {
     if (!/^\/\S*$/.test(d.repositoryPath)) errors.push("repositoryPath: must be an absolute path without spaces");
     if (!/^(npm|pnpm@\d+\.\d+\.\d+\S*)$/.test(d.packageManager)) errors.push("packageManager: must be \"npm\" or \"pnpm@<version>\"");
     if (!Number.isInteger(d.keepReleases) || d.keepReleases < 1) errors.push("keepReleases: must be an integer >= 1");
-    if (d.memoryMax !== undefined && !/^\S+$/.test(d.memoryMax)) errors.push("memoryMax: must be a systemd MemoryMax= value");
+    if (d.memoryMax !== undefined && (typeof d.memoryMax !== "string" || !/^\S+$/.test(d.memoryMax))) errors.push("memoryMax: must be a systemd MemoryMax= value as a string, such as \"20G\"");
     if (d.wrapper !== undefined && !/^\/\S*$/.test(d.wrapper)) errors.push("wrapper: must be an absolute path without spaces");
     if (d.docker !== undefined && typeof d.docker !== "boolean") errors.push("docker: must be true or false");
     if (d.docker === true && d.unit !== "user") errors.push("docker: rootless Docker needs \"unit\": \"user\"");
@@ -94,11 +115,11 @@ load_deployment() {
 fetch_release() {
   tag=$requested_version
   if [[ -z $tag ]]; then
-    tag=$(curl -fsSL "https://api.github.com/repos/$releases_repository/releases/latest" | node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(0, "utf8")).tag_name ?? ""))') || fail "Cannot resolve the latest release of $releases_repository"
+    tag=$(download "https://api.github.com/repos/$releases_repository/releases/latest" | node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(0, "utf8")).tag_name ?? ""))') || fail "Cannot resolve the latest release of $releases_repository"
   fi
   [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "\"$tag\" is not a release tag"
   log "Fetching $tag"
-  curl -fsSL -o "$work/release.tar.gz" "https://github.com/$releases_repository/archive/refs/tags/$tag.tar.gz" || fail "No release $tag in $releases_repository"
+  download -o "$work/release.tar.gz" "https://github.com/$releases_repository/archive/refs/tags/$tag.tar.gz" || fail "No release $tag in $releases_repository"
   sha=$(git get-tar-commit-id < <(gzip -dc "$work/release.tar.gz" 2> /dev/null)) || fail "The $tag tarball names no commit"
   [[ $sha =~ ^[0-9a-f]{40}$ ]] || fail "The $tag tarball names no commit"
   mkdir "$work/release"
@@ -130,18 +151,22 @@ deploy_release() {
   node src/config.ts
   check_sandbox
   rehearse_schema_push
+  list_backup_files
   state=$(scrat_unit is-active || true)
   if [[ $state == active || $state == activating || $state == reloading ]]; then
     log "Stopping scrat.service"
+    stopped=stopping
+    scrat_unit stop
     stopped=true
+  elif [[ $load_state == loaded ]]; then
+    scrat_unit stop
   fi
-  if [[ $load_state == loaded ]]; then scrat_unit stop; fi
   back_up
   log "Pushing the schema"
+  pushed=true
   npm run db:push
   ln -sfn "$release" "$root/current"
   [[ $(readlink -f "$root/current") == "$(readlink -f "$release")" ]] || fail "current does not point at $release"
-  refresh_cli "$release"
   if [[ $stopped == true ]]; then
     log "Starting scrat.service"
     scrat_unit start
@@ -150,6 +175,7 @@ deploy_release() {
     log "scrat.service was $state before the update and stays stopped"
   fi
   scrat_unit show --property=ActiveState --property=SubState --property=MainPID --property=NRestarts --property=MemoryMax
+  refresh_cli "$release"
   prune_releases "${previous##*/}"
   log "Deployed $sha"
 }
@@ -179,13 +205,24 @@ copy_database() {
   node --input-type=module -e 'import { DatabaseSync, backup } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); await backup(db, process.argv[2]); db.close();' "$1" "$2"
 }
 
+list_backup_files() {
+  local unit_path dropins
+  unit_path=$(scrat_unit show --property=FragmentPath --value)
+  [[ -f $unit_path ]] || fail "systemd names no unit file for scrat.service (FragmentPath \"$unit_path\"), so it cannot be backed up"
+  dropins=$(scrat_unit show --property=DropInPaths --value)
+  read -ra backup_dropins <<< "$dropins"
+  backup_files=("$unit_path" "$root/.env" "$root/scrat.local.json" "$root/deploy.json")
+  if [[ -n $wrapper ]]; then backup_files+=("$wrapper"); fi
+}
+
 back_up() {
-  local file
   backup=$root/backups/$(date -u +%Y%m%dT%H%M%SZ)
   mkdir -m 700 "$backup"
-  for file in "$(scrat_unit show --property=FragmentPath --value)" "$root/.env" "$root/scrat.local.json" "$root/deploy.json" "$wrapper"; do
-    if [[ -n $file && -f $file ]]; then cp "$file" "$backup/"; fi
-  done
+  cp "${backup_files[@]}" "$backup/"
+  if ((${#backup_dropins[@]} > 0)); then
+    mkdir "$backup/scrat.service.d"
+    cp "${backup_dropins[@]}" "$backup/scrat.service.d/"
+  fi
   if [[ -f $root/data/scrat.sqlite ]]; then copy_database "$root/data/scrat.sqlite" "$backup/scrat.sqlite"; fi
   log "Backed up to $backup"
 }
@@ -209,11 +246,11 @@ prune_releases() {
 refresh_cli() {
   local cli=$HOME/.local/bin/scrat
   if [[ ! -f $1/deploy/scrat ]] || cmp -s "$1/deploy/scrat" "$cli"; then return; fi
-  mkdir -p "${cli%/*}"
-  cp "$1/deploy/scrat" "$cli.new"
-  chmod 755 "$cli.new"
-  mv -f "$cli.new" "$cli"
-  log "Updated $cli"
+  if mkdir -p "${cli%/*}" && cp "$1/deploy/scrat" "$cli.new" && chmod 755 "$cli.new" && mv -f "$cli.new" "$cli"; then
+    log "Updated $cli"
+  else
+    log "Could not update $cli; copy $1/deploy/scrat there"
+  fi
 }
 
 scrat_unit() {
@@ -222,6 +259,19 @@ scrat_unit() {
   else
     sudo systemctl "$@" scrat.service
   fi
+}
+
+check_install_target() {
+  local file found=()
+  if [[ -f $root/.scrat-install ]]; then return; fi
+  if [[ -e $root/current ]]; then found+=("$root/current"); fi
+  for file in "$HOME/.config/systemd/user/scrat.service" "$HOME/.config/systemd/user/scrat-docker.service" /etc/systemd/system/scrat.service; do
+    if [[ -e $file ]]; then found+=("$file"); fi
+  done
+  if ((${#found[@]} > 0)) && [[ $force != true ]]; then
+    fail "This host was set up before scrat install (it has ${found[*]}). Update it with scrat update; scrat install --force takes it over and rewrites its units"
+  fi
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$root/.scrat-install"
 }
 
 install_packages() {
@@ -250,8 +300,8 @@ install_node() {
   mkdir -p "$root/runtime"
   if [[ ! -d $root/runtime/$name ]]; then
     log "Installing Node $node_version"
-    curl -fsSL -o "$work/$name.tar.xz" "https://nodejs.org/dist/v$node_version/$name.tar.xz"
-    curl -fsSL -o "$work/SHASUMS256.txt" "https://nodejs.org/dist/v$node_version/SHASUMS256.txt"
+    download -o "$work/$name.tar.xz" "https://nodejs.org/dist/v$node_version/$name.tar.xz"
+    download -o "$work/SHASUMS256.txt" "https://nodejs.org/dist/v$node_version/SHASUMS256.txt"
     (cd "$work" && grep "  $name.tar.xz\$" SHASUMS256.txt | sha256sum --check --quiet)
     tar -xJf "$work/$name.tar.xz" -C "$work"
     mv "$work/$name" "$root/runtime/$name"
@@ -261,12 +311,14 @@ install_node() {
 }
 
 load_apparmor_profiles() {
-  local name
+  local name profile
   if [[ ! -d /etc/apparmor.d ]]; then return; fi
   for name in "$@"; do
-    if cmp -s "$work/release/deploy/$name.apparmor" "/etc/apparmor.d/$name"; then continue; fi
+    profile=$release_source/deploy/$name.apparmor
+    [[ -f $profile ]] || fail "$release_source has no deploy/$name.apparmor; update to a release that has it first"
+    if cmp -s "$profile" "/etc/apparmor.d/$name"; then continue; fi
     log "Loading AppArmor profile $name"
-    sudo install -m 0644 "$work/release/deploy/$name.apparmor" "/etc/apparmor.d/$name"
+    sudo install -m 0644 "$profile" "/etc/apparmor.d/$name"
     sudo apparmor_parser -r "/etc/apparmor.d/$name"
   done
 }
@@ -286,23 +338,24 @@ install_package_manager() {
 }
 
 install_docker() {
-  local arch version file
+  local arch version file pins=$release_source/deploy/docker.sha256
   if [[ $docker != true ]]; then return; fi
+  [[ -f $pins ]] || fail "$release_source has no deploy/docker.sha256; update to a release that has it first"
   install_packages uidmap slirp4netns
   load_apparmor_profiles scrat-rootlesskit
   for file in /etc/subuid /etc/subgid; do
     grep -q "^$(id -un):" "$file" || fail "Rootless Docker needs a subordinate id range for $(id -un) in $file (sudo usermod --add-subuids <range> --add-subgids <range> $(id -un))"
   done
   arch=$(uname -m)
-  version=$(sed -n "s#^[0-9a-f]*  $arch/docker-\([0-9.]*\)\.tgz\$#\1#p" "$work/release/deploy/docker.sha256")
+  version=$(sed -n "s#^[0-9a-f]*  $arch/docker-\([0-9.]*\)\.tgz\$#\1#p" "$pins")
   [[ -n $version ]] || fail "deploy/docker.sha256 pins no Docker for $arch"
   if [[ ! -d $root/runtime/docker-$version ]]; then
     log "Installing rootless Docker $version"
     mkdir -p "$work/$arch" "$work/docker-$version" "$root/runtime"
     for file in docker docker-rootless-extras; do
-      curl -fsSL -o "$work/$arch/$file-$version.tgz" "https://download.docker.com/linux/static/stable/$arch/$file-$version.tgz"
+      download -o "$work/$arch/$file-$version.tgz" "https://download.docker.com/linux/static/stable/$arch/$file-$version.tgz"
     done
-    (cd "$work" && grep "  $arch/" "$work/release/deploy/docker.sha256" | sha256sum --check --quiet)
+    (cd "$work" && grep "  $arch/" "$pins" | sha256sum --check --quiet)
     for file in docker docker-rootless-extras; do
       tar -xzf "$work/$arch/$file-$version.tgz" -C "$work/docker-$version" --strip-components=1
     done
@@ -356,8 +409,6 @@ write_unit() {
 }
 
 print_first_sync_plan() {
-  local start="systemctl --user enable --now scrat.service"
-  if [[ $unit == system ]]; then start="sudo systemctl enable --now scrat.service"; fi
   cd "$root/current"
   log "Fetching open issues and pull requests for the first-sync plan"
   npm run --silent fetch
@@ -373,22 +424,32 @@ print_first_sync_plan() {
     console.log("First sync of " + config.github.repository + ": " + count("issue") + " open issues and " + count("pr") + " open pull requests, " + bot + " of them by " + config.github.botLogin);
     console.log("Enabled actions: " + Object.keys(config.actions).filter(isActionEnabled).join(", "));
   '
-  log "scrat.service is stopped. Start it with: $start"
+  log "scrat.service is stopped. Start it with: $(systemctl_command) enable --now scrat.service"
 }
 
 run_install() {
   command -v apt-get > /dev/null || fail "scrat install needs apt-get (Debian or Ubuntu)"
   open_work
+  check_install_target
   install_packages bubblewrap ca-certificates curl dbus-user-session git xz-utils
   install_node
   load_deployment
-  fetch_release
+  if [[ -e $root/current ]]; then
+    release_source=$(readlink -f "$root/current")
+  else
+    fetch_release
+    release_source=$work/release
+  fi
   load_apparmor_profiles scrat-bwrap scrat-chromium
   enable_linger
   install_package_manager
   install_docker
   write_unit scrat.service "$(scrat_unit_file)"
-  deploy_release
+  if [[ -e $root/current ]]; then
+    log "Keeping the installed release $release_source; change it with scrat update"
+  else
+    deploy_release
+  fi
   if ! scrat_unit is-active --quiet; then print_first_sync_plan; fi
 }
 
@@ -403,10 +464,10 @@ run_update() {
 plan() {
   printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
   declare -p root releases_repository requested_version
-  declare -f log fail open_work on_exit load_deployment fetch_release deploy_release check_sandbox rehearse_schema_push copy_database back_up prune_releases refresh_cli scrat_unit
+  declare -f log fail download open_work on_exit systemctl_command load_deployment fetch_release deploy_release check_sandbox rehearse_schema_push copy_database list_backup_files back_up prune_releases refresh_cli scrat_unit
   if [[ $subcommand == install ]]; then
-    declare -p node_version
-    declare -f install_packages install_node load_apparmor_profiles enable_linger install_package_manager install_docker docker_unit_file scrat_unit_file write_unit print_first_sync_plan run_install
+    declare -p node_version force
+    declare -f check_install_target install_packages install_node load_apparmor_profiles enable_linger install_package_manager install_docker docker_unit_file scrat_unit_file write_unit print_first_sync_plan run_install
     printf '%s\n' run_install
   else
     declare -f run_update
@@ -417,10 +478,13 @@ plan() {
 run_detached() {
   local log_file=$root/update.log pid
   [[ -d $root ]] || fail "No Scrat install at $root"
+  exec 9> "$root/update.lock"
+  flock --nonblock 9 || fail "Another scrat install or update is running; follow it with: tail -n +1 -f $log_file"
   log "Running detached, logging to $log_file"
   : > "$log_file"
-  nohup setsid bash -c "$1" >> "$log_file" 2>&1 < /dev/null &
+  SCRAT_LOCKED=1 nohup setsid bash -c "$1" >> "$log_file" 2>&1 < /dev/null &
   pid=$!
+  exec 9>&-
   tail --pid="$pid" --follow --lines=+1 "$log_file"
   wait "$pid"
 }
@@ -432,11 +496,16 @@ case $subcommand in
   *) usage >&2; exit 2 ;;
 esac
 dry_run=false
+force=false
 requested_version=
 node_version=
 while (($#)); do
   case $1 in
     --dry-run) dry_run=true ;;
+    --force)
+      [[ $subcommand == install ]] || fail "--force belongs to scrat install"
+      force=true
+      ;;
     --node)
       [[ $subcommand == install && $# -ge 2 ]] || fail "--node <version> belongs to scrat install"
       node_version=${2#v}

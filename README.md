@@ -74,31 +74,33 @@ First install, on Ubuntu or Debian:
    { "unit": "user", "repositoryPath": "/home/scrat/.local/share/scrat-v2/repository", "packageManager": "pnpm@11.7.0", "keepReleases": 3, "memoryMax": "20G", "docker": true }
    ```
 
-2. Fetch the CLI and run the installer, which asks for the sudo password when a host step is missing:
+2. Fetch the CLI from the latest release tag (`v<version>`) and run the installer, which asks for the sudo password when a host step is missing:
 
    ```sh
-   mkdir -p ~/.local/bin && curl -fsSLo ~/.local/bin/scrat https://raw.githubusercontent.com/unblocklabs-ai/scrat/main/deploy/scrat && chmod 755 ~/.local/bin/scrat
+   mkdir -p ~/.local/bin && curl -fsSLo ~/.local/bin/scrat https://raw.githubusercontent.com/unblocklabs-ai/scrat/v<version>/deploy/scrat && chmod 755 ~/.local/bin/scrat
    ~/.local/bin/scrat install --node 24.22.1
    ```
 
 3. Start the service with the command it prints.
 
-`scrat install` uses sudo only for what is missing: apt packages (including `bubblewrap`), the AppArmor profiles `deploy/scrat-bwrap.apparmor` and `deploy/scrat-chromium.apparmor` (plus `deploy/scrat-rootlesskit.apparmor` with Docker) in `/etc/apparmor.d`, and linger. It installs `--node <version>` into `runtime/`, checked against nodejs.org's `SHASUMS256.txt`, and points `runtime/node` at it; without `--node` it keeps the existing `runtime/node`. It activates `packageManager` through Corepack, installs rootless Docker as the user unit `scrat-docker.service` when `docker` is true (`deploy/docker.sha256` pins the version and checksums; the user needs subordinate id ranges), and writes `scrat.service`. Then it installs the latest release as `scrat update` does, leaves the service stopped, fetches the repository's open issues and pull requests, and prints how many there are, how many the bot login authored, and the enabled actions: the first sync reviews all of them. Running it again on a host it set up changes nothing.
+`scrat install` uses sudo only for what is missing: apt packages (including `bubblewrap`), the AppArmor profiles `deploy/scrat-bwrap.apparmor` and `deploy/scrat-chromium.apparmor` (plus `deploy/scrat-rootlesskit.apparmor` with Docker) in `/etc/apparmor.d`, and linger. It installs `--node <version>` into `runtime/`, checked against nodejs.org's `SHASUMS256.txt`, and points `runtime/node` at it; without `--node` it keeps the existing `runtime/node`. It activates `packageManager` through Corepack, installs rootless Docker as the user unit `scrat-docker.service` when `docker` is true (`deploy/docker.sha256` pins the version and checksums; the user needs subordinate id ranges), and writes `scrat.service`. On a host without a release, it then installs the latest release as `scrat update` does. While the service is stopped, it fetches the repository's open issues and pull requests and prints how many there are, how many the bot login authored, and the enabled actions: the first sync reviews all of them. It marks the hosts it sets up with `.scrat-install`; running it again on one changes nothing, the release included, which only `scrat update` changes.
 
-Updates need no sudo for a user unit. From a laptop: `ssh <host> '~/.local/bin/scrat update v2.0.47'`; with no version it installs the latest GitHub release, and an older version downgrades the same way. It runs detached, so an ssh drop does not stop it, streams its log, and keeps it in `~/.local/share/scrat-v2/update.log`, whose last line is `Deployed <commit>`. Running it for the deployed release changes nothing.
+Hosts set up before the CLI (with `current` or a `scrat.service` or `scrat-docker.service` unit, but no `.scrat-install`) use `scrat update` only. `scrat install` refuses them; `scrat install --force` takes one over, rewriting its units from `deploy.json` and keeping its release.
+
+Updates need no sudo for a user unit. From a laptop: `ssh <host> '~/.local/bin/scrat update v2.0.47'`; with no version it installs the latest GitHub release, and an older version downgrades the same way. It runs detached, so an ssh drop does not stop it, streams its log, and keeps it in `~/.local/share/scrat-v2/update.log`, whose last line is `Deployed <commit>`. Each run overwrites the log; a run refused because another is still going leaves it alone. Reattach with `tail -n +1 -f ~/.local/share/scrat-v2/update.log`. Running it for the deployed release changes nothing. Downloads give up after 30 seconds without a connection or 60 seconds below 1 KB/s.
 
 1. It downloads the tag's tarball from GitHub, takes the commit from the tarball's header, extracts it into `releases/<commit>/`, and refuses it unless `package.json` has the tag's version.
 2. While the old release keeps running, it runs `npm ci`, prepares the search tools, links `data`, `.env` and `scrat.local.json`, checks the config and the sandbox, and rehearses the schema push on a copy of the database, which must converge and pass `pragma integrity_check`. A failure here leaves the running service and everything it uses untouched.
-3. It stops the service, backs up the unit, `.env`, `scrat.local.json`, `deploy.json`, the wrapper and the database into `backups/<time>/`, pushes the schema, switches `current`, and starts the service again if it was running.
+3. It stops the service, backs up the unit and its drop-ins, `.env`, `scrat.local.json`, `deploy.json`, the wrapper and the database into `backups/<time>/`, pushes the schema, switches `current`, starts the service again if it was running, and refreshes `~/.local/bin/scrat`. If a step fails after the stop and before the schema push, it starts the old release again. If one fails later, it leaves the service stopped and prints the command that starts it.
 4. It removes releases beyond `keepReleases` and prints the space freed. Backups are not pruned.
 
 | `deploy.json` key | Purpose |
 | --- | --- |
 | `unit` | `"user"`: `scrat.service` is a systemd user unit. `"system"`: a system unit with `User=` set to the service user; `scrat update` then runs `sudo systemctl`, which must not prompt. |
-| `repositoryPath` | Absolute path of the target repository's clone, passed to the service as `SCRAT_REPOSITORY_PATH`. Scrat clones it on the first sync. |
+| `repositoryPath` | Absolute path of the target repository's clone, passed to the service as `SCRAT_REPOSITORY_PATH`. Scrat clones it on the first sync. `scrat update` passes it to the sandbox preflight, so on a host set up before the CLI it must be the `SCRAT_REPOSITORY_PATH` of the live unit or wrapper. |
 | `packageManager` | `"pnpm@<version>"` (the target repository's `packageManager` field), activated through Corepack with its shims in `bin/`, or `"npm"`, for which the sandbox preflight checks `npm` instead of `pnpm`. |
 | `keepReleases` | Releases kept after an update, newest first. The current and previous releases are always kept. |
-| `memoryMax` | Optional `MemoryMax=` of the unit that `scrat install` writes. |
+| `memoryMax` | Optional `MemoryMax=` of the unit that `scrat install` writes, as a string such as `"20G"`. |
 | `wrapper` | Optional absolute path of a program the unit runs instead of `node src/recover-active.ts && node src/serve.ts`, for example to load secrets kept elsewhere; it must exec both. Each update backs it up. |
 | `docker` | Optional. `true` installs rootless Docker for per-run databases; needs `"unit": "user"`. |
 

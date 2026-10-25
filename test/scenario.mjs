@@ -27,8 +27,11 @@ const pushFile = (branch, path, text) => {
   const remote = resolve("remote.git"), parent = git(remote, "rev-parse", branch), index = resolve("human-push.index"), env = { ...process.env, GIT_INDEX_FILE: index };
   rmSync(index, { force: true });
   execFileSync("git", ["-C", remote, "read-tree", parent], { env });
-  const blob = execFileSync("git", ["-C", remote, "hash-object", "-w", "--stdin"], { input: text, encoding: "utf8" }).trim();
-  execFileSync("git", ["-C", remote, "update-index", "--add", "--cacheinfo", `100644,${blob},${path}`], { env });
+  if (text === null) execFileSync("git", ["-C", remote, "update-index", "--index-info"], { env, input: `0 ${"0".repeat(40)}\t${path}\n` });
+  else {
+    const blob = execFileSync("git", ["-C", remote, "hash-object", "-w", "--stdin"], { input: text, encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", remote, "update-index", "--add", "--cacheinfo", `100644,${blob},${path}`], { env });
+  }
   const tree = execFileSync("git", ["-C", remote, "write-tree"], { env, encoding: "utf8" }).trim();
   const next = git(remote, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", tree, "-p", parent, "-m", "Human follow-up");
   git(remote, "update-ref", "refs/heads/" + branch, next);
@@ -121,6 +124,7 @@ const configureDatabase = (config) => {
   config.workspace = { ...config.workspace, environment: { SCRAT_WORKSPACE_VALUE: "isolated" }, database: { image: "postgres:16-alpine", environment: ["DATABASE_URL", "TEST_DATABASE_URL"], migrate: [process.execPath, resolve("database-command.mjs"), "migrate"] }, validate: [[process.execPath, resolve("database-command.mjs"), scenario === "validation_resume" ? "validate-resume" : "validate", resolve("database-receipts.jsonl")]] };
 };
 const themeFiles = { "layout/theme.liquid": "<html>{{ content_for_layout }}</html>\n", "assets/app.css": "body { color: black; }\n", "templates/index.json": "{\"sections\":{}}\n", "config/settings_data.json": "{\"current\":{}}\n", "README.md": "# Theme\n" };
+const heroPng = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02, 0x03]);
 const seedTheme = () => { for (const [path, text] of Object.entries(themeFiles)) { mkdirSync(resolve("seed", dirname(path)), { recursive: true }); writeFileSync(resolve("seed", path), text); } };
 const configureStorefront = (config) => {
   Object.assign(config.storefront, { enabled: true, store: "fixture.myshopify.com", publicHost: "shop.example.test" });
@@ -2714,6 +2718,7 @@ export const scenarios = {
     await startup((c) => { c.storefront.enabled = true; c.storefront.loggie.slug = " "; c.storefront.loggie.url = "app.loggie.ai"; c.storefront.preview.themePaths = "^(unclosed"; },
       /storefront\.enabled is true but LOGGIE_API_KEY is not set\n- storefront\.enabled requires workspace\.sandbox\n- storefront\.store must not be empty when storefront\.enabled is true\n- storefront\.publicHost must not be empty when storefront\.enabled is true\n- storefront\.loggie\.slug must not be empty when storefront\.enabled is true\n- storefront\.loggie\.url must be an absolute URL\n- storefront\.preview\.themePaths is not a valid regular expression/);
     schema((c) => { c.storefront.preview.uploadBatch = 51; }, /storefront\.preview\.uploadBatch: must be <= 50/);
+    await startup((c) => { c.storefront.enabled = true; c.storefront.publicHost = "https://shop.example.com"; }, /storefront\.publicHost must be a host name, without a scheme or path/);
     const key = process.env.GITHUB_APP_PRIVATE_KEY;
     delete process.env.GITHUB_APP_PRIVATE_KEY;
     await assert.rejects(validateStaticConfig(f.config), /github\.auth is "app" but GITHUB_APP_PRIVATE_KEY is not set/);
@@ -3595,7 +3600,7 @@ export const scenarios = {
     f.loggie.processingPolls = 1; live.storefront.preview.processingWaitSeconds = 300;
     from = f.loggie.requests.length;
     assert.equal(await failure(() => review(201)), undefined);
-    assert.deepEqual(fields(from), ["themes", "themeDuplicate", "theme", "theme", "theme", "theme"], "the next review duplicates afresh, waits for processing and lists the files page by page");
+    assert.deepEqual(fields(from), ["themes", "themeDuplicate", "theme", "theme", "theme", "theme", "theme"], "the next review duplicates afresh, waits for processing, lists the files page by page and checks the role before syncing");
     const preview = previews().find((row) => !row.deletedAt), theme = f.loggie.themes.get(preview.themeGid);
     assert.equal(previews().length, 2); assert.equal(preview.subjectId, intent.subjectId); assert.equal(preview.themeId, Number(preview.themeGid.split("/").at(-1)));
     assert.equal(theme.name, "scrat/pr-201"); assert.equal(theme.role, "UNPUBLISHED");
@@ -3619,7 +3624,7 @@ export const scenarios = {
     assert.ok(f.row(s.workspaces, implemented.workspaceId).removedAt, "a failed preview delete does not hold back the workspace cleanup");
     f.loggie.restricted.clear(); f.loggie.themes.delete(other.themeGid);
     from = f.loggie.requests.length; await route();
-    assert.deepEqual(fields(from), ["themeDelete", "theme"], "the next sync retries the delete and accepts a theme that is already gone");
+    assert.deepEqual(fields(from), ["theme"], "the next sync retries the delete and accepts a theme that is already gone");
     assert.ok(f.row(s.themePreviews, other.id).deletedAt);
     from = f.loggie.requests.length; await route();
     assert.equal(f.loggie.requests.length, from, "a deleted preview is not deleted again");
@@ -3638,7 +3643,7 @@ export const scenarios = {
   } },
   storefront_sync: { title: "a Scrat PR's theme changes reach its preview as checksum-verified batched uploads and deletions, a head move syncs only the delta and resends files that did not verify, a mismatch marks the preview unavailable in the sticky comment and the deployment, a theme gone from the store is replaced, an App without deployments loses only the deployment, and review agents get the preview link, theme ID and head as the storefront file", seed: seedTheme, configure: [configureStorefront], run: async () => {
     const md5 = f.loggie.md5, png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe, 0x10]), layout = "<html>{{ content_for_layout }}<footer></footer></html>\n";
-    f.loggie.themes.get(f.loggie.mainTheme).files = new Map(Object.entries(themeFiles).filter(([path]) => path !== "README.md").map(([path, text]) => [path, md5(text)]));
+    f.loggie.setLive(Object.fromEntries(Object.entries(themeFiles).filter(([path]) => path !== "README.md")));
     f.loggie.processingPolls = 0; writeFileSync("logo.png", png);
     f.script = [{ name: "bash", args: { command: `printf '${layout.trimEnd()}\\n' > layout/theme.liquid && cp ${resolve("logo.png")} assets/logo.png && rm templates/index.json && printf 'changed\\n' > README.md` } }];
     await implement(1); f.script = undefined;
@@ -3676,7 +3681,7 @@ export const scenarios = {
     assert.equal(previewComments().length, 1); assert.equal(previewComments()[0].id, comment.id);
     assert.match(previewComments()[0].body, new RegExp(`preview unavailable for ${secondHead}.*\\n\\n- \`assets/app\\.css\` does not match the commit`, "s"));
     assert.deepEqual(states(), [{ ref: secondHead, environment: "shopify-preview", states: ["failure"] }]);
-    assert.deepEqual(storefront(second.run), { url, themeId: preview.themeId, headSha: secondHead, available: false, problems: mismatch });
+    assert.deepEqual(storefront(second.run), { url: null, themeId: preview.themeId, headSha: secondHead, available: false, problems: mismatch });
     f.loggie.wrongMd5.clear(); from = f.loggie.requests.length;
     pushFile(pr.head.ref, "snippets/badge.liquid", "<span>new</span>\n");
     const third = await reviewed();
@@ -3697,6 +3702,8 @@ export const scenarios = {
     const gone = await reviewed();
     assert.match(gone.lines.find((line) => line.event === "storefront.preview_failed").err.message, /is gone from the store/);
     assert.ok(f.row(s.themePreviews, preview.id).deletedAt, "a reused preview whose theme is gone is marked deleted before any upload");
+    assert.match(previewComments()[0].body, new RegExp(`preview unavailable for ${head()}.*is gone from the store`, "s"));
+    assert.deepEqual(f.deployments.map(({ statuses }) => statuses.at(-1).state), ["inactive", "inactive", "failure"], "the dead link is replaced by a failure deployment");
     from = f.loggie.requests.length;
     tasks.enqueueManualTasks("review_pr", ["201"]); await success();
     const replacement = live();
@@ -3707,9 +3714,84 @@ export const scenarios = {
     pr.state = "closed"; await route();
     assert.ok(previews().every((row) => row.deletedAt)); assert.equal(f.loggie.themes.has(replacement.themeGid), false);
     assert.equal(previewComments().length, 1); assert.match(previewComments()[0].body, /Shopify preview removed:.*was deleted when this PR closed/);
-    assert.deepEqual(f.deployments.at(-1).statuses.map((status) => status.state), ["success", "inactive"]);
+    assert.deepEqual(f.deployments.map(({ statuses }) => statuses.at(-1).state), ["inactive", "inactive", "inactive", "inactive"], "every deployment of the PR ends inactive");
     const recorded = new Set(previews().map((row) => row.themeGid));
     for (const { field, variables } of f.loggie.requests) if (field === "themeFilesUpsert" || field === "themeFilesDelete") assert.ok(recorded.has(variables.themeId), "files are written only to recorded themes");
+  } },
+  storefront_sync_faults: { title: "a file the PR stops changing is copied back from the live theme (text or URL body), uploads are cut by bytes as well as count, a failed batch or a Shopify refusal marks the head unavailable and the same head is retried until it verifies, a published preview is neither written nor deleted, and closing the PR leaves every deployment inactive", seed: () => { seedTheme(); writeFileSync("seed/assets/hero.png", heroPng); }, configure: [configureStorefront, (config) => { config.storefront.preview.uploadBatchBytes = 36; }], run: async () => {
+    const md5 = f.loggie.md5, png = heroPng, changedPng = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xfe, 0xfd, 0xfc]);
+    const liveFiles = { ...Object.fromEntries(Object.entries(themeFiles).filter(([path]) => path !== "README.md")), "assets/hero.png": png };
+    f.loggie.setLive(liveFiles); f.loggie.processingPolls = 0; writeFileSync("hero2.png", changedPng);
+    f.script = [{ name: "bash", args: { command: `mkdir -p snippets && printf '{"current":{"pr":1}}\\n' > config/settings_data.json && printf '<p>old</p>\\n' > snippets/old.liquid && cp ${resolve("hero2.png")} assets/hero.png` } }];
+    await implement(1); f.script = undefined;
+    const pr = f.prs[0], head = () => pr.head.sha, live = () => all(s.themePreviews).find((row) => !row.deletedAt);
+    const sent = (field, from) => f.loggie.requests.slice(from).filter((request) => request.field === field).map((request) => request.variables.files);
+    const names = (batches) => batches.map((batch) => batch.map((file) => file.filename ?? file));
+    const comment = () => { const found = f.botComments(201).filter((entry) => entry.body.endsWith("<!-- scrat-preview -->")); assert.equal(found.length, 1); return found[0].body; };
+    const states = () => f.deployments.map(({ statuses }) => statuses.at(-1).state);
+    const logged = async (work) => { const lines = captureLogs(); try { await work(); } finally { restoreLogs(); } return lines; };
+    const reviewed = () => logged(async () => { await route(); await success(); });
+    const again = () => logged(async () => { tasks.enqueueManualTasks("review_pr", ["201"]); await success(); });
+    let from = f.loggie.requests.length;
+    await reviewed();
+    const preview = live(), theme = f.loggie.themes.get(preview.themeGid);
+    assert.deepEqual(names(sent("themeFilesUpsert", from)), [["assets/hero.png"], ["config/settings_data.json", "snippets/old.liquid"]], "a batch closes before it would pass uploadBatchBytes");
+    assert.deepEqual(preview.problems, []); assert.deepEqual(states(), ["success"]);
+    const liveSettings = '{"current":{"live":2}}\n', livePng = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x0a, 0x0b, 0x0c]);
+    f.loggie.setLive({ ...liveFiles, "config/settings_data.json": liveSettings, "assets/hero.png": livePng });
+    pushFile(pr.head.ref, "config/settings_data.json", themeFiles["config/settings_data.json"]); pushFile(pr.head.ref, "assets/hero.png", png);
+    pushFile(pr.head.ref, "snippets/new.liquid", "<p>old</p>\n"); pushFile(pr.head.ref, "snippets/old.liquid", null);
+    f.loggie.restricted.add("themeFilesDelete");
+    from = f.loggie.requests.length;
+    const failed = await reviewed(), failedHead = head();
+    assert.deepEqual(sent("themeFilesUpsert", from), [
+      [{ filename: "assets/hero.png", body: { type: "BASE64", value: livePng.toString("base64") } }],
+      [{ filename: "config/settings_data.json", body: { type: "TEXT", value: liveSettings } }, { filename: "snippets/new.liquid", body: { type: "TEXT", value: "<p>old</p>\n" } }],
+    ], "reverted files are copied from the live theme, not the merge base, and a rename uploads the new path");
+    assert.deepEqual(sent("themeFilesDelete", from), [["snippets/old.liquid"]], "a rename deletes the old path");
+    assert.equal(theme.files.get("config/settings_data.json"), md5(liveSettings)); assert.equal(theme.files.get("assets/hero.png"), md5(livePng));
+    assert.equal(failed.find((line) => line.event === "storefront.preview_failed").err.code, "ENDPOINT_RESTRICTED");
+    assert.equal(live().synced["snippets/old.liquid"], "", "a batch is recorded as unverified before it is sent");
+    assert.deepEqual({ headSha: live().headSha, problems: live().problems.length }, { headSha: failedHead, problems: 1 });
+    assert.match(comment(), new RegExp(`preview unavailable for ${failedHead}.*The sync to this commit failed \\(Loggie refused themeFilesDelete with HTTP 403 ENDPOINT_RESTRICTED`, "s"));
+    assert.deepEqual(states(), ["inactive", "failure"]);
+    f.loggie.restricted.clear(); from = f.loggie.requests.length;
+    await again();
+    assert.deepEqual(sent("themeFilesUpsert", from), [], "verified files are not sent again"); assert.deepEqual(sent("themeFilesDelete", from), [["snippets/old.liquid"]]);
+    assert.deepEqual(live().problems, []); assert.equal(theme.files.has("snippets/old.liquid"), false);
+    assert.match(comment(), new RegExp(`synced to ${failedHead}`)); assert.deepEqual(states(), ["inactive", "inactive", "success"]);
+    f.loggie.upsertErrors.add("sections/hero.liquid"); f.loggie.stuckDeletes.add("templates/index.json");
+    pushFile(pr.head.ref, "sections/hero.liquid", "<section>hero</section>\n"); pushFile(pr.head.ref, "templates/index.json", null);
+    await reviewed();
+    const refusals = ["Shopify: sections/hero.liquid: Liquid syntax error", "`sections/hero.liquid` does not match the commit", "Shopify: templates/index.json could not be deleted", "`templates/index.json` is still in the theme"];
+    assert.deepEqual(live().problems, refusals);
+    assert.ok(refusals.every((problem) => comment().includes(`- ${problem}`))); assert.deepEqual(states(), ["inactive", "inactive", "inactive", "failure"]);
+    f.loggie.upsertErrors.clear(); f.loggie.stuckDeletes.clear(); from = f.loggie.requests.length;
+    await again();
+    assert.deepEqual(names(sent("themeFilesUpsert", from)), [["sections/hero.liquid"]], "a head with problems is synced again on the next review");
+    assert.deepEqual(sent("themeFilesDelete", from), [["templates/index.json"]]);
+    assert.deepEqual(live().problems, []); assert.deepEqual(states(), ["inactive", "inactive", "inactive", "inactive", "success"]);
+    from = f.loggie.requests.length;
+    await again();
+    assert.equal(f.loggie.requests.length, from, "a verified head is not synced again");
+    theme.role = "MAIN";
+    pushFile(pr.head.ref, "snippets/new.liquid", "<p>new</p>\n");
+    from = f.loggie.requests.length;
+    await reviewed();
+    assert.deepEqual([...sent("themeFilesUpsert", from), ...sent("themeFilesDelete", from)], [], "a published preview is never written");
+    assert.deepEqual(live().problems, [`theme \`scrat/pr-201\` (ID ${preview.themeId}) is no longer unpublished (role MAIN), so Scrat does not write to it`]);
+    assert.match(comment(), /preview unavailable for .*is no longer unpublished \(role MAIN\)/s); assert.equal(states().at(-1), "failure");
+    from = f.loggie.requests.length;
+    pr.state = "closed";
+    const closed = await logged(route);
+    assert.deepEqual(f.loggie.requests.slice(from).map((request) => request.field), ["theme"], "a published preview is not deleted");
+    assert.ok(f.loggie.themes.has(preview.themeGid)); assert.equal(closed.find((line) => line.event === "storefront.preview_kept").role, "MAIN");
+    assert.match(comment(), /Shopify preview removed:.*is no longer unpublished \(role MAIN\), so Scrat left it in the store/s);
+    assert.ok(states().every((state) => state === "inactive"), "every deployment of the PR ends inactive");
+    assert.ok(all(s.themePreviews).every((row) => row.deletedAt && row.deploymentId === null));
+    from = f.loggie.requests.length; await route();
+    assert.equal(f.loggie.requests.length, from);
+    for (const { field, variables } of f.loggie.requests) if (field === "themeFilesUpsert" || field === "themeFilesDelete") assert.equal(variables.themeId, preview.themeGid);
   } },
   database: { title: "real PostgreSQL runs isolate databases, apply new migrations and remove resources", needsDocker: true, configure: [configureDatabase], run: async () => {
     const original = process.env.DATABASE_URL; f.addIssue(1); f.addIssue(2); f.enqueue(1, "implement"); f.enqueue(2, "implement");

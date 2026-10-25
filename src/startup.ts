@@ -83,6 +83,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
     for (const [key, value] of Object.entries({ "storefront.store": storefront.store, "storefront.publicHost": storefront.publicHost, "storefront.loggie.slug": storefront.loggie.slug })) {
       if (!value.trim()) problems.push(`${key} must not be empty when storefront.enabled is true`);
     }
+    if (storefront.publicHost.trim() && !/^[\w.-]+(?::\d+)?$/.test(storefront.publicHost)) problems.push("storefront.publicHost must be a host name, without a scheme or path");
     if (!URL.canParse(storefront.loggie.url)) problems.push("storefront.loggie.url must be an absolute URL");
     try { new RegExp(storefront.preview.themePaths); } catch { problems.push("storefront.preview.themePaths is not a valid regular expression"); }
   }

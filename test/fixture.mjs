@@ -61,8 +61,14 @@ export async function fixture(scenario, spec) {
   let onModel, script, nextCommentId = 1000, nextIssueNumber = 500;
   const external = [], searches = [];
   const md5 = (text) => createHash("md5").update(text).digest("hex"), mainTheme = "gid://shopify/OnlineStoreTheme/1";
-  const loggie = { key: "loggie-" + "Z8wQ4nR2tY".repeat(3), slug: "shop-fixture", requests: [], restricted: new Set(), lostDuplicate: false, wrongMd5: new Set(), processingPolls: 1, nextId: 9000, mainTheme, md5,
-    themes: new Map([[mainTheme, { id: mainTheme, name: "live", role: "MAIN", polls: 0, files: new Map(["layout/theme.liquid", "assets/app.css", "config/settings_data.json"].map((name) => [name, md5(name)])) }]]) };
+  const store = (theme, filename, type, value, checksum) => { theme.files.set(filename, checksum ?? md5(Buffer.from(value, type === "TEXT" ? "utf8" : "base64"))); theme.bodies.set(filename, { type, value }); };
+  const loggie = { key: "loggie-" + "Z8wQ4nR2tY".repeat(3), slug: "shop-fixture", requests: [], restricted: new Set(), lostDuplicate: false, wrongMd5: new Set(), upsertErrors: new Set(), stuckDeletes: new Set(), processingPolls: 1, nextId: 9000, mainTheme, md5,
+    themes: new Map([[mainTheme, { id: mainTheme, name: "live", role: "MAIN", polls: 0, files: new Map(), bodies: new Map() }]]),
+    setLive: (entries) => {
+      const main = loggie.themes.get(mainTheme); main.files.clear(); main.bodies.clear();
+      for (const [filename, content] of Object.entries(entries)) Buffer.isBuffer(content) ? store(main, filename, "URL", content.toString("base64")) : store(main, filename, "TEXT", content);
+    } };
+  loggie.setLive(Object.fromEntries(["layout/theme.liquid", "assets/app.css", "config/settings_data.json"].map((name) => [name, name])));
   if (scenario.startsWith("storefront")) process.env.LOGGIE_API_KEY = loggie.key;
   const shopify = (req, res, body) => {
     const send = (data, status = 200) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
@@ -77,7 +83,7 @@ export async function fixture(scenario, spec) {
     if (field === "themes") return send({ data: { themes: { nodes: [...loggie.themes.values()].filter((entry) => variables.names ? entry.role === "UNPUBLISHED" && variables.names.includes(entry.name) : entry.role === "MAIN").map(({ id, name }) => ({ id, name })) } } });
     if (field === "themeDuplicate") {
       const id = "gid://shopify/OnlineStoreTheme/" + ++loggie.nextId;
-      loggie.themes.set(id, { id, name: variables.name, role: "UNPUBLISHED", polls: loggie.processingPolls, files: new Map(theme.files) });
+      loggie.themes.set(id, { id, name: variables.name, role: "UNPUBLISHED", polls: loggie.processingPolls, files: new Map(theme.files), bodies: new Map(theme.bodies) });
       if (loggie.lostDuplicate) { loggie.lostDuplicate = false; res.writeHead(502, { "content-type": "text/html" }); return res.end("<html>Bad Gateway</html>"); }
       return send({ data: { themeDuplicate: { newTheme: { id, name: variables.name }, userErrors: [] } } });
     }
@@ -85,23 +91,36 @@ export async function fixture(scenario, spec) {
     const target = loggie.themes.get(variables.themeId);
     if (field === "themeFilesUpsert") {
       if (variables.files.length > 50) return send({ data: { themeFilesUpsert: { upsertedThemeFiles: [], userErrors: [{ field: ["files"], message: "You can only upload 50 files at a time" }] } } });
-      for (const { filename, body: { type, value } } of variables.files) target.files.set(filename, loggie.wrongMd5.has(filename) ? "0".repeat(32) : md5(Buffer.from(value, type === "BASE64" ? "base64" : "utf8")));
-      return send({ data: { themeFilesUpsert: { upsertedThemeFiles: variables.files.map(({ filename }) => ({ filename })), userErrors: [] } } });
+      const accepted = variables.files.filter(({ filename }) => !loggie.upsertErrors.has(filename));
+      for (const { filename, body: { type, value } } of accepted) store(target, filename, type, value, loggie.wrongMd5.has(filename) ? "0".repeat(32) : undefined);
+      const userErrors = variables.files.filter(({ filename }) => loggie.upsertErrors.has(filename)).map(({ filename }) => ({ field: ["files", filename], message: `${filename}: Liquid syntax error` }));
+      return send({ data: { themeFilesUpsert: { upsertedThemeFiles: accepted.map(({ filename }) => ({ filename })), userErrors } } });
     }
     if (field === "themeFilesDelete") {
-      for (const filename of variables.files) target.files.delete(filename);
-      return send({ data: { themeFilesDelete: { deletedThemeFiles: variables.files.map((filename) => ({ filename })), userErrors: [] } } });
+      const deleted = variables.files.filter((filename) => !loggie.stuckDeletes.has(filename));
+      for (const filename of deleted) { target.files.delete(filename); target.bodies.delete(filename); }
+      const userErrors = variables.files.filter((filename) => loggie.stuckDeletes.has(filename)).map((filename) => ({ field: ["files"], message: `${filename} could not be deleted` }));
+      return send({ data: { themeFilesDelete: { deletedThemeFiles: deleted.map((filename) => ({ filename })), userErrors } } });
     }
     if (!theme) return send({ data: { theme: null } });
     const processing = theme.polls > 0;
     if (processing && query.includes("processing")) theme.polls--;
-    const files = [...theme.files].map(([filename, checksumMd5]) => ({ filename, checksumMd5 })).filter(({ filename }) => !variables.filenames || variables.filenames.includes(filename));
+    const bodyOf = (filename) => {
+      const { type, value } = theme.bodies.get(filename);
+      return type === "TEXT" ? { content: value } : type === "BASE64" ? { contentBase64: value } : { url: `http://${req.headers.host}/cdn/${theme.id.split("/").at(-1)}/${filename}` };
+    };
+    const files = [...theme.files].map(([filename, checksumMd5]) => ({ filename, checksumMd5, ...(query.includes("body") && { body: bodyOf(filename) }) }))
+      .filter(({ filename }) => !variables.filenames || variables.filenames.includes(filename));
     const start = Number(variables.after ?? 0), end = start + (variables.first ?? files.length);
-    return send({ data: { theme: { id: theme.id, name: theme.name, processing, files: { nodes: files.slice(start, end), pageInfo: { hasNextPage: end < files.length, endCursor: String(end) } } } } });
+    return send({ data: { theme: { id: theme.id, name: theme.name, role: theme.role, processing, files: { nodes: files.slice(start, end), pageInfo: { hasNextPage: end < files.length, endCursor: String(end) } } } } });
   };
   const server = createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
     if (req.url.startsWith("/api/proxy/")) return shopify(req, res, body);
+    if (req.url.startsWith("/cdn/")) {
+      const [, , number, ...path] = req.url.split("/"), file = loggie.themes.get(`gid://shopify/OnlineStoreTheme/${number}`)?.bodies.get(path.join("/"));
+      res.writeHead(file ? 200 : 404); return res.end(file ? Buffer.from(file.value, "base64") : "");
+    }
     const request = JSON.parse(body);
     const texts = request.messages.filter((message) => message.role === "user")
       .map((message) => typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("\n"));

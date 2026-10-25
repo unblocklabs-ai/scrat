@@ -59,11 +59,12 @@
     "loggie": { "url": "https://app.loggie.ai", "slug": "", "timeoutSeconds": 60 },
     "preview": {
       "themeNamePrefix": "scrat/",
-      "themePaths": "^(?:assets|blocks|config|layout|locales|sections|snippets|templates|templates/customers)/[^/]+$",
+      "themePaths": "^(?:assets|blocks|config|layout|locales|sections|snippets|templates|templates/customers|templates/metaobject)/[^/]+$",
       "processingWaitSeconds": 300,
       "processingPollSeconds": 5,
       "filesPageSize": 250,
       "uploadBatch": 50,
+      "uploadBatchBytes": 8388608,
       "requestTimeoutSeconds": 180
     }
   },

@@ -31,6 +31,8 @@ export type JournalEvent = (
   | { type: "github.issue_created"; data: { repository: string; issueNumber: number; url: string; fingerprint: string } }
   | { type: "github.labels_added"; data: { repository: string; issueNumber: number; labels: string[] } }
   | { type: "github.label_removed"; data: { repository: string; issueNumber: number; label: string } }
+  | { type: "github.deployment_created"; data: { repository: string; deploymentId: number; environment: string; ref: string } }
+  | { type: "github.deployment_status_created"; data: { repository: string; deploymentId: number; state: string } }
   | { type: "github.pull_request_created"; data: {
       repository: string;
       pullRequestNumber: number;

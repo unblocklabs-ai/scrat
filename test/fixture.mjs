@@ -54,14 +54,14 @@ export async function fixture(scenario, spec) {
   if (scoped) process.env.SCOUT_TOKEN = "scout-" + "k9Xq2LmPz7".repeat(3);
   if (scenario.startsWith("commit_review") || scenario === "recovery" || scenario === "isolation" || scenario.startsWith("slack_status") || scenario === "publish_effects") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
-  const verdicts = {}, modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), checkRuns = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [];
-  const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set() };
+  const verdicts = {}, modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), checkRuns = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [], deployments = [];
+  const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set(), permissions: new Set() };
   const tokens = new Map(patMode ? [[pat, { issues: "write", pull_requests: "write", contents: "write" }]] : []);
   const transient = { failures: 0, seen: new Map() };
   let onModel, script, nextCommentId = 1000, nextIssueNumber = 500;
   const external = [], searches = [];
   const md5 = (text) => createHash("md5").update(text).digest("hex"), mainTheme = "gid://shopify/OnlineStoreTheme/1";
-  const loggie = { key: "loggie-" + "Z8wQ4nR2tY".repeat(3), slug: "shop-fixture", requests: [], restricted: new Set(), lostDuplicate: false, processingPolls: 1, nextId: 9000, mainTheme,
+  const loggie = { key: "loggie-" + "Z8wQ4nR2tY".repeat(3), slug: "shop-fixture", requests: [], restricted: new Set(), lostDuplicate: false, wrongMd5: new Set(), processingPolls: 1, nextId: 9000, mainTheme, md5,
     themes: new Map([[mainTheme, { id: mainTheme, name: "live", role: "MAIN", polls: 0, files: new Map(["layout/theme.liquid", "assets/app.css", "config/settings_data.json"].map((name) => [name, md5(name)])) }]]) };
   if (scenario.startsWith("storefront")) process.env.LOGGIE_API_KEY = loggie.key;
   const shopify = (req, res, body) => {
@@ -82,11 +82,21 @@ export async function fixture(scenario, spec) {
       return send({ data: { themeDuplicate: { newTheme: { id, name: variables.name }, userErrors: [] } } });
     }
     if (field === "themeDelete") return send({ data: { themeDelete: loggie.themes.delete(variables.id) ? { deletedThemeId: variables.id, userErrors: [] } : { deletedThemeId: null, userErrors: [{ field: ["id"], message: "Theme does not exist" }] } } });
-    if (field !== "theme") return send({ errors: [{ message: `The fixture does not implement ${field}` }] });
+    const target = loggie.themes.get(variables.themeId);
+    if (field === "themeFilesUpsert") {
+      if (variables.files.length > 50) return send({ data: { themeFilesUpsert: { upsertedThemeFiles: [], userErrors: [{ field: ["files"], message: "You can only upload 50 files at a time" }] } } });
+      for (const { filename, body: { type, value } } of variables.files) target.files.set(filename, loggie.wrongMd5.has(filename) ? "0".repeat(32) : md5(Buffer.from(value, type === "BASE64" ? "base64" : "utf8")));
+      return send({ data: { themeFilesUpsert: { upsertedThemeFiles: variables.files.map(({ filename }) => ({ filename })), userErrors: [] } } });
+    }
+    if (field === "themeFilesDelete") {
+      for (const filename of variables.files) target.files.delete(filename);
+      return send({ data: { themeFilesDelete: { deletedThemeFiles: variables.files.map((filename) => ({ filename })), userErrors: [] } } });
+    }
     if (!theme) return send({ data: { theme: null } });
     const processing = theme.polls > 0;
     if (processing && query.includes("processing")) theme.polls--;
-    const files = [...theme.files].map(([filename, checksumMd5]) => ({ filename, checksumMd5 })), start = Number(variables.after ?? 0), end = start + (variables.first ?? files.length);
+    const files = [...theme.files].map(([filename, checksumMd5]) => ({ filename, checksumMd5 })).filter(({ filename }) => !variables.filenames || variables.filenames.includes(filename));
+    const start = Number(variables.after ?? 0), end = start + (variables.first ?? files.length);
     return send({ data: { theme: { id: theme.id, name: theme.name, processing, files: { nodes: files.slice(start, end), pageInfo: { hasNextPage: end < files.length, endCursor: String(end) } } } } });
   };
   const server = createServer(async (req, res) => {
@@ -290,6 +300,7 @@ export async function fixture(scenario, spec) {
     if (path === "/user") return user.status === 200 ? reply({ login: user.login }) : reply({ message: "Bad credentials" }, user.status);
     if (path === "/app") return reply({ slug: githubApp.slug });
     if (path.endsWith("/access_tokens")) {
+      if (Object.keys(body.permissions).some((name) => faults.permissions.has(name))) return reply({ message: "The permissions requested are not granted to this installation." }, 422);
       const token = "ghs_fixture_" + tokens.size; tokens.set(token, body.permissions);
       return reply({ token, expires_at: new Date(Date.now() + 3600000).toISOString() }, 201);
     }
@@ -345,6 +356,19 @@ export async function fixture(scenario, spec) {
       } else for (const name of body.labels) if (!item.labels.some((label) => label.name === name)) item.labels.push({ name });
       return reply(item.labels);
     }
+    match = path.match(/\/deployments(?:\/(\d+)\/statuses)?$/);
+    if (match && method === "POST") {
+      if (!can("deployments")) return reply({ message: "Resource not accessible by integration" }, 403);
+      if (!match[1]) {
+        const deployment = { id: deployments.length + 1, ref: body.ref, environment: body.environment, description: body.description, statuses: [] };
+        deployments.push(deployment); writes.push({ type: "deployment", id: deployment.id, ref: body.ref });
+        return reply({ id: deployment.id, ref: body.ref, environment: body.environment }, 201);
+      }
+      const deployment = deployments.find((entry) => entry.id === Number(match[1]));
+      deployment.statuses.push({ state: body.state, environmentUrl: body.environment_url, description: body.description, autoInactive: body.auto_inactive });
+      writes.push({ type: "deployment_status", id: deployment.id, state: body.state });
+      return reply({ id: deployment.statuses.length, state: body.state }, 201);
+    }
     match = path.match(/\/commits\/([0-9a-f]+)\/check-runs$/);
     if (match) { if (tokens.get(credential)?.checks !== "read") return reply({ message: "Resource not accessible by integration" }, 403); const runs = checkRuns.get(match[1]) ?? []; return Object.defineProperty(reply({ total_count: runs.length, check_runs: runs }), "url", { value: url.href }); }
     if (path.endsWith("/pulls") && method === "GET") return reply(prs.filter((pr) => (!url.searchParams.get("head") || pr.head.ref === url.searchParams.get("head").split(":").slice(1).join(":")) && (url.searchParams.get("state") !== "open" || pr.state === "open")));
@@ -369,7 +393,7 @@ export async function fixture(scenario, spec) {
   const addPr = (number, branch, login, extra = {}) => { prs.push(githubItem("pr", number, { title: "PR " + number, body: "", user: { login }, head: { ref: branch, sha: git(resolve("remote.git"), "rev-parse", branch), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } }, ...extra })); };
   const botComments = (number) => (comments.get(number) ?? []).filter((c) => c.user.login !== "human");
   const written = (type, predicate = () => true) => writes.filter((write) => write.type === type && predicate(write));
-  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, loggie, pat, user, githubApp, modes, verdicts, requests, calls, slack, rate, issues, prs, comments, reviews, writes, checkRuns, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
+  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, loggie, pat, user, githubApp, modes, verdicts, requests, calls, slack, rate, issues, prs, comments, reviews, writes, deployments, checkRuns, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
     set onModel(value) { onModel = value; },
     set script(value) { script = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },

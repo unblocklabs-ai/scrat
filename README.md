@@ -361,7 +361,7 @@ Scrat can post its work to Slack: one thread per issue or pull request, with eve
 Put that in `scrat.local.json`. `channel` is a channel ID, not a name. Both this and `review_base_change` post through one Slack bot:
 
 1. Create a Slack app in the workspace, from scratch.
-2. Under OAuth & Permissions, add the bot token scope `chat:write`, then install the app to the workspace.
+2. Under OAuth & Permissions, add the bot token scopes `chat:write` and `reactions:write` (review verdict reactions), then install the app to the workspace; an app installed before `reactions:write` was added must be reinstalled to pick up the new scope.
 3. Copy the Bot User OAuth Token (`xoxb-...`) into `.env` as `SLACK_BOT_TOKEN=xoxb-...`.
 4. Invite the bot to the channel (`/invite @<bot name>`).
 
@@ -376,6 +376,8 @@ Posting is best effort. It runs after the database write, one message at a time,
 `review_base_change` reviews each update to `github.baseBranch` and reports the review in Slack. It runs on the `github.fetchIntervalSeconds` interval and at startup. It queues one review per push range by default, or one per commit with `granularity: commit`. Commits can be filtered by `author` or `message` (see `github_commits` above), and Scrat's own merged commits are reviewed unless filtered out.
 
 For each review, Scrat posts `startMessage` to the channel as the opening message, then replies in that thread with the review: a one-line verdict followed by at most five bullets, highest consequence first, and at most 3,000 characters.
+
+Once the reply is saved, Scrat reacts on the opening message with the review's verdict: `white_check_mark` (clean), `large_orange_square` (concerns) or `large_red_square` (breaking: an incompatible change to a contract callers or consumers use; it wins over concerns). The agent ends its review with `SCRAT_VERDICT: clean|concerns|breaking`, which is kept out of the reply. An incomplete review or a missing verdict gets no reaction.
 
 The agent receives the commit messages, the changed paths and the diff for the range. It has read-only tools, including `read_base` for the commit before the range. It does not install dependencies, run validation, open a PR or post to Slack, and it never sees the Slack token.
 
@@ -399,4 +401,5 @@ Failures:
 
 - Slack is unreachable when the run starts: Scrat logs `slack.post_failed` and runs the review anyway. The opening message is posted with the reply.
 - Slack is unreachable when the reply is posted: the run fails at publishing. `npm run retry -- <task-id>` reuses the saved review and posts only the reply to the thread, without running the agent again.
+- The reaction fails after the reply is posted: the run fails at publishing and the `slack.add_reaction` operation logs `operation.failed`. `npm run retry -- <task-id>` adds only the reaction, without posting the reply or running the agent again; a reaction that is already there counts as added.
 - Slack has no idempotency key. A crash after Slack accepts a message but before Scrat records its timestamp can post that message again on retry, either the opening message or the reply.

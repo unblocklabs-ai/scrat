@@ -126,6 +126,7 @@
           "id": "deepseek/deepseek-v4.1-flash",
           "name": "DeepSeek V4.1 Flash",
           "reasoning": true,
+          "input": ["text", "image"],
           "contextWindow": 1000000,
           "maxTokens": 32768
         },
@@ -133,6 +134,7 @@
           "id": "gpt-6.1-sol",
           "name": "GPT-6.1 Sol",
           "reasoning": true,
+          "input": ["text", "image"],
           "thinkingLevelMap": {
             "off": null,
             "minimal": null,

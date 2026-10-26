@@ -1,6 +1,6 @@
 import { buildAgentInput } from "./agent-input.ts";
 import { config } from "./config.ts";
-import type { Manifest } from "./manifests.ts";
+import type { Action } from "./manifests.ts";
 import { runCommands } from "./commands.ts";
 import { fetchPullRequestHead } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
@@ -31,7 +31,7 @@ export function stopBefore(stop: AbortSignal | undefined, next: string) {
 export type Ctx = {
   task: Task; run: Run; subject: Subject; item: Item | undefined;
   references: References; operation: ReturnType<typeof startOperation>;
-  manifest: Manifest; repositoryPath: string; stop: AbortSignal | undefined;
+  manifest: Action; repositoryPath: string; stop: AbortSignal | undefined;
   cleanup: { reviewWorkspace?: Workspace; databaseRequested: boolean };
 };
 export type Observed = {

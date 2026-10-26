@@ -1,6 +1,6 @@
 import { and, eq, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
-import { manifests, matchingActions, routeFor } from "./actions.ts";
+import { manifestOf, manifests, matchingActions, routeFor } from "./actions.ts";
 import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import type { Signal } from "./manifests.ts";
 import { botSlug } from "./identity.ts";
@@ -91,8 +91,8 @@ async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observatio
 }
 
 async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation: ItemObservation, routes: Routes, repair: string | undefined, state: PrReviewState, count: number) {
-  const settings = config.actions[repair ?? routes.repairs[0] ?? ""];
-  const latestRepair = latestOf(item.id, repair ?? routes.repairs[0]);
+  const name = repair ?? routes.repairs[0], settings = name === undefined ? undefined : manifestOf(name);
+  const latestRepair = latestOf(item.id, name);
   const repairActive = latestRepair?.status === "queued" || latestRepair?.status === "running";
   if (!settings?.exhaustedLabel || !routes.repairs.length || state.kind !== "current" || repairActive) return;
   const { exhaustedLabel } = settings;
@@ -104,7 +104,7 @@ async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation
 
 async function reconcileFailedLabels(ctx: SyncContext, item: Item) {
   const labelled = manifests.flatMap(({ name, trigger }) => {
-    const label = config.actions[name]?.failedLabel;
+    const label = manifestOf(name).failedLabel;
     return trigger.item === item.kind && label ? [{ name, label, selected: trigger.kind !== "label" || hasScratLabel(item) }] : [];
   });
   if (!labelled.length) return;
@@ -127,7 +127,7 @@ async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObse
   let added = applyDecisions(item.id, planReview({ kind: "pr", action, state, latest, attempt, revision: observation.revision, mainSha }));
   const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
   const repairAction = routes.repairFor(state.kind === "current" ? state.assessment.result.grade : undefined);
-  const limit = config.actions[repairAction ?? ""]?.maxSelfRepairs;
+  const limit = repairAction === undefined ? undefined : manifestOf(repairAction).maxSelfRepairs;
   const repair = planSelfRepair({
     repairAction, repairActions: routes.repairs, state, feedbackTask: latestOf(item.id, routes.feedback),
     reviewTask: latest, repairTask: latestOf(item.id, repairAction), count, limit,

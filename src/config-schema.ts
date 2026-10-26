@@ -1,6 +1,6 @@
 import { type Static, Type } from "typebox";
 import Value from "typebox/value";
-import { modelSettings, nullable, retrySettings, thinkingLevels } from "./manifests.ts";
+import { actionSettings, nullable } from "./manifests.ts";
 import { prGrades } from "./results.ts";
 
 const strict = { additionalProperties: false } as const;
@@ -61,17 +61,10 @@ const schema = Type.Object({
       contextWindow: Type.Optional(positive), maxTokens: Type.Optional(positive),
     }, open))),
   }, open)),
-  actions: Type.Record(Type.String(), Type.Object({
-    enabled: Type.Optional(Type.Boolean()), priority: Type.Integer(), skill: Type.String(), reviewers: Type.Array(modelSettings),
-    branch: Type.Optional(Type.String()), channel: Type.Optional(Type.String()), maxRangeCommits: Type.Optional(positive), startMessage: Type.Optional(Type.String()),
-    maxSelfRepairs: Type.Optional(Type.Integer({ minimum: 0 })), exhaustedLabel: Type.Optional(nullable(Type.String())), failedLabel: Type.Optional(nullable(Type.String())),
-    provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels),
-    retry: Type.Optional(nullable(retrySettings)),
-  }, strict)),
+  actions: Type.Record(Type.String(), actionSettings),
 }, strict);
 
 export type ScratConfig = Static<typeof schema>;
-export type ActionSettings = ScratConfig["actions"][string];
 
 const dotted = (path: string) => path.slice(1).replaceAll("/", ".");
 const where = (path: string, key: string) => [dotted(path), key].filter(Boolean).join(".");

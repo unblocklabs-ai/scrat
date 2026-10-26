@@ -3383,6 +3383,8 @@ export const scenarios = {
     assert.doesNotMatch(probe(base), /Error/);
     assert.match(probe({ directory, review_pr: { enabled: false } }), /actions\/review_issue\.yaml and .*review_triage\.yaml both match \{source: github_items, kind: item_changed, item: issue\}; disable one/);
     assert.doesNotMatch(probe({ directory, review_pr: { enabled: false }, review_triage: { enabled: false } }), /Error/);
+    const commits = readFileSync(resolve("app/actions/review_base_change.yaml"), "utf8");
+    assert.match(probe({ ...base, review_base_change: { enabled: true, branch: "develop" }, dup_commits: { enabled: true } }, { "dup_commits.yaml": commits.replace("name: review_base_change", "name: dup_commits").replace("enabled: false\n", "").replace("branch: main", "branch: develop") }), /both match \{source: github_commits, kind: commit, branch: develop\}/);
     assert.match(probe(base, { "bad_tool.yaml": withTools(named("bad_tool", "priority", "10"), "[teleport]") }), /bad_tool\.yaml: \/tools\/0/);
     assert.match(probe(base, { "bad_file.yaml": named("bad_file", "files", "[secrets]") }), /bad_file\.yaml: \/files\/0/);
     assert.match(probe({ ...base, directory: "relative/actions" }), /actions\.directory must be an absolute path/);

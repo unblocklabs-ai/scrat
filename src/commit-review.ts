@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { evaluateContext } from "./agent-input.ts";
-import { commitSettings } from "./config.ts";
+import { manifestOf } from "./actions.ts";
 import { db } from "./db.ts";
 import { changedPaths, git } from "./git.ts";
 import { botName } from "./identity.ts";
@@ -28,7 +28,7 @@ const savedRoot = (subject: Subject) => db.select().from(slackThreads).where(eq(
 async function threadRoot(subject: Subject, action: string, { sha, branch, commitCount }: CommitInput) {
   const existing = savedRoot(subject);
   if (existing) return existing;
-  const { channel, startMessage } = commitSettings(action);
+  const { channel = "", startMessage = "" } = manifestOf(action);
   const metadata = commitMetadata(subject);
   const values: Record<string, string> = {
     sha, short_sha: sha.slice(0, 7), author: escapeSlack(metadata.author), title: escapeSlack(metadata.title),

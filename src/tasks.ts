@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, count, desc, eq, isNotNull, isNull, lte, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
-import { getActionConfig, manifestOf, manifests } from "./actions.ts";
+import { manifestOf, manifests } from "./actions.ts";
 import { config, isActionEnabled } from "./config.ts";
 import { itemsInRepository, sameRepository } from "./repository.ts";
 import { db } from "./db.ts";
@@ -25,11 +25,6 @@ export function latestTask(subjectId: string, action: string) {
     .orderBy(desc(tasks.createdAt), desc(tasks.id)).limit(1).get();
 }
 
-export function configuredReviewers(action: string, single = false) {
-  const reviewers = getActionConfig(action).reviewers.map(({ provider, model, thinkingLevel }) => ({ provider, model, thinkingLevel }));
-  return single ? reviewers.slice(0, 1) : reviewers;
-}
-
 const modeOf = (action: string) => manifests.find(({ name }) => name === action)?.mode;
 
 function checkClaimable({ task, subject }: { task: Task; subject: Subject }, database: Pick<typeof db, "select">) {
@@ -45,15 +40,15 @@ function checkClaimable({ task, subject }: { task: Task; subject: Subject }, dat
 
 function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run | undefined; trigger: TriggerInput }) {
   const retry = previousRun?.error && isDeepStrictEqual(previousRun.input, task.input) ? previousRun : undefined;
-  const actionSettings = getActionConfig(task.action);
+  const action = manifestOf(task.action);
   const validationOnly = task.retryMode === "validation";
   const publicationResume = !validationOnly && hasPublicationSnapshot(retry) ? retry : undefined;
   const resume = validationOnly ? (hasValidationCheckpoint(retry) ? retry : undefined) : publicationResume;
   const prior = retry?.error?.name === "InterruptedError" && !resume ? undefined : retry;
-  const review = manifestOf(task.action).mode === "review";
+  const review = action.mode === "review";
   const pinned = review && !resume ? undefined : prior;
-  const settings = pinned ?? actionSettings;
-  const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? configuredReviewers(task.action, isBaseOnly(trigger));
+  const settings = pinned ?? action;
+  const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? (isBaseOnly(trigger) ? action.reviewers.slice(0, 1) : action.reviewers);
   const { provider, model, thinkingLevel } = !resume && reviewers.length === 1 ? reviewers[0] : settings;
   return { prior, resume, publicationResume, review, reviewers, skill: settings.skill, provider, model, thinkingLevel, stage: entryStage(retry, task.retryMode) };
 }

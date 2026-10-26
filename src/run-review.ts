@@ -1,4 +1,3 @@
-import { getActionConfig } from "./actions.ts";
 import { evaluateContext, readDiffScope } from "./agent-input.ts";
 import { commitInput, describeCommit, startCommitThread } from "./commit-review.ts";
 import { describeWindow } from "./window-review.ts";
@@ -12,7 +11,6 @@ import { getRun, updateRun } from "./run-history.ts";
 import { assertComplete } from "./results.ts";
 import type { Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
-import { configuredReviewers } from "./tasks.ts";
 import { isBaseOnly, parseTriggerInput } from "./triggers.ts";
 import { createWorkspace, removeWorkspace } from "./workspaces.ts";
 import { botAuthor, type Ctx, type Environment, itemRevisions, type Observed, prepareWorkspace, runAgent, stopBefore, tryCleanup } from "./run-context.ts";
@@ -23,7 +21,7 @@ const reviewsStorefront = ({ subject, manifest, run }: Ctx) => config.storefront
   && manifest.publish.includes("slack_reply") && commitInput(run.input).branch === config.github.baseBranch;
 
 async function settleReviewPlan(ctx: Ctx, { item, observation, mainSha }: Observed) {
-  const { run, task } = ctx;
+  const { run, manifest } = ctx;
   if (run.reviewers.length !== 1) return;
   const trigger = parseTriggerInput(run.input);
   if (isBaseOnly(trigger)) {
@@ -31,8 +29,8 @@ async function settleReviewPlan(ctx: Ctx, { item, observation, mainSha }: Observ
     if (state.kind === "stale" && state.reason === "base" && (state.assessment.run.mainSha ?? null) === (trigger.previousMainSha ?? null)
       && (state.assessment.run.headSha ?? null) === (trigger.previousHeadSha ?? null)) return;
   }
-  const { provider, model, thinkingLevel } = getActionConfig(task.action);
-  updateRun(run.id, { reviewers: configuredReviewers(task.action), provider, model, thinkingLevel });
+  const { reviewers, provider, model, thinkingLevel } = manifest;
+  updateRun(run.id, { reviewers, provider, model, thinkingLevel });
   ctx.run = getRun(run.id)!;
 }
 

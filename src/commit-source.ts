@@ -1,8 +1,8 @@
-import { commitSettings, config, getRepositoryPath, isBotLogin } from "./config.ts";
+import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import { commitOf, fetchRepository, git, gitList, isAncestor } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { type OperationScope } from "./logging.ts";
-import type { Manifest } from "./manifests.ts";
+import type { Action } from "./manifests.ts";
 import { upsertSubject } from "./items.ts";
 import { remoteUrl } from "./repository.ts";
 import { enqueueOnce, pollSource, sourceCursor } from "./sources.ts";
@@ -11,7 +11,7 @@ export function pollCommits(repository = config.github.repository) {
   return pollSource("commits.poll", "github_commits", repository, pollAction);
 }
 
-type CommitTrigger = Manifest["trigger"];
+type CommitTrigger = Action["trigger"];
 type RangeCommit = { sha: string; parent: string; author: string; email: string; title: string; message: string };
 
 const noreplyLogin = (email: string) => /^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$/i.exec(email)?.[1];
@@ -30,10 +30,10 @@ async function rangeCommits(repositoryPath: string, previousSha: string, tip: st
   });
 }
 
-async function pollAction({ name: action, trigger }: Manifest, operation: OperationScope, repository: string) {
-  const { enabled, branch, maxRangeCommits } = commitSettings(action);
+async function pollAction({ name: action, trigger, enabled, maxRangeCommits }: Action, operation: OperationScope, repository: string) {
+  const branch = trigger.branch!;
   const cursor = sourceCursor(repository, action, branch);
-  if (!enabled) {
+  if (enabled === false) {
     cursor.clear();
     return 0;
   }
@@ -63,7 +63,7 @@ async function pollAction({ name: action, trigger }: Manifest, operation: Operat
   }
   if (trigger.granularity === "commit") {
     const matching = (await rangeCommits(repositoryPath, previousSha, tip)).filter((commit) => commitMatches(trigger, commit));
-    const kept = matching.slice(0, maxRangeCommits);
+    const kept = matching.slice(0, maxRangeCommits!);
     operation.stage("enqueue");
     let queued = 0;
     for (const commit of kept) {
@@ -79,7 +79,7 @@ async function pollAction({ name: action, trigger }: Manifest, operation: Operat
   const commitCount = Number(await git(repositoryPath, ["rev-list", "--first-parent", "--count", `${previousSha}..${tip}`]));
   const [author, title] = (await git(repositoryPath, ["log", "-1", "--format=%an%x00%s", tip])).split("\0");
   operation.stage("enqueue");
-  const queued = enqueueCommit({ repository, action, branch, sha: tip, previousSha, commitCount, truncated: commitCount > maxRangeCommits, title: title ?? "", author: author ?? "" });
+  const queued = enqueueCommit({ repository, action, branch, sha: tip, previousSha, commitCount, truncated: commitCount > maxRangeCommits!, title: title ?? "", author: author ?? "" });
   cursor.save(tip);
   return queued;
 }

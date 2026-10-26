@@ -1,7 +1,7 @@
 import { copyFile, cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { contextDirOf } from "./agent-input.ts";
+import { contextDirOf, contextFiles } from "./agent-input.ts";
 import { commitInput, postCommitReply } from "./commit-review.ts";
 import { config } from "./config.ts";
 import type { EffectContext } from "./effects.ts";
@@ -46,13 +46,9 @@ async function liveProof({ repositoryPath, operation, stop }: Ctx, { headSha, di
 }
 
 async function sessionFiles(contextDir: string, diffPaths: string[], siteMap: string | undefined) {
-  const files: Record<string, string> = { directory: contextDir };
-  const write = async (key: string, name: string, content: string) => {
-    files[key] = join(contextDir, name);
-    await writeFile(files[key], content);
-  };
+  const { files, write, spill } = await contextFiles(contextDir);
   if (siteMap) await write("siteMap", "site.md", siteMap);
-  if (diffPaths.length > config.context.inlinePaths) await write("diffPaths", "diff-paths.txt", diffPaths.join("\n") + "\n");
+  const diffPathCount = await spill("diffPaths", "diff-paths.txt", diffPaths);
   const baselines = await readState<Baselines>("baselines/index.json", {}) ?? {};
   if (Object.keys(baselines).length) {
     await cp(statePath("baselines"), join(contextDir, "baselines"), { recursive: true });
@@ -60,20 +56,21 @@ async function sessionFiles(contextDir: string, diffPaths: string[], siteMap: st
       url, screenshots: Object.fromEntries(Object.entries(devices).map(([device, sha]) => [device, { path: join(contextDir, "baselines", key, `${device}.png`), sha }])),
     }])), null, 2));
   }
-  return files;
+  return { files, diffPathCount };
 }
 
 async function reviewPages({ run, task, operation, stop }: Ctx, { workspace, headSha, diffBaseSha, diffPaths, item }: Change, known: Alerts | undefined, record: (session: Storefront["session"]) => void) {
   const contextDir = contextDirOf(run.id), { devices, limits } = config.storefront;
   const { context: { liveUrl }, siteMap } = (await storefrontContext(task.subjectId, headSha, true))!;
+  const { files, diffPathCount } = await sessionFiles(contextDir, diffPaths, siteMap);
   const context = JSON.stringify({
     action: task.action, item,
     storefront: {
       liveUrl, sha: headSha, previousSha: diffBaseSha, devices, confirmationRuns: limits.confirmationRuns,
       knownBreakages: Object.entries(known ?? {}).map(([fingerprint, { title, sha }]) => ({ fingerprint, title, since: sha })),
     },
-    ...(diffPaths.length > config.context.inlinePaths ? { diffPathCount: diffPaths.length } : { diffPaths }),
-    files: await sessionFiles(contextDir, diffPaths, siteMap),
+    ...(diffPathCount ? { diffPathCount } : { diffPaths }),
+    files,
   }, null, 2);
   return executePi({
     run: { ...run, skill }, cwd: workspace.path, tools: ["read", "grep", "find", "ls", "git", "browser"],

@@ -54,12 +54,14 @@ export async function readState<T>(name: string, fallback: T) {
   return bestEffort(logger, "storefront.state_unreadable", { path: statePath(name) }, async () => JSON.parse(text) as T);
 }
 
-export async function writeState(name: string, value: unknown) {
+export async function writeStateText(name: string, text: string) {
   const path = statePath(name);
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(`${path}.tmp`, JSON.stringify(value, null, 2) + "\n");
+  await writeFile(`${path}.tmp`, text);
   await rename(`${path}.tmp`, path);
 }
+
+export const writeState = (name: string, value: unknown) => writeStateText(name, JSON.stringify(value, null, 2) + "\n");
 
 export async function treeBlobs(repositoryPath: string, sha: string, paths: string[] = []) {
   return new Map((await gitList(repositoryPath, ["ls-tree", "-r", "-z", sha, ...paths.length ? ["--", ...paths] : []])).flatMap((entry) => {

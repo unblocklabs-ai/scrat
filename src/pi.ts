@@ -94,9 +94,10 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
     ],
   });
   await resourceLoader.reload();
+  const sessionDir = resolve("data/pi-sessions");
   const sessionManager = sessionFile
-    ? SessionManager.open(sessionFile, resolve("data/pi-sessions"), cwd)
-    : SessionManager.create(cwd, resolve("data/pi-sessions"));
+    ? SessionManager.open(sessionFile, sessionDir, cwd)
+    : SessionManager.create(cwd, sessionDir);
   const { session } = await createAgentSession({
     cwd, modelRuntime, model, thinkingLevel, settingsManager, sessionManager, resourceLoader,
     tools: names, customTools,

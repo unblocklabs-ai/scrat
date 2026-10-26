@@ -15,6 +15,12 @@
     "reviewCacheLimit": 256,
     "treeCacheLimit": 8,
     "databaseHealthRetries": 30,
+    "databaseHealthIntervalSeconds": 1,
+    "databaseHealthTimeoutSeconds": 3,
+    "databaseLogTailLines": 50,
+    "sqliteBusyTimeoutMs": 5000,
+    "workerErrorDelaySeconds": 1,
+    "sandboxPreflightSeconds": 30,
     "retryJitter": 0.1,
     "corrections": { "incomplete": 1, "validation": 2, "format": 2 },
     "agentRetry": { "maxRetries": 3, "baseDelayMs": 2000 },
@@ -77,7 +83,8 @@
     "channel": "",
     "maxRetryAfterSeconds": 30,
     "minimumGapMs": 1000,
-    "maxErrorLength": 300
+    "maxErrorLength": 300,
+    "maxTextLength": 3000
   },
   "workspace": {
     "sandbox": false,

@@ -143,7 +143,13 @@ Per-install systemd overrides (for example a lower `MemoryMax` on a smaller host
 | `harness.logTargetChars` | Longest path, pattern, command or revision shown in tool log lines and in the heavy-command refusal message. |
 | `harness.logErrorChars` | Longest tool error shown in a `pi.tool_failed` log line. |
 | `harness.reviewCacheLimit` / `harness.treeCacheLimit` | Entries kept in the review-relevance cache and the tree-listing cache. |
-| `harness.databaseHealthRetries` | Failed health checks, one second apart, before a run's database container is declared unhealthy. |
+| `harness.databaseHealthIntervalSeconds` | Seconds between health checks of a run's database container, and between the startup polls that read them. |
+| `harness.databaseHealthTimeoutSeconds` | Seconds one database health check may take before it counts as failed. |
+| `harness.databaseLogTailLines` | Container log lines quoted in the error when a run's database fails to start. |
+| `harness.sqliteBusyTimeoutMs` | Milliseconds a process waits for the Scrat SQLite database lock before failing. |
+| `harness.workerErrorDelaySeconds` | Seconds a worker waits after a "Worker failed" error before taking the next task. |
+| `harness.sandboxPreflightSeconds` | Seconds the sandbox preflight command may run before it fails. |
+| `harness.databaseHealthRetries` | Failed health checks, `harness.databaseHealthIntervalSeconds` apart, before a run's database container is declared unhealthy. |
 | `harness.logLevel` | Pino log verbosity, such as `info` or `debug`. |
 | `context.inlinePaths` | Most changed paths put inline in the agent's input; beyond it they go to a context file. |
 | `context.historyRuns` | How many earlier completed runs of an action feed its `history` context. |
@@ -161,6 +167,7 @@ Per-install systemd overrides (for example a lower `MemoryMax` on a smaller host
 | `slack.minimumGapMs` | Least time between Slack posts; 0 posts back to back. |
 | `slack.maxRetryAfterSeconds` | Longest `Retry-After` Scrat waits out once on a Slack 429; a longer one drops the post. |
 | `slack.maxErrorLength` | Longest run failure message quoted in a Slack status post. |
+| `slack.maxTextLength` | Longest Slack message Scrat posts; longer text is cut and ends with an ellipsis. |
 | `github.repository` | Target GitHub repository as `owner/repo`. |
 | `github.repositoryPath` | Local repository clone; relative paths resolve from the config directory. `SCRAT_REPOSITORY_PATH` overrides it. |
 | `github.baseBranch` | Default base branch for issues and implementations. Existing PRs use their own base branch. |
@@ -419,7 +426,7 @@ Posting is best effort. It runs after the database write, one message at a time,
 
 `review_base_change` reviews each update to `github.baseBranch` and reports the review in Slack. It runs on the `github.fetchIntervalSeconds` interval and at startup. It queues one review per push range by default, or one per commit with `granularity: commit`. Commits can be filtered by `author` or `message` (see `github_commits` above), and Scrat's own merged commits are reviewed unless filtered out.
 
-For each review, Scrat posts `startMessage` to the channel as the opening message, then replies in that thread with the review: a one-line verdict followed by at most five bullets, highest consequence first, and at most 3,000 characters.
+For each review, Scrat posts `startMessage` to the channel as the opening message, then replies in that thread with the review: a one-line verdict followed by at most five bullets, highest consequence first, and at most `slack.maxTextLength` characters.
 
 Once the reply is saved, Scrat reacts on the opening message with the review's verdict: `white_check_mark` (clean), `large_orange_square` (concerns) or `large_red_square` (breaking: an incompatible change to a contract callers or consumers use; it wins over concerns). The agent ends its review with `SCRAT_VERDICT: clean|concerns|breaking`, which is kept out of the reply. An incomplete review or a missing verdict gets no reaction.
 

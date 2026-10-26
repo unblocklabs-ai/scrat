@@ -3,7 +3,6 @@ import { withOperation } from "./logging.ts";
 import { assertPublishable } from "./secrets.ts";
 
 const apiUrl = "https://slack.com/api/";
-const maxTextLength = 3000;
 
 export const escapeSlack = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
@@ -34,7 +33,7 @@ async function call(method: string, body: Record<string, unknown>): Promise<Reco
 export function postMessage({ channel, text, threadTs }: { channel: string; text: string; threadTs?: string }): Promise<string> {
   return withOperation("slack.post_message", { channel, threadTs }, async (operation) => {
     operation.stage("inspection");
-    const capped = text.length > maxTextLength ? text.slice(0, maxTextLength - 1) + "…" : text;
+    const capped = text.length > config.slack.maxTextLength ? text.slice(0, config.slack.maxTextLength - 1) + "…" : text;
     assertPublishable(capped);
     operation.stage("request");
     const data = await call("chat.postMessage", {

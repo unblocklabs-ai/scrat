@@ -9,7 +9,7 @@ const positive = Type.Integer({ minimum: 1 });
 
 const schema = Type.Object({
   harness: Type.Object({
-    maxConcurrency: positive, maxConcurrentValidations: positive, commandTimeoutSeconds: positive, commandOutputTailBytes: positive, maxOutputBytes: positive, gitNetworkTimeoutSeconds: positive, idlePollSeconds: positive, agentTimeoutSeconds: positive, drainTimeoutSeconds: positive, maxStderrBytes: positive, logTargetChars: positive, logErrorChars: positive, reviewCacheLimit: positive, treeCacheLimit: positive, databaseHealthRetries: positive,
+    maxConcurrency: positive, maxConcurrentValidations: positive, commandTimeoutSeconds: positive, commandOutputTailBytes: positive, maxOutputBytes: positive, gitNetworkTimeoutSeconds: positive, idlePollSeconds: positive, agentTimeoutSeconds: positive, drainTimeoutSeconds: positive, maxStderrBytes: positive, logTargetChars: positive, logErrorChars: positive, reviewCacheLimit: positive, treeCacheLimit: positive, databaseHealthRetries: positive, databaseHealthIntervalSeconds: positive, databaseHealthTimeoutSeconds: positive, databaseLogTailLines: positive, sqliteBusyTimeoutMs: positive, workerErrorDelaySeconds: positive, sandboxPreflightSeconds: positive,
     retryJitter: Type.Number({ minimum: 0, maximum: 1 }),
     corrections: Type.Object({ incomplete: Type.Integer({ minimum: 0 }), validation: Type.Integer({ minimum: 0 }), format: Type.Integer({ minimum: 0 }) }, strict),
     agentRetry: Type.Object({ maxRetries: Type.Integer({ minimum: 0 }), baseDelayMs: Type.Integer({ minimum: 0 }) }, strict),
@@ -42,7 +42,7 @@ const schema = Type.Object({
     }, strict),
     lighthouse: Type.Object({ runs: positive, pages: Type.Array(Type.String({ pattern: "^/(?!/)" }), { minItems: 1, uniqueItems: true }), timeoutSeconds: positive }, strict),
   }, strict),
-  slack: Type.Object({ enabled: Type.Boolean(), channel: Type.String(), maxRetryAfterSeconds: positive, minimumGapMs: Type.Integer({ minimum: 0 }), maxErrorLength: positive }, strict),
+  slack: Type.Object({ enabled: Type.Boolean(), channel: Type.String(), maxRetryAfterSeconds: positive, minimumGapMs: Type.Integer({ minimum: 0 }), maxErrorLength: positive, maxTextLength: positive }, strict),
   workspace: Type.Object({
     sandbox: Type.Boolean(),
     commandMemoryMax: nullable(Type.String({ pattern: "^(?:[1-9]\\d*[KMGT]?|(?:100|[1-9]\\d?)%)$" })),

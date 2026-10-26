@@ -1,16 +1,16 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
 import { config, isActionEnabled } from "./config.ts";
 import { ifMissing } from "./errors.ts";
 import { botName } from "./identity.ts";
 import { upsertSubject } from "./items.ts";
 import type { Run, Subject, Task } from "./schema.ts";
 import { enqueueOnce, pollSource, sourceCursor } from "./sources.ts";
-import { previewContext } from "./storefront.ts";
+import { previewContext, statePath } from "./storefront.ts";
 
 const scope = "site_map", dayMs = 86_400_000;
-const siteMapPath = () => resolve("data/storefront/site.md");
+const siteMapPath = () => statePath("site.md");
 const liveUrl = () => `https://${config.storefront.publicHost}/`;
 
 export function pollSiteMap(repository = config.github.repository, now = new Date()) {

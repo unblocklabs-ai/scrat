@@ -16,6 +16,7 @@ import { type Ctx, stopBefore } from "./run-context.ts";
 import type { Run, Workspace } from "./schema.ts";
 import { serialized } from "./single-flight.ts";
 import { escapeSlack } from "./slack.ts";
+import { linkSection, reviewBlocks, tableBlock } from "./slack-blocks.ts";
 import { liveFiles, md5, readState, statePath, treeBlobs, writeState } from "./storefront.ts";
 import { storefrontContext } from "./storefront-site.ts";
 
@@ -124,12 +125,17 @@ export function reviewStorefront(ctx: Ctx, change: Change, result: AgentResult):
         : { slack: [`Lighthouse: not run (${lighthouse.error})`], report: `### Lighthouse\n\nNot run: ${lighthouse.error}` };
       const [headline = "", ...rest] = review?.text.trim().split("\n") ?? [], end = rest.findIndex((line) => !line.startsWith("• "));
       const failure = "error" in pages ? `failed (${pages.error})` : review ? undefined : `returned ${pages.value.outcome}`;
-      const slack = [
+      const lines = [
         `*Storefront* on ${short}: ${failure ? `the visual review ${failure}` : headline}`,
         ...end < 0 ? rest : rest.slice(0, end),
         ...breakages.map(({ title, fingerprint, since }) => since === undefined ? `• New breakage \`${fingerprint}\`: ${title}` : `• Still broken${since ? ` since ${since.slice(0, 7)}` : ""} \`${fingerprint}\`: ${title}`),
-        ...measured.slack.map((line) => `• ${line}`),
-      ].join("\n");
+      ], bullets = measured.slack.map((line) => `• ${line}`), table = "table" in measured && measured.table.rows.length ? measured.table : undefined;
+      const slack = [...lines, ...bullets].join("\n");
+      const blocks = [
+        ...reviewBlocks((table ? lines : [...lines, ...bullets]).join("\n")),
+        ...table ? [tableBlock(table.header, table.rows, { align: ["left", "right", "right", "right", "right", "right"] })] : [],
+        ...table && "hasPrevious" in measured && !measured.hasPrevious ? [{ type: "context", elements: [{ type: "mrkdwn", text: "No previous Lighthouse run to compare against." }] }] : [],
+      ];
       const reported = (since: string | undefined) => since === undefined ? "new on this commit" : since ? `first reported on ${since}` : "reported earlier; the earlier record could not be read";
       const report = [
         `## Storefront review of ${sha}`,
@@ -146,7 +152,7 @@ export function reviewStorefront(ctx: Ctx, change: Change, result: AgentResult):
         ].join("\n"),
       ].join("\n\n");
       const verdict = result.verdict && storefrontVerdict && rank[storefrontVerdict] > rank[result.verdict] ? storefrontVerdict : result.verdict;
-      return { ...result, verdict, storefrontReview: { slack, report, session } };
+      return { ...result, verdict, storefrontReview: { slack, blocks, report, session } };
     } catch (error) {
       stopBefore(stop, "publication");
       operation.log.warn({ event: "storefront.review_failed", sha, err: error });
@@ -156,11 +162,11 @@ export function reviewStorefront(ctx: Ctx, change: Change, result: AgentResult):
 }
 
 export async function publishStorefront({ github, subject, task, run, references, publication, saveReceipt }: EffectContext) {
-  const { slack, report } = run.result.storefrontReview!;
+  const { slack, blocks, report } = run.result.storefrontReview!;
   if (report && !publication().storefrontReportUrl) {
     const url = await bestEffort(logger, "storefront.report_failed", references, () => github.upsertCommitComment(commitInput(run.input).sha, report, storefrontMarker, references));
     if (url) saveReceipt({ storefrontReportUrl: url });
   }
   const url = publication().storefrontReportUrl;
-  saveReceipt({ storefrontReplyTs: await postCommitReply(subject, task.action, run, escapeSlack(slack) + (url ? `\n<${url}|Full storefront report>` : "")) });
+  saveReceipt({ storefrontReplyTs: await postCommitReply(subject, task.action, run, escapeSlack(slack) + (url ? `\n<${url}|Full storefront report>` : ""), url && blocks ? [...blocks, linkSection(url, "Full storefront report")] : blocks) });
 }

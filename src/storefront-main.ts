@@ -132,7 +132,7 @@ export function reviewStorefront(ctx: Ctx, change: Change, result: AgentResult):
       ], bullets = measured.slack.map((line) => `• ${line}`), table = "table" in measured && measured.table.rows.length ? measured.table : undefined;
       const slack = [...lines, ...bullets].join("\n");
       const blocks = [
-        ...reviewBlocks((table ? lines : [...lines, ...bullets]).join("\n")),
+        ...reviewBlocks([...lines, ...("missing" in measured && table ? measured.missing.map((line) => `• ${line}`) : bullets)].join("\n")),
         ...table ? [tableBlock(table.header, table.rows, { align: ["left", "right", "right", "right", "right", "right"] })] : [],
         ...table && "hasPrevious" in measured && !measured.hasPrevious ? [{ type: "context", elements: [{ type: "mrkdwn", text: "No previous Lighthouse run to compare against." }] }] : [],
       ];

@@ -541,7 +541,7 @@ The state files are written to a temporary file and renamed. One that cannot be 
 
 The storefront part never fails the code review: a Loggie, agent or Lighthouse failure is logged as `storefront.review_failed` and shown in the block. Storefront parts of concurrent reviews run one at a time, since they share the stored state.
 
-The block is its own message in the review's Slack thread, posted after the review reply: the session's first line, at most five lines for changed pages, one per breakage, one per Lighthouse device and a link to the GitHub report.
+The block is its own message in the review's Slack thread, posted after the review reply: the session's first line, at most five lines for changed pages, one per breakage, one per Lighthouse device and a link to the GitHub report. Both replies are Block Kit messages with the same content as their plain `text` (the notification fallback, shown below): the lines are a rich text block with real bullets, the Lighthouse averages are a table block (one row per device with a result, deltas in the cells, a note when there is no previous run; a device without a result keeps its bullet), and the report link is its own section.
 
 ```
 *Storefront* on 1a2b3c4: The home page shows the new hero; nothing else changed.

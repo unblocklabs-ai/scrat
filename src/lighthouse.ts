@@ -86,14 +86,14 @@ const signed = (value: number) => value > 0 ? `+${value}` : value < 0 ? String(v
 
 export async function recordLighthouse(results: Run[], sha: string) {
   const previous = await readState<Previous>("lighthouse.json", {}) ?? {}, current: Previous = {};
-  const slack: string[] = [], table: string[] = [], rows: string[][] = [];
+  const slack: string[] = [], table: string[] = [], rows: string[][] = [], missing: string[] = [];
   for (const device of devices) {
     const all = results.filter((run) => run.device === device), scored = all.flatMap((run) => run.scores ? [run.scores] : []);
     if (!all.length) continue;
     if (!scored.length) {
-      slack.push(`Lighthouse ${device}: no result (${all[0]!.error})`);
+      const line = `Lighthouse ${device}: no result (${all[0]!.error})`;
+      slack.push(line); missing.push(line);
       table.push(`| ${device} | 0 of ${all.length} | ${ids.map(() => "-").join(" | ")} |`);
-      rows.push([device, `0 of ${all.length}`, ...ids.map(() => "-")]);
       continue;
     }
     const scores = average(scored), before = previous[device], count = scored.length === all.length ? `${all.length} runs` : `${scored.length} of ${all.length} runs`;
@@ -115,5 +115,5 @@ export async function recordLighthouse(results: Run[], sha: string) {
     "Each run:",
     `| Device | Page | Run | ${ids.map((id) => categories[id]).join(" | ")} | Report |\n| --- | --- | --- | ${ids.map(() => "---").join(" | ")} | --- |\n${perRun.join("\n")}`,
   ].join("\n\n");
-  return { slack, report, table: { header: ["Device", "Runs", ...ids.map((id) => categories[id])], rows }, hasPrevious: devices.some((device) => previous[device]) };
+  return { slack, report, missing, table: { header: ["Device", "Runs", ...ids.map((id) => categories[id])], rows }, hasPrevious: devices.some((device) => previous[device]) };
 }

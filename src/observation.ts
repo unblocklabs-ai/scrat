@@ -8,17 +8,17 @@ const baseBranchOf = (item: GithubItem) => "base" in item ? item.base.ref : conf
 
 export type ItemObservation = {
   remote: string; kind: "issue" | "pr"; item: GithubItem;
-  baseBranch: string; revision: string;
+  baseBranch: string; revision: string; priorRevision?: string;
   external: GithubComment[]; own: GithubComment[]; labels: string[];
 };
 
 export function observe(repository: string, context: GithubContext, headSha?: string): ItemObservation {
   const pullRequest = "head" in context.item ? context.item : undefined;
   const item = pullRequest && headSha ? { ...pullRequest, head: { ...pullRequest.head, sha: headSha } } : context.item;
-  const { comments: external, revision } = evaluateGithubContext({ ...context, item });
+  const { comments: external, revision, priorRevision } = evaluateGithubContext({ ...context, item });
   return {
     remote: remoteUrl(repository), kind: pullRequest ? "pr" : "issue", item,
-    baseBranch: baseBranchOf(item), revision, external,
+    baseBranch: baseBranchOf(item), revision, priorRevision, external,
     own: context.comments.filter((comment) => isBotLogin(comment.author)),
     labels: item.labels.map(labelName),
   };

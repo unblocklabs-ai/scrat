@@ -101,7 +101,7 @@ const comment = {
   receipted: (publication) => Boolean(publication.commentId),
   async apply({ github, task, run, current, references, saveReceipt }) {
     const marker = manifestOf(task.action).mode === "review" ? reviewMarker : taskMarker(task.id);
-    const observation = observe(github.repository, current);
+    const observation = observe(current);
     const existing = observation.own.findLast((candidate) => isIssueComment(candidate) && endsWithMarker(candidate.body, marker));
     const commentId = await upsertComment(github, run.context.item.number, existing, withMarker(`${run.result.text}\n\n${validationLine(run)}`, marker), references);
     saveReceipt({ commentId });
@@ -111,7 +111,7 @@ const comment = {
 const labels = {
   async apply({ github, run, current, references }) {
     if (!run.result.ready) return;
-    const observation = observe(github.repository, current);
+    const observation = observe(current);
     await reconcileLabels(github, run.context.item.number, { current: observation.labels, desired: [botSlug], managed: [] }, references);
   },
 } satisfies Effect<GithubEffectContext>;

@@ -4,9 +4,8 @@ import { describeWindow } from "./window-review.ts";
 import { config, isBotLogin } from "./config.ts";
 import { branchConflictCode } from "./errors.ts";
 import { bestEffort } from "./logging.ts";
-import { createMergeCommit, fetchRepository, prepareTarget } from "./git.ts";
+import { createMergeCommit, prepareTarget } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
-import { assertConfiguredRepository, remoteUrl } from "./repository.ts";
 import { currentPrReview } from "./pr-assessment.ts";
 import { getRun, updateRun } from "./run-history.ts";
 import { assertComplete } from "./results.ts";
@@ -41,10 +40,8 @@ async function commitRevisions({ subject, run, task, manifest, operation }: Ctx)
   return { mainSha: sha, headSha: sha };
 }
 
-async function windowRevisions({ subject, repositoryPath }: Ctx) {
-  const { repository } = subject;
-  assertConfiguredRepository(repository);
-  const mainSha = await fetchRepository(repositoryPath, remoteUrl(repository), config.github.baseBranch, await new GitHubRepository(repository).getGitEnvironment());
+async function windowRevisions({ subject }: Ctx) {
+  const mainSha = await new GitHubRepository(subject.repository).fetchBranch(config.github.baseBranch);
   return { mainSha, headSha: mainSha };
 }
 
@@ -77,7 +74,7 @@ async function refreshPreview({ manifest, operation, stop, references, repositor
 
 export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   const { task, run, subject, manifest, repositoryPath, stop } = ctx;
-  const { mainSha, headSha } = observed ? await itemRevisions(ctx, observed)
+  const { mainSha, headSha } = observed ? await itemRevisions(observed)
     : subject.kind === "window" ? await windowRevisions(ctx) : await commitRevisions(ctx);
   const workspace = ctx.cleanup.reviewWorkspace = await createWorkspace({ repositoryPath, baseRef: headSha }, ctx.references);
   updateRun(run.id, { workspaceId: workspace.id, mainSha, headSha });

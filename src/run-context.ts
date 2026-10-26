@@ -2,7 +2,6 @@ import { buildAgentInput } from "./agent-input.ts";
 import { config } from "./config.ts";
 import type { Action } from "./manifests.ts";
 import { runCommands } from "./commands.ts";
-import { fetchPullRequestHead } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { startOperation } from "./logging.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
@@ -36,11 +35,11 @@ export type Ctx = {
 };
 export type Observed = {
   repository: string; github: GitHubRepository; context: GithubContext; pullRequest: GithubPullRequest | undefined;
-  item: Item; observation: ItemObservation; gitEnvironment: NodeJS.ProcessEnv; mainSha: string;
+  item: Item; observation: ItemObservation; mainSha: string;
 };
 
-export async function itemRevisions({ repositoryPath }: Ctx, { pullRequest, observation, gitEnvironment, mainSha }: Observed) {
-  const headSha = pullRequest ? await fetchPullRequestHead(repositoryPath, observation.remote, pullRequest.number, pullRequest.head.sha, gitEnvironment) : mainSha;
+export async function itemRevisions({ github, pullRequest, mainSha }: Observed) {
+  const headSha = pullRequest ? await github.fetchPullRequestHead(pullRequest) : mainSha;
   return { mainSha, headSha };
 }
 

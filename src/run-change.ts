@@ -93,7 +93,7 @@ async function acquireChangeWorkspace(ctx: Ctx, observed: Observed) {
   const { repository, context, pullRequest, item, observation } = observed;
   const { run, references, repositoryPath } = ctx;
   const validationOnly = run.stage === "validating";
-  const { mainSha, headSha: preparedHead } = await itemRevisions(ctx, observed);
+  const { mainSha, headSha: preparedHead } = await itemRevisions(observed);
   let workspace = item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
   if (workspace?.removedAt) throw new Error(`Workspace was removed: ${workspace.id}`);
   if (workspace) {

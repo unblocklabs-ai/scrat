@@ -8,7 +8,9 @@ import { logger, withOperation } from "./logging.ts";
 import { endsWithMarker, fingerprintMarker, inlineCommentId, issueCommentId, reviewCommentId, withMarker } from "./markers.ts";
 import type { GithubComment, GithubContext, GithubIssue, GithubItem, GithubPullRequest } from "./github-types.ts";
 import { errorStatus } from "./errors.ts";
-import { assertConfiguredRepository } from "./repository.ts";
+import { getRepositoryPath } from "./config.ts";
+import { fetchPullRequestHead as fetchHead, fetchRepository } from "./git.ts";
+import { assertConfiguredRepository, remoteUrl } from "./repository.ts";
 import { conditionalFetch, rateLimitLow } from "./github-http.ts";
 import { assertPublishable, basicCredential, childEnvironment } from "./secrets.ts";
 
@@ -143,6 +145,12 @@ export class GitHubRepository {
       GIT_CONFIG_KEY_1: "core.hooksPath",
       GIT_CONFIG_VALUE_1: "/dev/null",
     };
+  }
+
+  async fetchBranch(branch: string) { return fetchRepository(getRepositoryPath(), remoteUrl(this.repository), branch, await this.getGitEnvironment()); }
+
+  async fetchPullRequestHead({ number, head }: Pick<GithubPullRequest, "number" | "head">) {
+    return fetchHead(getRepositoryPath(), remoteUrl(this.repository), number, head.sha, await this.getGitEnvironment());
   }
 
   private read() {

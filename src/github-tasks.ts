@@ -8,10 +8,9 @@ import { freshness, savedEvaluation } from "./freshness.ts";
 import { acknowledgedTaskIds, commentKey } from "./markers.ts";
 import type { Item } from "./items.ts";
 import { observe, type ItemObservation } from "./observation.ts";
-import { remoteUrl } from "./repository.ts";
 import { labelName, reconcileLabels } from "./labels.ts";
 import { db } from "./db.ts";
-import { fetchPullRequestHead, fetchRepository, prepareTarget } from "./git.ts";
+import { prepareTarget } from "./git.ts";
 import { rateLimitLow, rateLimitState } from "./github-http.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
@@ -26,8 +25,7 @@ import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-asses
 import { planIssueTasks, planPrMaintenance, planReview, planSelfRepair, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
 
 type SyncContext = {
-  github: GitHubRepository; repository: string; repositoryPath: string; remote: string;
-  env: Awaited<ReturnType<GitHubRepository["getGitEnvironment"]>>; log: Logger;
+  github: GitHubRepository; repository: string; repositoryPath: string; log: Logger;
 };
 type PrMaintenanceFacts = Parameters<typeof planPrMaintenance>[0];
 type Routes = { review?: string; conflicts?: string; feedback?: string; repairs: string[]; repairFor: (grade: Signal["grade"]) => string | undefined };
@@ -69,8 +67,8 @@ async function cleanupClosedItem({ github, log }: SyncContext, item: Item) {
 }
 
 async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observation: ItemObservation, pr: GithubPullRequest, mainSha: string, routes: Routes): Promise<PrMaintenanceFacts> {
-  const { repositoryPath, remote, env } = ctx;
-  const { headSha, conflicts, behind } = await prepareTarget(repositoryPath, mainSha, await fetchPullRequestHead(repositoryPath, remote, pr.number, pr.head.sha, env));
+  const { repositoryPath, github } = ctx;
+  const { headSha, conflicts, behind } = await prepareTarget(repositoryPath, mainSha, await github.fetchPullRequestHead(pr));
   const lastRun = latestFinishedRun(item.id);
   const stale = !conflicts && Boolean(lastRun?.error) && lastRun?.stage === "preparing" && lastRun.headSha === headSha && behind;
   const acknowledged = new Set(observation.own.flatMap((comment) => acknowledgedTaskIds(comment.body)));
@@ -150,10 +148,10 @@ async function routeIssueReview(item: Item, observation: ItemObservation, mainSh
 
 async function routeObserved(ctx: SyncContext, item: Item, context: GithubContext, defaultBaseSha: string) {
   if (context.item.state !== "open") return 0;
-  const { github, repository, repositoryPath, remote, env, log } = ctx;
-  const observation = observe(repository, context);
+  const { github, repository, log } = ctx;
+  const observation = observe(context);
   const mainSha = observation.kind === "pr" && observation.baseBranch !== config.github.baseBranch
-    ? await fetchRepository(repositoryPath, remote, observation.baseBranch, env) : defaultBaseSha;
+    ? await github.fetchBranch(observation.baseBranch) : defaultBaseSha;
   const login = context.item.user?.login, signal = (kind: Signal["kind"]) => signalFor(item, login, kind);
   const routes: Routes = {
     review: routeFor(signal("item_changed")),
@@ -182,10 +180,8 @@ async function routeObserved(ctx: SyncContext, item: Item, context: GithubContex
 export async function routeGithubTasks(github: GitHubRepository, current: Item[], previous: Map<string, Item>, log: Logger) {
   const { repository } = github;
   const repositoryPath = getRepositoryPath();
-  const remote = remoteUrl(repository);
-  const env = await github.getGitEnvironment();
-  const ctx: SyncContext = { github, repository, repositoryPath, remote, env, log };
-  const defaultBaseSha = await fetchRepository(repositoryPath, remote, config.github.baseBranch, env);
+  const ctx: SyncContext = { github, repository, repositoryPath, log };
+  const defaultBaseSha = await github.fetchBranch(config.github.baseBranch);
   const implemented = new Set(current.filter((item) => item.kind === "pr" && item.state === "open")
     .flatMap((item) => [...(item.payload.body ?? "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi)]
       .map((match) => Number(match[1]))));

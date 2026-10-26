@@ -31,7 +31,7 @@ function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeo
 async function reconcile(github: GitHubRepository, subjectId: string, number: number, references: EventReferences, publication?: { task: Task; run: Run }, observed?: GithubContext) {
   const current = observed ?? await github.fetchItemContext("pr", number);
   const reviews = prReviewHistory(subjectId);
-  const observation = observe(github.repository, current);
+  const observation = observe(current);
   const existing = canonicalComment(observation.own, reviews);
   const mainSha = await git(getRepositoryPath(), ["rev-parse", `refs/remotes/origin/${observation.baseBranch}`]);
   const state = await resolvePrReview(reviews, observation, mainSha);

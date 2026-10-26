@@ -1,10 +1,9 @@
 import { config, getRepositoryPath, isBotLogin } from "./config.ts";
-import { commitOf, fetchRepository, git, gitList, isAncestor } from "./git.ts";
+import { commitOf, git, gitList, isAncestor } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { type OperationScope } from "./logging.ts";
 import type { Action } from "./manifests.ts";
 import { upsertSubject } from "./items.ts";
-import { remoteUrl } from "./repository.ts";
 import { enqueueOnce, pollSource, sourceCursor } from "./sources.ts";
 
 export function pollCommits(repository = config.github.repository) {
@@ -39,7 +38,7 @@ async function pollAction({ name: action, trigger, enabled, maxRangeCommits }: A
   }
   operation.stage("fetch");
   const repositoryPath = getRepositoryPath();
-  const tip = await fetchRepository(repositoryPath, remoteUrl(repository), branch, await new GitHubRepository(repository).getGitEnvironment());
+  const tip = await new GitHubRepository(repository).fetchBranch(branch);
   if (!cursor.value) {
     cursor.save(tip);
     operation.log.info({ event: "commits.seeded", branch, sha: tip });

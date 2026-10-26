@@ -4,18 +4,17 @@ import { db } from "./db.ts";
 import { GitHubRepository, mapConcurrent } from "./github.ts";
 import { routeGithubTasks } from "./github-tasks.ts";
 import { upsertItem } from "./items.ts";
-import { assertConfiguredRepository, itemsInRepository } from "./repository.ts";
+import { itemsInRepository } from "./repository.ts";
 import { withOperation } from "./logging.ts";
 import type { GithubContext } from "./github-types.ts";
 
 export async function syncGitHub(repository = config.github.repository, queueTasks = true) {
   return withOperation(queueTasks ? "github.sync" : "github.fetch", { repository }, async (operation) => {
     operation.stage("repository");
-    assertConfiguredRepository(repository);
+    const github = new GitHubRepository(repository);
     operation.stage("fetch");
     const previousItems = itemsInRepository(repository);
     const previous = new Map(previousItems.map((item) => [item.externalId, item]));
-    const github = new GitHubRepository(repository);
     const { issues, pullRequests } = await github.fetchOpenItems();
     operation.stage("persistence");
     db.transaction((transaction) => {

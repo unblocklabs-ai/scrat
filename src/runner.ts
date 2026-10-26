@@ -1,12 +1,10 @@
 import { manifestOf } from "./actions.ts";
 import { getRepositoryPath } from "./config.ts";
 import { removeRunDatabase } from "./databases.ts";
-import { fetchRepository } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { bestEffort, startOperation } from "./logging.ts";
 import { observe } from "./observation.ts";
-import { assertConfiguredRepository } from "./repository.ts";
 import { currentPrReview } from "./pr-assessment.ts";
 import { getRun } from "./run-history.ts";
 import { publishRun, publishSubject } from "./publication.ts";
@@ -19,18 +17,16 @@ import { changeRun } from "./run-change.ts";
 import { reviewRun } from "./run-review.ts";
 import { type Ctx, type Observed, stopBefore } from "./run-context.ts";
 
-async function connect({ subject, item, repositoryPath }: Ctx): Promise<Observed | undefined> {
+async function connect({ subject, item }: Ctx): Promise<Observed | undefined> {
   if (!item) return;
   const { repository } = subject;
-  assertConfiguredRepository(repository);
   const github = new GitHubRepository(repository);
   const context = await github.fetchItemContext(item.kind, item.payload.number);
   if (context.item.state !== "open") throw new Error("GitHub item is no longer open");
   const pullRequest = "head" in context.item ? context.item : undefined;
-  const observation = observe(repository, context);
-  const gitEnvironment = await github.getGitEnvironment();
-  const mainSha = await fetchRepository(repositoryPath, observation.remote, observation.baseBranch, gitEnvironment);
-  return { repository, github, context, pullRequest, item, observation, gitEnvironment, mainSha };
+  const observation = observe(context);
+  const mainSha = await github.fetchBranch(observation.baseBranch);
+  return { repository, github, context, pullRequest, item, observation, mainSha };
 }
 
 async function assertRepairCurrent({ task }: Ctx, { item, observation, mainSha }: Observed) {
@@ -42,9 +38,9 @@ async function assertRepairCurrent({ task }: Ctx, { item, observation, mainSha }
   }
 }
 
-async function publishStage({ task, run, subject, references, manifest, repositoryPath }: Ctx, observed: Observed | undefined) {
+async function publishStage({ task, run, subject, references, manifest }: Ctx, observed: Observed | undefined) {
   if (!observed) return publishSubject(subject, task, run, references);
-  const { repository, github, context, item, observation, mainSha } = observed;
+  const { github, context, item, observation, mainSha } = observed;
   const review = manifest.mode === "review";
   const evaluatedRun = getRun(run.id)!;
   const publicationContext = run.stage !== "publishing"
@@ -57,9 +53,9 @@ async function publishStage({ task, run, subject, references, manifest, reposito
       && sha !== evaluatedRun.publication.commitSha) throw new Error("GitHub PR head changed during execution");
     headOverride = evaluatedRun.context.headSha;
   }
-  const current = observe(repository, publicationContext, headOverride);
+  const current = observe(publicationContext, headOverride);
   const currentMainSha = review ? async () => run.stage === "publishing" ? mainSha
-    : await fetchRepository(repositoryPath, observation.remote, current.baseBranch, await github.getGitEnvironment()) : undefined;
+    : await github.fetchBranch(current.baseBranch) : undefined;
   if (manifest.publish.includes("pr_assessment")) await currentMainSha?.();
   else {
     const state = await freshness(savedEvaluation(evaluatedRun), { ...current, mainSha: currentMainSha }, "relevant-paths", true);

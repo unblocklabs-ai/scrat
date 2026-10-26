@@ -148,6 +148,12 @@ export class GitHubRepository {
 
   async fetchBranch(branch: string) { return fetchRepository(getRepositoryPath(), remoteUrl(this.repository), branch, await this.getGitEnvironment()); }
 
+  async fetchPullRequest(number: number) {
+    const { github, owner, repo } = await this.read();
+    const { data } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+    return { number: data.number, title: data.title, html_url: data.html_url, merged_by: data.merged_by };
+  }
+
   async fetchPullRequestHead({ number, head }: Pick<GithubPullRequest, "number" | "head">) {
     return fetchHead(getRepositoryPath(), remoteUrl(this.repository), number, head.sha, await this.getGitEnvironment());
   }

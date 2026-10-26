@@ -11,4 +11,4 @@ model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }
 priority: 110
 channel: ""
 maxRangeCommits: 50
-startMessage: "{{bot}}: `{{branch}}` moved to <{{url}}|{{short_sha}}> by {{author}} ({{count}} commit(s)): {{title}}. Reviewing the change."
+startMessage: "Store update: {{change}} {{bot}} is checking the live site."

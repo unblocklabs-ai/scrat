@@ -498,7 +498,8 @@ const commitReview = async (variant) => {
     assert.equal(posts().length, 2); const [root, reply] = posts();
     assert.deepEqual(root.body, {
       channel, unfurl_links: false, unfurl_media: false, link_names: false,
-      text: `${bot}: \`main\` moved to <https://github.com/fixture/project/commit/${head}|${head.slice(0, 7)}> by Fixture (1 commit(s)): Fix a&lt;b &amp; c&gt;d. Reviewing the change.`,
+      text: `Store update: Fixture changed the theme: <https://github.com/fixture/project/commit/${head}|"Fix a&lt;b &amp; c&gt;d">. ${bot} is checking the live site.`,
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: `Store update: Fixture changed the theme: <https://github.com/fixture/project/commit/${head}|"Fix a&lt;b &amp; c&gt;d">. ${bot} is checking the live site.` } }],
     });
     assert.equal(reply.body.thread_ts, "1700000000.000001"); assert.equal(reply.body.text, "Independent review from gpt-6.1-sol. &lt;!channel&gt;");
     assert.deepEqual(reply.body.blocks, [{ type: "rich_text", elements: [{ type: "rich_text_section", elements: [{ type: "text", text: "Independent review from gpt-6.1-sol. <!channel>" }] }] }]);
@@ -538,6 +539,14 @@ const commitReview = async (variant) => {
     f.slack.reactionFail = ["already_reacted"];
     const repeated = await review(5, "breaking");
     assert.deepEqual(repeated.added, [[channel, repeated.root, "large_red_square"]]); assert.equal(repeated.done.publication.slackReaction, "large_red_square");
+    f.addPr(7, "main", "human", { title: "Cart drawer <fix>", state: "closed", merged_by: { login: "Bek" } });
+    assert.equal(await push("Merge pull request #7 from fixture/topic", 8), 1); await success();
+    assert.equal(roots().at(-1).body.text, `Store update: <https://github.com/fixture/project/pull/7|*Cart drawer &lt;fix&gt;*> (PR #7, merged by Bek). ${bot} is checking the live site.`);
+    mkdirSync(resolve(seed, "templates"), { recursive: true }); mkdirSync(resolve(seed, "config"), { recursive: true });
+    writeFileSync(resolve(seed, "templates/index.json"), "{}\n"); writeFileSync(resolve(seed, "config/settings_data.json"), "{}\n"); git(seed, "add", ".");
+    git(seed, "-c", "user.name=shopify[bot]", "-c", "user.email=bot@example.invalid", "commit", "-m", "Update from Shopify for theme fixture/main"); git(seed, "push", remote, "main");
+    assert.equal(await pollCommits(), 1); const shopified = tip(); await success();
+    assert.equal(roots().at(-1).body.text, `Store update: <https://github.com/fixture/project/commit/${shopified}|the theme settings and home page template were edited in the Shopify theme editor>. ${bot} is checking the live site.`);
     f.verdicts.default = "clean"; f.modes.set(0, "incomplete");
     assert.equal(await push("Incomplete", 6), 1);
     const reactionsBefore = reactions().length, incomplete = await run();

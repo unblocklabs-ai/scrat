@@ -6,7 +6,7 @@ import type { ErrorDetails } from "./errors.ts";
 import { changedPaths, git } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { botName } from "./identity.ts";
-import { logger } from "./logging.ts";
+import { bestEffort, logger } from "./logging.ts";
 import { commentKey, parseCommentKey } from "./markers.ts";
 import type { ItemObservation } from "./observation.ts";
 import { priorReviewTexts } from "./pr-assessment.ts";
@@ -55,6 +55,17 @@ export function evaluateContext(run: Run, task: Task, observation: ItemObservati
 
 export const contextDirOf = (runId: string) => resolve("data/runs", runId);
 
+export async function contextFiles(directory: string) {
+  await mkdir(directory, { recursive: true });
+  const files: Record<string, string> = { directory };
+  const write = async (key: string, name: string, content: string) => {
+    files[key] = resolve(directory, name);
+    await writeFile(files[key], content);
+  };
+  const spill = async (key: string, name: string, paths: string[]) => paths.length > config.context.inlinePaths ? (await write(key, name, paths.join("\n") + "\n"), paths.length) : undefined;
+  return { files, write, spill };
+}
+
 export async function buildAgentInput(options: {
   run: Run; task: Task; evaluated: ReturnType<typeof evaluateContext>; diffBaseSha: string; diffPaths: string[];
   mainSha: string; headSha: string; baseRef: string; mergeInProgress: boolean;
@@ -71,14 +82,8 @@ export async function buildAgentInput(options: {
   delete input.source;
   if (trigger.source === "github_items") delete input.kind;
   const changedPaths = trigger.kind === "item_changed" ? trigger.changedPaths ?? [] : [];
-  if (changedPaths.length > config.context.inlinePaths) { delete input.changedPaths; input.changedPathCount = changedPaths.length; }
   const contextDir = contextDirOf(run.id);
-  await mkdir(contextDir, { recursive: true });
-  const files: Record<string, string> = { directory: contextDir };
-  const writeContext = async (key: string, name: string, content: string) => {
-    files[key] = resolve(contextDir, name);
-    await writeFile(files[key], content);
-  };
+  const { files, write: writeContext, spill } = await contextFiles(contextDir);
   const repair = trigger.kind === "low_grade" ? trigger : undefined;
   const report = repair ? getRun(repair.assessmentRunId)?.result?.text : undefined;
   if (repair && !report) throw new Error("Missing review report for self-repair");
@@ -87,17 +92,14 @@ export async function buildAgentInput(options: {
   const history = listed.includes("history") ? historyReport(completedRunsOfActionInRepository(config.github.repository, action, config.context.historyRuns), action) : undefined;
   const assessesPr = manifestOf(action).publish.includes("pr_assessment");
   const prior = assessesPr ? priorReviewTexts(task.subjectId) : undefined;
-  const previousAssessment = assessesPr ? prior?.assessment : listed.includes("previous_assessment") ? completedRunsOfAction(task.subjectId, action, 1)[0]?.result?.text : undefined;
+  const previousAssessment = listed.includes("previous_assessment") ? assessesPr ? prior?.assessment : completedRunsOfAction(task.subjectId, action, 1)[0]?.result?.text : undefined;
   const triage = listed.includes("triage") ? completedRunsOfAction(task.subjectId, actionsPublishing("labels"), 1)[0]?.result : undefined;
   const issue = listed.includes("issue") ? issueOfPullRequest(config.github.repository, evaluated.item.number) : undefined;
   const found = listed.includes("validation") ? verificationOfCommit(headSha) : undefined, verification = found?.commands.length ? found : undefined;
   const storefront = listed.includes("storefront") && config.storefront.enabled ? await (await import("./storefront-site.ts")).storefrontContext(task.subjectId, headSha, trigger.source === "storefront") : undefined;
   const reviewedSha = evaluated.headSha;
   const checks = listed.includes("validation") && reviewedSha
-    ? await new GitHubRepository(config.github.repository).checkRunConclusions(reviewedSha).catch((error) => {
-      logger.warn({ event: "github.check_runs_failed", err: error, sha: reviewedSha });
-      return [];
-    })
+    ? (await bestEffort(logger, "github.check_runs_failed", { sha: reviewedSha }, () => new GitHubRepository(config.github.repository).checkRunConclusions(reviewedSha))) ?? []
     : [];
   const validation = [
     verification && `# Validation run by ${botName} on ${headSha}\n\n${verification.commands.map((check) => `- ${check.name}: ${check.status} (${(check.durationMs / 1000).toFixed(1)}s)`).join("\n")}\n`,
@@ -107,7 +109,7 @@ export async function buildAgentInput(options: {
     validation && writeContext("validation", "validation.md", validation),
     listed.includes("discussion") && writeContext("discussion", "discussion.json", JSON.stringify(evaluated.comments, null, 2)),
     listed.includes("review") && report && writeContext("review", "review.md", report),
-    listed.includes("previous_assessment") && previousAssessment && writeContext("previous_assessment", "previous-assessment.md", previousAssessment),
+    previousAssessment && writeContext("previous_assessment", "previous-assessment.md", previousAssessment),
     listed.includes("previous_repair") && prior?.repair && writeContext("previous_repair", "previous-repair.md", prior.repair),
     triage?.ready && writeContext("triage", "triage.md", triage.text),
     issue && writeContext("issue", "issue.md", `# ${issue.title} (#${issue.number})\n\n${issue.body ?? ""}\n`),
@@ -116,9 +118,9 @@ export async function buildAgentInput(options: {
     storefront?.siteMap && writeContext("siteMap", "site.md", storefront.siteMap),
     failure && writeContext("previousFailure", "previous-failure.json", JSON.stringify(failure, null, 2)),
     options.validationFailure && writeContext("validationFailure", "validation-failure.json", JSON.stringify(options.validationFailure, null, 2)),
-    diffPaths.length > config.context.inlinePaths && writeContext("diffPaths", "diff-paths.txt", diffPaths.join("\n") + "\n"),
-    changedPaths.length > config.context.inlinePaths && writeContext("changedPaths", "changed-paths.txt", changedPaths.join("\n") + "\n"),
   ]);
+  const [diffPathCount, changedPathCount] = await Promise.all([spill("diffPaths", "diff-paths.txt", diffPaths), spill("changedPaths", "changed-paths.txt", changedPaths)]);
+  if (changedPathCount) { delete input.changedPaths; input.changedPathCount = changedPathCount; }
   const previous = trigger.kind === "item_changed" ? trigger : undefined;
   const previousMainSha = previous?.previousMainSha ?? undefined;
   const previousHeadSha = evaluated.headSha ? previous?.previousHeadSha ?? undefined : undefined;
@@ -130,7 +132,7 @@ export async function buildAgentInput(options: {
     input,
     workspace: { path: options.workspace.path, branch: options.workspace.branch, baseRef: options.baseRef, baseBranch: evaluated.baseBranch, mainSha, headSha, mergeInProgress: options.mergeInProgress },
     diffBaseSha, previous: previousMainSha || previousHeadSha ? { mainSha: previousMainSha, headSha: previousHeadSha } : undefined,
-    ...(diffPaths.length > config.context.inlinePaths ? { diffPathCount: diffPaths.length } : { diffPaths }),
+    ...(diffPathCount ? { diffPathCount } : { diffPaths }),
     files,
     database: options.database,
   }, null, 2);

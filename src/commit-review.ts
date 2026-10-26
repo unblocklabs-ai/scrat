@@ -1,10 +1,10 @@
 import { eq } from "drizzle-orm";
 import type { evaluateContext } from "./agent-input.ts";
-import { commitSettings } from "./config.ts";
+import { manifestOf } from "./actions.ts";
 import { db } from "./db.ts";
 import { changedPaths, git } from "./git.ts";
 import { botName } from "./identity.ts";
-import type { startOperation } from "./logging.ts";
+import { bestEffort, type startOperation } from "./logging.ts";
 import { slackThreads, type Run, type Subject } from "./schema.ts";
 import { addReaction, escapeSlack, postMessage } from "./slack.ts";
 import { parseTriggerInput } from "./triggers.ts";
@@ -28,7 +28,7 @@ const savedRoot = (subject: Subject) => db.select().from(slackThreads).where(eq(
 async function threadRoot(subject: Subject, action: string, { sha, branch, commitCount }: CommitInput) {
   const existing = savedRoot(subject);
   if (existing) return existing;
-  const { channel, startMessage } = commitSettings(action);
+  const { channel = "", startMessage = "" } = manifestOf(action);
   const metadata = commitMetadata(subject);
   const values: Record<string, string> = {
     sha, short_sha: sha.slice(0, 7), author: escapeSlack(metadata.author), title: escapeSlack(metadata.title),
@@ -40,7 +40,7 @@ async function threadRoot(subject: Subject, action: string, { sha, branch, commi
 }
 
 export async function startCommitThread(subject: Subject, action: string, input: CommitInput, log: ReturnType<typeof startOperation>["log"]) {
-  await threadRoot(subject, action, input).catch((error: unknown) => { log.warn({ event: "slack.post_failed", err: error }); });
+  await bestEffort(log, "slack.post_failed", {}, () => threadRoot(subject, action, input));
 }
 
 export async function describeCommit(repositoryPath: string, subject: Subject, rawInput: Record<string, unknown>) {

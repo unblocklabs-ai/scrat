@@ -1,8 +1,8 @@
 import { and, eq } from "drizzle-orm";
-import { manifests } from "./actions.ts";
+import { manifestOf, manifests } from "./actions.ts";
 import { db } from "./db.ts";
 import { type OperationScope, withOperation } from "./logging.ts";
-import type { Manifest } from "./manifests.ts";
+import type { Action } from "./manifests.ts";
 import { assertConfiguredRepository } from "./repository.ts";
 import { sourceCursors, type Subject } from "./schema.ts";
 import { enqueueTask, latestTask } from "./tasks.ts";
@@ -18,12 +18,12 @@ export function sourceCursor(repository: string, action: string, scope: string) 
   };
 }
 
-export function pollSource(operationName: string, source: string, repository: string, perAction: (manifest: Manifest, operation: OperationScope, repository: string) => number | Promise<number>) {
+export function pollSource(operationName: string, source: string, repository: string, perAction: (manifest: Action, operation: OperationScope, repository: string) => number | Promise<number>) {
   return withOperation(operationName, { repository }, async (operation) => {
     assertConfiguredRepository(repository);
     let queued = 0;
     for (const manifest of manifests) {
-      if (manifest.trigger.source === source) queued += await perAction(manifest, operation, repository);
+      if (manifest.trigger.source === source) queued += await perAction(manifestOf(manifest.name), operation, repository);
     }
     operation.complete({ queued });
     return queued;

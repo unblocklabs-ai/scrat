@@ -7,6 +7,7 @@ import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
 import { describeError, type ErrorDetails, errorExitCode } from "./errors.ts";
+import { bestEffort } from "./logging.ts";
 import { conventionalTitle, git, headOf, hasPendingMerge, mergeBase, prepareTarget } from "./git.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { executePi } from "./pi.ts";
@@ -92,7 +93,7 @@ async function acquireChangeWorkspace(ctx: Ctx, observed: Observed) {
   const { repository, context, pullRequest, item, observation } = observed;
   const { run, references, repositoryPath } = ctx;
   const validationOnly = run.stage === "validating";
-  const { mainSha, headSha: preparedHead } = await itemRevisions(ctx, observed);
+  const { mainSha, headSha: preparedHead } = await itemRevisions(observed);
   let workspace = item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
   if (workspace?.removedAt) throw new Error(`Workspace was removed: ${workspace.id}`);
   if (workspace) {
@@ -120,15 +121,13 @@ async function acquireChangeWorkspace(ctx: Ctx, observed: Observed) {
       await git(workspace.path, ["merge", "--ff-only", preparedHead]);
       await pinWorkspaceBase(workspace, preparedHead);
     } else {
-      try {
+      await bestEffort(ctx.operation.log, "workspace.base_update_skipped", { workspaceId: workspace.id }, async () => {
         await git(workspace.path, ["merge", "--ff-only", preparedHead]);
         if (await headOf(workspace.path) === preparedHead) {
           await pinWorkspaceBase(workspace, preparedHead);
           db.update(workspaces).set({ baseSha: preparedHead }).where(eq(workspaces.id, workspace.id)).run();
         }
-      } catch (error) {
-        ctx.operation.log.warn({ event: "workspace.base_update_skipped", workspaceId: workspace.id, err: error });
-      }
+      });
     }
   }
   const startHeadSha = await headOf(workspace.path);
@@ -175,7 +174,7 @@ async function correctionRound({ run, operation, manifest, stop }: Ctx, p: Chang
   if (!sessionFile || round > config.harness.corrections.validation) throw error.cause;
   operation.log.warn({ event: "pi.validation_retry", round });
   updateRun(run.id, { stage: "agent" });
-  const followUp = await executePi({ run, cwd: p.workspace.path, context: "", tools: manifest.tools, scoped: manifest, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });
+  const followUp = await executePi({ run, cwd: p.workspace.path, tools: manifest.tools, scoped: manifest, log: operation.log, environment: p.environment, ...p.agentInput, stop }, { context: "", sessionFile, followUp: validationMessage(error, round) });
   const corrected = { ...followUp, text: `${result.text}\n\n**Validation correction ${round}:** ${followUp.text}`, paths: [...new Set([...result.paths, ...followUp.paths])] };
   updateRun(run.id, { result: corrected, stage: "validating" });
   assertComplete(corrected);

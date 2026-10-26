@@ -4,7 +4,7 @@ import { isAbsolute, resolve } from "node:path";
 import settings from "../scrat.config.json" with { type: "json" };
 import { buildConfig, type Json } from "./config-merge.ts";
 import { configError, validateConfig } from "./config-schema.ts";
-import { deploymentDefaults, findTriggerConflicts, readManifests } from "./manifests.ts";
+import { deploymentDefaults, findTriggerConflicts, readManifests, resolveAction } from "./manifests.ts";
 
 const configUrl = new URL("../scrat.config.json", import.meta.url);
 const localConfigUrl = new URL("../scrat.local.json", import.meta.url);
@@ -33,7 +33,7 @@ const unknownActions = Object.keys(merged.actions as Json).filter((name) => !loa
 if (unknownActions.length) throw configError(unknownActions.map((name) => `actions.${name}: unknown action`));
 export const config = validateConfig(merged);
 
-const conflicts = findTriggerConflicts(loadedManifests, (manifest) => config.actions[manifest.name]?.enabled !== false);
+const conflicts = findTriggerConflicts(loadedManifests.map((manifest) => resolveAction(manifest, config.actions[manifest.name]!)), (action) => action.enabled !== false);
 if (conflicts.length) throw configError(conflicts);
 
 const unbound = loadedManifests.flatMap((manifest) => [manifest.http?.binding, manifest.browser?.binding]
@@ -42,12 +42,6 @@ if (unbound.length) throw configError(unbound);
 
 export function getRepositoryPath() {
   return resolve(fileURLToPath(new URL(".", configUrl)), process.env.SCRAT_REPOSITORY_PATH ?? config.github.repositoryPath);
-}
-
-export function commitSettings(action: string) {
-  const { enabled, branch, maxRangeCommits, channel, startMessage } = config.actions[action] ?? {};
-  if (!branch || !maxRangeCommits) throw new Error(`${action} is not a commit action`);
-  return { enabled: enabled !== false, branch, maxRangeCommits, channel: channel ?? "", startMessage: startMessage ?? "" };
 }
 
 export const isBotLogin = (login: string | null | undefined) => login?.toLowerCase() === config.github.botLogin.toLowerCase();

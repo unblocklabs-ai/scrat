@@ -2,8 +2,8 @@ import { access, lstat, mkdir } from "node:fs/promises";
 import { manifests } from "./actions.ts";
 import { type Resolver, publicAnswers, resolveHost, validateBindings } from "./bindings.ts";
 import { config } from "./config.ts";
-import { configError, type ActionSettings, type ScratConfig } from "./config-schema.ts";
-import { deploymentDefaults, entryProblems, skillPath, type Manifest } from "./manifests.ts";
+import { configError, type ScratConfig } from "./config-schema.ts";
+import { type ActionSettings, deploymentDefaults, entryProblems, resolveAction, type Manifest } from "./manifests.ts";
 import { slugOf } from "./identity.ts";
 import { logger } from "./logging.ts";
 import { errorMessage } from "./errors.ts";
@@ -33,7 +33,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
     else if (await lstat(store).then((entry) => entry.isSymbolicLink(), () => false)) problems.push("workspace.packageStore must not be a symlink");
     else if (process.platform === "linux") await mkdir(store, { recursive: true, mode: 0o700 }).catch(() => { problems.push(`workspace.packageStore ${store} cannot be created`); });
   }
-  const resolvedEntry = (manifest: Manifest) => ({ ...deploymentDefaults(manifest), ...settings.actions[manifest.name] });
+  const resolvedEntry = (manifest: Manifest) => resolveAction(manifest, { ...deploymentDefaults(manifest), ...settings.actions[manifest.name] });
   const checkSlackAuth = (prefix: string) => authTest().catch((error: unknown) => { problems.push(`${prefix} auth.test failed: ${errorMessage(error)}`); });
   const checkEntry = (label: string, { provider, model }: Entry) => {
     if (!modelRuntime.getModel(provider, model)) problems.push(`${label}: no Pi model ${provider}/${model}${modelRuntime.getError() ? ` (${modelRuntime.getError()})` : ""}`);
@@ -111,8 +111,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
       if (storefront?.enabled && manifest.publish.includes("slack_reply")) {
         for (const load of [loadPlaywright, (await import("./lighthouse.ts")).loadLighthouse]) await load().catch((error: unknown) => { problems.push(`${action}: storefront: ${errorMessage(error)}`); });
       }
-      const skill = skillPath(manifest, entry.skill);
-      if (!await access(skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${skill}`);
+      if (!await access(entry.skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${entry.skill}`);
     }
   }
   if (problems.length) {

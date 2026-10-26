@@ -22,16 +22,16 @@ export async function createRunDatabase(runId: string, image: string, references
     await docker(["create", "--name", container, "--label", `${runLabel}=${runId}`,
       "--publish", "127.0.0.1::5432", "--env", `POSTGRES_PASSWORD=${password}`, "--env", "POSTGRES_DB=scrat_test",
       "--health-cmd", "pg_isready -h 127.0.0.1 -U postgres -d scrat_test",
-      "--health-interval", "1s", "--health-timeout", "3s", "--health-retries", String(config.harness.databaseHealthRetries), image]);
+      "--health-interval", `${config.harness.databaseHealthIntervalSeconds}s`, "--health-timeout", `${config.harness.databaseHealthTimeoutSeconds}s`, "--health-retries", String(config.harness.databaseHealthRetries), image]);
     await docker(["start", container]);
     while (true) {
       const [state, health] = (await docker(["inspect", "--format", "{{.State.Status}} {{.State.Health.Status}}", container])).split(" ");
       if (state === "running" && health === "healthy") break;
       if (state !== "running" || health === "unhealthy") {
-        const { stdout, stderr } = await executeFile("docker", ["logs", "--tail", "50", container]);
+        const { stdout, stderr } = await executeFile("docker", ["logs", "--tail", String(config.harness.databaseLogTailLines), container]);
         throw new Error(`Run database failed to start (${state}/${health}): ${stdout}${stderr}`);
       }
-      await setTimeout(500);
+      await setTimeout(config.harness.databaseHealthIntervalSeconds * 1000);
     }
     const address = await docker(["port", container, "5432/tcp"]);
     recordEvent({ ...references, runId, operationId: operation.operationId, type: "database.created", data: { container, image } });

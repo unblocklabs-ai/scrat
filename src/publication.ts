@@ -2,35 +2,31 @@ import { manifestOf } from "./actions.ts";
 import { db } from "./db.ts";
 import { applyEffects, type EffectContext } from "./effects.ts";
 import type { EventReferences } from "./events.ts";
-import { GitHubRepository } from "./github.ts";
+import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
-import { logger } from "./logging.ts";
-import { getRun, updateRun } from "./run-history.ts";
+import { bestEffort, logger } from "./logging.ts";
+import { updateRun } from "./run-history.ts";
 import type { Run, Task, Subject } from "./schema.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 
-function receiptContext(run: Run, references: EventReferences): EffectContext {
+export async function publishRun(github: GitHubRepository, subject: Subject, task: Task, run: Run, references: EventReferences, current?: GithubContext) {
+  const { result, context } = run;
+  if (!result || !context) throw new Error("Run has no evaluated result to publish");
+  if (result.outcome !== "complete") throw new Error("Incomplete agent work cannot be published");
+  const manifest = manifestOf(task.action);
   let publication = run.publication;
-  return {
-    references,
+  const effectContext: EffectContext = {
+    references, github, subject, task, run: { ...run, result, context }, current,
     publication: () => publication,
     saveReceipt(patch, database = db) {
       publication = { ...publication, ...patch };
       updateRun(run.id, { publication }, database);
     },
   };
-}
-
-export async function publishRun(github: GitHubRepository, task: Task, run: Run, current: GithubContext, references: EventReferences) {
-  const { result, context } = run;
-  if (!result || !context) throw new Error("Run has no evaluated result to publish");
-  if (result.outcome !== "complete") throw new Error("Incomplete agent work cannot be published");
-  const manifest = manifestOf(task.action);
-  const effectContext = { ...receiptContext(run, references), github, task, run: { ...run, result, context }, current };
   if (run.publication.commentOnly) {
     await applyEffects(["comment"], effectContext);
     const { workspaceId } = run;
-    if (workspaceId) await removeWorkspace(workspaceId, references).catch(() => logger.warn({ event: "run.cleanup_pending", ...references, workspaceId }));
+    if (workspaceId) await bestEffort(logger, "run.cleanup_pending", { ...references, workspaceId }, () => removeWorkspace(workspaceId, references));
     return;
   }
   if (manifest.mode === "change") {
@@ -41,9 +37,4 @@ export async function publishRun(github: GitHubRepository, task: Task, run: Run,
     return applyEffects(manifest.publish, { ...effectContext, workspace, commitSha });
   }
   return applyEffects(manifest.publish, effectContext);
-}
-
-export function publishSubject(subject: Subject, task: Task, run: Run, references: EventReferences) {
-  const saved = getRun(run.id)!;
-  return applyEffects(manifestOf(task.action).publish, { ...receiptContext(saved, references), github: new GitHubRepository(subject.repository), subject, task, run: saved });
 }

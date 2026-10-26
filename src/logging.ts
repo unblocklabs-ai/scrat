@@ -21,6 +21,11 @@ export const logger = pino({
   },
 }, pino.destination({ dest: 2, sync: true }));
 
+export async function bestEffort<T>(log: typeof logger, event: string, fields: Record<string, unknown>, work: () => Promise<T>) {
+  try { return await work(); }
+  catch (err) { log.warn({ ...fields, event, err }); return undefined; }
+}
+
 export function startOperation(operation: string, context: Record<string, unknown> = {}) {
   const operationId = randomUUID();
   const log = logger.child({ ...context, operation, operationId });

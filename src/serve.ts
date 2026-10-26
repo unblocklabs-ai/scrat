@@ -28,7 +28,7 @@ async function worker() {
     try { if (!await runNextTask(shutdown.signal)) await waitForWork(seen, config.harness.idlePollSeconds * 1000, shutdown.signal); }
     catch (error) {
       logger.error({ err: error }, "Worker failed");
-      await wait(1000);
+      await wait(config.harness.workerErrorDelaySeconds * 1000);
     }
   }
 }

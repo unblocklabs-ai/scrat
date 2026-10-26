@@ -1,7 +1,7 @@
 import { config, isActionEnabled } from "./config.ts";
 import { type Cron, nextTick, parseCron, parseWindow } from "./cron.ts";
 import { type OperationScope } from "./logging.ts";
-import type { Manifest } from "./manifests.ts";
+import type { Action } from "./manifests.ts";
 import { upsertSubject } from "./items.ts";
 import { enqueueOnce, pollSource, sourceCursor } from "./sources.ts";
 
@@ -11,7 +11,7 @@ export function pollSchedules(repository = config.github.repository, now = new D
   return pollSource("schedule.poll", "schedule", repository, (manifest, operation) => pollAction(manifest, repository, now, operation));
 }
 
-function pollAction(manifest: Manifest, repository: string, now: Date, operation: OperationScope) {
+function pollAction(manifest: Action, repository: string, now: Date, operation: OperationScope) {
   const { name: action, trigger } = manifest;
   const cursor = sourceCursor(repository, action, cursorBranch);
   if (!isActionEnabled(action)) {

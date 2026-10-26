@@ -8,7 +8,7 @@ import { hostProblem } from "./bindings.ts";
 import { prGrades } from "./results.ts";
 import { triggerKinds, triggerSource } from "./triggers.ts";
 
-export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const toolNames = ["read", "grep", "find", "ls", "git", "read_base", "bash", "edit", "write", "http", "browser", "github_search"] as const;
 const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "history", "validation", "triage", "issue", "storefront"] as const;
 const effectNames = ["push", "pull_request", "comment", "labels", "pr_assessment", "issue", "slack_reply", "site_map"] as const;
@@ -20,8 +20,18 @@ export type EffectName = (typeof effectNames)[number];
 const strict = { additionalProperties: false } as const;
 export const nullable = <T extends TSchema>(schema: T) => Type.Union([schema, Type.Null()]);
 const list = <T extends TSchema>(items: T, minItems = 0) => Type.Array(items, { minItems, uniqueItems: true });
-export const modelSettings = Type.Object({ provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels) }, strict);
-export const retrySettings = Type.Object({ initialDelaySeconds: Type.Integer({ minimum: 1 }), maxDelaySeconds: Type.Integer({ minimum: 1 }) }, strict);
+const modelSettings = Type.Object({ provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels) }, strict);
+const retrySettings = Type.Object({ initialDelaySeconds: Type.Integer({ minimum: 1 }), maxDelaySeconds: Type.Integer({ minimum: 1 }) }, strict);
+const positive = Type.Integer({ minimum: 1 });
+const settings = {
+  enabled: Type.Optional(Type.Boolean()), priority: Type.Integer(), skill: Type.String(),
+  channel: Type.Optional(Type.String()), maxRangeCommits: Type.Optional(positive), startMessage: Type.Optional(Type.String()),
+  maxSelfRepairs: Type.Optional(Type.Integer({ minimum: 0 })), exhaustedLabel: Type.Optional(nullable(Type.String())), failedLabel: Type.Optional(nullable(Type.String())),
+};
+export const actionSettings = Type.Object({
+  ...settings, ...modelSettings.properties, reviewers: Type.Array(modelSettings), branch: Type.Optional(Type.String()), retry: Type.Optional(nullable(retrySettings)),
+}, strict);
+export type ActionSettings = Static<typeof actionSettings>;
 const trigger = Type.Object({
   source: Type.Enum(["github_items", "github_commits", "schedule", "storefront"]), kind: Type.Enum(triggerKinds),
   item: Type.Optional(Type.Enum(["issue", "pr"])), author: Type.Optional(Type.String({ minLength: 1 })),
@@ -33,16 +43,13 @@ const trigger = Type.Object({
 const httpSettings = Type.Object({ binding: Type.String(), methods: Type.Optional(list(Type.Enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]), 1)) }, strict);
 const browserSettings = Type.Object({ navigationHosts: list(Type.String(), 1), resourceHosts: list(Type.String()), binding: Type.Optional(Type.String()) }, strict);
 const schema = Type.Object({
-  name: Type.String({ pattern: "^[a-z][a-z0-9_]{0,63}$" }), enabled: Type.Optional(Type.Boolean()),
+  name: Type.String({ pattern: "^[a-z][a-z0-9_]{0,63}$" }),
   trigger, mode: Type.Enum(["review", "change"]), agent: Type.Optional(Type.Enum(["single", "panel"])), reviewers: Type.Optional(Type.Array(modelSettings)),
   context: Type.Optional(Type.Enum(["all", "feedback", "change"])),
   tools: Type.Optional(list(Type.Enum(toolNames), 1)), http: Type.Optional(httpSettings), browser: Type.Optional(browserSettings), files: Type.Optional(list(Type.Enum(contextFileNames))),
   acceptance: Type.Optional(Type.Enum(["complete", "nonempty_diff", "conflict_free"])),
   start: Type.Optional(list(Type.Enum(startEffectNames))), publish: list(Type.Enum(effectNames), 1),
-  skill: Type.String(), model: modelSettings, priority: Type.Integer(), retry: Type.Optional(retrySettings),
-  maxSelfRepairs: Type.Optional(Type.Integer({ minimum: 0 })), exhaustedLabel: Type.Optional(nullable(Type.String())),
-  failedLabel: Type.Optional(nullable(Type.String())),
-  channel: Type.Optional(Type.String()), maxRangeCommits: Type.Optional(Type.Integer({ minimum: 1 })), startMessage: Type.Optional(Type.String()),
+  ...settings, model: modelSettings, retry: Type.Optional(retrySettings),
 }, strict);
 
 type Parsed = Static<typeof schema>;
@@ -52,10 +59,7 @@ export type Manifest = Resolved & { file: string; root: string };
 const defaultTools = ({ mode, agent, context }: Pick<Resolved, "mode" | "agent" | "context">): ToolName[] => mode === "change" ? ["read", "grep", "find", "ls", "bash", "edit", "write"]
   : ["read", "grep", "find", "ls", "git", ...agent === "panel" || context === "change" ? ["read_base" as const] : []];
 
-type EntrySettings = {
-  reviewers?: readonly unknown[]; retry?: { initialDelaySeconds: number; maxDelaySeconds: number } | null;
-  failedLabel?: string | null; maxSelfRepairs?: number; exhaustedLabel?: string | null;
-};
+type EntrySettings = Partial<Pick<ActionSettings, "reviewers" | "retry" | "failedLabel" | "maxSelfRepairs" | "exhaustedLabel" | "channel" | "startMessage" | "maxRangeCommits" | "branch">>;
 
 export function entryProblems({ mode, agent, trigger }: Pick<Resolved, "mode" | "agent" | "trigger">, entry: EntrySettings) {
   const checks: [boolean, string][] = [
@@ -64,6 +68,7 @@ export function entryProblems({ mode, agent, trigger }: Pick<Resolved, "mode" | 
     [!entry.retry || entry.retry.maxDelaySeconds >= entry.retry.initialDelaySeconds, "retry.maxDelaySeconds must be at least retry.initialDelaySeconds"],
     [!entry.failedLabel || mode === "change", "failedLabel requires mode change"],
     [(entry.maxSelfRepairs === undefined && !entry.exhaustedLabel) || trigger.kind === "low_grade", "maxSelfRepairs and exhaustedLabel are only allowed with kind low_grade"],
+    [(entry.channel === undefined && entry.startMessage === undefined && entry.maxRangeCommits === undefined && entry.branch === undefined) || trigger.source === "github_commits", "channel, startMessage, maxRangeCommits and branch are only allowed with source github_commits"],
   ];
   return checks.filter(([ok]) => !ok).map(([, message]) => message);
 }
@@ -92,7 +97,6 @@ function crossChecks(m: Resolved) {
   need(t.grades === undefined || t.kind === "low_grade", "trigger.grades is only allowed with kind low_grade");
   need(t.kind !== "low_grade" || m.maxSelfRepairs !== undefined, "kind low_grade requires maxSelfRepairs");
   need(!commits || m.maxRangeCommits !== undefined, "source github_commits requires maxRangeCommits");
-  need((m.channel === undefined && m.startMessage === undefined && m.maxRangeCommits === undefined) || commits, "channel, startMessage and maxRangeCommits are only allowed with source github_commits");
   need(!any(slack, ["slack_post", "slack_reply"]) || commits, "slack effects require source github_commits");
   need(!publish.includes("issue") || !commits, "the issue effect requires source github_items or schedule");
   need(!any(publish, ["labels", "comment"]) || items, "labels and comment effects require a github_items trigger");
@@ -163,16 +167,15 @@ export function readManifests(root: string, directory?: string | null) {
 
 type Grade = NonNullable<Manifest["trigger"]["grades"]>[number];
 export type Signal = {
-  source: Manifest["trigger"]["source"]; kind: Manifest["trigger"]["kind"]; item?: "issue" | "pr"; author?: "bot" | "other"; grade?: Grade; branch?: string;
+  source: Manifest["trigger"]["source"]; kind: Manifest["trigger"]["kind"]; item?: "issue" | "pr"; author?: "bot" | "other"; grade?: Grade;
 };
 
 export function matches({ trigger: t }: Manifest, signal: Signal) {
   return t.source === signal.source && t.kind === signal.kind && (t.item === undefined || t.item === signal.item)
-    && (t.author === undefined || t.author === signal.author) && (t.grades === undefined || signal.grade === undefined || t.grades.includes(signal.grade))
-    && (t.branch === undefined || t.branch === signal.branch);
+    && (t.author === undefined || t.author === signal.author) && (t.grades === undefined || signal.grade === undefined || t.grades.includes(signal.grade));
 }
 
-export function findTriggerConflicts(manifests: readonly Manifest[], enabled: (manifest: Manifest) => boolean) {
+export function findTriggerConflicts<T extends Pick<Manifest, "file" | "trigger">>(manifests: readonly T[], enabled: (manifest: T) => boolean) {
   const live = manifests.filter(enabled), problems: string[] = [];
   live.forEach((a, index) => live.slice(index + 1).forEach((b) => {
     const [x, y] = [a.trigger, b.trigger];
@@ -185,7 +188,8 @@ export function findTriggerConflicts(manifests: readonly Manifest[], enabled: (m
   return problems;
 }
 
-export const skillPath = (manifest: Manifest, skill = manifest.skill) => resolve(manifest.root, skill);
+export const resolveAction = (manifest: Manifest, entry: ActionSettings) => ({ ...manifest, ...entry, skill: resolve(manifest.root, entry.skill), trigger: { ...manifest.trigger, branch: entry.branch } });
+export type Action = ReturnType<typeof resolveAction>;
 
 export function deploymentDefaults(m: Manifest) {
   const optional = { branch: m.trigger.branch, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel, failedLabel: m.failedLabel, retry: m.retry };

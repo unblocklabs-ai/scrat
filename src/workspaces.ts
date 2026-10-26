@@ -11,6 +11,7 @@ import { runs, workspaces, type Run, type Workspace } from "./schema.ts";
 import { ifMissing } from "./errors.ts";
 import { SecretLeakError } from "./results.ts";
 import { containsSecret } from "./secrets.ts";
+import { sandboxHome, workspaceRoot } from "./sandbox.ts";
 
 export function getWorkspace(workspaceId: string) {
   return db.select().from(workspaces).where(eq(workspaces.id, workspaceId)).get();
@@ -73,7 +74,7 @@ export async function createWorkspace(
 ) {
   const workspaceId = randomUUID();
   branch ??= `${botSlug}/${workspaceId}`;
-  let path = resolve("data/workspaces", workspaceId);
+  let path = resolve(workspaceRoot(), workspaceId);
   return withOperation("workspace.create", {
     ...references, workspaceId, repositoryPath, path, branch, baseRef,
   }, async (operation) => {
@@ -124,9 +125,9 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
       const published = db.select().from(runs).where(eq(runs.workspaceId, workspace.id)).all()
         .some((run) => run.publication.publishedCommitSha === head);
       if (head !== workspace.baseSha && !published) throw new Error("Workspace has unpublished commits; retain it for recovery");
-      if (path !== resolve(await realpath("data/workspaces"), workspace.id)) throw new Error("Refusing cleanup outside the owned workspace root");
+      if (path !== resolve(workspaceRoot(), workspace.id)) throw new Error("Refusing cleanup outside the owned workspace root");
       await rm(path, { recursive: true });
-      const home = resolve("data/sandbox-homes", workspace.id);
+      const home = sandboxHome(workspace.id);
       const stats = await ifMissing(lstat(home), undefined);
       if (stats?.isDirectory() && !stats.isSymbolicLink()) await rm(home, { recursive: true });
     }

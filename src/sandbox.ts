@@ -20,18 +20,23 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const cwd = await mkdtemp(join(workspaceRoot(), "sandbox-preflight-"));
   try {
     const command = sandboxCommand(cwd, "/bin/sh", ["-c", `node --version && pnpm --version && git --version${config.workspace.packageStore ? ` && touch ${packageStoreMount}/.preflight && rm ${packageStoreMount}/.preflight` : ""}`], {});
-    const { stdout } = await promisify(execFile)(command.file, command.args, { env: command.env, timeout: 30_000 });
+    const { stdout } = await promisify(execFile)(command.file, command.args, { env: command.env, timeout: config.harness.sandboxPreflightSeconds * 1000 });
     process.stdout.write(`Sandbox ready\n${stdout}`);
   } finally {
     await rm(cwd, { recursive: true });
-    const home = join(realpathSync("data/sandbox-homes"), relative(workspaceRoot(), cwd));
+    const home = sandboxHome(relative(workspaceRoot(), cwd));
     if (existsSync(home) && realpathSync(home) === home) await rm(home, { recursive: true });
   }
 }
 
-function workspaceRoot() {
+export function workspaceRoot() {
   const path = resolve("data/workspaces");
   return existsSync(path) ? realpathSync(path) : path;
+}
+
+export function sandboxHome(path: string) {
+  const parent = resolve("data/sandbox-homes");
+  return join(existsSync(parent) ? realpathSync(parent) : parent, path);
 }
 
 export function sandboxCommand(cwd: string, file: string, args: string[], environment: NodeJS.ProcessEnv, readOnly: string[] = [], track = false) {
@@ -40,7 +45,7 @@ export function sandboxCommand(cwd: string, file: string, args: string[], enviro
   if (!inWorkspace(cwd)) throw new Error("Sandbox commands must run inside an owned workspace");
   const workspace = realpathSync(cwd);
   mkdirSync("data/sandbox-homes", { recursive: true, mode: 0o700 });
-  const home = join(realpathSync("data/sandbox-homes"), relative(workspaceRoot(), workspace).split("/")[0]);
+  const home = sandboxHome(relative(workspaceRoot(), workspace).split("/")[0]);
   mkdirSync(home, { recursive: true, mode: 0o700 });
   if (realpathSync(home) !== home) throw new Error("Sandbox home is not its owned directory");
   const limit = config.workspace.commandMemoryMax;

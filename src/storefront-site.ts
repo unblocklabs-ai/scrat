@@ -1,16 +1,15 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
 import { config, isActionEnabled } from "./config.ts";
 import { ifMissing } from "./errors.ts";
 import { botName } from "./identity.ts";
 import { upsertSubject } from "./items.ts";
 import type { Run, Subject, Task } from "./schema.ts";
 import { enqueueOnce, pollSource, sourceCursor } from "./sources.ts";
-import { previewContext } from "./storefront.ts";
+import { previewContext, statePath, writeStateText } from "./storefront.ts";
 
 const scope = "site_map", dayMs = 86_400_000;
-const siteMapPath = () => resolve("data/storefront/site.md");
+const siteMapPath = () => statePath("site.md");
 const liveUrl = () => `https://${config.storefront.publicHost}/`;
 
 export function pollSiteMap(repository = config.github.repository, now = new Date()) {
@@ -26,10 +25,8 @@ export function pollSiteMap(repository = config.github.repository, now = new Dat
 
 export async function saveSiteMap({ subject, task, run }: { subject: Subject; task: Task; run: Run }) {
   if (!run.result) throw new Error("Run has no saved site map to store");
-  const written = new Date().toISOString(), path = siteMapPath();
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(`${path}.tmp`, `Site map of ${liveUrl()}, written by ${botName} on ${written}.\n\n${run.result.text}\n`);
-  await rename(`${path}.tmp`, path);
+  const written = new Date().toISOString();
+  await writeStateText("site.md", `Site map of ${liveUrl()}, written by ${botName} on ${written}.\n\n${run.result.text}\n`);
   sourceCursor(subject.repository, task.action, scope).save(written);
 }
 

@@ -138,7 +138,7 @@ export async function fixture(scenario, spec) {
       res.writeHead(503, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "Service temporarily unavailable" } }));
     }
-    const key = `${context.item.number}/${request.model.replace("terra", "sol")}/${consolidating}/${context.database?.container ?? ""}`;
+    const key = `${context.item.number}/${request.model === config.storefront.model?.model ? config.providers.fixture.models[0].id : request.model}/${consolidating}/${context.database?.container ?? ""}`;
     const step = steps.get(key) ?? 0; steps.set(key, step + 1);
     requests.push({ request, text, context, consolidating });
     onModel?.(context, step);

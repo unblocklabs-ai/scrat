@@ -45,8 +45,8 @@ export async function pruneScreenshots(now = Date.now()) {
   const root = resolve("data/runs");
   for (const run of await ifMissing(readdir(root), [])) {
     for (const file of (await ifMissing(readdir(resolve(root, run)), [])).filter((name) => /^screenshot-.*\.png$/.test(name))) {
-      const path = resolve(root, run, file);
-      if (now - (await stat(path)).mtimeMs > config.storefront.screenshotRetentionDays * dayMs) await rm(path, { force: true });
+      const path = resolve(root, run, file), taken = await ifMissing(stat(path), undefined);
+      if (taken && now - taken.mtimeMs > config.storefront.screenshotRetentionDays * dayMs) await rm(path, { force: true });
     }
   }
 }

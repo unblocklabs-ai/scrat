@@ -219,13 +219,15 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
   async function open() {
     if (session) return session;
     if (!browser) {
-      release = await acquire?.();
-      const rules: string[] = [];
-      for (const host of resourceHosts === "any" ? [] : resourceHosts) {
-        const answer = (await publicAnswers(host, resolve))?.[0];
-        rules.push(`MAP ${host} ${answer ? (answer.family === 6 ? `[${answer.address}]` : answer.address) : "~NOTFOUND"}`);
-      }
-      browser = await launch(rules.length ? [`--host-resolver-rules=${rules.join(",")}`] : []);
+      release = await acquire?.().catch(() => halt("the worker is stopping"));
+      try {
+        const rules: string[] = [];
+        for (const host of resourceHosts === "any" ? [] : resourceHosts) {
+          const answer = (await publicAnswers(host, resolve))?.[0];
+          rules.push(`MAP ${host} ${answer ? (answer.family === 6 ? `[${answer.address}]` : answer.address) : "~NOTFOUND"}`);
+        }
+        browser = await launch(rules.length ? [`--host-resolver-rules=${rules.join(",")}`] : []);
+      } catch (error) { await close(); throw error; }
     }
     try {
       const context = await browser.newContext({ acceptDownloads: false, serviceWorkers: "block", viewport: size });

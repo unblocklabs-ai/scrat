@@ -150,6 +150,7 @@ deploy_release() {
   log "Checking the config"
   node src/config.ts
   check_sandbox
+  check_browser_packages
   rehearse_schema_push
   list_backup_files
   state=$(scrat_unit is-active || true)
@@ -189,6 +190,14 @@ check_sandbox() {
   else
     node src/sandbox.ts
   fi
+}
+
+check_browser_packages() {
+  local package
+  [[ $(node --input-type=module -e 'const { config } = await import("./src/config.ts"); process.stdout.write(String(config.storefront.enabled))') == true ]] || return 0
+  for package in playwright-core lighthouse; do
+    node -e 'require.resolve(process.argv[1])' "$package" 2> /dev/null || fail "$package does not resolve from $release. Install the browser packages in the install root first: cd $root && npm install --no-save --no-package-lock playwright-core@^1.50.0 lighthouse@^13.5.0"
+  done
 }
 
 rehearse_schema_push() {
@@ -464,7 +473,7 @@ run_update() {
 plan() {
   printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
   declare -p root releases_repository requested_version
-  declare -f log fail download open_work on_exit systemctl_command load_deployment fetch_release deploy_release check_sandbox rehearse_schema_push copy_database list_backup_files back_up prune_releases refresh_cli scrat_unit
+  declare -f log fail download open_work on_exit systemctl_command load_deployment fetch_release deploy_release check_sandbox check_browser_packages rehearse_schema_push copy_database list_backup_files back_up prune_releases refresh_cli scrat_unit
   if [[ $subcommand == install ]]; then
     declare -p node_version force
     declare -f check_install_target install_packages install_node load_apparmor_profiles enable_linger install_package_manager install_docker docker_unit_file scrat_unit_file write_unit print_first_sync_plan run_install

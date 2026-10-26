@@ -7,7 +7,7 @@ import { bestEffort, startOperation } from "./logging.ts";
 import { observe } from "./observation.ts";
 import { currentPrReview } from "./pr-assessment.ts";
 import { getRun } from "./run-history.ts";
-import { publishRun, publishSubject } from "./publication.ts";
+import { publishRun } from "./publication.ts";
 import { InterruptedError } from "./results.ts";
 import { recordEvent } from "./events.ts";
 import { claimTask, finishRun, interruptRun, retryTransientFailure } from "./tasks.ts";
@@ -39,7 +39,7 @@ async function assertRepairCurrent({ task }: Ctx, { item, observation, mainSha }
 }
 
 async function publishStage({ task, run, subject, references, manifest }: Ctx, observed: Observed | undefined) {
-  if (!observed) return publishSubject(subject, task, run, references);
+  if (!observed) return publishRun(new GitHubRepository(subject.repository), subject, task, getRun(run.id)!, references);
   const { github, context, item, observation, mainSha } = observed;
   const review = manifest.mode === "review";
   const evaluatedRun = getRun(run.id)!;
@@ -63,7 +63,7 @@ async function publishStage({ task, run, subject, references, manifest }: Ctx, o
       ? "GitHub task context changed; enqueue a fresh task instead of retrying publication"
       : "Reviewed code changed; enqueue a fresh review instead of retrying publication");
   }
-  await publishRun(github, task, evaluatedRun, publicationContext, references);
+  await publishRun(github, subject, task, evaluatedRun, references, publicationContext);
 }
 
 export async function runNextTask(stop?: AbortSignal) {

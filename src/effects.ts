@@ -27,28 +27,19 @@ export type EffectContext = {
   references: EventReferences;
   publication: () => Receipts;
   saveReceipt: (patch: Partial<Receipts>, database?: Pick<typeof db, "update">) => void;
-};
-
-type GithubEffectContext = EffectContext & {
   github: GitHubRepository;
+  subject: Subject;
   task: Task;
   run: Evaluated;
-  current: GithubContext;
+  current?: GithubContext;
   workspace?: NonNullable<ReturnType<typeof getWorkspace>>;
   commitSha?: string;
 };
 
-type SubjectEffectContext = EffectContext & {
-  github: GitHubRepository;
-  subject: Subject;
-  task: Task;
-  run: Run;
-};
-
-type Effect<Context extends EffectContext> = {
-  receipted?: (publication: Receipts, context: Context) => boolean;
+type Effect = {
+  receipted?: (publication: Receipts, context: EffectContext) => boolean;
   settlesRun?: boolean;
-  apply: (context: Context) => Promise<void>;
+  apply: (context: EffectContext) => Promise<void>;
 };
 
 function validationLine({ verification }: Run) {
@@ -56,7 +47,12 @@ function validationLine({ verification }: Run) {
   return verification && passed?.length ? `Validated on ${verification.headSha.slice(0, 7)}: ${passed.join(", ")} passed.\n\n` : "";
 }
 
-function changed(context: GithubEffectContext) {
+function observed({ current }: EffectContext) {
+  if (!current) throw new Error("Publication has no GitHub item context");
+  return observe(current);
+}
+
+function changed(context: EffectContext) {
   const { workspace, commitSha } = context;
   if (!workspace || !commitSha) throw new Error("Change publication has no workspace or validated commit");
   return { workspace, commitSha };
@@ -74,7 +70,7 @@ const push = {
     }
     context.saveReceipt({ publishedCommitSha: commitSha });
   },
-} satisfies Effect<GithubEffectContext>;
+} satisfies Effect;
 
 const pullRequest = {
   receipted: (publication) => Boolean(publication.pullRequestNumber),
@@ -95,32 +91,34 @@ const pullRequest = {
       context.saveReceipt({ pullRequestNumber: publishedPr.number }, transaction);
     });
   },
-} satisfies Effect<GithubEffectContext>;
+} satisfies Effect;
 
 const comment = {
   receipted: (publication) => Boolean(publication.commentId),
-  async apply({ github, task, run, current, references, saveReceipt }) {
+  async apply(context) {
+    const { github, task, run, references, saveReceipt } = context;
     const marker = manifestOf(task.action).mode === "review" ? reviewMarker : taskMarker(task.id);
-    const observation = observe(current);
+    const observation = observed(context);
     const existing = observation.own.findLast((candidate) => isIssueComment(candidate) && endsWithMarker(candidate.body, marker));
     const commentId = await upsertComment(github, run.context.item.number, existing, withMarker(`${run.result.text}\n\n${validationLine(run)}`, marker), references);
     saveReceipt({ commentId });
   },
-} satisfies Effect<GithubEffectContext>;
+} satisfies Effect;
 
 const labels = {
-  async apply({ github, run, current, references }) {
+  async apply(context) {
+    const { github, run, references } = context;
     if (!run.result.ready) return;
-    const observation = observe(current);
+    const observation = observed(context);
     await reconcileLabels(github, run.context.item.number, { current: observation.labels, desired: [botSlug], managed: [] }, references);
   },
-} satisfies Effect<GithubEffectContext>;
+} satisfies Effect;
 
 const prAssessment = {
   settlesRun: true,
   apply: ({ github, task, run, references }) =>
     reconcilePrReview(github, task.subjectId, run.context.item.number, references, { task, run }),
-} satisfies Effect<GithubEffectContext>;
+} satisfies Effect;
 
 const issue = {
   async apply({ github, run, references, publication, saveReceipt }) {
@@ -137,7 +135,7 @@ const issue = {
       saveReceipt({ issues: { ...publication().issues, [fingerprint]: number } });
     }
   },
-} satisfies Effect<GithubEffectContext>;
+} satisfies Effect;
 
 const slackReply = {
   receipted: (publication, { run }) => Boolean(publication.slackReplyTs) && (!run.result?.storefrontReview || Boolean(publication.storefrontReplyTs)) && publication.slackReaction === verdictReaction(run),
@@ -150,16 +148,16 @@ const slackReply = {
     await reactToCommitRoot(subject, name);
     saveReceipt({ slackReaction: name });
   },
-} satisfies Effect<SubjectEffectContext>;
+} satisfies Effect;
 
 const siteMap = {
   apply: async (context) => (await import("./storefront-site.ts")).saveSiteMap(context),
-} satisfies Effect<SubjectEffectContext>;
+} satisfies Effect;
 
-const effects = { push, pull_request: pullRequest, comment, labels, pr_assessment: prAssessment, issue, slack_reply: slackReply, site_map: siteMap } satisfies Record<EffectName, Effect<never>>;
+const effects = { push, pull_request: pullRequest, comment, labels, pr_assessment: prAssessment, issue, slack_reply: slackReply, site_map: siteMap } satisfies Record<EffectName, Effect>;
 
-export async function applyEffects<Context extends EffectContext>(names: readonly EffectName[], context: Context) {
-  const list = names.map((name) => effects[name]) as unknown as readonly Effect<Context>[];
+export async function applyEffects(names: readonly EffectName[], context: EffectContext) {
+  const list: readonly Effect[] = names.map((name) => effects[name]);
   for (const effect of list) {
     if (!effect.receipted?.(context.publication(), context)) await effect.apply(context);
   }

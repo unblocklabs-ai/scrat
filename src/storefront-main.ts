@@ -7,14 +7,13 @@ import { config } from "./config.ts";
 import type { EffectContext } from "./effects.ts";
 import { errorMessage } from "./errors.ts";
 import { blobBytes } from "./git.ts";
-import type { GitHubRepository } from "./github.ts";
 import { recordLighthouse, runLighthouse } from "./lighthouse.ts";
 import { bestEffort, logger } from "./logging.ts";
 import { storefrontMarker } from "./markers.ts";
 import { executePi } from "./pi.ts";
 import type { AgentResult } from "./results.ts";
 import { type Ctx, stopBefore } from "./run-context.ts";
-import type { Run, Subject, Task, Workspace } from "./schema.ts";
+import type { Run, Workspace } from "./schema.ts";
 import { serialized } from "./single-flight.ts";
 import { escapeSlack } from "./slack.ts";
 import { liveFiles, md5, readState, statePath, treeBlobs, writeState } from "./storefront.ts";
@@ -26,7 +25,6 @@ type Baselines = Record<string, { url: string; devices: Record<string, string> }
 type Alerts = Record<string, { title: string; sha: string }>;
 type Verdict = NonNullable<AgentResult["verdict"]>;
 type Storefront = NonNullable<AgentResult["storefrontReview"]>;
-type Publication = EffectContext & { github: GitHubRepository; subject: Subject; task: Task; run: Run };
 
 const skill = fileURLToPath(new URL("../skills/review_storefront/SKILL.md", import.meta.url));
 const locks = new Map<string, Promise<unknown>>();
@@ -160,8 +158,8 @@ export function reviewStorefront(ctx: Ctx, change: Change, result: AgentResult):
   });
 }
 
-export async function publishStorefront({ github, subject, task, run, references, publication, saveReceipt }: Publication) {
-  const { slack, report } = run.result!.storefrontReview!;
+export async function publishStorefront({ github, subject, task, run, references, publication, saveReceipt }: EffectContext) {
+  const { slack, report } = run.result.storefrontReview!;
   if (report && !publication().storefrontReportUrl) {
     const url = await bestEffort(logger, "storefront.report_failed", references, () => github.upsertCommitComment(commitInput(run.input).sha, report, storefrontMarker, references));
     if (url) saveReceipt({ storefrontReportUrl: url });

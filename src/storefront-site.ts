@@ -1,10 +1,12 @@
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile, rm, stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import { config, isActionEnabled } from "./config.ts";
 import { ifMissing } from "./errors.ts";
 import { botName } from "./identity.ts";
 import { upsertSubject } from "./items.ts";
-import type { Run, Subject, Task } from "./schema.ts";
+import type { Evaluated } from "./effects.ts";
+import type { Subject, Task } from "./schema.ts";
 import { enqueueOnce, pollSource, sourceCursor } from "./sources.ts";
 import { previewContext, statePath, writeStateText } from "./storefront.ts";
 
@@ -23,8 +25,7 @@ export function pollSiteMap(repository = config.github.repository, now = new Dat
   });
 }
 
-export async function saveSiteMap({ subject, task, run }: { subject: Subject; task: Task; run: Run }) {
-  if (!run.result) throw new Error("Run has no saved site map to store");
+export async function saveSiteMap({ subject, task, run }: { subject: Subject; task: Task; run: Evaluated }) {
   const written = new Date().toISOString();
   await writeStateText("site.md", `Site map of ${liveUrl()}, written by ${botName} on ${written}.\n\n${run.result.text}\n`);
   sourceCursor(subject.repository, task.action, scope).save(written);
@@ -38,4 +39,14 @@ export async function storefrontContext(subjectId: string, headSha: string, disc
     context: preview ? { ...preview, liveUrl: liveUrl(), devices, confirmationRuns, regressionMaxGrade } : { liveUrl: liveUrl() },
     siteMap: await ifMissing(readFile(siteMapPath(), "utf8"), undefined), browse: preview?.available ?? true,
   };
+}
+
+export async function pruneScreenshots(now = Date.now()) {
+  const root = resolve("data/runs");
+  for (const run of await ifMissing(readdir(root), [])) {
+    for (const file of (await ifMissing(readdir(resolve(root, run)), [])).filter((name) => /^screenshot-.*\.png$/.test(name))) {
+      const path = resolve(root, run, file), taken = await ifMissing(stat(path), undefined);
+      if (taken && now - taken.mtimeMs > config.storefront.screenshotRetentionDays * dayMs) await rm(path, { force: true });
+    }
+  }
 }

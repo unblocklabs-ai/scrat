@@ -48,24 +48,33 @@ export async function runCommands(commands: string[][], cwd: string, environment
   return checks;
 }
 
-let active = 0;
-const waiters: (() => void)[] = [];
+export function createSlots(limit: () => number, waiting: string, started: string) {
+  let active = 0;
+  const waiters: (() => void)[] = [];
+  return async (references: EventReferences = {}, signal?: AbortSignal) => {
+    const queuedAt = performance.now();
+    if (active >= limit()) {
+      logger.info({ ...references, event: waiting, position: waiters.length + 1 });
+      await new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) return reject(signal.reason);
+        const leave = () => { const index = waiters.indexOf(take); if (index >= 0) waiters.splice(index, 1); reject(signal!.reason); };
+        const take = () => { signal?.removeEventListener("abort", leave); resolve(); };
+        signal?.addEventListener("abort", leave, { once: true });
+        waiters.push(take);
+      });
+    } else active++;
+    logger.info({ ...references, event: started, waitedMs: Math.round(performance.now() - queuedAt) });
+    let released = false;
+    return () => { if (released) return; released = true; const next = waiters.shift(); if (next) next(); else active--; };
+  };
+}
+
+const validationSlot = createSlots(() => config.harness.maxConcurrentValidations, "validation.waiting", "validation.started");
 
 export async function withValidationSlot<T>(fn: () => Promise<T>, references: EventReferences = {}, signal?: AbortSignal) {
-  const queuedAt = performance.now();
-  if (active >= config.harness.maxConcurrentValidations) {
-    logger.info({ ...references, event: "validation.waiting", position: waiters.length + 1 });
-    await new Promise<void>((resolve, reject) => {
-      if (signal?.aborted) return reject(signal.reason);
-      const leave = () => { const index = waiters.indexOf(take); if (index >= 0) waiters.splice(index, 1); reject(signal!.reason); };
-      const take = () => { signal?.removeEventListener("abort", leave); resolve(); };
-      signal?.addEventListener("abort", leave, { once: true });
-      waiters.push(take);
-    });
-  } else active++;
-  logger.info({ ...references, event: "validation.started", waitedMs: Math.round(performance.now() - queuedAt) });
+  const release = await validationSlot(references, signal);
   try { return await fn(); }
-  finally { const next = waiters.shift(); if (next) next(); else active--; }
+  finally { release(); }
 }
 
 const quoted = /'[^']*'|"(?:[^"\\]|\\.)*"/g;

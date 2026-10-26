@@ -9,5 +9,9 @@ export async function pollSources() {
   await attempt(async () => { await syncGitHub(); signalWork(); });
   await attempt(async () => { if (await pollCommits()) signalWork(); });
   await attempt(async () => { if (await pollSchedules()) signalWork(); });
-  if (config.storefront.enabled) await attempt(async () => { if (await (await import("./storefront-site.ts")).pollSiteMap()) signalWork(); });
+  if (config.storefront.enabled) {
+    const site = await import("./storefront-site.ts");
+    await attempt(async () => { if (await site.pollSiteMap()) signalWork(); });
+    await attempt(() => site.pruneScreenshots());
+  }
 }

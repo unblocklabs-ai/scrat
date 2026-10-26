@@ -167,7 +167,7 @@ const themeIdOf = (html: string) => {
   try { const id = end < 0 ? undefined : (JSON.parse(html.slice(start, end + 1)) as { id?: unknown }).id; return Number.isSafeInteger(id) ? (id as number) : undefined; } catch { return undefined; }
 };
 
-export function createBrowserTool({ settings, binding, contextDir, runId, prefix, launch = launchChromium, resolve = resolveHost, limits = { steps: config.tools.browser.steps, milliseconds: config.tools.browser.sessionSeconds * 1000 }, log }: {
+export function createBrowserTool({ settings, binding, contextDir, runId, prefix, launch = launchChromium, resolve = resolveHost, acquire, limits = { steps: config.tools.browser.steps, milliseconds: config.tools.browser.sessionSeconds * 1000 }, log }: {
   settings: { navigationHosts: Hosts; resourceHosts: Hosts };
   binding?: Binding;
   contextDir?: string;
@@ -175,6 +175,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
   prefix?: string;
   launch?: (args: string[]) => Promise<BrowserLike>;
   resolve?: Resolver;
+  acquire?: () => Promise<() => void>;
   limits?: { steps: number; milliseconds: number };
   log?: { warn(details: Record<string, unknown>): void };
 }) {
@@ -182,7 +183,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
   if (!Object.hasOwn(viewports, config.tools.browser.defaultViewport)) throw new Error(`tools.browser.defaultViewport must be one of: ${viewportNames.join(", ")}`);
   let blockedNavigation: string | undefined, size = viewports[config.tools.browser.defaultViewport];
   const secret = binding && bindingSecret(binding);
-  let browser: BrowserLike | undefined, session: { context: ContextLike; page: PageLike } | undefined, startedAt: number | undefined, halted: string | undefined, steps = 0, shots = 0;
+  let browser: BrowserLike | undefined, release: (() => void) | undefined, session: { context: ContextLike; page: PageLike } | undefined, startedAt: number | undefined, halted: string | undefined, steps = 0, shots = 0;
   const answered = new Map<string, Promise<boolean>>();
   const resolvesPublicly = (host: string) => {
     if (!answered.has(host)) answered.set(host, publicAnswers(host, resolve).then(Boolean, () => false));
@@ -198,6 +199,8 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
     browser = undefined;
     session = undefined;
     await open?.close().catch(() => undefined);
+    release?.();
+    release = undefined;
   }
   async function halt(reason: string): Promise<never> {
     halted = `Refused: ${reason}`;
@@ -216,12 +219,15 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
   async function open() {
     if (session) return session;
     if (!browser) {
-      const rules: string[] = [];
-      for (const host of resourceHosts === "any" ? [] : resourceHosts) {
-        const answer = (await publicAnswers(host, resolve))?.[0];
-        rules.push(`MAP ${host} ${answer ? (answer.family === 6 ? `[${answer.address}]` : answer.address) : "~NOTFOUND"}`);
-      }
-      browser = await launch(rules.length ? [`--host-resolver-rules=${rules.join(",")}`] : []);
+      release = await acquire?.().catch(() => halt("the worker is stopping"));
+      try {
+        const rules: string[] = [];
+        for (const host of resourceHosts === "any" ? [] : resourceHosts) {
+          const answer = (await publicAnswers(host, resolve))?.[0];
+          rules.push(`MAP ${host} ${answer ? (answer.family === 6 ? `[${answer.address}]` : answer.address) : "~NOTFOUND"}`);
+        }
+        browser = await launch(rules.length ? [`--host-resolver-rules=${rules.join(",")}`] : []);
+      } catch (error) { await close(); throw error; }
     }
     try {
       const context = await browser.newContext({ acceptDownloads: false, serviceWorkers: "block", viewport: size });

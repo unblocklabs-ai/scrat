@@ -506,6 +506,8 @@ The agent has no path to Loggie: no tool, no binding and no environment variable
 | `storefront.store` | The store's `myshopify.com` host, logged with every Loggie request. Required when enabled. |
 | `storefront.publicHost` | The storefront host used in preview links, `https://<publicHost>/?preview_theme_id=<id>`, and as the live URL, without a scheme or path. Required when enabled. |
 | `storefront.siteMapMaxAgeDays` | Age after which the stored site map is rediscovered. |
+| `storefront.screenshotRetentionDays` | Age in days after which each poll deletes a run's `data/runs/<run-id>/screenshot-*.png` files; baselines under `data/storefront/baselines/` are kept. |
+| `storefront.limits.browsers` | Maximum storefront browser sessions open at once per install; a session that would exceed it waits for a free one (logged as `storefront.browser_waiting` with its `position`, then `storefront.browser_started`) and gives up when the service is stopping. A session holds its slot from Chromium's launch until its agent session ends or the budget halts it. |
 | `storefront.limits.browserSteps` / `storefront.limits.browserSeconds` | Storefront browser actions allowed per agent session, and the session's browser time. |
 | `storefront.devices` | Viewport presets (names from `tools.browser.viewports`) a preview review compares preview and live at, and that the main-branch storefront review screenshots each page at and keeps baselines for; startup fails on an unknown name. |
 | `storefront.limits.confirmationRuns` | Fresh-browser re-runs a candidate regression, or a breakage found on main, must reproduce in before the reviewer counts it; 0 counts it on first sight. |

@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile, rm, stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import { config, isActionEnabled } from "./config.ts";
 import { ifMissing } from "./errors.ts";
 import { botName } from "./identity.ts";
@@ -38,4 +39,14 @@ export async function storefrontContext(subjectId: string, headSha: string, disc
     context: preview ? { ...preview, liveUrl: liveUrl(), devices, confirmationRuns, regressionMaxGrade } : { liveUrl: liveUrl() },
     siteMap: await ifMissing(readFile(siteMapPath(), "utf8"), undefined), browse: preview?.available ?? true,
   };
+}
+
+export async function pruneScreenshots(now = Date.now()) {
+  const root = resolve("data/runs");
+  for (const run of await ifMissing(readdir(root), [])) {
+    for (const file of (await ifMissing(readdir(resolve(root, run)), [])).filter((name) => /^screenshot-.*\.png$/.test(name))) {
+      const path = resolve(root, run, file);
+      if (now - (await stat(path)).mtimeMs > config.storefront.screenshotRetentionDays * dayMs) await rm(path, { force: true });
+    }
+  }
 }

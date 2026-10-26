@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { createBashToolDefinition, createEditToolDefinition, createFindToolDefinition, createGrepToolDefinition, createLsToolDefinition, createReadToolDefinition, createWriteToolDefinition, defineTool, detectSupportedImageMimeTypeFromFile } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { backgroundsWork, heavyCommand, withValidationSlot } from "./commands.ts";
+import { backgroundsWork, createSlots, heavyCommand, withValidationSlot } from "./commands.ts";
 import { config } from "./config.ts";
 import type { ToolName } from "./manifests.ts";
 import type { PiOptions } from "./pi.ts";
@@ -16,9 +16,11 @@ import { createBrowserTool, createGithubSearchTool, createHttpTool } from "./sco
 import { createReviewGitTool, pageText } from "./review-git.ts";
 import { sandboxCommand } from "./sandbox.ts";
 
+const browserSlot = createSlots(() => config.storefront.limits.browsers, "storefront.browser_waiting", "storefront.browser_started");
+
 type ScopedToolName = "http" | "browser" | "github_search";
 
-export async function createAgentTools({ run: { id: runId }, cwd, contextDir, tools, scoped, baseSha, revisions = {}, environment = {}, log }: PiOptions, reviewerIndex?: number) {
+export async function createAgentTools({ run: { id: runId }, cwd, contextDir, tools, scoped, baseSha, revisions = {}, environment = {}, log, stop }: PiOptions, reviewerIndex?: number) {
   const workspaceRoot = await realpath(cwd);
   const roots = [workspaceRoot, ...contextDir ? [await realpath(contextDir)] : []];
   function assertInside(real: string, path: string, allowed: string[]) {
@@ -138,7 +140,7 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
   } satisfies Record<Exclude<ToolName, ScopedToolName>, object>;
   const binding = (name?: string) => name === undefined ? undefined : config.bindings[name];
   const browser = scoped.browser
-    ? createBrowserTool({ settings: scoped.browser, binding: binding(scoped.browser.binding), contextDir, runId, log, limits: scoped.browser.limits, prefix: reviewerIndex === undefined ? undefined : `reviewer-${reviewerIndex + 1}` }) : undefined;
+    ? createBrowserTool({ settings: scoped.browser, binding: binding(scoped.browser.binding), contextDir, runId, log, acquire: () => browserSlot({ runId }, stop), limits: scoped.browser.limits, prefix: reviewerIndex === undefined ? undefined : `reviewer-${reviewerIndex + 1}` }) : undefined;
   const table = {
     ...core,
     ...scoped.http && { http: createHttpTool({ settings: scoped.http, binding: binding(scoped.http.binding)!, runId }) },

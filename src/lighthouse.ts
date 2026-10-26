@@ -86,12 +86,13 @@ const signed = (value: number) => value > 0 ? `+${value}` : value < 0 ? String(v
 
 export async function recordLighthouse(results: Run[], sha: string) {
   const previous = await readState<Previous>("lighthouse.json", {}) ?? {}, current: Previous = {};
-  const slack: string[] = [], table: string[] = [];
+  const slack: string[] = [], table: string[] = [], rows: string[][] = [], missing: string[] = [];
   for (const device of devices) {
     const all = results.filter((run) => run.device === device), scored = all.flatMap((run) => run.scores ? [run.scores] : []);
     if (!all.length) continue;
     if (!scored.length) {
-      slack.push(`Lighthouse ${device}: no result (${all[0]!.error})`);
+      const line = `Lighthouse ${device}: no result (${all[0]!.error})`;
+      slack.push(line); missing.push(line);
       table.push(`| ${device} | 0 of ${all.length} | ${ids.map(() => "-").join(" | ")} |`);
       continue;
     }
@@ -100,6 +101,7 @@ export async function recordLighthouse(results: Run[], sha: string) {
     const shown = (id: Category) => `${scores[id]}${before ? ` (${signed(scores[id] - before.scores[id])})` : ""}`;
     slack.push(`Lighthouse ${device} (${count}${before ? "" : ", no previous run"}): ${ids.map((id) => `${categories[id]} ${shown(id)}`).join(", ")}`);
     table.push(`| ${device} | ${scored.length} of ${all.length} | ${ids.map(shown).join(" | ")} |`);
+    rows.push([device, scored.length === all.length ? String(all.length) : `${scored.length} of ${all.length}`, ...ids.map(shown)]);
   }
   if (Object.keys(current).length) await writeState("lighthouse.json", { ...previous, ...current });
   const compared = devices.flatMap((device) => current[device] && previous[device] ? [`${device} with ${previous[device].sha.slice(0, 7)}`] : []);
@@ -113,5 +115,5 @@ export async function recordLighthouse(results: Run[], sha: string) {
     "Each run:",
     `| Device | Page | Run | ${ids.map((id) => categories[id]).join(" | ")} | Report |\n| --- | --- | --- | ${ids.map(() => "---").join(" | ")} | --- |\n${perRun.join("\n")}`,
   ].join("\n\n");
-  return { slack, report };
+  return { slack, report, missing, table: { header: ["Device", "Runs", ...ids.map((id) => categories[id])], rows }, hasPrevious: devices.some((device) => previous[device]) };
 }

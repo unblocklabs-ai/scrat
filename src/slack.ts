@@ -30,14 +30,15 @@ async function call(method: string, body: Record<string, unknown>): Promise<Reco
   }
 }
 
-export function postMessage({ channel, text, threadTs }: { channel: string; text: string; threadTs?: string }): Promise<string> {
+export function postMessage({ channel, text, threadTs, blocks }: { channel: string; text: string; threadTs?: string; blocks?: unknown[] }): Promise<string> {
   return withOperation("slack.post_message", { channel, threadTs }, async (operation) => {
     operation.stage("inspection");
     const capped = text.length > config.slack.maxTextLength ? text.slice(0, config.slack.maxTextLength - 1) + "…" : text;
     assertPublishable(capped);
+    if (blocks) assertPublishable(JSON.stringify(blocks));
     operation.stage("request");
     const data = await call("chat.postMessage", {
-      channel, text: capped, unfurl_links: false, unfurl_media: false, link_names: false, ...(threadTs ? { thread_ts: threadTs } : {}),
+      channel, text: capped, ...blocks ? { blocks } : {}, unfurl_links: false, unfurl_media: false, link_names: false, ...(threadTs ? { thread_ts: threadTs } : {}),
     });
     const ts = String(data.ts);
     operation.complete({ ts });

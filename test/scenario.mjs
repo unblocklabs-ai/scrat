@@ -202,6 +202,7 @@ export default async function lighthouse(url, flags, settings) {
     fakes, theme, push, scored, previous: git(remote, "rev-parse", "main"),
     code: "The change looks safe on `main`.\nSCRAT_VERDICT: clean\nSCRAT_STATUS: complete", codeText: "The change looks safe on `main`.",
     replies: () => f.slack.calls.filter((call) => call.method === "chat.postMessage" && call.body.thread_ts).map((call) => call.body.text),
+    replyBlocks: () => f.slack.calls.filter((call) => call.method === "chat.postMessage" && call.body.thread_ts).map((call) => call.body.blocks),
     reactions: () => f.slack.calls.filter((call) => call.method === "reactions.add").map((call) => call.body.name),
     sessions: () => f.requests.filter((request) => request.context.storefront),
     reports: () => f.written("commit_comment"),
@@ -498,6 +499,7 @@ const commitReview = async (variant) => {
       text: `${bot}: \`main\` moved to <https://github.com/fixture/project/commit/${head}|${head.slice(0, 7)}> by Fixture (1 commit(s)): Fix a&lt;b &amp; c&gt;d. Reviewing the change.`,
     });
     assert.equal(reply.body.thread_ts, "1700000000.000001"); assert.equal(reply.body.text, "Independent review from gpt-6.1-sol. &lt;!channel&gt;");
+    assert.deepEqual(reply.body.blocks, [{ type: "rich_text", elements: [{ type: "rich_text_section", elements: [{ type: "text", text: "Independent review from gpt-6.1-sol. <!channel>" }] }] }]);
     assert.ok(posts().every((call) => call.token === process.env.SLACK_BOT_TOKEN));
     const [thread] = all(s.slackThreads); assert.equal(all(s.slackThreads).length, 1);
     assert.deepEqual({ subjectId: thread.subjectId, channel: thread.channel, ts: thread.ts }, { subjectId: all(s.tasks)[0].subjectId, channel, ts: "1700000000.000001" });
@@ -3149,7 +3151,7 @@ export const scenarios = {
   commit_review_panel: { title: "a panel commit review runs two reviewers and a consolidator without requiring a grade and replies once", configure: [configureCommitSource, configureCommitPanel], run: () => commitReview("panel") },
   commit_review_slack_down: { title: "a failed root post still reviews and the reply creates the root, while a failed reply fails at publishing and retries without a new session or second root", configure: [configureCommitSource], run: () => commitReview("slack_down") },
   commit_review_storefront: { title: "with the storefront enabled, a main change whose theme files match the live MAIN theme gets a browser review of the live store against stored baselines and Lighthouse averages with deltas, posted as its own concise Slack message and a full commit comment edited in place; a new confirmed breakage turns the reaction red once per fingerprint, only a clean run replaces the baselines, the code review keeps its session, a live theme that does not match yet skips with one line, and a disabled storefront changes nothing", seed: seedTheme, configure: [configureCommitSource, configureMainStorefront], run: async () => {
-    const { fakes, push, scored, previous, code, codeText, replies, reactions, sessions, reports, state, link } = await mainStorefront();
+    const { fakes, push, scored, previous, code, codeText, replies, replyBlocks, reactions, sessions, reports, state, link } = await mainStorefront();
     const { config: live } = await f.app("config.ts"), site = "https://shop.example.test", json = (path) => JSON.parse(state(path)), S = storefrontScores;
     const breakage = (verdict) => "The variant picker is broken on product pages.\n\n## Checked\n- `/products/tee` on the purchase path.\nSCRAT_ISSUE_BEGIN\ntitle: The variant picker does nothing on mobile\nfingerprint: product:variant-picker\n\nPicked Size M three times after reset; the price and image stayed on Size S.\nSCRAT_ISSUE_END\n"
       + `SCRAT_VERDICT: ${verdict}\nSCRAT_STATUS: complete`;
@@ -3216,6 +3218,20 @@ export const scenarios = {
     assert.equal(replies().at(-1), `*Storefront* on ${second.slice(0, 7)}: The variant picker is broken on product pages.\n• New breakage \`product:variant-picker\`: The variant picker does nothing on mobile\n`
       + "• Lighthouse mobile (2 runs): Performance 62 (-3), Accessibility 90 (±0), Best Practices 96 (±0), SEO 100 (±0)\n"
       + "• Lighthouse desktop (2 runs): Performance 90 (-3), Accessibility 95 (±0), Best Practices 100 (±0), SEO 100 (±0)" + link(r2));
+    const cell = (text) => ({ type: "raw_text", text }), align = ["left", "right", "right", "right", "right", "right"].map((value) => ({ align: value }));
+    assert.deepEqual(replyBlocks().at(-1), [
+      { type: "rich_text", elements: [
+        { type: "rich_text_section", elements: [{ type: "text", text: "Storefront", style: { bold: true } }, { type: "text", text: ` on ${second.slice(0, 7)}: The variant picker is broken on product pages.` }] },
+        { type: "rich_text_list", style: "bullet", elements: [{ type: "rich_text_section", elements: [
+          { type: "text", text: "New breakage " }, { type: "text", text: "product:variant-picker", style: { code: true } }, { type: "text", text: ": The variant picker does nothing on mobile" }] }] },
+      ] },
+      { type: "table", column_settings: align, rows: [
+        ["Device", "Runs", "Performance", "Accessibility", "Best Practices", "SEO"],
+        ["mobile", "2", "62 (-3)", "90 (±0)", "96 (±0)", "100 (±0)"],
+        ["desktop", "2", "90 (-3)", "95 (±0)", "100 (±0)", "100 (±0)"],
+      ].map((row) => row.map(cell)) },
+      { type: "section", text: { type: "mrkdwn", text: `<${r2.publication.storefrontReportUrl}|Full storefront report>` } },
+    ]);
     assert.equal(reactions().at(-1), "large_red_square"); assert.equal(r2.result.verdict, "breaking");
     assert.equal(state("baselines/home/desktop.png"), "png / 1280 v1", "a run with a breakage keeps the baselines");
     assert.deepEqual(json("alerts.json"), { "product:variant-picker": { title: "The variant picker does nothing on mobile", sha: second } });

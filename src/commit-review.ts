@@ -9,6 +9,7 @@ import type { Ctx } from "./run-context.ts";
 import type { Evaluated } from "./effects.ts";
 import { slackThreads, type Run, type Subject } from "./schema.ts";
 import { addReaction, escapeSlack, postMessage } from "./slack.ts";
+import { reviewBlocks } from "./slack-blocks.ts";
 import { parseTriggerInput } from "./triggers.ts";
 
 type CommitInput = { sha: string; previousSha: string; branch: string; commitCount: number };
@@ -53,10 +54,10 @@ export async function describeCommit({ subject, run, task, manifest, operation, 
   return { mainSha: sha, headSha: sha, evaluated, diffPaths, diffBaseSha: previousSha };
 }
 
-export async function postCommitReply(subject: Subject, action: string, run: Evaluated, text?: string) {
+export async function postCommitReply(subject: Subject, action: string, run: Evaluated, text?: string, blocks?: unknown[]) {
   const input = commitInput(run.input);
   const thread = await threadRoot(subject, action, input);
-  return postMessage({ channel: thread.channel, text: text ?? escapeSlack(run.result.text), threadTs: thread.ts });
+  return postMessage({ channel: thread.channel, text: text ?? escapeSlack(run.result.text), blocks: text === undefined ? reviewBlocks(run.result.text) : blocks, threadTs: thread.ts });
 }
 
 const verdictReactions = { clean: "white_check_mark", concerns: "large_orange_square", breaking: "large_red_square" } as const;

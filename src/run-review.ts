@@ -1,11 +1,10 @@
 import { evaluateContext, readDiffScope } from "./agent-input.ts";
-import { commitInput, describeCommit, startCommitThread } from "./commit-review.ts";
+import { commitInput, describeCommit } from "./commit-review.ts";
 import { describeWindow } from "./window-review.ts";
 import { config, isBotLogin } from "./config.ts";
 import { branchConflictCode } from "./errors.ts";
 import { bestEffort } from "./logging.ts";
 import { createMergeCommit, prepareTarget } from "./git.ts";
-import { GitHubRepository } from "./github.ts";
 import { currentPrReview } from "./pr-assessment.ts";
 import { getRun, updateRun } from "./run-history.ts";
 import { assertComplete } from "./results.ts";
@@ -34,16 +33,10 @@ async function settleReviewPlan(ctx: Ctx, { item, observation, mainSha }: Observ
   ctx.run = getRun(run.id)!;
 }
 
-async function commitRevisions({ subject, run, task, manifest, operation }: Ctx) {
-  const input = commitInput(run.input), { sha } = input;
-  if (manifest.start?.includes("slack_post")) await startCommitThread(subject, task.action, input, operation.log);
-  return { mainSha: sha, headSha: sha };
-}
-
-async function windowRevisions({ subject }: Ctx) {
-  const mainSha = await new GitHubRepository(subject.repository).fetchBranch(config.github.baseBranch);
-  return { mainSha, headSha: mainSha };
-}
+const itemScope = async ({ run, task, repositoryPath }: Ctx, observed: Observed) => {
+  const { mainSha, headSha } = await itemRevisions(observed);
+  return { mainSha, headSha, evaluated: evaluateContext(run, task, observed.observation), ...await readDiffScope(repositoryPath, mainSha, headSha, Boolean(observed.pullRequest)) };
+};
 
 async function prepareReviewCommands({ run, repositoryPath, references, operation, cleanup }: Ctx, { context, pullRequest, observation }: Observed, review: Review, environment: Environment) {
   try { await prepareWorkspace(review.workspace, environment, references); }
@@ -73,15 +66,11 @@ async function refreshPreview({ manifest, operation, stop, references, repositor
 }
 
 export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
-  const { task, run, subject, manifest, repositoryPath, stop } = ctx;
-  const { mainSha, headSha } = observed ? await itemRevisions(observed)
-    : subject.kind === "window" ? await windowRevisions(ctx) : await commitRevisions(ctx);
+  const { run, subject, manifest, repositoryPath, stop } = ctx;
+  const { mainSha, headSha, evaluated, diffPaths, diffBaseSha } = observed ? await itemScope(ctx, observed)
+    : subject.kind === "window" ? await describeWindow(ctx) : await describeCommit(ctx);
   const workspace = ctx.cleanup.reviewWorkspace = await createWorkspace({ repositoryPath, baseRef: headSha }, ctx.references);
-  updateRun(run.id, { workspaceId: workspace.id, mainSha, headSha });
-  const { evaluated, diffPaths, diffBaseSha } = observed
-    ? { evaluated: evaluateContext(run, task, observed.observation), ...await readDiffScope(workspace.path, mainSha, headSha, Boolean(observed.pullRequest)) }
-    : subject.kind === "window" ? describeWindow(task.action, subject, mainSha) : await describeCommit(repositoryPath, subject, run.input);
-  updateRun(run.id, { context: evaluated });
+  updateRun(run.id, { workspaceId: workspace.id, mainSha, headSha, context: evaluated });
   const review: Review = { workspace, mainSha, headSha, diffBaseSha };
   const environment: Environment = observed ? { ...config.workspace.environment } : {};
   stopBefore(stop, "workspace preparation");

@@ -21,7 +21,7 @@ import { subjects, type Run, type Task, type Subject } from "./schema.ts";
 import { getWorkspace, pushWorkspace } from "./workspaces.ts";
 
 type Receipts = Run["publication"];
-type Evaluated = Run & { result: NonNullable<Run["result"]>; context: NonNullable<Run["context"]> };
+export type Evaluated = Run & { result: NonNullable<Run["result"]>; context: NonNullable<Run["context"]> };
 
 export type EffectContext = {
   references: EventReferences;

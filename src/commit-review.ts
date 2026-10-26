@@ -4,7 +4,9 @@ import { manifestOf } from "./actions.ts";
 import { db } from "./db.ts";
 import { changedPaths, git } from "./git.ts";
 import { botName } from "./identity.ts";
-import { bestEffort, type startOperation } from "./logging.ts";
+import { bestEffort } from "./logging.ts";
+import type { Ctx } from "./run-context.ts";
+import type { Evaluated } from "./effects.ts";
 import { slackThreads, type Run, type Subject } from "./schema.ts";
 import { addReaction, escapeSlack, postMessage } from "./slack.ts";
 import { parseTriggerInput } from "./triggers.ts";
@@ -39,24 +41,20 @@ async function threadRoot(subject: Subject, action: string, { sha, branch, commi
   return db.insert(slackThreads).values({ subjectId: subject.id, channel, ts }).returning().get();
 }
 
-export async function startCommitThread(subject: Subject, action: string, input: CommitInput, log: ReturnType<typeof startOperation>["log"]) {
-  await bestEffort(log, "slack.post_failed", {}, () => threadRoot(subject, action, input));
-}
-
-export async function describeCommit(repositoryPath: string, subject: Subject, rawInput: Record<string, unknown>) {
-  const { sha, previousSha, branch } = commitInput(rawInput);
+export async function describeCommit({ subject, run, task, manifest, operation, repositoryPath }: Ctx) {
+  const input = commitInput(run.input), { sha, previousSha, branch } = input;
+  if (manifest.start?.includes("slack_post")) await bestEffort(operation.log, "slack.post_failed", {}, () => threadRoot(subject, task.action, input));
   const [commitSubject = "", body = ""] = (await git(repositoryPath, ["log", "-1", "--format=%s%x00%b", sha])).split("\0");
   const diffPaths = await changedPaths(repositoryPath, `${previousSha}..${sha}`);
   const evaluated: ReturnType<typeof evaluateContext> = {
     revision: sha, baseBranch: branch, headSha: undefined,
     item: { number: 0, title: commitSubject, body, url: commitMetadata(subject).url }, comments: [], commentRevisions: [],
   };
-  return { evaluated, diffPaths, diffBaseSha: previousSha };
+  return { mainSha: sha, headSha: sha, evaluated, diffPaths, diffBaseSha: previousSha };
 }
 
-export async function postCommitReply(subject: Subject, action: string, run: Run, text?: string) {
+export async function postCommitReply(subject: Subject, action: string, run: Evaluated, text?: string) {
   const input = commitInput(run.input);
-  if (!run.result) throw new Error("Run has no saved result to publish");
   const thread = await threadRoot(subject, action, input);
   return postMessage({ channel: thread.channel, text: text ?? escapeSlack(run.result.text), threadTs: thread.ts });
 }

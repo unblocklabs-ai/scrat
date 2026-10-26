@@ -4,7 +4,8 @@ import { config, isActionEnabled } from "./config.ts";
 import { ifMissing } from "./errors.ts";
 import { botName } from "./identity.ts";
 import { upsertSubject } from "./items.ts";
-import type { Run, Subject, Task } from "./schema.ts";
+import type { Evaluated } from "./effects.ts";
+import type { Subject, Task } from "./schema.ts";
 import { enqueueOnce, pollSource, sourceCursor } from "./sources.ts";
 import { previewContext, statePath, writeStateText } from "./storefront.ts";
 
@@ -23,8 +24,7 @@ export function pollSiteMap(repository = config.github.repository, now = new Dat
   });
 }
 
-export async function saveSiteMap({ subject, task, run }: { subject: Subject; task: Task; run: Run }) {
-  if (!run.result) throw new Error("Run has no saved site map to store");
+export async function saveSiteMap({ subject, task, run }: { subject: Subject; task: Task; run: Evaluated }) {
   const written = new Date().toISOString();
   await writeStateText("site.md", `Site map of ${liveUrl()}, written by ${botName} on ${written}.\n\n${run.result.text}\n`);
   sourceCursor(subject.repository, task.action, scope).save(written);

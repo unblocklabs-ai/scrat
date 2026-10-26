@@ -138,7 +138,7 @@ export async function fixture(scenario, spec) {
       res.writeHead(503, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "Service temporarily unavailable" } }));
     }
-    const key = `${context.item.number}/${request.model}/${consolidating}/${context.database?.container ?? ""}`;
+    const key = `${context.item.number}/${request.model.replace("terra", "sol")}/${consolidating}/${context.database?.container ?? ""}`;
     const step = steps.get(key) ?? 0; steps.set(key, step + 1);
     requests.push({ request, text, context, consolidating });
     onModel?.(context, step);
@@ -257,8 +257,10 @@ export async function fixture(scenario, spec) {
   config.harness.maxConcurrency = 6; config.github.repository = "fixture/project"; config.github.repositoryPath = resolve("checkout");
   config.providers = { fixture: { api: "openai-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: "fixture", models: [
     { id: "gpt-6.1-sol", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
+    { id: "gpt-6.1-terra", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
     { id: "deepseek/deepseek-v4.1-flash", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
   ] } };
+  config.storefront.model = { ...config.storefront.model, provider: "fixture" };
   config.storefront.loggie = { ...config.storefront.loggie, url: `http://127.0.0.1:${server.address().port}`, slug: loggie.slug };
   config.actions = Object.fromEntries(readdirSync("app/actions").map((file) => parseYaml(readFileSync("app/actions/" + file, "utf8")))
     .map(({ name, reviewers = [] }) => [name, { provider: "fixture", ...reviewers.length && { reviewers: reviewers.map((reviewer) => ({ ...reviewer, provider: "fixture" })) } }]));

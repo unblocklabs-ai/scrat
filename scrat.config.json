@@ -62,10 +62,11 @@
     "enabled": false,
     "store": "",
     "publicHost": "",
+    "model": { "provider": "codex-lb", "model": "gpt-6.1-terra", "thinkingLevel": "high" },
     "siteMapMaxAgeDays": 30,
     "screenshotRetentionDays": 14,
     "devices": ["desktop", "mobile"],
-    "limits": { "browsers": 2, "browserSteps": 40, "browserSeconds": 600, "confirmationRuns": 1, "regressionMaxGrade": "C" },
+    "limits": { "browsers": 2, "browserSteps": 80, "browserSeconds": 1200, "confirmationRuns": 1, "regressionMaxGrade": "C" },
     "loggie": { "url": "https://app.loggie.ai", "slug": "", "timeoutSeconds": 60 },
     "preview": {
       "themeNamePrefix": "scrat/",
@@ -133,6 +134,23 @@
         {
           "id": "gpt-6.1-sol",
           "name": "GPT-6.1 Sol",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "contextWindow": 500000,
+          "maxTokens": 500000
+        },
+        {
+          "id": "gpt-6.1-terra",
+          "name": "GPT-6.1 Terra",
           "reasoning": true,
           "input": ["text", "image"],
           "thinkingLevelMap": {

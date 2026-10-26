@@ -74,7 +74,7 @@ async function reviewPages({ run, task, operation, stop }: Ctx, { workspace, hea
     files,
   }, null, 2);
   return executePi({
-    run: { ...run, skill }, cwd: workspace.path, tools: ["read", "grep", "find", "ls", "git", "browser"],
+    run: { ...run, skill, ...config.storefront.model }, cwd: workspace.path, tools: ["read", "grep", "find", "ls", "git", "browser"],
     scoped: { mode: "review", browser: { navigationHosts: "any", resourceHosts: "any", limits: { steps: limits.browserSteps, milliseconds: limits.browserSeconds * 1000 } } },
     log: operation.log, contextDir, revisions: { head: headSha, base: diffBaseSha, main: headSha }, stop,
   }, { context, onSession: record });

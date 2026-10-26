@@ -25,6 +25,7 @@ export type PrGrade = typeof prGrades[number];
 
 const reviewVerdicts = ["clean", "concerns", "breaking"] as const;
 type ReviewVerdict = typeof reviewVerdicts[number];
+const outcomes = ["complete", "incomplete", "needs_decision"] as const;
 const storefrontResults = ["verified", "regression", "unavailable"] as const;
 
 type ReportedIssue = { title: string; body: string; fingerprint: string };
@@ -33,7 +34,7 @@ export type AgentResult = {
   text: string;
   ready: boolean;
   paths: string[];
-  outcome: "complete" | "incomplete" | "needs_decision";
+  outcome: typeof outcomes[number];
   grade?: PrGrade;
   verdict?: ReviewVerdict;
   storefront?: typeof storefrontResults[number];
@@ -109,31 +110,28 @@ function popIssues(lines: string[]) {
   return issues.reverse();
 }
 
+const anyOf = (values: readonly string[]) => `${values.slice(0, -1).join(", ")}, or ${values.at(-1)}`;
+
+function popFooter<T extends string>(lines: string[], token: string, values: readonly T[]) {
+  const line = lines.at(-1)?.trim();
+  if (!line?.startsWith(`${token}:`)) return undefined;
+  const value = values.find((candidate) => line === `${token}: ${candidate}`);
+  if (!value) throw new ResultFormatError(`Pi must return a valid ${token}: ${anyOf(values)}`);
+  lines.pop();
+  return value;
+}
+
+export function footerRules(requireGrade: boolean, storefront: boolean) {
+  return `SCRAT_READY (optional, only when ready)\n${storefront ? `SCRAT_STOREFRONT: ${anyOf(storefrontResults)} (required for a complete review)\n` : ""}SCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of ${prGrades.join(", ")}, with no plus or minus)\nSCRAT_VERDICT: ${anyOf(reviewVerdicts)} (only when your instructions ask for it)\nSCRAT_STATUS: ${anyOf(outcomes)} (required, and the very last line)`;
+}
+
 export function parseResult(output: string, paths: string[], { requireGrade = false }: { requireGrade?: boolean } = {}): AgentResult {
   const lines = output.trim().split("\n");
-  const marker = lines.pop()?.trim();
-  const outcome = marker?.startsWith("SCRAT_STATUS: ") ? marker.slice("SCRAT_STATUS: ".length) : undefined;
-  if (outcome !== "complete" && outcome !== "incomplete" && outcome !== "needs_decision") {
-    throw new ResultFormatError("Pi must end its response with SCRAT_STATUS: complete, incomplete, or needs_decision");
-  }
-  const verdictLine = lines.at(-1)?.trim();
-  const verdict = reviewVerdicts.find((value) => verdictLine === `SCRAT_VERDICT: ${value}`);
-  if (verdictLine?.startsWith("SCRAT_VERDICT:")) {
-    if (!verdict) throw new ResultFormatError("Pi must return a valid SCRAT_VERDICT: clean, concerns, or breaking");
-    lines.pop();
-  }
-  const gradeLine = lines.at(-1)?.trim();
-  const grade = prGrades.find((value) => gradeLine === `SCRAT_GRADE: ${value}`);
-  if (gradeLine?.startsWith("SCRAT_GRADE:")) {
-    if (!grade) throw new ResultFormatError("Pi must return a valid SCRAT_GRADE: S, A, B, C, D, or F");
-    lines.pop();
-  }
-  const storefrontLine = lines.at(-1)?.trim();
-  const storefront = storefrontResults.find((value) => storefrontLine === `SCRAT_STOREFRONT: ${value}`);
-  if (storefrontLine?.startsWith("SCRAT_STOREFRONT:")) {
-    if (!storefront) throw new ResultFormatError("Pi must return a valid SCRAT_STOREFRONT: verified, regression, or unavailable");
-    lines.pop();
-  }
+  const outcome = popFooter(lines, "SCRAT_STATUS", outcomes);
+  if (!outcome) throw new ResultFormatError(`Pi must end its response with SCRAT_STATUS: ${anyOf(outcomes)}`);
+  const verdict = popFooter(lines, "SCRAT_VERDICT", reviewVerdicts);
+  const grade = popFooter(lines, "SCRAT_GRADE", prGrades);
+  const storefront = popFooter(lines, "SCRAT_STOREFRONT", storefrontResults);
   const ready = lines.at(-1)?.trim() === "SCRAT_READY";
   if (ready) lines.pop();
   const issues = popIssues(lines);

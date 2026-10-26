@@ -9,7 +9,7 @@ import { db } from "./db.ts";
 import { botName, withBotName } from "./identity.ts";
 import { getRun, updateRun } from "./run-history.ts";
 import type { Run } from "./schema.ts";
-import { InterruptedError, parseResult, ResultFormatError, type Reviewer, storefrontProblem } from "./results.ts";
+import { footerRules, InterruptedError, parseResult, ResultFormatError, type Reviewer, storefrontProblem } from "./results.ts";
 import { gitList } from "./git.ts";
 import type { Manifest, ToolName } from "./manifests.ts";
 import { createAgentTools } from "./tools.ts";
@@ -19,10 +19,6 @@ import { redactSecrets, transientInferenceCode } from "./errors.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 
 const withStorefront = (skill: string, shown: boolean) => skill.replace(/^\{\{#storefront\}\}\n([\s\S]*?)^\{\{\/storefront\}\}\n/gm, (_, body: string) => shown ? body : "");
-
-function footerRules(requireGrade: boolean, storefront: boolean) {
-  return `SCRAT_READY (optional, only when ready)\n${storefront ? "SCRAT_STOREFRONT: verified, regression, or unavailable (required for a complete review)\n" : ""}SCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of S, A, B, C, D, F, with no plus or minus)\nSCRAT_VERDICT: clean, concerns, or breaking (only when your instructions ask for it)\nSCRAT_STATUS: complete, incomplete, or needs_decision (required, and the very last line)`;
-}
 
 function correctionMessage(error: string, requireGrade: boolean, storefront: boolean) {
   return `Your previous final answer was not accepted: ${error}.\n\nSend your complete final answer again, with the same content, correctly formatted. It must end with these footer lines, in this order:\n${footerRules(requireGrade, storefront)}`;

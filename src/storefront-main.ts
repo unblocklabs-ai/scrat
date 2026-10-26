@@ -133,7 +133,7 @@ export function reviewStorefront(ctx: Ctx, change: Change, result: AgentResult):
       const slack = [...lines, ...bullets].join("\n");
       const blocks = [
         ...reviewBlocks([...lines, ...("missing" in measured && table ? measured.missing.map((line) => `• ${line}`) : bullets)].join("\n")),
-        ...table ? [tableBlock(table.header, table.rows, { align: ["left", "right", "right", "right", "right", "right"] })] : [],
+        ...table ? [tableBlock(table.header, table.rows, { align: table.header.map((_, index) => index ? "right" as const : "left" as const) })] : [],
         ...table && "hasPrevious" in measured && !measured.hasPrevious ? [{ type: "context", elements: [{ type: "mrkdwn", text: "No previous Lighthouse run to compare against." }] }] : [],
       ];
       const reported = (since: string | undefined) => since === undefined ? "new on this commit" : since ? `first reported on ${since}` : "reported earlier; the earlier record could not be read";

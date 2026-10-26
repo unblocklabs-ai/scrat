@@ -139,7 +139,9 @@ const configureMainStorefront = (config) => {
   Object.assign(config.storefront, { enabled: true, store: "fixture.myshopify.com", publicHost: "shop.example.test" });
   config.storefront.lighthouse.runs = 2;
 };
-const storefrontScores = (performance, accessibility, practices, seo) => ({ performance, accessibility, "best-practices": practices, seo });
+const storefrontScores = (performance, accessibility, practices, seo, [fcp, lcp, tbt, cls, speed] = [1800, 3100, 210, 0.05, 2900]) => Object.defineProperty({ performance, accessibility, "best-practices": practices, seo }, "metrics", {
+  value: { "first-contentful-paint": fcp, "largest-contentful-paint": lcp, "total-blocking-time": tbt, "cumulative-layout-shift": cls, "speed-index": speed },
+});
 const mainStorefront = async () => {
   const fakes = globalThis.storefrontFakes = { launches: [], launchOptions: [], visits: [], audits: [], scores: { mobile: [], desktop: [] }, look: "v1" };
   const pkg = (name, source) => {
@@ -171,7 +173,7 @@ export default async function lighthouse(url, flags, settings) {
   fakes.audits.push({ url, device, port: flags.port, output: flags.output, categories: flags.onlyCategories, screenshot: !flags.disableFullPageScreenshot });
   if (next === "hang") return new Promise(() => {});
   if (typeof next === "string") throw new Error(next);
-  return { lhr: { categories: Object.fromEntries(Object.entries(next).map(([id, score]) => [id, { score }])) }, report: JSON.stringify({ url, device, next }) };
+  return { lhr: { categories: Object.fromEntries(Object.entries(next).map(([id, score]) => [id, { score }])), audits: Object.fromEntries(Object.entries(next.metrics).map(([id, numericValue]) => [id, { numericValue }])) }, report: JSON.stringify({ url, device, next }) };
 }
 `);
   const dns = createRequire(import.meta.url)("node:dns/promises"), lookup = dns.lookup;
@@ -3153,6 +3155,7 @@ export const scenarios = {
   commit_review_storefront: { title: "with the storefront enabled, a main change whose theme files match the live MAIN theme gets a browser review of the live store against stored baselines and Lighthouse averages with deltas, posted as its own concise Slack message and a full commit comment edited in place; a new confirmed breakage turns the reaction red once per fingerprint, only a clean run replaces the baselines, the code review keeps its session, a live theme that does not match yet skips with one line, and a disabled storefront changes nothing", seed: seedTheme, configure: [configureCommitSource, configureMainStorefront], run: async () => {
     const { fakes, push, scored, previous, code, codeText, replies, replyBlocks, reactions, sessions, reports, state, link } = await mainStorefront();
     const { config: live } = await f.app("config.ts"), site = "https://shop.example.test", json = (path) => JSON.parse(state(path)), S = storefrontScores;
+    const m1 = { "first-contentful-paint": 1.8, "largest-contentful-paint": 3.1, "total-blocking-time": 210, "cumulative-layout-shift": 0.05, "speed-index": 2.9 };
     const breakage = (verdict) => "The variant picker is broken on product pages.\n\n## Checked\n- `/products/tee` on the purchase path.\nSCRAT_ISSUE_BEGIN\ntitle: The variant picker does nothing on mobile\nfingerprint: product:variant-picker\n\nPicked Size M three times after reset; the price and image stayed on Size S.\nSCRAT_ISSUE_END\n"
       + `SCRAT_VERDICT: ${verdict}\nSCRAT_STATUS: complete`;
 
@@ -3183,19 +3186,19 @@ export const scenarios = {
     assert.match(r1.publication.storefrontReportUrl, new RegExp(`^https://github\\.com/fixture/project/commit/${first}#commitcomment-\\d+$`));
     assert.deepEqual(replies(), [codeText, `*Storefront* on ${first.slice(0, 7)}: The home page shows the new hero; nothing else changed.\n`
       + "• `/` desktop and mobile: a hero section sits above the collection grid, as the commit intends.\n"
-      + "• Lighthouse mobile (2 runs, no previous run): Performance 65, Accessibility 90, Best Practices 96, SEO 100\n"
-      + "• Lighthouse desktop (2 runs, no previous run): Performance 93, Accessibility 95, Best Practices 100, SEO 100" + link(r1)], "the block is its own message after the code review");
+      + "• Lighthouse mobile (2 runs, no previous run): Performance 65, Accessibility 90, Best Practices 96, SEO 100; FCP 1.8 s, LCP 3.1 s, TBT 210 ms, CLS 0.05, Speed Index 2.9 s\n"
+      + "• Lighthouse desktop (2 runs, no previous run): Performance 93, Accessibility 95, Best Practices 100, SEO 100; FCP 1.8 s, LCP 3.1 s, TBT 210 ms, CLS 0.05, Speed Index 2.9 s" + link(r1)], "the block is its own message after the code review");
     assert.deepEqual(reactions(), ["white_check_mark"]); assert.equal(r1.result.verdict, "clean");
     const [report] = reports(), runs = `data/runs/${r1.id}`;
     assert.equal(report.sha, first); assert.ok(report.body.endsWith("<!-- scrat-storefront -->"));
     for (const text of [`## Storefront review of ${first}\n\nThe live \`MAIN\` theme matches this commit for the 2 theme file(s) the change touches.\n\nThe home page shows the new hero`,
-      "## Checked\n- `/` because the commit adds `sections/hero.liquid`.", "| mobile | 2 of 2 | 65 | 90 | 96 | 100 |", "| desktop | 2 of 2 | 93 | 95 | 100 | 100 |",
-      `| mobile | \`/\` | 1 | 60 | 90 | 96 | 100 | \`${runs}/lighthouse/mobile-1-1.json\` |`, `| desktop | \`/\` | 2 | 95 | 95 | 100 | 100 | \`${runs}/lighthouse/desktop-1-2.json\` |`,
+      "## Checked\n- `/` because the commit adds `sections/hero.liquid`.", "|  | Mobile | Desktop |\n| --- | --- | --- |\n| Runs | 2 | 2 |\n| Performance | 65 | 93 |\n| Accessibility | 90 | 95 |\n| Best Practices | 96 | 100 |\n| SEO | 100 | 100 |\n| FCP | 1.8 s | 1.8 s |\n| LCP | 3.1 s | 3.1 s |\n| TBT | 210 ms | 210 ms |\n| CLS | 0.05 | 0.05 |\n| Speed Index | 2.9 s | 2.9 s |",
+      `| mobile | \`/\` | 1 | 60 | 90 | 96 | 100 | 1.8 s | 3.1 s | 210 ms | 0.05 | 2.9 s | \`${runs}/lighthouse/mobile-1-1.json\` |`, `| desktop | \`/\` | 2 | 95 | 95 | 100 | 100 | 1.8 s | 3.1 s | 210 ms | 0.05 | 2.9 s | \`${runs}/lighthouse/desktop-1-2.json\` |`,
       `3 screenshot(s) under \`${runs}\`:\n- \`${site}/\` at desktop: \`${runs}/screenshot-desktop-1.png\`\n- \`${site}/\` at mobile: \`${runs}/screenshot-mobile-2.png\`\n- \`${site}/products/tee?variant=1\` at desktop: \`${runs}/screenshot-desktop-3.png\``,
       "The baselines under `data/storefront/baselines` are now this run's 3 screenshot(s)."]) assert.ok(report.body.includes(text), text);
     assert.deepEqual([state("baselines/home/desktop.png"), state("baselines/home/mobile.png"), state("baselines/products_tee/desktop.png")], ["png / 1280 v1", "png / 390 v1", "png /products/tee 1280 v1"]);
     assert.deepEqual(json("baselines/index.json"), { home: { url: site + "/", devices: { desktop: first, mobile: first } }, products_tee: { url: site + "/products/tee", devices: { desktop: first } } });
-    assert.deepEqual(json("lighthouse.json"), { mobile: { sha: first, scores: S(65, 90, 96, 100) }, desktop: { sha: first, scores: S(93, 95, 100, 100) } });
+    assert.deepEqual(json("lighthouse.json"), { mobile: { sha: first, scores: S(65, 90, 96, 100), metrics: m1 }, desktop: { sha: first, scores: S(93, 95, 100, 100), metrics: m1 } });
     assert.deepEqual(JSON.parse(readFileSync(`${runs}/lighthouse/mobile-1-1.json`, "utf8")), { url: site + "/", device: "mobile", next: S(0.6, 0.9, 0.96, 1) }, "each run's report is kept as evidence");
     assert.deepEqual(fakes.audits.map(({ url, device, output, categories, screenshot }) => [url, device, output, categories.join(","), screenshot]),
       [...Array(2).fill([site + "/", "mobile", "json", "performance,accessibility,best-practices,seo", false]), ...Array(2).fill([site + "/", "desktop", "json", "performance,accessibility,best-practices,seo", false])]);
@@ -3207,7 +3210,7 @@ export const scenarios = {
 
     mkdirSync("data/storefront", { recursive: true }); writeFileSync("data/storefront/site.md", "Site map\n- `/products/<handle>`: product page\n");
     fakes.look = "v2";
-    scored([S(0.62, 0.9, 0.96, 1), S(0.62, 0.9, 0.96, 1)]);
+    scored([S(0.62, 0.9, 0.96, 1, [1600, 3500, 240, 0.05, 2800]), S(0.62, 0.9, 0.96, 1, [1600, 3500, 240, 0.05, 2800])]);
     const second = await push({ "sections/hero.liquid": "<section>Hero 2</section>\n" });
     f.script = [code, { name: "browser", args: { action: "goto", url: site + "/" } }, { name: "browser", args: { action: "screenshot", viewport: "desktop", fullPage: true } }, breakage("breaking")];
     const r2 = await success(), secondSession = sessions().at(-1);
@@ -3216,9 +3219,9 @@ export const scenarios = {
     assert.deepEqual(Object.keys(baselines), ["home", "products_tee"]); assert.equal(baselines.home.screenshots.mobile.sha, first);
     assert.equal(readFileSync(baselines.home.screenshots.desktop.path, "utf8"), "png / 1280 v1", "the agent reads the previous run's screenshot from its own context directory");
     assert.equal(replies().at(-1), `*Storefront* on ${second.slice(0, 7)}: The variant picker is broken on product pages.\n• New breakage \`product:variant-picker\`: The variant picker does nothing on mobile\n`
-      + "• Lighthouse mobile (2 runs): Performance 62 (-3), Accessibility 90 (±0), Best Practices 96 (±0), SEO 100 (±0)\n"
-      + "• Lighthouse desktop (2 runs): Performance 90 (-3), Accessibility 95 (±0), Best Practices 100 (±0), SEO 100 (±0)" + link(r2));
-    const cell = (text) => ({ type: "raw_text", text }), align = ["left", "right", "right", "right", "right", "right"].map((value) => ({ align: value }));
+      + "• Lighthouse mobile (2 runs): Performance 62 (-3), Accessibility 90 (±0), Best Practices 96 (±0), SEO 100 (±0); FCP 1.6 s (-0.2), LCP 3.5 s (+0.4), TBT 240 ms (+30), CLS 0.05 (±0.00), Speed Index 2.8 s (-0.1)\n"
+      + "• Lighthouse desktop (2 runs): Performance 90 (-3), Accessibility 95 (±0), Best Practices 100 (±0), SEO 100 (±0); FCP 1.8 s (±0.0), LCP 3.1 s (±0.0), TBT 210 ms (±0), CLS 0.05 (±0.00), Speed Index 2.9 s (±0.0)" + link(r2));
+    const cell = (text) => ({ type: "raw_text", text }), align = ["left", "right", "right"].map((value) => ({ align: value }));
     assert.deepEqual(replyBlocks().at(-1), [
       { type: "rich_text", elements: [
         { type: "rich_text_section", elements: [{ type: "text", text: "Storefront", style: { bold: true } }, { type: "text", text: ` on ${second.slice(0, 7)}: The variant picker is broken on product pages.` }] },
@@ -3226,9 +3229,17 @@ export const scenarios = {
           { type: "text", text: "New breakage " }, { type: "text", text: "product:variant-picker", style: { code: true } }, { type: "text", text: ": The variant picker does nothing on mobile" }] }] },
       ] },
       { type: "table", column_settings: align, rows: [
-        ["Device", "Runs", "Performance", "Accessibility", "Best Practices", "SEO"],
-        ["mobile", "2", "62 (-3)", "90 (±0)", "96 (±0)", "100 (±0)"],
-        ["desktop", "2", "90 (-3)", "95 (±0)", "100 (±0)", "100 (±0)"],
+        ["", "Mobile", "Desktop"],
+        ["Runs", "2", "2"],
+        ["Performance", "62 (-3)", "90 (-3)"],
+        ["Accessibility", "90 (±0)", "95 (±0)"],
+        ["Best Practices", "96 (±0)", "100 (±0)"],
+        ["SEO", "100 (±0)", "100 (±0)"],
+        ["FCP", "1.6 s (-0.2)", "1.8 s (±0.0)"],
+        ["LCP", "3.5 s (+0.4)", "3.1 s (±0.0)"],
+        ["TBT", "240 ms (+30)", "210 ms (±0)"],
+        ["CLS", "0.05 (±0.00)", "0.05 (±0.00)"],
+        ["Speed Index", "2.8 s (-0.1)", "2.9 s (±0.0)"],
       ].map((row) => row.map(cell)) },
       { type: "section", text: { type: "mrkdwn", text: `<${r2.publication.storefrontReportUrl}|Full storefront report>` } },
     ]);
@@ -3243,11 +3254,11 @@ export const scenarios = {
     const r3 = await success();
     assert.deepEqual(sessions().at(-1).context.storefront.knownBreakages, [{ fingerprint: "product:variant-picker", title: "The variant picker does nothing on mobile", since: second }]);
     assert.equal(replies().at(-1), `*Storefront* on ${third.slice(0, 7)}: The variant picker is broken on product pages.\n• Still broken since ${second.slice(0, 7)} \`product:variant-picker\`: The variant picker does nothing on mobile\n`
-      + "• Lighthouse mobile (2 runs): Performance 60 (-2), Accessibility 90 (±0), Best Practices 96 (±0), SEO 100 (±0)\n"
-      + "• Lighthouse desktop (1 of 2 runs): Performance 92 (+2), Accessibility 95 (±0), Best Practices 100 (±0), SEO 100 (±0)" + link(r3));
+      + "• Lighthouse mobile (2 runs): Performance 60 (-2), Accessibility 90 (±0), Best Practices 96 (±0), SEO 100 (±0); FCP 1.8 s (+0.2), LCP 3.1 s (-0.4), TBT 210 ms (-30), CLS 0.05 (±0.00), Speed Index 2.9 s (+0.1)\n"
+      + "• Lighthouse desktop (1 of 2 runs): Performance 92 (+2), Accessibility 95 (±0), Best Practices 100 (±0), SEO 100 (±0); FCP 1.8 s (±0.0), LCP 3.1 s (±0.0), TBT 210 ms (±0), CLS 0.05 (±0.00), Speed Index 2.9 s (±0.0)" + link(r3));
     assert.equal(reactions().at(-1), "large_orange_square", "a breakage already reported raises no new red alert"); assert.equal(r3.result.verdict, "concerns");
     assert.deepEqual(json("alerts.json"), { "product:variant-picker": { title: "The variant picker does nothing on mobile", sha: second } });
-    for (const text of [`(\`product:variant-picker\`, first reported on ${second})`, "| desktop | `/` | 1 | - | - | - | - | Chrome crashed |", "| desktop | 1 of 2 | 92 (+2) | 95 (±0) | 100 (±0) | 100 (±0) |"]) assert.ok(reports().at(-1).body.includes(text), text);
+    for (const text of [`(\`product:variant-picker\`, first reported on ${second})`, "| desktop | `/` | 1 | - | - | - | - | - | - | - | - | - | Chrome crashed |", "| Runs | 2 | 1 of 2 |", "| Performance | 60 (-2) | 92 (+2) |"]) assert.ok(reports().at(-1).body.includes(text), text);
 
     scored();
     const fourth = await push({ "snippets/price.liquid": "<span>price 2</span>\n" }), long = "The change is large. " + "x".repeat(3500);
@@ -3261,8 +3272,8 @@ export const scenarios = {
     const r4 = await success();
     assert.deepEqual([reports().length, replies().length, f.requests.length], [commented, posted, used], "a retried publication posts neither the comment nor a message again");
     assert.equal(replies().at(-1), `*Storefront* on ${fourth.slice(0, 7)}: The variant picker works again.\n`
-      + "• Lighthouse mobile (2 runs): Performance 60 (±0), Accessibility 90 (±0), Best Practices 96 (±0), SEO 100 (±0)\n"
-      + "• Lighthouse desktop (2 runs): Performance 90 (-2), Accessibility 95 (±0), Best Practices 100 (±0), SEO 100 (±0)" + link(r4), "the storefront message keeps its link however long the code review is");
+      + "• Lighthouse mobile (2 runs): Performance 60 (±0), Accessibility 90 (±0), Best Practices 96 (±0), SEO 100 (±0); FCP 1.8 s (±0.0), LCP 3.1 s (±0.0), TBT 210 ms (±0), CLS 0.05 (±0.00), Speed Index 2.9 s (±0.0)\n"
+      + "• Lighthouse desktop (2 runs): Performance 90 (-2), Accessibility 95 (±0), Best Practices 100 (±0), SEO 100 (±0); FCP 1.8 s (±0.0), LCP 3.1 s (±0.0), TBT 210 ms (±0), CLS 0.05 (±0.00), Speed Index 2.9 s (±0.0)" + link(r4), "the storefront message keeps its link however long the code review is");
     assert.equal(reactions().at(-1), "white_check_mark");
     assert.deepEqual(json("alerts.json"), {}, "a clean run clears the alerts");
     assert.deepEqual(json("baselines/index.json"), { home: { url: site + "/", devices: { desktop: fourth } } }, "a clean run keeps only the pages it captured");

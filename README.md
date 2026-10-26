@@ -439,7 +439,7 @@ The agent receives the commit messages, the changed paths and the diff for the r
 | `branch` | Branch to watch, the manifest's `trigger.branch` by default; must not be empty. |
 | `channel` | Slack channel ID to post in. Required when enabled, and the bot must be a member of it. |
 | `maxRangeCommits` | Range granularity: a range with more first-parent commits is recorded as `truncated` and still reviewed whole. Commit granularity: most commits queued per poll. |
-| `startMessage` | Opening message template. Variables: `{{sha}}` (tip commit), `{{short_sha}}`, `{{author}}` (commit author name), `{{title}}` (commit subject), `{{url}}`, `{{branch}}`, `{{count}}` (commits in the range) and `{{bot}}` (`github.botName`). Any other `{{name}}` stops startup. |
+| `startMessage` | Opening message template. Variables: `{{sha}}` (tip commit), `{{short_sha}}`, `{{author}}` (commit author name), `{{title}}` (commit subject), `{{url}}`, `{{branch}}`, `{{count}}` (commits in the range), `{{bot}}` (`github.botName`) and `{{change}}` (a plain-language, linked description of the tip commit: the pull request title, number and merger for a merged pull request, the edited areas for a Shopify theme editor change, or the author and commit subject for a direct change, plus the number of other commits in the range). Any other `{{name}}` stops startup. |
 | `priority`, `skill`, `provider`, `model`, `thinkingLevel` | As in the table above. |
 
 Author and title are escaped for Slack. Messages do not unfurl links or ping users by name.

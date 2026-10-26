@@ -15,6 +15,13 @@ type RangeCommit = { sha: string; parent: string; author: string; email: string;
 
 const noreplyLogin = (email: string) => /^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$/i.exec(email)?.[1];
 
+async function classify(repositoryPath: string, { sha, author, email, title }: { sha: string; author: string; email: string; title: string }) {
+  const pr = /^Merge pull request #(\d+) from /.exec(title)?.[1] ?? / \(#(\d+)\)$/.exec(title)?.[1];
+  if (pr) return { pr: Number(pr) };
+  if (![author, noreplyLogin(email)].some((login) => login?.toLowerCase() === "shopify[bot]") && !title.startsWith("Update from Shopify for theme ")) return {};
+  return { shopify: true, paths: await gitList(repositoryPath, ["diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z", sha]) };
+}
+
 function commitMatches({ author, message }: CommitTrigger, commit: RangeCommit) {
   const logins = [commit.author, noreplyLogin(commit.email)].filter((login) => login !== undefined).map((login) => login.toLowerCase());
   return (author === undefined || (author === "bot" ? logins.some((login) => isBotLogin(login)) : logins.includes(author.toLowerCase())))
@@ -66,7 +73,7 @@ async function pollAction({ name: action, trigger, enabled, maxRangeCommits }: A
     operation.stage("enqueue");
     let queued = 0;
     for (const commit of kept) {
-      queued += enqueueCommit({ repository, action, branch, sha: commit.sha, previousSha: commit.parent, commitCount: 1, truncated: false, title: commit.title, author: commit.author });
+      queued += enqueueCommit({ repository, action, branch, sha: commit.sha, previousSha: commit.parent, commitCount: 1, truncated: false, title: commit.title, author: commit.author, kind: await classify(repositoryPath, commit) });
     }
     cursor.save(matching.length > kept.length ? kept.at(-1)!.sha : tip);
     return queued;
@@ -76,19 +83,20 @@ async function pollAction({ name: action, trigger, enabled, maxRangeCommits }: A
     return 0;
   }
   const commitCount = Number(await git(repositoryPath, ["rev-list", "--first-parent", "--count", `${previousSha}..${tip}`]));
-  const [author, title] = (await git(repositoryPath, ["log", "-1", "--format=%an%x00%s", tip])).split("\0");
+  const [author = "", email = "", title = ""] = (await git(repositoryPath, ["log", "-1", "--format=%an%x00%ae%x00%s", tip])).split("\0");
   operation.stage("enqueue");
-  const queued = enqueueCommit({ repository, action, branch, sha: tip, previousSha, commitCount, truncated: commitCount > maxRangeCommits!, title: title ?? "", author: author ?? "" });
+  const queued = enqueueCommit({ repository, action, branch, sha: tip, previousSha, commitCount, truncated: commitCount > maxRangeCommits!, title, author, kind: await classify(repositoryPath, { sha: tip, author, email, title }) });
   cursor.save(tip);
   return queued;
 }
 
-function enqueueCommit({ repository, action, branch, sha, previousSha, commitCount, truncated, title, author }: {
+function enqueueCommit({ repository, action, branch, sha, previousSha, commitCount, truncated, title, author, kind }: {
   repository: string; action: string; branch: string; sha: string; previousSha: string; commitCount: number; truncated: boolean; title: string; author: string;
+  kind: Awaited<ReturnType<typeof classify>>;
 }) {
   const subject = upsertSubject({
     repository, kind: "commit", key: `${branch}:${sha}`,
-    metadata: { title, author, url: `https://github.com/${repository}/commit/${sha}` },
+    metadata: { title, author, ...kind, url: `https://github.com/${repository}/commit/${sha}` },
   });
   return enqueueOnce(subject, action, `${branch} moved to ${sha.slice(0, 7)}`,
     { source: "github_commits", kind: "commit", triggerKey: sha, sha, previousSha, branch, commitCount, truncated });

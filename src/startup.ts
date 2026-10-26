@@ -11,7 +11,7 @@ import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 import { loadPlaywright } from "./scoped-tools.ts";
 import { authTest } from "./slack.ts";
 
-const templateVariables = new Set(["sha", "short_sha", "author", "title", "url", "branch", "count", "bot"]);
+const templateVariables = new Set(["sha", "short_sha", "author", "title", "url", "branch", "count", "bot", "change"]);
 
 type Entry = { provider: string; model: string };
 

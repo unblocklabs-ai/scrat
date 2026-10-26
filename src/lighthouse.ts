@@ -9,16 +9,25 @@ import { launchChromium } from "./scoped-tools.ts";
 import { readState, writeState } from "./storefront.ts";
 
 const categories = { performance: "Performance", accessibility: "Accessibility", "best-practices": "Best Practices", seo: "SEO" } as const;
+const metrics = {
+  "first-contentful-paint": { label: "FCP", divisor: 1000, digits: 1, unit: " s" },
+  "largest-contentful-paint": { label: "LCP", divisor: 1000, digits: 1, unit: " s" },
+  "total-blocking-time": { label: "TBT", divisor: 1, digits: 0, unit: " ms" },
+  "cumulative-layout-shift": { label: "CLS", divisor: 1, digits: 2, unit: "" },
+  "speed-index": { label: "Speed Index", divisor: 1000, digits: 1, unit: " s" },
+} as const;
 const devices = ["mobile", "desktop"] as const;
 type Category = keyof typeof categories;
 type Device = typeof devices[number];
+type Metric = keyof typeof metrics;
 type Scores = Record<Category, number>;
-type Run = { device: Device; page: string; run: number; scores?: Scores; report?: string; error?: string };
-type Previous = Partial<Record<Device, { sha: string; scores: Scores }>>;
-type Audit = (url: string, flags: Record<string, unknown>, settings?: unknown) => Promise<{ lhr: { categories: Record<string, { score: number | null } | undefined> }; report: string | string[] } | undefined>;
+type Metrics = Record<Metric, number>;
+type Run = { device: Device; page: string; run: number; scores?: Scores; metrics?: Metrics; report?: string; error?: string };
+type Previous = Partial<Record<Device, { sha: string; scores: Scores; metrics?: Metrics }>>;
+type Audit = (url: string, flags: Record<string, unknown>, settings?: unknown) => Promise<{ lhr: { categories: Record<string, { score: number | null } | undefined>; audits?: Record<string, { numericValue?: unknown } | undefined> }; report: string | string[] } | undefined>;
 type Lighthouse = { default: Audit; desktopConfig: unknown };
 
-const ids = Object.keys(categories) as Category[];
+const ids = Object.keys(categories) as Category[], metricIds = Object.keys(metrics) as Metric[];
 
 export async function loadLighthouse() {
   const specifier = "lighthouse";
@@ -52,7 +61,12 @@ async function audited({ audit, desktopConfig }: { audit: Audit; desktopConfig: 
       if (typeof score !== "number") throw new Error(`Lighthouse returned no ${categories[id]} score`);
       return [id, Math.round(score * 100)];
     })) as Scores;
-    return { scores, report: Array.isArray(result.report) ? result.report[0]! : result.report };
+    const measured = Object.fromEntries(metricIds.map((id) => {
+      const value = result.lhr.audits?.[id]?.numericValue;
+      if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`Lighthouse returned no ${metrics[id].label} value`);
+      return [id, value];
+    })) as Metrics;
+    return { scores, metrics: measured, report: Array.isArray(result.report) ? result.report[0]! : result.report };
   } finally {
     await browser.close().catch(() => undefined);
   }
@@ -68,10 +82,10 @@ export async function runLighthouse(origin: string, directory: string, reference
       if (stop?.aborted) throw stop.reason;
       if (budget.aborted) { results.push({ device, page, run, error: `not run, the ${timeoutSeconds}s budget was spent` }); continue; }
       try {
-        const { scores, report } = await audited({ audit, desktopConfig }, new URL(page, origin).href, device, signal);
+        const { scores, metrics, report } = await audited({ audit, desktopConfig }, new URL(page, origin).href, device, signal);
         const path = join(directory, `${device}-${index + 1}-${run}.json`);
         await writeFile(path, report);
-        results.push({ device, page, run, scores, report: path });
+        results.push({ device, page, run, scores, metrics, report: path });
       } catch (error) {
         if (stop?.aborted) throw error;
         results.push({ device, page, run, error: budget.aborted ? `stopped when the ${timeoutSeconds}s budget was spent` : errorMessage(error).replace(/\s+/g, " ") });
@@ -81,39 +95,50 @@ export async function runLighthouse(origin: string, directory: string, reference
   }, references, stop);
 }
 
-const average = (scored: Scores[]) => Object.fromEntries(ids.map((id) => [id, Math.round(scored.reduce((sum, scores) => sum + scores[id], 0) / scored.length)])) as Scores;
-const signed = (value: number) => value > 0 ? `+${value}` : value < 0 ? String(value) : "±0";
+const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
+const average = (scored: Scores[]) => Object.fromEntries(ids.map((id) => [id, Math.round(mean(scored.map((scores) => scores[id])))])) as Scores;
+const shownUnits = (id: Metric, raw: number) => Number((raw / metrics[id].divisor).toFixed(metrics[id].digits));
+const averageMetrics = (measured: Metrics[]) => Object.fromEntries(metricIds.map((id) => [id, shownUnits(id, mean(measured.map((values) => values[id])))])) as Metrics;
+const signed = (value: number, digits = 0) => {
+  const text = Math.abs(value).toFixed(digits);
+  return Number(text) === 0 ? `±${text}` : `${value > 0 ? "+" : "-"}${text}`;
+};
+const formatMetric = (id: Metric, value: number) => `${value.toFixed(metrics[id].digits)}${metrics[id].unit}`;
+const capitalised = (device: Device) => device[0]!.toUpperCase() + device.slice(1);
 
 export async function recordLighthouse(results: Run[], sha: string) {
   const previous = await readState<Previous>("lighthouse.json", {}) ?? {}, current: Previous = {};
-  const slack: string[] = [], table: string[] = [], rows: string[][] = [], missing: string[] = [];
+  const slack: string[] = [], missing: string[] = [], columns: { device: Device; cells: string[] }[] = [];
   for (const device of devices) {
-    const all = results.filter((run) => run.device === device), scored = all.flatMap((run) => run.scores ? [run.scores] : []);
+    const all = results.filter((run) => run.device === device), scored = all.filter((run) => run.scores && run.metrics);
     if (!all.length) continue;
     if (!scored.length) {
       const line = `Lighthouse ${device}: no result (${all[0]!.error})`;
       slack.push(line); missing.push(line);
-      table.push(`| ${device} | 0 of ${all.length} | ${ids.map(() => "-").join(" | ")} |`);
       continue;
     }
-    const scores = average(scored), before = previous[device], count = scored.length === all.length ? `${all.length} runs` : `${scored.length} of ${all.length} runs`;
-    current[device] = { sha, scores };
+    const scores = average(scored.map((run) => run.scores!)), values = averageMetrics(scored.map((run) => run.metrics!)), before = previous[device];
+    const count = scored.length === all.length ? `${all.length} runs` : `${scored.length} of ${all.length} runs`;
+    current[device] = { sha, scores, metrics: values };
     const shown = (id: Category) => `${scores[id]}${before ? ` (${signed(scores[id] - before.scores[id])})` : ""}`;
-    slack.push(`Lighthouse ${device} (${count}${before ? "" : ", no previous run"}): ${ids.map((id) => `${categories[id]} ${shown(id)}`).join(", ")}`);
-    table.push(`| ${device} | ${scored.length} of ${all.length} | ${ids.map(shown).join(" | ")} |`);
-    rows.push([device, scored.length === all.length ? String(all.length) : `${scored.length} of ${all.length}`, ...ids.map(shown)]);
+    const shownMetric = (id: Metric) => `${formatMetric(id, values[id])}${before?.metrics ? ` (${signed(values[id] - before.metrics[id], metrics[id].digits)})` : ""}`;
+    slack.push(`Lighthouse ${device} (${count}${before ? "" : ", no previous run"}): ${ids.map((id) => `${categories[id]} ${shown(id)}`).join(", ")}; ${metricIds.map((id) => `${metrics[id].label} ${shownMetric(id)}`).join(", ")}`);
+    columns.push({ device, cells: [scored.length === all.length ? String(all.length) : `${scored.length} of ${all.length}`, ...ids.map(shown), ...metricIds.map(shownMetric)] });
   }
   if (Object.keys(current).length) await writeState("lighthouse.json", { ...previous, ...current });
   const compared = devices.flatMap((device) => current[device] && previous[device] ? [`${device} with ${previous[device].sha.slice(0, 7)}`] : []);
-  const header = `| Device | Runs | ${ids.map((id) => categories[id]).join(" | ")} |\n| --- | --- | ${ids.map(() => "---").join(" | ")} |`;
-  const perRun = results.map(({ device, page, run, scores, report, error }) =>
-    `| ${device} | \`${page}\` | ${run} | ${scores ? `${ids.map((id) => scores[id]).join(" | ")} | \`${relative(process.cwd(), report!)}\`` : `${ids.map(() => "-").join(" | ")} | ${error!.replaceAll("|", "\\|")}`} |`);
+  const labels = ["Runs", ...ids.map((id) => categories[id]), ...metricIds.map((id) => metrics[id].label)];
+  const tableHeader = ["", ...columns.map(({ device }) => capitalised(device))], tableRows = columns.length ? labels.map((label, index) => [label, ...columns.map(({ cells }) => cells[index]!)]) : [];
+  const averages = columns.length ? [`| ${tableHeader.join(" | ")} |\n| ${tableHeader.map(() => "---").join(" | ")} |\n${tableRows.map((row) => `| ${row.join(" | ")} |`).join("\n")}`] : [];
+  const perRunLabels = [...ids.map((id) => categories[id]), ...metricIds.map((id) => metrics[id].label)];
+  const perRun = results.map(({ device, page, run, scores, metrics: measured, report, error }) =>
+    `| ${device} | \`${page}\` | ${run} | ${scores && measured ? `${[...ids.map((id) => scores[id]), ...metricIds.map((id) => formatMetric(id, shownUnits(id, measured[id])))].join(" | ")} | \`${relative(process.cwd(), report!)}\`` : `${perRunLabels.map(() => "-").join(" | ")} | ${error!.replaceAll("|", "\\|")}`} |`);
   const report = [
     "### Lighthouse",
-    `Average scores of ${config.storefront.lighthouse.pages.map((page) => `\`${page}\``).join(", ")} per device${compared.length ? `, with the change from the previous main run (${compared.join(", ")})` : ""}.`,
-    `${header}\n${table.join("\n")}`,
+    `Average scores and metrics of ${config.storefront.lighthouse.pages.map((page) => `\`${page}\``).join(", ")} per device${compared.length ? `, with the change from the previous main run (${compared.join(", ")})` : ""}.`,
+    ...averages,
     "Each run:",
-    `| Device | Page | Run | ${ids.map((id) => categories[id]).join(" | ")} | Report |\n| --- | --- | --- | ${ids.map(() => "---").join(" | ")} | --- |\n${perRun.join("\n")}`,
+    `| Device | Page | Run | ${perRunLabels.join(" | ")} | Report |\n| --- | --- | --- | ${perRunLabels.map(() => "---").join(" | ")} | --- |\n${perRun.join("\n")}`,
   ].join("\n\n");
-  return { slack, report, missing, table: { header: ["Device", "Runs", ...ids.map((id) => categories[id])], rows }, hasPrevious: devices.some((device) => previous[device]) };
+  return { slack, report, missing, table: { header: tableHeader, rows: tableRows }, hasPrevious: devices.some((device) => previous[device]) };
 }

@@ -12,7 +12,7 @@ import type { EventReferences } from "./events.ts";
 import { blobBytes, changedPaths, gitList } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubComment, GithubItem } from "./github-types.ts";
-import { logger } from "./logging.ts";
+import { bestEffort, logger } from "./logging.ts";
 import { endsWithMarker, isIssueComment, previewMarker, withMarker } from "./markers.ts";
 import { themePreviews, type ThemePreview } from "./schema.ts";
 import { loggie } from "./storefront-loggie.ts";
@@ -51,11 +51,7 @@ export const statePath = (...parts: string[]) => resolve("data/storefront", ...p
 export async function readState<T>(name: string, fallback: T) {
   const text = await ifMissing(readFile(statePath(name), "utf8"), undefined);
   if (text === undefined) return fallback;
-  try { return JSON.parse(text) as T; }
-  catch (error) {
-    logger.warn({ event: "storefront.state_unreadable", path: statePath(name), err: error });
-    return undefined;
-  }
+  return bestEffort(logger, "storefront.state_unreadable", { path: statePath(name) }, async () => JSON.parse(text) as T);
 }
 
 export async function writeState(name: string, value: unknown) {
@@ -232,7 +228,7 @@ function previewBody(preview: ThemePreview, outcome: Outcome) {
 }
 
 async function deploy({ github, number, references }: Target, preview: ThemePreview, outcome: Outcome) {
-  try {
+  await bestEffort(logger, "storefront.deployment_failed", { subjectId: references.subjectId, number }, async () => {
     for (const row of activeDeployments(references.subjectId)) {
       await github.setDeploymentStatus(row.deploymentId!, { state: "inactive", description: "closed" in outcome ? "The preview was removed" : "A newer preview replaced this one" }, references);
       savePreview(row, { deploymentId: null });
@@ -243,9 +239,7 @@ async function deploy({ github, number, references }: Target, preview: ThemePrev
     await github.setDeploymentStatus(deploymentId, outcome.problems.length
       ? { state: "failure", description: "The preview theme does not match this commit" }
       : { state: "success", environmentUrl: previewUrl(preview), description: "The preview theme matches this commit" }, references);
-  } catch (error) {
-    logger.warn({ event: "storefront.deployment_failed", subjectId: references.subjectId, number, err: error });
-  }
+  });
 }
 
 async function publish(target: Target, preview: ThemePreview, outcome: Outcome) {
@@ -270,8 +264,7 @@ export async function ensurePreview(target: Target, revision: Revision, stop?: A
     problems = role === "UNPUBLISHED" ? await syncFiles(preview, revision, stop) : [`${themeLabel(preview)} is no longer unpublished (role ${role}), so Scrat does not write to it`];
   } catch (error) {
     if (!stop?.aborted) {
-      await publish(target, livePreview(subjectId) ?? preview, { headSha, problems: [`The sync to this commit failed (${errorMessage(error)}); the next review retries it.`] })
-        .catch((linkError: unknown) => logger.warn({ event: "storefront.link_failed", subjectId, err: linkError }));
+      await bestEffort(logger, "storefront.link_failed", { subjectId }, () => publish(target, livePreview(subjectId) ?? preview, { headSha, problems: [`The sync to this commit failed (${errorMessage(error)}); the next review retries it.`] }));
     }
     throw error;
   }

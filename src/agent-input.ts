@@ -6,7 +6,7 @@ import type { ErrorDetails } from "./errors.ts";
 import { changedPaths, git } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { botName } from "./identity.ts";
-import { logger } from "./logging.ts";
+import { bestEffort, logger } from "./logging.ts";
 import { commentKey, parseCommentKey } from "./markers.ts";
 import type { ItemObservation } from "./observation.ts";
 import { priorReviewTexts } from "./pr-assessment.ts";
@@ -94,10 +94,7 @@ export async function buildAgentInput(options: {
   const storefront = listed.includes("storefront") && config.storefront.enabled ? await (await import("./storefront-site.ts")).storefrontContext(task.subjectId, headSha, trigger.source === "storefront") : undefined;
   const reviewedSha = evaluated.headSha;
   const checks = listed.includes("validation") && reviewedSha
-    ? await new GitHubRepository(config.github.repository).checkRunConclusions(reviewedSha).catch((error) => {
-      logger.warn({ event: "github.check_runs_failed", err: error, sha: reviewedSha });
-      return [];
-    })
+    ? (await bestEffort(logger, "github.check_runs_failed", { sha: reviewedSha }, () => new GitHubRepository(config.github.repository).checkRunConclusions(reviewedSha))) ?? []
     : [];
   const validation = [
     verification && `# Validation run by ${botName} on ${headSha}\n\n${verification.commands.map((check) => `- ${check.name}: ${check.status} (${(check.durationMs / 1000).toFixed(1)}s)`).join("\n")}\n`,

@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import type { JournalEvent } from "./events.ts";
-import { logger } from "./logging.ts";
+import { bestEffort, logger } from "./logging.ts";
 import { items, slackThreads, subjects, type Subject } from "./schema.ts";
 import { escapeSlack, postMessage } from "./slack.ts";
 
@@ -46,16 +46,14 @@ async function threadFor(subjectId: string, kind: string, payload: { number: num
 }
 
 async function post(event: JournalEvent) {
-  try {
+  await bestEffort(logger, "slack.post_failed", { subjectId: event.subjectId }, async () => {
     const row = db.select({ subject: subjects, item: items }).from(subjects).innerJoin(items, eq(items.id, subjects.id))
       .where(eq(subjects.id, event.subjectId!)).get();
     const text = row && messageFor(event, row.subject);
     if (!row || !text) return;
     const thread = await threadFor(row.subject.id, row.item.kind, row.item.payload);
     await send({ channel: thread.channel, text, threadTs: thread.ts });
-  } catch (error) {
-    logger.warn({ event: "slack.post_failed", subjectId: event.subjectId, err: error });
-  }
+  });
 }
 
 export function queueStatus(event: JournalEvent) {

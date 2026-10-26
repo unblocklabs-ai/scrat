@@ -3,6 +3,7 @@ import { commitInput, describeCommit, startCommitThread } from "./commit-review.
 import { describeWindow } from "./window-review.ts";
 import { config, isBotLogin } from "./config.ts";
 import { branchConflictCode } from "./errors.ts";
+import { bestEffort } from "./logging.ts";
 import { createMergeCommit, fetchRepository, prepareTarget } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { assertConfiguredRepository, remoteUrl } from "./repository.ts";
@@ -13,7 +14,7 @@ import type { Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { isBaseOnly, parseTriggerInput } from "./triggers.ts";
 import { createWorkspace, removeWorkspace } from "./workspaces.ts";
-import { botAuthor, type Ctx, type Environment, itemRevisions, type Observed, prepareWorkspace, runAgent, stopBefore, tryCleanup } from "./run-context.ts";
+import { botAuthor, type Ctx, type Environment, itemRevisions, type Observed, prepareWorkspace, runAgent, stopBefore } from "./run-context.ts";
 
 type Review = { workspace: Workspace; mainSha: string; headSha: string; diffBaseSha: string };
 
@@ -57,7 +58,7 @@ async function prepareReviewCommands({ run, repositoryPath, references, operatio
     if (conflicts) throw Object.assign(new Error(`PR branch is behind ${baseBranch} and does not merge cleanly; the author needs to update it`), { code: branchConflictCode });
     const synthetic = await createMergeCommit(repositoryPath, review.mainSha, review.headSha, `Review merge of ${baseBranch} into the PR head`, botAuthor());
     cleanup.reviewWorkspace = undefined;
-    await tryCleanup(operation, { workspaceId: review.workspace.id }, () => removeWorkspace(review.workspace.id, references));
+    await bestEffort(operation.log, "run.cleanup_pending", { workspaceId: review.workspace.id }, () => removeWorkspace(review.workspace.id, references));
     review.workspace = cleanup.reviewWorkspace = await createWorkspace({ repositoryPath, baseRef: synthetic }, references);
     updateRun(run.id, { workspaceId: review.workspace.id });
     review.headSha = synthetic;

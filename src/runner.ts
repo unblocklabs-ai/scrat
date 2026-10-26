@@ -4,7 +4,7 @@ import { removeRunDatabase } from "./databases.ts";
 import { fetchRepository } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
-import { startOperation } from "./logging.ts";
+import { bestEffort, startOperation } from "./logging.ts";
 import { observe } from "./observation.ts";
 import { assertConfiguredRepository } from "./repository.ts";
 import { currentPrReview } from "./pr-assessment.ts";
@@ -17,7 +17,7 @@ import { parseTriggerInput } from "./triggers.ts";
 import { removeWorkspace } from "./workspaces.ts";
 import { changeRun } from "./run-change.ts";
 import { reviewRun } from "./run-review.ts";
-import { type Ctx, type Observed, stopBefore, tryCleanup } from "./run-context.ts";
+import { type Ctx, type Observed, stopBefore } from "./run-context.ts";
 
 async function connect({ subject, item, repositoryPath }: Ctx): Promise<Observed | undefined> {
   if (!item) return;
@@ -106,7 +106,7 @@ export async function runNextTask(stop?: AbortSignal) {
     operation.fail(error);
     return failed;
   } finally {
-    if (cleanup.databaseRequested) await tryCleanup(operation, { resource: "database" }, () => removeRunDatabase(run.id, references));
-    if (cleanup.reviewWorkspace) await tryCleanup(operation, { workspaceId: cleanup.reviewWorkspace.id }, () => removeWorkspace(cleanup.reviewWorkspace!.id, references));
+    if (cleanup.databaseRequested) await bestEffort(operation.log, "run.cleanup_pending", { resource: "database" }, () => removeRunDatabase(run.id, references));
+    if (cleanup.reviewWorkspace) await bestEffort(operation.log, "run.cleanup_pending", { workspaceId: cleanup.reviewWorkspace.id }, () => removeWorkspace(cleanup.reviewWorkspace!.id, references));
   }
 }

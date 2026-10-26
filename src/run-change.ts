@@ -7,6 +7,7 @@ import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
 import { describeError, type ErrorDetails, errorExitCode } from "./errors.ts";
+import { bestEffort } from "./logging.ts";
 import { conventionalTitle, git, headOf, hasPendingMerge, mergeBase, prepareTarget } from "./git.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { executePi } from "./pi.ts";
@@ -120,15 +121,13 @@ async function acquireChangeWorkspace(ctx: Ctx, observed: Observed) {
       await git(workspace.path, ["merge", "--ff-only", preparedHead]);
       await pinWorkspaceBase(workspace, preparedHead);
     } else {
-      try {
+      await bestEffort(ctx.operation.log, "workspace.base_update_skipped", { workspaceId: workspace.id }, async () => {
         await git(workspace.path, ["merge", "--ff-only", preparedHead]);
         if (await headOf(workspace.path) === preparedHead) {
           await pinWorkspaceBase(workspace, preparedHead);
           db.update(workspaces).set({ baseSha: preparedHead }).where(eq(workspaces.id, workspace.id)).run();
         }
-      } catch (error) {
-        ctx.operation.log.warn({ event: "workspace.base_update_skipped", workspaceId: workspace.id, err: error });
-      }
+      });
     }
   }
   const startHeadSha = await headOf(workspace.path);

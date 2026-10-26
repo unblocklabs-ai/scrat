@@ -4,7 +4,7 @@ import { applyEffects, type EffectContext } from "./effects.ts";
 import type { EventReferences } from "./events.ts";
 import { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
-import { logger } from "./logging.ts";
+import { bestEffort, logger } from "./logging.ts";
 import { getRun, updateRun } from "./run-history.ts";
 import type { Run, Task, Subject } from "./schema.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
@@ -30,7 +30,7 @@ export async function publishRun(github: GitHubRepository, task: Task, run: Run,
   if (run.publication.commentOnly) {
     await applyEffects(["comment"], effectContext);
     const { workspaceId } = run;
-    if (workspaceId) await removeWorkspace(workspaceId, references).catch(() => logger.warn({ event: "run.cleanup_pending", ...references, workspaceId }));
+    if (workspaceId) await bestEffort(logger, "run.cleanup_pending", { ...references, workspaceId }, () => removeWorkspace(workspaceId, references));
     return;
   }
   if (manifest.mode === "change") {

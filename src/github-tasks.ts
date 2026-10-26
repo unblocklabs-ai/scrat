@@ -19,6 +19,7 @@ import { items, runs, subjects } from "./schema.ts";
 import { cancelQueuedTasks, enqueueTask, latestTask } from "./tasks.ts";
 import { parseTriggerInput } from "./triggers.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
+import { bestEffort } from "./logging.ts";
 import { reconcileObserved, serializePr } from "./pr-review-publication.ts";
 import { completedRunsOfAction, latestFinishedRun, latestRunOfTask, runHistory } from "./run-history.ts";
 import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
@@ -55,8 +56,7 @@ async function cleanupClosedItem({ github, log }: SyncContext, item: Item) {
   cancelQueuedTasks(item.id, "GitHub item closed");
   if (item.kind === "pr" && config.storefront.enabled) {
     const { deletePreview } = await import("./storefront.ts");
-    try { await deletePreview(github, item.id, item.payload); }
-    catch (error) { log.warn({ event: "storefront.delete_failed", subjectId: item.id, err: error }); }
+    await bestEffort(log, "storefront.delete_failed", { subjectId: item.id }, () => deletePreview(github, item.id, item.payload));
   }
   if (item.kind !== "pr" || !item.workspaceId) return;
   const active = db.select().from(runs).where(and(eq(runs.workspaceId, item.workspaceId), isNull(runs.finishedAt))).get();
@@ -97,9 +97,7 @@ async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation
   if (!settings?.exhaustedLabel || !routes.repairs.length || state.kind !== "current" || repairActive) return;
   const { exhaustedLabel } = settings;
   const exhausted = repair !== undefined && settings.maxSelfRepairs !== undefined && count >= settings.maxSelfRepairs;
-  try {
-    await reconcileLabels(ctx.github, item.payload.number, { current: observation.labels, desired: exhausted ? [exhaustedLabel] : [], managed: [exhaustedLabel] }, { subjectId: item.id });
-  } catch (error) { ctx.log.warn({ event: "github.label_pending", subjectId: item.id, err: error }); }
+  await bestEffort(ctx.log, "github.label_pending", { subjectId: item.id }, () => reconcileLabels(ctx.github, item.payload.number, { current: observation.labels, desired: exhausted ? [exhaustedLabel] : [], managed: [exhaustedLabel] }, { subjectId: item.id }));
 }
 
 async function reconcileFailedLabels(ctx: SyncContext, item: Item) {
@@ -108,13 +106,11 @@ async function reconcileFailedLabels(ctx: SyncContext, item: Item) {
     return trigger.item === item.kind && label ? [{ name, label, selected: trigger.kind !== "label" || hasScratLabel(item) }] : [];
   });
   if (!labelled.length) return;
-  try {
-    await reconcileLabels(ctx.github, item.payload.number, {
-      current: item.payload.labels ?? [],
-      desired: labelled.filter(({ name, selected }) => selected && latestTask(item.id, name)?.status === "failed").map(({ label }) => label),
-      managed: labelled.map(({ label }) => label),
-    }, { subjectId: item.id });
-  } catch (error) { ctx.log.warn({ event: "github.label_pending", subjectId: item.id, err: error }); }
+  await bestEffort(ctx.log, "github.label_pending", { subjectId: item.id }, () => reconcileLabels(ctx.github, item.payload.number, {
+    current: item.payload.labels ?? [],
+    desired: labelled.filter(({ name, selected }) => selected && latestTask(item.id, name)?.status === "failed").map(({ label }) => label),
+    managed: labelled.map(({ label }) => label),
+  }, { subjectId: item.id }));
 }
 
 async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObservation, mainSha: string, routes: Routes) {
@@ -169,19 +165,16 @@ async function routeObserved(ctx: SyncContext, item: Item, context: GithubContex
   };
   let added = 0;
   if ((routes.conflicts || routes.feedback || routes.repairs.length) && "head" in context.item) {
-    if (context.item.head.repo?.full_name !== repository) return added;
+    const pullRequest = context.item;
+    if (pullRequest.head.repo?.full_name !== repository) return added;
     if (routes.conflicts || routes.feedback) {
-      try { added += applyDecisions(item.id, planPrMaintenance(await gatherPrMaintenanceFacts(ctx, item, observation, context.item, mainSha, routes))); }
-      catch (error) { log.warn({ event: "github.pr_maintenance_skipped", subjectId: item.id, err: error }); }
+      added += await bestEffort(log, "github.pr_maintenance_skipped", { subjectId: item.id }, async () => applyDecisions(item.id, planPrMaintenance(await gatherPrMaintenanceFacts(ctx, item, observation, pullRequest, mainSha, routes)))) ?? 0;
     }
   }
   try {
     added += item.kind === "pr" ? await routePrReview(ctx, item, observation, mainSha, routes) : await routeIssueReview(item, observation, mainSha, routes.review);
   } finally {
-    if (item.kind === "pr") {
-      try { await reconcileObserved(github, item.id, item.payload.number, { subjectId: item.id }, context); }
-      catch (error) { log.warn({ event: "github.review_reconciliation_pending", subjectId: item.id, err: error }); }
-    }
+    if (item.kind === "pr") await bestEffort(log, "github.review_reconciliation_pending", { subjectId: item.id }, () => reconcileObserved(github, item.id, item.payload.number, { subjectId: item.id }, context));
   }
   return added;
 }
@@ -235,8 +228,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
     }
   };
   for (const item of ordered) {
-    try { await routeItem(item); }
-    catch (error) { log.warn({ event: "github.routing_failed", subjectId: item.id, err: error }); }
+    await bestEffort(log, "github.routing_failed", { subjectId: item.id }, () => routeItem(item));
   }
   if (deferred) log.warn({ event: "github.sync_deferred", deferred, ...rateLimitState() }, "GitHub rate limit is low; deferred item reads to the next sync");
   return queued;

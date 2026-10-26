@@ -44,11 +44,6 @@ export async function itemRevisions({ repositoryPath }: Ctx, { pullRequest, obse
   return { mainSha, headSha };
 }
 
-export async function tryCleanup(operation: Ctx["operation"], detail: Record<string, string>, fn: () => Promise<unknown>) {
-  try { await fn(); }
-  catch { operation.log.warn({ event: "run.cleanup_pending", ...detail }); }
-}
-
 export async function runAgent({ run, task, manifest, operation, stop }: Ctx, { environment, input, sessionFile, baseSha, panel }: {
   environment: Environment; input: Omit<Parameters<typeof buildAgentInput>[0], "run" | "task">;
   sessionFile?: string; baseSha?: string; panel?: { baseSha: string; requireGrade: boolean };

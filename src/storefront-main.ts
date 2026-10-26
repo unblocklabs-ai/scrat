@@ -9,7 +9,7 @@ import { errorMessage } from "./errors.ts";
 import { blobBytes } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import { recordLighthouse, runLighthouse } from "./lighthouse.ts";
-import { logger } from "./logging.ts";
+import { bestEffort, logger } from "./logging.ts";
 import { storefrontMarker } from "./markers.ts";
 import { executePi } from "./pi.ts";
 import type { AgentResult } from "./results.ts";
@@ -163,8 +163,7 @@ export function reviewStorefront(ctx: Ctx, change: Change, result: AgentResult):
 export async function publishStorefront({ github, subject, task, run, references, publication, saveReceipt }: Publication) {
   const { slack, report } = run.result!.storefrontReview!;
   if (report && !publication().storefrontReportUrl) {
-    const url = await github.upsertCommitComment(commitInput(run.input).sha, report, storefrontMarker, references)
-      .catch((error: unknown) => { logger.warn({ ...references, event: "storefront.report_failed", err: error }); return undefined; });
+    const url = await bestEffort(logger, "storefront.report_failed", references, () => github.upsertCommitComment(commitInput(run.input).sha, report, storefrontMarker, references));
     if (url) saveReceipt({ storefrontReportUrl: url });
   }
   const url = publication().storefrontReportUrl;

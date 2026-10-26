@@ -1,14 +1,13 @@
 import { createAppAuth } from "@octokit/auth-app";
 import { createHash } from "node:crypto";
 import { Octokit } from "octokit";
-import { config, isBotLogin } from "./config.ts";
+import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import { recordEvent, type EventReferences, type JournalEvent } from "./events.ts";
 import { labelName } from "./labels.ts";
 import { logger, withOperation } from "./logging.ts";
 import { endsWithMarker, fingerprintMarker, inlineCommentId, issueCommentId, reviewCommentId, withMarker } from "./markers.ts";
 import type { GithubComment, GithubContext, GithubIssue, GithubItem, GithubPullRequest } from "./github-types.ts";
 import { errorStatus } from "./errors.ts";
-import { getRepositoryPath } from "./config.ts";
 import { fetchPullRequestHead as fetchHead, fetchRepository } from "./git.ts";
 import { assertConfiguredRepository, remoteUrl } from "./repository.ts";
 import { conditionalFetch, rateLimitLow } from "./github-http.ts";

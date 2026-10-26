@@ -92,7 +92,7 @@ export async function buildAgentInput(options: {
   const history = listed.includes("history") ? historyReport(completedRunsOfActionInRepository(config.github.repository, action, config.context.historyRuns), action) : undefined;
   const assessesPr = manifestOf(action).publish.includes("pr_assessment");
   const prior = assessesPr ? priorReviewTexts(task.subjectId) : undefined;
-  const previousAssessment = assessesPr ? prior?.assessment : listed.includes("previous_assessment") ? completedRunsOfAction(task.subjectId, action, 1)[0]?.result?.text : undefined;
+  const previousAssessment = listed.includes("previous_assessment") ? assessesPr ? prior?.assessment : completedRunsOfAction(task.subjectId, action, 1)[0]?.result?.text : undefined;
   const triage = listed.includes("triage") ? completedRunsOfAction(task.subjectId, actionsPublishing("labels"), 1)[0]?.result : undefined;
   const issue = listed.includes("issue") ? issueOfPullRequest(config.github.repository, evaluated.item.number) : undefined;
   const found = listed.includes("validation") ? verificationOfCommit(headSha) : undefined, verification = found?.commands.length ? found : undefined;

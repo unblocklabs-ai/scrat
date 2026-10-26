@@ -2,7 +2,7 @@ import { manifestOf } from "./actions.ts";
 import { db } from "./db.ts";
 import { applyEffects, type EffectContext } from "./effects.ts";
 import type { EventReferences } from "./events.ts";
-import { GitHubRepository } from "./github.ts";
+import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { bestEffort, logger } from "./logging.ts";
 import { updateRun } from "./run-history.ts";

@@ -68,7 +68,7 @@ export function entryProblems({ mode, agent, trigger }: Pick<Resolved, "mode" | 
     [!entry.retry || entry.retry.maxDelaySeconds >= entry.retry.initialDelaySeconds, "retry.maxDelaySeconds must be at least retry.initialDelaySeconds"],
     [!entry.failedLabel || mode === "change", "failedLabel requires mode change"],
     [(entry.maxSelfRepairs === undefined && !entry.exhaustedLabel) || trigger.kind === "low_grade", "maxSelfRepairs and exhaustedLabel are only allowed with kind low_grade"],
-    [(entry.channel === undefined && entry.startMessage === undefined && entry.maxRangeCommits === undefined && entry.branch === undefined) || trigger.source === "github_commits", "channel, startMessage and maxRangeCommits are only allowed with source github_commits"],
+    [(entry.channel === undefined && entry.startMessage === undefined && entry.maxRangeCommits === undefined && entry.branch === undefined) || trigger.source === "github_commits", "channel, startMessage, maxRangeCommits and branch are only allowed with source github_commits"],
   ];
   return checks.filter(([ok]) => !ok).map(([, message]) => message);
 }

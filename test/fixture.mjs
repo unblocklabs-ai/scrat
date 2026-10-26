@@ -270,7 +270,7 @@ export async function fixture(scenario, spec) {
   copyFileSync(schemaTemplate(repository), "data/scrat.sqlite");
   const app = async (path) => import(pathToFileURL(resolve("app/src", path)));
   const { db } = await app("db.ts"), schema = await app("schema.ts"), tasks = await app("tasks.ts"), { runNextTask } = await app("runner.ts");
-  const slack = { calls: [], down: false, rateLimitOnce: false, retryAfter: "0", fail: null, reactionFail: null, sequence: 0 };
+  const slack = { calls: [], down: false, rateLimitOnce: false, retryAfter: "0", fail: null, reactionFail: null, rejectBlocks: false, sequence: 0 };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, options = {}) => {
     const url = new URL(typeof input === "string" ? input : input.url);
@@ -283,6 +283,7 @@ export async function fixture(scenario, spec) {
       if (slack.rateLimitOnce) { slack.rateLimitOnce = false; return json({ ok: false, error: "ratelimited" }, 429, { "retry-after": slack.retryAfter }); }
       if (slack.reactionFail && url.pathname.endsWith("/reactions.add")) { const error = slack.reactionFail.shift(); if (!slack.reactionFail.length) slack.reactionFail = null; return json({ ok: false, error }); }
       if (slack.fail) return json({ ok: false, error: slack.fail });
+      if (slack.rejectBlocks && JSON.stringify(slackBody.blocks ?? []).includes('"type":"table"')) { slack.rejectBlocks = false; return json({ ok: false, error: "invalid_blocks" }); }
       if (url.pathname.endsWith("/reactions.add")) return json({ ok: true });
       return url.pathname.endsWith("/auth.test") ? json({ ok: true, team: "Fixture", user: "scrat" }) : json({ ok: true, channel: slackBody.channel, ts: `1700000000.${String(++slack.sequence).padStart(6, "0")}` });
     }

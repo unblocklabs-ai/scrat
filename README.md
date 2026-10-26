@@ -554,7 +554,7 @@ The block is its own message in the review's Slack thread, posted after the revi
 
 The Lighthouse table in the same message, with the mobile column as the example above:
 
-| | Mobile | Desktop |
+| Lighthouse | Mobile | Desktop |
 | --- | ---: | ---: |
 | Runs | 3 | 2 of 3 |
 | Performance | 62 (-3) | 92 (+2) |

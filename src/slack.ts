@@ -37,9 +37,12 @@ export function postMessage({ channel, text, threadTs, blocks }: { channel: stri
     assertPublishable(capped);
     if (blocks) assertPublishable(JSON.stringify(blocks));
     operation.stage("request");
-    const data = await call("chat.postMessage", {
-      channel, text: capped, ...blocks ? { blocks } : {}, unfurl_links: false, unfurl_media: false, link_names: false, ...(threadTs ? { thread_ts: threadTs } : {}),
-    });
+    const body = { channel, text: capped, unfurl_links: false, unfurl_media: false, link_names: false, ...(threadTs ? { thread_ts: threadTs } : {}) };
+    const data = await (blocks ? call("chat.postMessage", { ...body, blocks }).catch((error: unknown) => {
+      if ((error as { slackError?: string }).slackError !== "invalid_blocks") throw error;
+      operation.log.warn({ event: "slack.blocks_rejected", blocks });
+      return call("chat.postMessage", body);
+    }) : call("chat.postMessage", body));
     const ts = String(data.ts);
     operation.complete({ ts });
     return ts;

@@ -3201,7 +3201,7 @@ export const scenarios = {
     const [report] = reports(), runs = `data/runs/${r1.id}`;
     assert.equal(report.sha, first); assert.ok(report.body.endsWith("<!-- scrat-storefront -->"));
     for (const text of [`## Storefront review of ${first}\n\nThe live \`MAIN\` theme matches this commit for the 2 theme file(s) the change touches.\n\nThe home page shows the new hero`,
-      "## Checked\n- `/` because the commit adds `sections/hero.liquid`.", "|  | Mobile | Desktop |\n| --- | --- | --- |\n| Runs | 2 | 2 |\n| Performance | 65 | 93 |\n| Accessibility | 90 | 95 |\n| Best Practices | 96 | 100 |\n| SEO | 100 | 100 |\n| FCP | 1.8 s | 1.8 s |\n| LCP | 3.1 s | 3.1 s |\n| TBT | 210 ms | 210 ms |\n| CLS | 0.05 | 0.05 |\n| Speed Index | 2.9 s | 2.9 s |",
+      "## Checked\n- `/` because the commit adds `sections/hero.liquid`.", "| Lighthouse | Mobile | Desktop |\n| --- | --- | --- |\n| Runs | 2 | 2 |\n| Performance | 65 | 93 |\n| Accessibility | 90 | 95 |\n| Best Practices | 96 | 100 |\n| SEO | 100 | 100 |\n| FCP | 1.8 s | 1.8 s |\n| LCP | 3.1 s | 3.1 s |\n| TBT | 210 ms | 210 ms |\n| CLS | 0.05 | 0.05 |\n| Speed Index | 2.9 s | 2.9 s |",
       `| mobile | \`/\` | 1 | 60 | 90 | 96 | 100 | 1.8 s | 3.1 s | 210 ms | 0.05 | 2.9 s | \`${runs}/lighthouse/mobile-1-1.json\` |`, `| desktop | \`/\` | 2 | 95 | 95 | 100 | 100 | 1.8 s | 3.1 s | 210 ms | 0.05 | 2.9 s | \`${runs}/lighthouse/desktop-1-2.json\` |`,
       `3 screenshot(s) under \`${runs}\`:\n- \`${site}/\` at desktop: \`${runs}/screenshot-desktop-1.png\`\n- \`${site}/\` at mobile: \`${runs}/screenshot-mobile-2.png\`\n- \`${site}/products/tee?variant=1\` at desktop: \`${runs}/screenshot-desktop-3.png\``,
       "The baselines under `data/storefront/baselines` are now this run's 3 screenshot(s)."]) assert.ok(report.body.includes(text), text);
@@ -3238,7 +3238,7 @@ export const scenarios = {
           { type: "text", text: "New breakage " }, { type: "text", text: "product:variant-picker", style: { code: true } }, { type: "text", text: ": The variant picker does nothing on mobile" }] }] },
       ] },
       { type: "table", column_settings: align, rows: [
-        ["", "Mobile", "Desktop"],
+        ["Lighthouse", "Mobile", "Desktop"],
         ["Runs", "2", "2"],
         ["Performance", "62 (-3)", "90 (-3)"],
         ["Accessibility", "90 (±0)", "95 (±0)"],
@@ -3257,11 +3257,13 @@ export const scenarios = {
     assert.deepEqual(json("alerts.json"), { "product:variant-picker": { title: "The variant picker does nothing on mobile", sha: second } });
     for (const text of ["### Confirmed breakage\n\n- **The variant picker does nothing on mobile** (`product:variant-picker`, new on this commit)\n\n  Picked Size M three times after reset", "were kept, because the storefront verdict is breaking"]) assert.ok(reports().at(-1).body.includes(text), text);
 
+    f.slack.rejectBlocks = true;
     scored(undefined, ["Chrome crashed", S(0.92, 0.95, 1, 1)]);
     const third = await push({ "snippets/price.liquid": "<span>price</span>\n" });
     f.script = [code, breakage("breaking")];
     const r3 = await success();
     assert.deepEqual(sessions().at(-1).context.storefront.knownBreakages, [{ fingerprint: "product:variant-picker", title: "The variant picker does nothing on mobile", since: second }]);
+    assert.equal(replyBlocks().at(-1), undefined, "a reply whose blocks Slack rejects is posted again as text only"); assert.equal(f.slack.rejectBlocks, false);
     assert.equal(replies().at(-1), `*Storefront* on ${third.slice(0, 7)}: The variant picker is broken on product pages.\n• Still broken since ${second.slice(0, 7)} \`product:variant-picker\`: The variant picker does nothing on mobile\n`
       + "• Lighthouse mobile (2 runs): Performance 60 (-2), Accessibility 90 (±0), Best Practices 96 (±0), SEO 100 (±0); FCP 1.8 s (+0.2), LCP 3.1 s (-0.4), TBT 210 ms (-30), CLS 0.05 (±0.00), Speed Index 2.9 s (+0.1)\n"
       + "• Lighthouse desktop (1 of 2 runs): Performance 92 (+2), Accessibility 95 (±0), Best Practices 100 (±0), SEO 100 (±0); FCP 1.8 s (±0.0), LCP 3.1 s (±0.0), TBT 210 ms (±0), CLS 0.05 (±0.00), Speed Index 2.9 s (±0.0)" + link(r3));

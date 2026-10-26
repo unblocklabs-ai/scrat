@@ -128,7 +128,7 @@ export async function recordLighthouse(results: Run[], sha: string) {
   if (Object.keys(current).length) await writeState("lighthouse.json", { ...previous, ...current });
   const compared = devices.flatMap((device) => current[device] && previous[device] ? [`${device} with ${previous[device].sha.slice(0, 7)}`] : []);
   const labels = ["Runs", ...ids.map((id) => categories[id]), ...metricIds.map((id) => metrics[id].label)];
-  const tableHeader = ["", ...columns.map(({ device }) => capitalised(device))], tableRows = columns.length ? labels.map((label, index) => [label, ...columns.map(({ cells }) => cells[index]!)]) : [];
+  const tableHeader = ["Lighthouse", ...columns.map(({ device }) => capitalised(device))], tableRows = columns.length ? labels.map((label, index) => [label, ...columns.map(({ cells }) => cells[index]!)]) : [];
   const averages = columns.length ? [`| ${tableHeader.join(" | ")} |\n| ${tableHeader.map(() => "---").join(" | ")} |\n${tableRows.map((row) => `| ${row.join(" | ")} |`).join("\n")}`] : [];
   const perRunLabels = [...ids.map((id) => categories[id]), ...metricIds.map((id) => metrics[id].label)];
   const perRun = results.map(({ device, page, run, scores, metrics: measured, report, error }) =>

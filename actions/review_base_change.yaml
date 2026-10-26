@@ -8,7 +8,7 @@ start: [slack_post]
 publish: [slack_reply]
 skill: skills/review_change/SKILL.md
 model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }
-priority: 30
+priority: 110
 channel: ""
 maxRangeCommits: 50
 startMessage: "{{bot}}: `{{branch}}` moved to <{{url}}|{{short_sha}}> by {{author}} ({{count}} commit(s)): {{title}}. Reviewing the change."

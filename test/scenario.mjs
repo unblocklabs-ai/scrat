@@ -2993,7 +2993,7 @@ export const scenarios = {
     assert.equal(await pollCommits(), 1);
     const first = tip(), [task] = reviews();
     assert.deepEqual(task.input, { source: "github_commits", kind: "commit", triggerKey: first, sha: first, previousSha: initial, branch: "main", commitCount: 1, truncated: false });
-    assert.equal(task.reason, "main moved to " + first.slice(0, 7)); assert.equal(task.status, "queued"); assert.equal(task.priority, 30);
+    assert.equal(task.reason, "main moved to " + first.slice(0, 7)); assert.equal(task.status, "queued"); assert.equal(task.priority, 110);
     const subject = f.row(s.subjects, task.subjectId);
     assert.equal(subject.kind, "commit"); assert.equal(subject.state, "open"); assert.equal(subject.repository, "fixture/project"); assert.equal(subject.workspaceId, null);
     assert.equal(subject.key, "main:" + first); assert.equal(all(s.items).length, 0);

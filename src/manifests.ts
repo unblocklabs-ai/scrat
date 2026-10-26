@@ -20,7 +20,7 @@ export type EffectName = (typeof effectNames)[number];
 const strict = { additionalProperties: false } as const;
 export const nullable = <T extends TSchema>(schema: T) => Type.Union([schema, Type.Null()]);
 const list = <T extends TSchema>(items: T, minItems = 0) => Type.Array(items, { minItems, uniqueItems: true });
-const modelSettings = Type.Object({ provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels) }, strict);
+export const modelSettings = Type.Object({ provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels) }, strict);
 const retrySettings = Type.Object({ initialDelaySeconds: Type.Integer({ minimum: 1 }), maxDelaySeconds: Type.Integer({ minimum: 1 }) }, strict);
 const positive = Type.Integer({ minimum: 1 });
 const settings = {

@@ -2813,6 +2813,8 @@ export const scenarios = {
     schema((c) => { c.storefront.preview.uploadBatch = 51; }, /storefront\.preview\.uploadBatch: must be <= 50/);
     await startup((c) => { c.storefront.enabled = true; c.storefront.publicHost = "https://shop.example.com"; }, /storefront\.publicHost must be a host name, without a scheme or path/);
     if (!await import("playwright-core").then(() => true, () => false)) await startup((c) => { c.storefront.enabled = true; }, /storefront_discover: The browser tool needs the optional playwright-core package/);
+    schema((c) => { c.storefront.model.thinkingLevel = "turbo"; }, /storefront\.model\.thinkingLevel: must be equal to one of the allowed values/);
+    await startup((c) => { c.storefront.enabled = true; c.storefront.model.model = "nope"; }, /storefront\.model: no Pi model fixture\/nope/);
     schema((c) => { c.storefront.limits.browserSeconds = 0; }, /storefront\.limits\.browserSeconds: must be >= 1/);
     schema((c) => { c.storefront.siteMapMaxAgeDays = 1.5; }, /storefront\.siteMapMaxAgeDays: must be integer/);
     schema((c) => { c.storefront.limits.regressionMaxGrade = "C+"; }, /storefront\.limits\.regressionMaxGrade: must be equal to one of the allowed values/);
@@ -3184,9 +3186,10 @@ export const scenarios = {
     const [session] = sessions(), browserTool = session.request.tools.find((tool) => tool.function.name === "browser");
     assert.deepEqual(session.context.storefront, { liveUrl: site + "/", sha: first, previousSha: previous, devices: ["desktop", "mobile"], confirmationRuns: 1, knownBreakages: [] });
     assert.deepEqual(session.context.diffPaths, ["README.md", "assets/app.css", "sections/hero.liquid"]);
+    assert.equal(session.request.model, "gpt-6.1-terra"); assert.notEqual(f.requests.find((request) => !request.context.storefront).request.model, "gpt-6.1-terra");
     assert.deepEqual([session.context.files.siteMap, session.context.files.baselines], [undefined, undefined], "the first run has no site map and no baselines");
     assert.deepEqual(session.request.tools.map((tool) => tool.function.name), ["read", "grep", "find", "ls", "git", "browser"]); assert.match(session.text, /# Live storefront review/);
-    assert.match(browserTool.function.description, /public https sites.*At most 40 actions and 600 seconds per session/s);
+    assert.match(browserTool.function.description, /public https sites.*At most 80 actions and 1200 seconds per session/s);
     assert.ok(f.requests.filter((request) => !request.context.storefront).every((request) => !request.request.tools.some((tool) => tool.function.name === "browser")), "the code review itself gets no browser");
     const { piSessionId, piSessionFile } = f.row(s.runs, r1.id), storefrontSession = r1.result.storefrontReview.session;
     assert.notEqual(storefrontSession.piSessionId, piSessionId);
@@ -4164,7 +4167,7 @@ export const scenarios = {
     assert.equal(first.publication.status, "published"); assert.ok(f.row(s.workspaces, first.workspaceId).removedAt);
     const [session] = sessions(), browser = session.request.tools.find((tool) => tool.function.name === "browser");
     assert.deepEqual(names(session), ["read", "grep", "find", "ls", "browser"]);
-    assert.match(browser.function.description, /public https sites.*At most 40 actions and 600 seconds per session/s);
+    assert.match(browser.function.description, /public https sites.*At most 80 actions and 1200 seconds per session/s);
     assert.match(JSON.stringify(session.request.messages.filter((m) => m.role === "system" || m.role === "developer")), /read\/search\/git and browser tools; do not modify files, implement a fix, or claim to have run shell commands, tests or live integrations; report only the browser checks you performed/);
     assert.match(session.text, /# Storefront site map.*Visit only URLs on the `liveUrl` host/s);
     assert.deepEqual(JSON.parse(readFileSync(session.context.files.storefront, "utf8")), { liveUrl: "https://shop.example.test/" });
@@ -4180,7 +4183,7 @@ export const scenarios = {
     assert.equal(JSON.parse(readFileSync(review.at(-1).context.files.storefront, "utf8")).liveUrl, "https://shop.example.test/");
     assert.equal(new Set(review.map((request) => `${request.request.model}/${request.consolidating}`)).size, 3);
     assert.ok(review.every((request) => names(request).includes("browser")), "every panel session reviewing a matching preview gets the browser");
-    assert.match(review[0].request.tools.find((tool) => tool.function.name === "browser").function.description, /public https sites.*At most 40 actions and 600 seconds per session/s);
+    assert.match(review[0].request.tools.find((tool) => tool.function.name === "browser").function.description, /public https sites.*At most 80 actions and 1200 seconds per session/s);
     f.loggie.wrongMd5.add("snippets/badge.liquid"); pushFile(pr.head.ref, "snippets/badge.liquid", "<span>new</span>\n");
     const mismatched = await reviewed();
     assert.equal(JSON.parse(readFileSync(mismatched[0].context.files.storefront, "utf8")).available, false);
@@ -4242,7 +4245,7 @@ export const scenarios = {
     assert.equal(new Set(verified.requests.map((request) => `${request.request.model}/${request.consolidating}`)).size, 3, "both reviewers and the consolidator ran");
     for (const request of verified.requests) {
       assert.deepEqual(names(request), [...JSON.parse(panel), "browser"]);
-      assert.match(request.request.tools.find((tool) => tool.function.name === "browser").function.description, /public https sites.*action=reset.*At most 40 actions and 600 seconds per session/s);
+      assert.match(request.request.tools.find((tool) => tool.function.name === "browser").function.description, /public https sites.*action=reset.*At most 80 actions and 1200 seconds per session/s);
       assert.ok(request.text.includes(section) && !request.text.includes("{{#storefront}}") && !request.text.includes("{{/storefront}}"));
     }
     const context = JSON.parse(readFileSync(verified.requests[0].context.files.storefront, "utf8")), preview = all(s.themePreviews).find((row) => !row.deletedAt);

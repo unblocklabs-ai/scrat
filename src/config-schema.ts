@@ -1,6 +1,6 @@
 import { type Static, Type } from "typebox";
 import Value from "typebox/value";
-import { actionSettings, nullable } from "./manifests.ts";
+import { actionSettings, modelSettings, nullable } from "./manifests.ts";
 import { prGrades } from "./results.ts";
 
 const strict = { additionalProperties: false } as const;
@@ -32,7 +32,7 @@ const schema = Type.Object({
     redactionMarginBytes: positive,
   }, strict),
   storefront: Type.Object({
-    enabled: Type.Boolean(), store: Type.String(), publicHost: Type.String(), siteMapMaxAgeDays: positive, screenshotRetentionDays: positive,
+    enabled: Type.Boolean(), store: Type.String(), publicHost: Type.String(), model: Type.Optional(modelSettings), siteMapMaxAgeDays: positive, screenshotRetentionDays: positive,
     devices: Type.Array(Type.String(), { minItems: 1, uniqueItems: true }),
     limits: Type.Object({ browsers: positive, browserSteps: positive, browserSeconds: positive, confirmationRuns: Type.Integer({ minimum: 0 }), regressionMaxGrade: Type.Enum(prGrades) }, strict),
     loggie: Type.Object({ url: Type.String(), slug: Type.String(), timeoutSeconds: positive }, strict),

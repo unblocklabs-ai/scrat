@@ -175,7 +175,7 @@ async function correctionRound({ run, operation, manifest, stop }: Ctx, p: Chang
   if (!sessionFile || round > config.harness.corrections.validation) throw error.cause;
   operation.log.warn({ event: "pi.validation_retry", round });
   updateRun(run.id, { stage: "agent" });
-  const followUp = await executePi({ run, cwd: p.workspace.path, context: "", tools: manifest.tools, scoped: manifest, log: operation.log, sessionFile, environment: p.environment, ...p.agentInput, followUp: validationMessage(error, round), stop });
+  const followUp = await executePi({ run, cwd: p.workspace.path, tools: manifest.tools, scoped: manifest, log: operation.log, environment: p.environment, ...p.agentInput, stop }, { context: "", sessionFile, followUp: validationMessage(error, round) });
   const corrected = { ...followUp, text: `${result.text}\n\n**Validation correction ${round}:** ${followUp.text}`, paths: [...new Set([...result.paths, ...followUp.paths])] };
   updateRun(run.id, { result: corrected, stage: "validating" });
   assertComplete(corrected);

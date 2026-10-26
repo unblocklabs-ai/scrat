@@ -39,25 +39,21 @@ export function saveReviewer(runId: string, index: number, patch: Partial<Review
   });
 }
 
-export async function executePi({ run, cwd, context, tools, scoped, storefront = false, log, sessionFile, environment = {}, reviewerIndex, onSession, baseSha, contextDir, revisions = {}, requireGrade = false, followUp, stop }: {
-  run: Run;
-  cwd: string;
+export type PiOptions = {
+  run: Run; cwd: string; tools: readonly ToolName[]; scoped: Pick<Manifest, "mode" | "http"> & { browser?: BrowserScope };
+  storefront?: boolean; contextDir?: string; revisions?: Record<string, string>; baseSha?: string;
+  environment?: NodeJS.ProcessEnv; log: Logger; stop?: AbortSignal;
+};
+
+export async function executePi(options: PiOptions, { context, sessionFile, reviewerIndex, onSession, requireGrade = false, followUp }: {
   context: string;
-  tools: readonly ToolName[];
-  scoped: Pick<Manifest, "mode" | "http"> & { browser?: BrowserScope };
-  storefront?: boolean;
-  log: Logger;
   sessionFile?: string;
-  environment?: NodeJS.ProcessEnv;
   reviewerIndex?: number;
   onSession?: (details: Pick<Reviewer, "piSessionId" | "piSessionFile" | "thinkingLevel">) => void;
-  baseSha?: string;
-  contextDir?: string;
-  revisions?: Record<string, string>;
   requireGrade?: boolean;
   followUp?: string;
-  stop?: AbortSignal;
 }) {
+  const { run, cwd, tools, scoped, storefront = false, baseSha, log, stop } = options;
   const readOnly = scoped.mode === "review";
   const modelRuntime = await sharedModelRuntime();
   const model = modelRuntime.getModel(run.provider, run.model);
@@ -66,7 +62,7 @@ export async function executePi({ run, cwd, context, tools, scoped, storefront =
     throw new Error(modelRuntime.getError() ?? `Configure a Pi model for ${run.provider}/${run.model}`);
   }
   const thinkingLevel = run.thinkingLevel as ThinkingLevel;
-  const { names, customTools, paths, gitPaths, basePaths, close } = await createAgentTools({ cwd, contextDir, tools, scoped, reviewerIndex, baseSha, revisions, environment, log, runId: run.id });
+  const { names, customTools, paths, gitPaths, basePaths, close } = await createAgentTools(options, reviewerIndex);
   const browsing = names.includes("browser"), graded = storefront && requireGrade;
   const settingsManager = SettingsManager.inMemory({ retry: config.harness.agentRetry });
   const resourceLoader = new DefaultResourceLoader({

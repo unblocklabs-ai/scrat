@@ -78,10 +78,10 @@ async function reviewPages({ run, task, operation, stop }: Ctx, { workspace, hea
     files: await sessionFiles(contextDir, diffPaths, siteMap),
   }, null, 2);
   return executePi({
-    run: { ...run, skill }, cwd: workspace.path, context, tools: ["read", "grep", "find", "ls", "git", "browser"],
+    run: { ...run, skill }, cwd: workspace.path, tools: ["read", "grep", "find", "ls", "git", "browser"],
     scoped: { mode: "review", browser: { navigationHosts: "any", resourceHosts: "any", limits: { steps: limits.browserSteps, milliseconds: limits.browserSeconds * 1000 } } },
-    onSession: record, log: operation.log, contextDir, revisions: { head: headSha, base: diffBaseSha, main: headSha }, stop,
-  });
+    log: operation.log, contextDir, revisions: { head: headSha, base: diffBaseSha, main: headSha }, stop,
+  }, { context, onSession: record });
 }
 
 async function replaceBaselines(shots: Shot[], sha: string) {

@@ -2,34 +2,23 @@ import { access, lstat, mkdir, readFile, realpath, writeFile } from "node:fs/pro
 import { constants } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { createBashToolDefinition, createEditToolDefinition, createFindToolDefinition, createGrepToolDefinition, createLsToolDefinition, createReadToolDefinition, createWriteToolDefinition, defineTool, detectSupportedImageMimeTypeFromFile } from "@earendil-works/pi-coding-agent";
-import type { Logger } from "pino";
 import { Type } from "typebox";
 import { backgroundsWork, heavyCommand, withValidationSlot } from "./commands.ts";
 import { config } from "./config.ts";
-import type { Manifest, ToolName } from "./manifests.ts";
+import type { ToolName } from "./manifests.ts";
+import type { PiOptions } from "./pi.ts";
 import { botName } from "./identity.ts";
 import { errorCode, ifMissing, redactSecrets } from "./errors.ts";
 import { childEnvironment } from "./secrets.ts";
 import { blobSize, gitPage } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
-import { type BrowserScope, createBrowserTool, createGithubSearchTool, createHttpTool } from "./scoped-tools.ts";
+import { createBrowserTool, createGithubSearchTool, createHttpTool } from "./scoped-tools.ts";
 import { createReviewGitTool, pageText } from "./review-git.ts";
 import { sandboxCommand } from "./sandbox.ts";
 
 type ScopedToolName = "http" | "browser" | "github_search";
 
-export async function createAgentTools({ cwd, contextDir, tools, scoped = {}, reviewerIndex, baseSha, revisions = {}, environment = {}, log, runId }: {
-  cwd: string;
-  contextDir?: string;
-  tools: readonly ToolName[];
-  scoped?: Pick<Manifest, "http"> & { browser?: BrowserScope };
-  reviewerIndex?: number;
-  baseSha?: string;
-  revisions?: Record<string, string>;
-  environment?: NodeJS.ProcessEnv;
-  log: Logger;
-  runId: string;
-}) {
+export async function createAgentTools({ run: { id: runId }, cwd, contextDir, tools, scoped, baseSha, revisions = {}, environment = {}, log }: PiOptions, reviewerIndex?: number) {
   const workspaceRoot = await realpath(cwd);
   const roots = [workspaceRoot, ...contextDir ? [await realpath(contextDir)] : []];
   function assertInside(real: string, path: string, allowed: string[]) {

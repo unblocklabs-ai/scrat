@@ -38,6 +38,10 @@ const pushFile = (branch, path, text) => {
   git(remote, "update-ref", "refs/heads/" + branch, next);
   return next;
 };
+const touchPr = (number) => {
+  const pr = f.prs.find((candidate) => candidate.number === number);
+  pr.head.sha = pushFile(pr.head.ref, "touched.txt", `touched ${pr.head.sha}\n`);
+};
 const writeSync = fs.writeSync;
 const captureLogs = () => {
   const lines = [];
@@ -1093,7 +1097,9 @@ export const scenarios = {
     assert.match(tasks.enqueueManualTasks("resolve_conflicts", ["5"])[0].error, /needs a PR/);
     assert.match(tasks.enqueueManualTasks("address_pr_feedback", ["5"])[0].error, /needs a PR/);
     assert.ok(!all(s.tasks).some((t) => t.subjectId === "issue-5" && t.action === "review_pr"));
-    f.prs.find((pr) => pr.number === 202).title = "Retitled after the review";
+    f.prs.find((pr) => pr.number === 202).title = "Retitled after the review"; await route();
+    assert.deepEqual(reviews2().filter((t) => t.status === "queued"), [], "a description edit is not a context change");
+    touchPr(202);
     const running = tasks.enqueueManualTasks("review_pr", ["202"])[0];
     const claimed = tasks.claimTask(); assert.equal(claimed.task.id, running.taskId);
     await route();
@@ -1585,6 +1591,7 @@ export const scenarios = {
     for (const mode of ["exact", "relevant-paths"]) assert.deepEqual(await freshness(saved, now, mode), { kind: "current", baseMoved: false });
     for (const mode of ["exact", "relevant-paths"]) {
       assert.deepEqual(await freshness(saved, { ...now, revision: "changed" }, mode), { kind: "stale", reason: "context", changedPaths: [] });
+      assert.equal((await freshness(saved, { ...now, revision: "changed", priorRevision: saved.revision }, mode)).kind, "current", "a pre-2.0.51 PR revision still counts");
       assert.deepEqual(await freshness(saved, { ...now, baseBranch: "release" }, mode), { kind: "stale", reason: "context", changedPaths: [] });
     }
     let fetched = false;
@@ -2143,13 +2150,13 @@ export const scenarios = {
     tasks.enqueueTask({ subjectId: queuedRepair.subjectId, action: "address_review", reason: "Coalesce", input: queuedRepair.input });
     assert.equal(count(204), before, "A coalesced repair does not spend a cap slot");
     assert.throws(() => tasks.enqueueManualTasks("address_review", ["204"]), /queued automatically/);
-    f.prs.find((pr) => pr.number === 204).title = "Retitled after the review"; await route();
+    touchPr(204); await route();
     assert.equal(repairs(204)[0].status, "cancelled", "A repair for a stale assessment is cancelled");
     assert.equal(labels204(), 1, "The label waits for the next review");
     db.$client.prepare("update items set self_repair_count = 2 where id = ?").run(prItem(204).id);
     await success(); await route(); assert.equal(repairs(204).length, 1, "A new low grade at the cap queues nothing");
     assert.equal(labels204(), 1, "Still low at the cap");
-    f.prs.find((pr) => pr.number === 204).title = "Retitled again"; await route(); f.reset(204, "normal"); assert.equal((await success()).result.grade, "B"); await route();
+    touchPr(204); await route(); f.reset(204, "normal"); assert.equal((await success()).result.grade, "B"); await route();
     assert.equal(labels204(), 0, "A better grade removes the label");
     await implement(5);
     f.comments.set(205, [humanComment(205, 9100, "Please rename it", "2026-10-19T01:00:00Z")]);

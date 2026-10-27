@@ -268,7 +268,8 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
       fullPage: Type.Optional(Type.Boolean()),
     }),
     executionMode: "sequential",
-    async execute(_id, { action, url: raw, selector, text: value, viewport, fullPage }) {
+    async execute(_id, { action, url: raw, selector, text: value, viewport: requested, fullPage }) {
+      const viewport = requested || undefined;
       if (!browserActions.includes(action)) throw new Error(`action must be one of: ${browserActions.join(", ")}`);
       const interaction = action === "click" || action === "fill" || action === "select";
       if (interaction && !selector) throw new Error(`action ${action} needs a selector`);
@@ -287,9 +288,9 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
         }
         const target = action === "goto" ? allowedUrl(raw ?? "", navigationHosts) : undefined;
         if (target && navigationHosts === "any" && !await resolvesPublicly(target.hostname)) throw new Error(`Refused: ${target.hostname} does not resolve to a public address`);
-        const { page } = await open(), timeout = { timeout: config.tools.browser.stepSeconds * 1000 };
+        const { page } = await open(), navigation = { timeout: config.tools.browser.navigationSeconds * 1000 }, timeout = { timeout: config.tools.browser.actionSeconds * 1000 };
         if (target) {
-          const response = await page.goto(target.href, { waitUntil: "load", ...timeout });
+          const response = await page.goto(target.href, { waitUntil: "load", ...navigation });
           operation.complete({ status: response?.status() });
           return text(JSON.stringify({ url: redactSecrets(page.url()), status: response?.status() ?? null, title: redactSecrets(await page.title()), ...await servedTheme(page, timeout) }), { host: target.hostname });
         }
@@ -307,7 +308,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
             if (action === "click") await page.click(selector, timeout);
             else if (action === "fill") await page.fill(selector, value ?? "", timeout);
             else await page.selectOption(selector, value ?? "", timeout);
-            await page.waitForLoadState("load", timeout);
+            await page.waitForLoadState("load", navigation);
           } finally { page.off("popup", onPopup); }
           operation.complete();
           return text(JSON.stringify({ url: redactSecrets(page.url()), title: redactSecrets(await page.title()), ...await servedTheme(page, timeout), ...(page.url() === before && { matched }), ...(popups.length > 0 && { popupClosed: true }), ...(blockedNavigation !== undefined && { blocked: redactSecrets(blockedNavigation) }) }));

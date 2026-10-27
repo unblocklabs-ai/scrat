@@ -159,7 +159,7 @@ export const chromium = {
       goto: async (url) => { current = url; fakes.visits.push(url); return { status: () => 200 }; },
       title: async () => "Fixture shop", url: () => current, innerText: async () => "Shop", innerHTML: async () => "<html></html>",
       screenshot: async ({ path }) => writeFileSync(path, "png " + new URL(current).pathname + " " + width + " " + fakes.look),
-      waitForLoadState: async () => {}, on: () => {}, off: () => {}, setViewportSize: async (size) => { width = size.width; },
+      waitForLoadState: async (_state, { timeout }) => { state.navigations.push(timeout); }, on: () => {}, off: () => {}, setViewportSize: async (size) => { width = size.width; },
       locator: () => ({ count: async () => 1 }), click: async () => {}, fill: async () => {}, selectOption: async () => {},
     };
     return { newContext: async ({ viewport }) => { width = viewport.width; return { route: async () => {}, newPage: async () => page, close: async () => {} }; }, close: async () => {} };
@@ -3581,7 +3581,7 @@ export const scenarios = {
     mkdirSync("ctx");
     const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
     const fake = () => {
-      const state = { closed: false, contexts: 0, launches: 0, handler: undefined, contextOptions: undefined, visited: [], typed: [], viewport: undefined, html: "<html></html>", timeouts: [], popups: [], listeners: [] };
+      const state = { closed: false, contexts: 0, launches: 0, handler: undefined, contextOptions: undefined, visited: [], typed: [], viewport: undefined, html: "<html></html>", timeouts: [], navigations: [], popups: [], listeners: [] };
       let current = "about:blank";
       const page = {
         async request(url, navigation, headers = { accept: "*/*" }) {
@@ -3590,7 +3590,7 @@ export const scenarios = {
             abort: async (code) => { outcome = { aborted: code }; }, continue: async (options) => { outcome = { continued: options?.headers ?? {} }; } });
           return outcome;
         },
-        async goto(url) { const outcome = await page.request(url, true); if (outcome.aborted) throw new Error("net::ERR_BLOCKED_BY_CLIENT"); state.visited.push(url); current = url; return { status: () => 200 }; },
+        async goto(url, options) { if (options) state.navigations.push(options.timeout); const outcome = await page.request(url, true); if (outcome.aborted) throw new Error("net::ERR_BLOCKED_BY_CLIENT"); state.visited.push(url); current = url; return { status: () => 200 }; },
         title: async () => "Shop", url: () => current, innerText: async () => "Cart total 5. token " + secret,
         screenshot: async ({ path, fullPage, timeout }) => { state.timeouts.push(timeout); writeFileSync(path, `png ${state.viewport?.width ?? "default"} ${fullPage ?? false}`); },
         innerHTML: async (_selector, { timeout }) => { state.timeouts.push(timeout); return state.html; }, waitForLoadState: async () => {},
@@ -3661,6 +3661,7 @@ export const scenarios = {
     assert.match(content, /Cart total 5/); assert.ok(content.includes("[redacted]") && !content.includes(secret));
     await assert.rejects(act(bound, { action: "click" }), /action click needs a selector/);
     await assert.rejects(act(bound, { action: "fill", selector: "#q" }), /action fill needs text/);
+    await act(bound, { action: "text", viewport: "" });
     await assert.rejects(act(bound, { action: "screenshot", viewport: "tablet" }), /viewport must be one of: desktop, mobile/);
     assert.deepEqual(JSON.parse(textOf(await act(bound, { action: "click", selector: "#missing" }))), { url: "https://shop.example.test/cart?x=1", title: "Shop", matched: 0 });
     assert.deepEqual(JSON.parse(textOf(await act(bound, { action: "click", selector: "#noop" }))), { url: "https://shop.example.test/cart?x=1", title: "Shop", matched: 2 });
@@ -3687,7 +3688,8 @@ export const scenarios = {
       bound.state.html = html;
       assert.equal(JSON.parse(textOf(await act(bound, { action: "screenshot" }))).themeId, undefined, html);
     }
-    assert.ok(bound.state.timeouts.length > 0 && bound.state.timeouts.every((timeout) => timeout === 30000));
+    assert.ok(bound.state.timeouts.length > 0 && bound.state.timeouts.every((timeout) => timeout === 12000));
+    assert.ok(bound.state.navigations.length > 0 && bound.state.navigations.every((timeout) => timeout === 30000));
     const ledger = readFileSync(resolve("ctx/screenshots.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
     assert.deepEqual(ledger.slice(0, 3), [plainShot, { path: mobileShot.path, viewport: "mobile", url: mobileShot.url }, { path: desktopShot.path, viewport: "desktop", url: desktopShot.url }]);
     assert.equal(ledger.length, 7, "every screenshot is recorded with its viewport and URL");

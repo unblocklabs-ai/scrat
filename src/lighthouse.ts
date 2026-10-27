@@ -48,14 +48,12 @@ const labelled = (table: Record<string, { label: string }>) => Object.fromEntrie
 
 const childAudit = (input: string, signal: AbortSignal) => new Promise<{ scores: Scores; metrics: Metrics }>((done, fail) => {
   const child = spawn(process.execPath, [auditScript, input], { env: process.env, stdio: ["ignore", "pipe", "pipe"] }), out: Buffer[] = [], err: Buffer[] = [];
-  let killer: NodeJS.Timeout | undefined;
-  const abort = () => { child.kill("SIGTERM"); killer = setTimeout(() => child.kill("SIGKILL"), config.tools.browser.stepSeconds * 1000); };
+  const abort = () => { child.kill("SIGKILL"); };
   if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
   child.stdout.on("data", (chunk: Buffer) => out.push(chunk));
   child.stderr.on("data", (chunk: Buffer) => err.push(chunk));
   child.once("error", fail);
   child.once("close", (code) => {
-    clearTimeout(killer);
     signal.removeEventListener("abort", abort);
     if (signal.aborted) return fail(signal.reason);
     if (code !== 0) return fail(new Error(Buffer.concat(err).toString().slice(-config.harness.maxStderrBytes).trim() || `Lighthouse exited with code ${code}`));

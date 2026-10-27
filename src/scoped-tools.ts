@@ -183,7 +183,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
   if (!Object.hasOwn(viewports, config.tools.browser.defaultViewport)) throw new Error(`tools.browser.defaultViewport must be one of: ${viewportNames.join(", ")}`);
   let blockedNavigation: string | undefined, size = viewports[config.tools.browser.defaultViewport];
   const secret = binding && bindingSecret(binding);
-  let browser: BrowserLike | undefined, release: (() => void) | undefined, session: { context: ContextLike; page: PageLike } | undefined, startedAt: number | undefined, halted: string | undefined, steps = 0, shots = 0;
+  let browser: BrowserLike | undefined, closed = false, release: (() => void) | undefined, session: { context: ContextLike; page: PageLike } | undefined, startedAt: number | undefined, halted: string | undefined, steps = 0, shots = 0;
   const answered = new Map<string, Promise<boolean>>();
   const resolvesPublicly = (host: string) => {
     if (!answered.has(host)) answered.set(host, publicAnswers(host, resolve).then(Boolean, () => false));
@@ -195,6 +195,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
   };
 
   async function close() {
+    closed = true;
     const open = browser;
     browser = undefined;
     session = undefined;
@@ -227,6 +228,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
           rules.push(`MAP ${host} ${answer ? (answer.family === 6 ? `[${answer.address}]` : answer.address) : "~NOTFOUND"}`);
         }
         browser = await launch(rules.length ? [`--host-resolver-rules=${rules.join(",")}`] : []);
+        if (closed) { await browser.close().catch(() => undefined); browser = undefined; throw new Error("Refused: the browser session has ended"); }
       } catch (error) { await close(); throw error; }
     }
     try {

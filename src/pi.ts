@@ -173,7 +173,6 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
       }
     }
   } finally {
-    session.dispose();
-    await close();
+    try { session.dispose(); } finally { await close(); }
   }
 }

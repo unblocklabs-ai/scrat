@@ -66,6 +66,8 @@ async function publishStage({ task, run, subject, references, manifest }: Ctx, o
   await publishRun(github, subject, task, evaluatedRun, references, publicationContext);
 }
 
+const heapUsed = () => Math.round(process.memoryUsage().heapUsed / 1048576);
+
 export async function runNextTask(stop?: AbortSignal) {
   const claimed = claimTask();
   if (!claimed) return;
@@ -85,21 +87,21 @@ export async function runNextTask(stop?: AbortSignal) {
     }
     await publishStage(ctx, observed);
     finishRun(run.id, { status: "completed" });
-    operation.complete();
+    operation.complete({ heapUsedMb: heapUsed() });
     return getRun(run.id)!;
   } catch (error) {
     if (error instanceof InterruptedError) {
       recordEvent({ ...references, type: "run.interrupting", data: { stage: getRun(run.id)!.stage, reason: error.message } });
-      operation.complete({ interrupted: true });
+      operation.complete({ interrupted: true, heapUsedMb: heapUsed() });
       interruptRun(run.id, error);
       return getRun(run.id)!;
     }
     if (retryTransientFailure(run.id, error)) {
-      operation.fail(error);
+      operation.fail(error, { heapUsedMb: heapUsed() });
       return getRun(run.id)!;
     }
     const failed = finishRun(run.id, { status: "failed", error });
-    operation.fail(error);
+    operation.fail(error, { heapUsedMb: heapUsed() });
     return failed;
   } finally {
     if (cleanup.databaseRequested) await bestEffort(operation.log, "run.cleanup_pending", { resource: "database" }, () => removeRunDatabase(run.id, references));

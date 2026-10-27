@@ -6,7 +6,8 @@ import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { botName } from "./identity.ts";
 import { gradeLabels, reconcileLabels } from "./labels.ts";
-import { isIssueComment, issueCommentId, reviewMarker, taskMarker, withMarker } from "./markers.ts";
+import { acknowledgedTaskIds, isIssueComment, issueCommentId, parseIssueCommentId, reviewMarker, taskMarker, withMarker } from "./markers.ts";
+import { logger } from "./logging.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
 import { runHistory, updateRun } from "./run-history.ts";
@@ -48,10 +49,12 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
 
   let commentId: number | undefined;
   if (shown) {
-    const body = desired ? reviewBody(desired.result.text, desired.task.id)
-      : reviewBody(`This PR is behind ${observation.baseBranch} and does not merge cleanly; update the branch and ${botName} will review it.`, shown.task.id);
+    const text = desired ? desired.result.text : `This PR is behind ${observation.baseBranch} and does not merge cleanly; update the branch and ${botName} will review it.`;
+    const body = reviewBody(text, shown.task.id);
     const { run } = shown;
-    commentId = await upsertComment(github, number, existing, body, deliveryReferences);
+    const unchanged = existing && acknowledgedTaskIds(existing.body).some((id) => existing.body === reviewBody(text, id));
+    if (existing && unchanged) logger.info({ ...deliveryReferences, event: "review.unchanged" });
+    commentId = existing && unchanged ? parseIssueCommentId(existing.id) : await upsertComment(github, number, existing, body, deliveryReferences);
     updateRun(run.id, { publication: { ...run.publication, commentId } });
   }
 

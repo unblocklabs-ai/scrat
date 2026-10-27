@@ -6,7 +6,7 @@ import { branchConflictCode } from "./errors.ts";
 import { bestEffort } from "./logging.ts";
 import { createMergeCommit, prepareTarget } from "./git.ts";
 import { currentPrReview } from "./pr-assessment.ts";
-import { getRun, updateRun } from "./run-history.ts";
+import { completedRunsOfAction, getRun, updateRun } from "./run-history.ts";
 import { assertComplete } from "./results.ts";
 import type { Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
@@ -21,16 +21,27 @@ const reviewsStorefront = ({ subject, manifest, run }: Ctx) => config.storefront
 
 async function settleReviewPlan(ctx: Ctx, { item, observation, mainSha }: Observed) {
   const { run, manifest } = ctx;
-  if (run.reviewers.length !== 1) return;
+  if (run.reviewers.length !== 1) return false;
   const trigger = parseTriggerInput(run.input);
   if (isBaseOnly(trigger)) {
     const state = await currentPrReview(item.id, observation, mainSha);
     if (state.kind === "stale" && state.reason === "base" && (state.assessment.run.mainSha ?? null) === (trigger.previousMainSha ?? null)
-      && (state.assessment.run.headSha ?? null) === (trigger.previousHeadSha ?? null)) return;
+      && (state.assessment.run.headSha ?? null) === (trigger.previousHeadSha ?? null)) return true;
   }
   const { reviewers, provider, model, thinkingLevel } = manifest;
   updateRun(run.id, { reviewers, provider, model, thinkingLevel });
   ctx.run = getRun(run.id)!;
+  return false;
+}
+
+async function retainedScope({ run, task }: Ctx, { item, observation, mainSha, pullRequest }: Observed, evaluated: ReturnType<typeof evaluateContext>, diffPaths: string[], paths: string[]) {
+  const trigger = parseTriggerInput(run.input);
+  if (trigger.kind !== "item_changed") return paths;
+  const state = pullRequest ? await currentPrReview(item.id, observation, mainSha) : undefined;
+  const previous = state ? "assessment" in state ? state.assessment.run : undefined : completedRunsOfAction(item.id, task.action, 1)[0];
+  if (!previous || previous.context?.revision !== evaluated.revision) return paths;
+  const mainOnly = new Set(trigger.changedPaths);
+  return [...new Set([...previous.result?.paths ?? [], ...diffPaths, ...paths.filter((path) => !mainOnly.has(path))])];
 }
 
 const itemScope = async ({ run, task, repositoryPath }: Ctx, observed: Observed) => {
@@ -79,13 +90,14 @@ export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   if (observed) await refreshPreview(ctx, observed, review);
   stopBefore(stop, "the agent");
   const changeContext = manifest.context === "change";
-  if (observed) await settleReviewPlan(ctx, observed);
+  const baseOnly = observed ? await settleReviewPlan(ctx, observed) : false;
   updateRun(run.id, { stage: "agent" });
   const { result } = await runAgent(ctx, {
     environment, baseSha: changeContext ? review.diffBaseSha : undefined,
     panel: manifest.agent === "panel" ? { baseSha: review.diffBaseSha, requireGrade: !changeContext } : undefined,
-    input: { workspace: review.workspace, evaluated, diffBaseSha: review.diffBaseSha, diffPaths, mainSha: review.mainSha, headSha: review.headSha, baseRef: review.mainSha, mergeInProgress: false },
+    input: { workspace: review.workspace, evaluated, diffBaseSha: review.diffBaseSha, diffPaths, mainSha: review.mainSha, headSha: review.headSha, baseRef: review.mainSha, mergeInProgress: false, baseOnly },
   });
+  if (observed) result.paths = await retainedScope(ctx, observed, evaluated, diffPaths, result.paths);
   updateRun(run.id, { result, stage: "validating" });
   assertComplete(result);
   if (reviewsStorefront(ctx)) updateRun(run.id, { result: await (await import("./storefront-main.ts")).reviewStorefront(ctx, { ...review, diffPaths, item: evaluated.item }, result) });

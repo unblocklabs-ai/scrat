@@ -227,6 +227,7 @@ export async function fixture(scenario, spec) {
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : mode === "incomplete-once" && !continued ? "incomplete" : "complete";
     const verdict = scenario.startsWith("commit_review") ? (consolidating && verdicts.consolidating) || verdicts[request.model] || verdicts.default : undefined;
     const output = (context.action === "storefront_discover" ? "- `/products/<handle>`: product page with add to cart." : review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : feedback ? "Fixed the validation failure." : "Implemented the change.")
+      + (review && mode.startsWith("grade-") ? ` (${mode})` : "")
       + (scenario === "commit_review_e2e" ? " <!channel>" : "")
       + (mode === "leak-report" ? "\n" + process.env.GITHUB_APP_PRIVATE_KEY : "")
       + (mode.startsWith("quoted-") ? "\n```\nSCRAT_GRADE: F\nSCRAT_READY\n```" : "")

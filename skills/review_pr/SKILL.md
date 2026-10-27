@@ -60,7 +60,7 @@ End with exactly one `SCRAT_STOREFRONT: <result>` line immediately before the `S
 {{/storefront}}
 ## Previous assessment
 
-When `files.previous_assessment` has findings, first state each finding as fixed, unfixed or no longer applicable, with evidence from current source. When `files.previous_repair` is present, it is the repair agent's summary of what it changed. Report new findings only if verified against the current diff; mark one in code unchanged since the previous assessment "missed earlier" and grade as if it were absent unless it is P1 or above. Do not re-raise a finding the evidence shows fixed. Grade by the rubric on what remains.
+When `files.previous_assessment` has findings, first state each finding as fixed, unfixed or no longer applicable, with evidence from current source. When `files.previous_repair` is present, it is the repair agent's summary of what it changed. Report new findings only if verified against the current diff; mark one in code unchanged since the previous assessment "missed earlier" and grade as if it were absent unless it is P1 or above. Do not re-raise a finding the evidence shows fixed. Grade by the rubric on what remains. When this session has no storefront section, carry the previous assessment's storefront findings forward as they were, naming the head they were taken on. If the conclusion is unchanged and the cited evidence is still accurate on the current snapshot, return the text of `files.previous_assessment` exactly as written, with no added summary, then the usual `SCRAT_GRADE` line; the file does not contain it.
 
 ## Follow-ups and output
 

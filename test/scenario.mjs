@@ -686,6 +686,10 @@ export const scenarios = {
     mark = f.requests.length; const single = await success(); singleRun(single, mark);
     assert.equal(comments(), 1); assert.deepEqual(f.prs[0].labels.map((label) => label.name), ["B · Solid"]);
 
+    const updates = f.written("comment_update").length;
+    changeMain("src/app.ts", "export const value = 98;\n"); await route(); assert.equal(queued()[0].input.baseOnly, true);
+    await success(); assert.equal(f.written("comment_update").length, updates, "a re-review with unchanged text does not edit the comment");
+
     changeMain("src/app.ts", "export const value = 100;\n"); await route(); assert.equal(queued()[0].input.baseOnly, true);
     pushFile(branch, "human-note.txt", "A follow-up change\n"); await route();
     assert.equal(queued().length, 1); assert.equal(queued()[0].input.baseOnly, undefined, "coalescing with a head change drops the base-only reason");
@@ -699,15 +703,15 @@ export const scenarios = {
     assert.equal(queued()[0].input.baseOnly, undefined, "a context change with a main change is mixed");
     mark = f.requests.length; panelRun(await success(), mark);
 
-    changeMain("src/app.ts", "export const value = 103;\n"); await route();
-    f.reset(201, "incomplete"); const failed = await run(); assert.equal(failed.error.code, "AGENT_INCOMPLETE"); assert.equal(failed.reviewers.length, 1);
-    f.reset(201, "normal"); mark = f.requests.length; tasks.retryTask(failed.taskId); singleRun(await success(), mark);
-
     changeMain("src/app.ts", "export const value = 104;\n"); await route();
     f.faults.comment.add(201); const lost = await run(); assert.equal(lost.stage, "publishing"); assert.ok(lost.error); assert.equal(lost.reviewers.length, 1);
     mark = f.requests.length; tasks.retryTask(lost.taskId); const recovered = await success();
     assert.equal(f.requests.length, mark); assert.deepEqual(recovered.reviewers, lost.reviewers); assert.equal(recovered.result.text, lost.result.text);
     assert.equal(recovered.publication.status, "published");
+
+    changeMain("src/app.ts", "export const value = 103;\n"); await route();
+    f.reset(201, "incomplete"); const failed = await run(); assert.equal(failed.error.code, "AGENT_INCOMPLETE"); assert.equal(failed.reviewers.length, 1);
+    f.reset(201, "normal"); mark = f.requests.length; tasks.retryTask(failed.taskId); singleRun(await success(), mark);
 
     changeMain("src/app.ts", "export const value = 105;\n"); await route();
     f.reset(201, "incomplete"); const stale = await run(); assert.ok(stale.error);
@@ -1018,7 +1022,8 @@ export const scenarios = {
     const second = f.requests.filter((r) => r.context.revision && r.context.previous);
     assert.ok(second.length >= 3 && second.every((r) => prompts(r).length < 20_000), "Prompt size is independent of base-branch changes");
     assert.ok(second.every((r) => /^[a-f0-9]{40}$/.test(r.context.previous.mainSha) && r.context.previous.mainSha !== r.context.workspace.mainSha));
-    assert.ok(failed.result.paths.includes("src/bulk.txt"), "Paths inspected through the git tool join review scope");
+    assert.ok(!failed.result.paths.includes("src/bulk.txt"), "Files looked at only because main changed them stay out of review scope");
+    assert.ok(failed.result.paths.includes("src/app.ts"));
     assert.ok(second.some((r) => toolText(r, "src/bulk.txt")));
     for (const r of second) {
       assert.ok(!("changedPaths" in r.context.input) && r.context.input.changedPathCount >= 250);
@@ -1097,7 +1102,7 @@ export const scenarios = {
     await route(); assert.equal(f.row(s.tasks, manual.id).status, "queued");
     const result = await success();
     assert.equal(result.taskId, manual.id);
-    assert.match(f.comments.get(201).find((c) => c.user.login !== "human").body, new RegExp(manual.id));
+    assert.equal(result.publication.status, "published");
     await route(); assert.equal(reviewTasks().filter((t) => t.status === "queued").length, 0, "the manual run is the current authoritative review");
     const again = tasks.enqueueManualTasks("review_pr", ["201"])[0];
     f.prs[0].state = "closed"; await route();
@@ -1450,7 +1455,7 @@ export const scenarios = {
     const publications = () => f.writes.length;
     f.reset(201, "incomplete-once"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Continue", input: { source: "github_items", kind: "manual", manual: true } });
     let writes = publications(); const continued = await success();
-    assert.equal(continued.result.outcome, "complete"); assert.ok(prompts() >= 3); assert.equal(publications() - writes, 1, "an unchanged grade writes only the comment");
+    assert.equal(continued.result.outcome, "complete"); assert.ok(prompts() >= 3); assert.equal(publications() - writes, 0, "an unchanged review and grade write nothing");
     const published = f.comments.get(201).length;
     f.reset(201, "incomplete"); tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Never completes", input: { source: "github_items", kind: "manual", manual: true } });
     writes = publications(); const spent = prompts(); const exhausted = await run();
@@ -4289,6 +4294,13 @@ export const scenarios = {
     const consolidation = split.requests.find((request) => request.consolidating);
     assert.match(consolidation.text, /re-run in the browser, after reset, only the storefront regressions and fix claims the reviewers report or disagree on/);
     assert.match(consolidation.text, /"grade": "A",\s*"storefront": "regression"[\s\S]*"grade": "A",\s*"storefront": "verified"/);
+
+    const settled = f.botComments(201).length;
+    mkdirSync(resolve("seed", "snippets"), { recursive: true }); changeMain("snippets/badge.liquid", "<span>main</span>\n"); f.reset(201, "normal"); const baseFrom = f.requests.length; await route();
+    const baseOnly = await success(); assert.equal(baseOnly.reviewers.length, 1);
+    const baseRequests = f.requests.slice(baseFrom).filter((request) => request.context.action === "review_pr");
+    assert.ok(baseRequests.length && baseRequests.every((request) => request.context.files.storefront === undefined && !request.text.includes(section) && JSON.stringify(names(request)) === panel), "a base-only re-review does not browse");
+    assert.equal(f.botComments(201).length, settled);
 
     f.loggie.wrongMd5.add("snippets/badge.liquid");
     const mismatched = await reviewOf("normal");

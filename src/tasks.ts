@@ -8,7 +8,7 @@ import { db } from "./db.ts";
 import { describeError, type ErrorDetails, errorCode, errorMessage, transientInferenceCode } from "./errors.ts";
 import { recordEvent, type JournalEvent } from "./events.ts";
 import { withOperationSync } from "./logging.ts";
-import { entryStage, hasPublicationSnapshot, hasValidationCheckpoint, InterruptedError } from "./results.ts";
+import { entryStage, hasPublicationSnapshot, hasReviewCheckpoint, hasValidationCheckpoint, InterruptedError, workerStoppedMessage } from "./results.ts";
 import { getRun, getTask, latestRunOfTask } from "./run-history.ts";
 import { asItem } from "./items.ts";
 import { items, runs, type Run, subjects, tasks, type Task, type Subject } from "./schema.ts";
@@ -43,14 +43,17 @@ function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run |
   const action = manifestOf(task.action);
   const validationOnly = task.retryMode === "validation";
   const publicationResume = !validationOnly && hasPublicationSnapshot(retry) ? retry : undefined;
-  const resume = validationOnly ? (hasValidationCheckpoint(retry) ? retry : undefined) : publicationResume;
-  const prior = retry?.error?.name === "InterruptedError" && !resume ? undefined : retry;
+  const interrupted = retry?.error?.name === "InterruptedError";
   const review = action.mode === "review";
+  const reviewResume = interrupted && review && !validationOnly && hasReviewCheckpoint(retry) ? retry : undefined;
+  const resume = validationOnly ? (hasValidationCheckpoint(retry) ? retry : undefined) : publicationResume ?? reviewResume;
+  const prior = interrupted && !resume ? undefined : retry;
+  const resumeReason = !interrupted ? "retry" as const : retry?.error?.message === workerStoppedMessage ? "crash" as const : "drain" as const;
   const pinned = review && !resume ? undefined : prior;
   const settings = pinned ?? action;
   const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? (isBaseOnly(trigger) ? action.reviewers.slice(0, 1) : action.reviewers);
   const { provider, model, thinkingLevel } = !resume && reviewers.length === 1 ? reviewers[0] : settings;
-  return { prior, resume, publicationResume, review, reviewers, skill: settings.skill, provider, model, thinkingLevel, stage: entryStage(retry, task.retryMode) };
+  return { prior, resume, publicationResume, review, reviewers, skill: settings.skill, provider, model, thinkingLevel, resumeReason, stage: entryStage(retry, task.retryMode, reviewResume) };
 }
 
 export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | "action" | "priority" | "reason"> & { input: TriggerInput }) {
@@ -141,7 +144,7 @@ export function claimTask() {
       recordEvent({ subjectId: next.task.subjectId, taskId: next.task.id, type: "task.rejected", data: { action: next.task.action, reason: claimable.reason } }, transaction);
     }
     if (!next || !claimable?.ok) return;
-    const { prior, resume, publicationResume, review, reviewers, skill, provider, model, thinkingLevel, stage } = planRunStart(next.task, claimable);
+    const { prior, resume, publicationResume, review, reviewers, skill, provider, model, thinkingLevel, resumeReason, stage } = planRunStart(next.task, claimable);
     const task = transaction.update(tasks).set({ status: "running" }).where(eq(tasks.id, next.task.id)).returning().get()!;
     const run = transaction.insert(runs).values({
       taskId: task.id,
@@ -168,6 +171,7 @@ export function claimTask() {
     recordEvent({ subjectId: task.subjectId, taskId: task.id, runId: run.id, type: "run.started", data: {
       action: task.action, skill: run.skill, provider: run.provider, model: run.model, thinkingLevel: run.thinkingLevel,
     } }, transaction);
+    if (resume) recordEvent({ subjectId: task.subjectId, taskId: task.id, runId: run.id, type: "run.resumed", data: { stage: run.stage, fromRunId: resume.id, reason: resumeReason } }, transaction);
     const item = transaction.select().from(items).where(eq(items.id, task.subjectId)).get();
     return { task, subject: next.subject, item: item && asItem(item, next.subject), run };
   }, { behavior: "immediate" });
@@ -235,7 +239,7 @@ export function retryTransientFailure(runId: string, error: unknown) {
   return true;
 }
 
-export function interruptRun(runId: string, error: unknown = new InterruptedError("Worker stopped before finishing this run"), retry?: { initialDelaySeconds: number; maxDelaySeconds: number }) {
+export function interruptRun(runId: string, error: unknown = new InterruptedError(workerStoppedMessage), retry?: { initialDelaySeconds: number; maxDelaySeconds: number }) {
   const details = describeError(error);
   const interrupted = db.transaction((transaction) => closeRun(transaction, runId, details, (run) => {
     const own = getTask(run.taskId, transaction)!;

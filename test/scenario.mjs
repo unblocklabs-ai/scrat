@@ -1993,6 +1993,21 @@ export const scenarios = {
     const r = f.row(s.runs, claim.run.id); assert.equal(r.error.code, "RUN_INTERRUPTED"); assert.equal(r.result.text, "Saved"); assert.equal(r.publication.commentId, 123);
     tasks.retryTask(r.taskId); const retried = await success();
     assert.equal(retried.retryOfRunId, null); assert.ok(!("previousFailure" in f.requests.at(-1).context.files), "a recovered run is retried as an interruption, not as a failure to repair");
+    const recoverActive = () => execFileSync(process.execPath, [resolve("app/src/recover-active.ts")], { stdio: "pipe" });
+    f.addIssue(2); f.enqueue(2); const reviewed = await success(), requests = f.requests.length;
+    f.enqueue(2); const validating = tasks.claimTask();
+    db.update(s.runs).set({ stage: "validating", result: reviewed.result, context: reviewed.context, mainSha: reviewed.mainSha, headSha: reviewed.headSha }).where(eq(s.runs.id, validating.run.id)).run();
+    recoverActive();
+    assert.equal(f.row(s.tasks, validating.task.id).status, "queued"); assert.equal(f.row(s.runs, validating.run.id).error.code, "RUN_INTERRUPTED");
+    const resumed = await success();
+    assert.equal(resumed.retryOfRunId, validating.run.id); assert.equal(resumed.inferenceFromRunId, validating.run.id); assert.equal(resumed.result.text, reviewed.result.text); assert.equal(f.requests.length, requests, "a crash after the agent resumes without a new model request");
+    assert.ok(all(s.events).some((event) => event.type === "run.resumed" && event.runId === resumed.id && event.data.reason === "crash" && event.data.stage === "validating"));
+    f.enqueue(2); const agent = tasks.claimTask();
+    db.update(s.runs).set({ stage: "agent" }).where(eq(s.runs.id, agent.run.id)).run();
+    recoverActive();
+    assert.equal(f.row(s.tasks, agent.task.id).status, "queued");
+    const restarted = await success();
+    assert.equal(restarted.retryOfRunId, null); assert.equal(restarted.inferenceFromRunId, null); assert.ok(f.requests.length > requests, "a crash during the agent starts the review over");
   } },
   cleanup: { title: "cleanup failure cannot turn a published review or comment-only implementation into a failed task, and cleanup never removes a change workspace through a review that stopped early", run: async () => {
     f.addIssue(1); f.enqueue(1); f.faults.cleanup.add(1); const r = await success();
@@ -3384,6 +3399,20 @@ export const scenarios = {
     const started = Date.now(), timed = await success();
     assert.ok(Date.now() - started < 20_000, "a hanging Lighthouse run does not hold the review");
     assert.ok(replies().at(-1).endsWith("• Lighthouse mobile: no result (stopped when the 1s budget was spent)\n• Lighthouse desktop: no result (not run, the 1s budget was spent)" + link(timed)));
+
+    live.harness.drainTimeoutSeconds = 1; scored();
+    await push({ "assets/app.css": "body { color: gold; }\n" });
+    const stop = new AbortController(), codeRequests = () => f.requests.filter((request) => !request.context.storefront).length, before = replies().length;
+    f.script = [code, done]; f.onModel = (context) => { if (context.storefront) stop.abort(); else f.modes.set(0, "stall"); };
+    const cut = await f.runNextTask(stop.signal); f.onModel = undefined;
+    assert.equal(cut.error.code, "RUN_INTERRUPTED"); assert.equal(cut.stage, "validating"); assert.equal(f.row(s.tasks, cut.taskId).status, "queued");
+    const reviewed = codeRequests(); assert.equal(replies().length, before);
+    f.reset(0, "normal"); f.script = [done];
+    const resumed = await success();
+    assert.equal(resumed.retryOfRunId, cut.id); assert.equal(resumed.inferenceFromRunId, cut.id); assert.equal(codeRequests(), reviewed, "the code review is not re-prompted");
+    assert.equal(resumed.result.text, cut.result.text); assert.equal(replies().length, before + 2, "the code review and the storefront block are each posted once");
+    assert.equal(replies().at(-2), codeText); assert.match(replies().at(-1), /^\*Storefront\* on \w{7}: Nothing visible changed\./);
+    assert.ok(all(s.events).some((event) => event.type === "run.resumed" && event.runId === resumed.id && event.data.fromRunId === cut.id && event.data.reason === "drain"));
   } },
   manifests: { title: "every action is loaded from a validated manifest, malformed manifests are rejected with file and path, and local overrides reach the runtime", run: async () => {
     const { readManifests } = await f.app("manifests.ts");

@@ -78,7 +78,7 @@
       "uploadBatchBytes": 8388608,
       "requestTimeoutSeconds": 180
     },
-    "lighthouse": { "runs": 3, "pages": ["/"], "timeoutSeconds": 600 }
+    "lighthouse": { "runs": 2, "pages": ["/"], "timeoutSeconds": 600 }
   },
   "slack": {
     "enabled": false,

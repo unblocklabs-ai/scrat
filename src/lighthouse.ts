@@ -133,7 +133,7 @@ export async function recordLighthouse(results: Run[], sha: string, state: strin
     `| ${device} | \`${page}\` | ${run} | ${scores && measured ? `${[...ids.map((id) => scores[id]), ...metricIds.map((id) => formatMetric(id, shownUnits(id, measured[id])))].join(" | ")} | \`${relative(process.cwd(), report!)}\`` : `${perRunLabels.map(() => "-").join(" | ")} | ${error!.replaceAll("|", "\\|")}`} |`);
   const report = [
     "### Lighthouse",
-    `Average scores and metrics of ${config.storefront.lighthouse.pages.map((page) => `\`${page}\``).join(", ")} per device${compared.length ? `, with the change from the previous main run (${compared.join(", ")})` : ""}.`,
+    `Average scores and metrics of ${config.storefront.lighthouse.pages.map((page) => `\`${page}\``).join(", ")} per device${compared.length ? `, with the change from the ${state ? "previous audit" : "previous main run"} (${compared.join(", ")})` : ""}.`,
     ...averages,
     "Each run:",
     `| Device | Page | Run | ${perRunLabels.join(" | ")} | Report |\n| --- | --- | --- | ${perRunLabels.map(() => "---").join(" | ")} | --- |\n${perRun.join("\n")}`,

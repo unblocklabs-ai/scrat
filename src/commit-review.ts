@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import type { evaluateContext } from "./agent-input.ts";
 import { manifestOf } from "./actions.ts";
+import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { changedPaths, git } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
@@ -59,7 +60,7 @@ async function describeChange(subject: Subject, commitCount: number) {
 }
 
 const rootPost = async (subject: Subject, channel: string, text: string) => {
-  const ts = await postMessage({ channel, text, blocks: [{ type: "section", text: { type: "mrkdwn", text } }] });
+  const ts = await postMessage({ channel, text, blocks: text.length > config.slack.maxTextLength ? undefined : [{ type: "section", text: { type: "mrkdwn", text } }] });
   return db.insert(slackThreads).values({ subjectId: subject.id, channel, ts }).returning().get();
 };
 

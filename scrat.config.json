@@ -64,6 +64,7 @@
     "publicHost": "",
     "model": { "provider": "codex-lb", "model": "gpt-6.1-terra", "thinkingLevel": "high" },
     "siteMapMaxAgeDays": 30,
+    "auditPaths": [],
     "screenshotRetentionDays": 14,
     "devices": ["desktop", "mobile"],
     "limits": { "browsers": 2, "browserSteps": 80, "browserSeconds": 1200, "confirmationRuns": 1, "regressionMaxGrade": "C" },

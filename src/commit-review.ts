@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import type { evaluateContext } from "./agent-input.ts";
 import { manifestOf } from "./actions.ts";
+import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { changedPaths, git } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
@@ -58,6 +59,11 @@ async function describeChange(subject: Subject, commitCount: number) {
   return `${author} changed the theme: <${metadata.url}|"${title}">${others}.`;
 }
 
+const rootPost = async (subject: Subject, channel: string, text: string) => {
+  const ts = await postMessage({ channel, text, blocks: text.length > config.slack.maxTextLength ? undefined : [{ type: "section", text: { type: "mrkdwn", text } }] });
+  return db.insert(slackThreads).values({ subjectId: subject.id, channel, ts }).returning().get();
+};
+
 async function threadRoot(subject: Subject, action: string, { sha, branch, commitCount }: CommitInput) {
   const existing = savedRoot(subject);
   if (existing) return existing;
@@ -67,9 +73,7 @@ async function threadRoot(subject: Subject, action: string, { sha, branch, commi
     sha, short_sha: sha.slice(0, 7), author: escapeSlack(metadata.author), title: escapeSlack(metadata.title),
     url: metadata.url, branch, count: String(commitCount), bot: botName, change: startMessage.includes("{{change}}") ? await describeChange(subject, commitCount) : "",
   };
-  const text = startMessage.replaceAll(/\{\{(\w+)\}\}/g, (match, name: string) => Object.hasOwn(values, name) ? values[name]! : match);
-  const ts = await postMessage({ channel, text, blocks: [{ type: "section", text: { type: "mrkdwn", text } }] });
-  return db.insert(slackThreads).values({ subjectId: subject.id, channel, ts }).returning().get();
+  return rootPost(subject, channel, startMessage.replaceAll(/\{\{(\w+)\}\}/g, (match, name: string) => Object.hasOwn(values, name) ? values[name]! : match));
 }
 
 export async function describeCommit({ subject, run, task, manifest, operation, repositoryPath }: Ctx) {
@@ -84,9 +88,10 @@ export async function describeCommit({ subject, run, task, manifest, operation, 
   return { mainSha: sha, headSha: sha, evaluated, diffPaths, diffBaseSha: previousSha };
 }
 
-export async function postCommitReply(subject: Subject, action: string, run: Evaluated, text?: string, blocks?: unknown[]) {
-  const input = commitInput(run.input);
-  const thread = await threadRoot(subject, action, input);
+export async function postReply(subject: Subject, action: string, run: Evaluated, text?: string, blocks?: unknown[]) {
+  const thread = subject.kind === "window"
+    ? savedRoot(subject) ?? await rootPost(subject, manifestOf(action).channel ?? "", escapeSlack(run.result.text.split("\n").find((line) => line.trim())!.trim()))
+    : await threadRoot(subject, action, commitInput(run.input));
   return postMessage({ channel: thread.channel, text: text ?? escapeSlack(run.result.text), blocks: text === undefined ? reviewBlocks(run.result.text) : blocks, threadTs: thread.ts });
 }
 
@@ -96,8 +101,8 @@ export function verdictReaction({ result }: Run) {
   return result?.verdict ? verdictReactions[result.verdict] : undefined;
 }
 
-export async function reactToCommitRoot(subject: Subject, name: string) {
+export async function reactToRoot(subject: Subject, name: string) {
   const thread = savedRoot(subject);
-  if (!thread) throw new Error("Commit review has no Slack thread root to react to");
+  if (!thread) throw new Error("The review has no Slack thread root to react to");
   await addReaction({ channel: thread.channel, timestamp: thread.ts, name });
 }

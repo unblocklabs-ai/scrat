@@ -3413,7 +3413,7 @@ export const scenarios = {
   manifest_directory: { title: "a deployment manifest directory adds an action for a freed trigger, rejects duplicate enabled triggers, unknown tools and files, and bad directories", configure: [configureManifestDirectory], run: async () => {
     const { manifests, routeFor } = await f.app("actions.ts");
     const { validateStaticConfig } = await f.app("startup.ts");
-    assert.deepEqual(manifests.map((m) => m.name).sort(), ["address_pr_feedback", "address_review", "implement", "my_pr_review", "resolve_conflicts", "review_base_change", "review_issue", "review_pr", "review_triage", "storefront_discover"]);
+    assert.deepEqual(manifests.map((m) => m.name).sort(), ["address_pr_feedback", "address_review", "implement", "my_pr_review", "resolve_conflicts", "review_base_change", "review_issue", "review_pr", "review_triage", "store_audit", "storefront_discover"]);
     await validateStaticConfig(f.config);
     await assert.rejects(validateStaticConfig({ ...f.config, actions: { ...f.config.actions, review_issue: { ...f.config.actions.review_issue, enabled: true } } }), /review_issue, review_triage would share one review comment on each issue; enable only one/);
     const issue = { source: "github_items", kind: "item_changed", item: "issue", author: "other" };
@@ -3481,7 +3481,7 @@ export const scenarios = {
     rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [review]"), /files: review requires trigger.kind low_grade/);
     rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [labels]"), /files: previous_assessment requires the pr_assessment effect or a review that publishes comment/);
     rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [discussion, previous_repair]"), /files: previous_repair requires the pr_assessment effect/);
-    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [discussion, previous_assessment, storefront]"), /files: storefront requires the pr_assessment effect or a storefront trigger/);
+    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [discussion, previous_assessment, storefront]"), /files: storefront requires the pr_assessment effect, a storefront trigger or a schedule trigger/);
     rejects("storefront_discover", (text) => text.replace("files: [storefront]", "files: []"), /the browser tool and the browser setting require each other, except that a manifest listing the storefront file may list browser alone/);
     rejects("storefront_discover", (text) => text.replace("publish: [site_map]", "publish: [issue]"), /the site_map effect and a storefront trigger require each other/);
     rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [comment, labels, site_map]"), /the site_map effect and a storefront trigger require each other/);
@@ -3930,6 +3930,71 @@ export const scenarios = {
     const history = readFileSync(later.files.history, "utf8");
     assert.match(history, /## 2026-10-21T12:00:00\.000Z/); assert.match(history, /link:docs-a/);
     assert.equal(all(s.items).length, 0); assert.equal(all(s.subjects).length, 2); assert.equal(all(s.runs).length, 2);
+  } },
+  store_audit: { title: "a scheduled store audit runs the browser from the manifest's budget with the site map, the audit's own baselines and known breakages, keeps its Lighthouse, baselines and alerts apart from the main-change review, and posts the agent's first line as the root, one reply with the findings and the Lighthouse table, the verdict reaction and a report file, without posting twice on a retry", configure: [configureMainStorefront, (config) => { config.storefront.auditPaths = ["/pages/about"]; Object.assign(config.actions.store_audit, { enabled: true, channel: "C0123456789" }); }], run: async () => {
+    const { fakes, scored, state } = await mainStorefront();
+    const { pollSchedules } = await f.app("schedule-source.ts"), { config: live } = await f.app("config.ts"), site = "https://shop.example.test", channel = "C0123456789", S = storefrontScores;
+    const tip = git(resolve("remote.git"), "rev-parse", "main"), first = "2026-10-21T09:00:00.000Z", next = "2026-10-22T09:00:00.000Z";
+    const posts = () => f.slack.calls.filter((call) => call.method === "chat.postMessage"), reactions = () => f.slack.calls.filter((call) => call.method === "reactions.add");
+    const audits = () => f.requests.filter((request) => request.context.action === "store_audit"), json = (path) => JSON.parse(state(path));
+    const tick = async (at) => { f.reset(0, "normal"); assert.equal(await pollSchedules(undefined, new Date(at)), 1); };
+    mkdirSync("data/storefront", { recursive: true }); writeFileSync("data/storefront/site.md", "Site map\n- `/products/<handle>`: product page\n");
+    assert.equal(await pollSchedules(undefined, new Date("2026-10-21T08:00:00Z")), 0);
+
+    scored();
+    f.script = [{ name: "browser", args: { action: "goto", url: site + "/" } }, { name: "browser", args: { action: "screenshot", viewport: "desktop", fullPage: true } },
+      { name: "browser", args: { action: "screenshot", viewport: "mobile", fullPage: true } }, { name: "browser", args: { action: "goto", url: site + "/cart" } },
+      "Your store is healthy today & all 2 pages were checked <0 problems>.\n• `/cart` mobile: the cart lists the product with its price.\n\n## Checked\n- `/` and `/cart` on both devices.\nSCRAT_VERDICT: clean\nSCRAT_STATUS: complete"];
+    await tick("2026-10-21T09:00:00Z");
+    const r1 = await success(), [one] = audits(), files = one.context.files;
+    assert.equal(audits().length, 5); assert.equal(f.row(s.tasks, r1.taskId).status, "completed"); assert.equal(r1.mainSha, tip);
+    assert.deepEqual(one.context.input, { kind: "tick", triggerKey: first, start: "2026-10-20T09:00:00.000Z", end: first });
+    assert.deepEqual(JSON.parse(readFileSync(files.storefront, "utf8")), { liveUrl: site + "/", devices: ["desktop", "mobile"], confirmationRuns: 1, auditPaths: ["/pages/about"], knownBreakages: [] });
+    assert.equal(readFileSync(files.siteMap, "utf8"), "Site map\n- `/products/<handle>`: product page\n"); assert.deepEqual([files.baselines, files.history], [undefined, undefined]);
+    assert.equal(one.context.rootInstructions, live.actions.store_audit.rootInstructions); assert.match(one.context.rootInstructions, /^One sentence for a non-technical reader/);
+    assert.deepEqual(one.request.tools.map((tool) => tool.function.name), ["read", "grep", "find", "ls", "browser"]); assert.match(one.text, /# Scheduled store audit/);
+    assert.match(one.request.tools.find((tool) => tool.function.name === "browser").function.description, /At most 200 actions and 2700 seconds per session/);
+    assert.deepEqual(fakes.visits, [site + "/", site + "/cart"]);
+    const m1 = { "first-contentful-paint": 1.8, "largest-contentful-paint": 3.1, "total-blocking-time": 210, "cumulative-layout-shift": 0.05, "speed-index": 2.9 };
+    assert.deepEqual(json("audits/lighthouse.json"), { mobile: { sha: tip, scores: S(60, 90, 96, 100), metrics: m1 }, desktop: { sha: tip, scores: S(90, 95, 100, 100), metrics: m1 } });
+    assert.ok(!existsSync("data/storefront/lighthouse.json") && !existsSync("data/storefront/baselines") && !existsSync("data/storefront/alerts.json"), "the main-change review's state is untouched");
+    assert.deepEqual(json("audits/baselines/index.json"), { home: { url: site + "/", devices: { desktop: tip, mobile: tip } } }); assert.equal(state("audits/baselines/home/mobile.png"), "png / 390 v1");
+    assert.deepEqual(json("audits/alerts.json"), {});
+    assert.ok(state(`audits/${first}.md`).startsWith(`## Store audit of ${first}\n\nLighthouse and the screenshots belong to \`main\` at ${tip}.\n\nYour store is healthy today & all 2 pages were checked <0 problems>.\n`));
+    assert.ok(state(`audits/${first}.md`).includes("## Checked") && state(`audits/${first}.md`).includes("### Lighthouse"));
+    assert.equal(posts().length, 2); const [root, reply] = posts(), [thread] = all(s.slackThreads), rootText = "Your store is healthy today &amp; all 2 pages were checked &lt;0 problems&gt;.";
+    assert.deepEqual(root.body, { channel, unfurl_links: false, unfurl_media: false, link_names: false, text: rootText, blocks: [{ type: "section", text: { type: "mrkdwn", text: rootText } }] });
+    assert.deepEqual({ channel: thread.channel, ts: thread.ts, subject: thread.subjectId }, { channel, ts: reply.body.thread_ts, subject: f.row(s.tasks, r1.taskId).subjectId });
+    assert.equal(reply.body.text, "• `/cart` mobile: the cart lists the product with its price.\n• Lighthouse mobile (2 runs, no previous run): Performance 60, Accessibility 90, Best Practices 96, SEO 100; FCP 1.8 s, LCP 3.1 s, TBT 210 ms, CLS 0.05, Speed Index 2.9 s\n• Lighthouse desktop (2 runs, no previous run): Performance 90, Accessibility 95, Best Practices 100, SEO 100; FCP 1.8 s, LCP 3.1 s, TBT 210 ms, CLS 0.05, Speed Index 2.9 s");
+    assert.deepEqual(reply.body.blocks.map((block) => block.type), ["rich_text", "table", "context"]); assert.ok(!JSON.stringify(reply.body).includes("github.com"));
+    assert.deepEqual(reply.body.blocks[1].rows.slice(0, 3).map((row) => row.map((cell) => cell.text)), [["Lighthouse", "Mobile", "Desktop"], ["Runs", "2", "2"], ["Performance", "60", "90"]]);
+    assert.deepEqual(reactions().map((call) => [call.body.channel, call.body.timestamp, call.body.name]), [[channel, thread.ts, "white_check_mark"]]);
+    assert.equal(r1.result.verdict, "clean"); assert.equal(r1.publication.status, "published"); assert.equal(r1.publication.slackReplyTs, r1.publication.storefrontReplyTs); assert.equal(r1.publication.slackReaction, "white_check_mark");
+
+    scored([S(0.64, 0.9, 0.96, 1), S(0.64, 0.9, 0.96, 1)], [S(0.9, 0.95, 1, 1), S(0.9, 0.95, 1, 1)]);
+    f.script = [{ name: "browser", args: { action: "goto", url: site + "/" } },
+      "The store has 1 problem today: the checkout does not open (2 pages checked).\n\n## Checked\n- `/`.\nSCRAT_ISSUE_BEGIN\ntitle: Checkout does not open\nfingerprint: cart:checkout\n\nThe checkout button did nothing on mobile three times.\nSCRAT_ISSUE_END\nSCRAT_VERDICT: breaking\nSCRAT_STATUS: complete"];
+    await tick("2026-10-22T09:00:00Z");
+    f.slack.reactionFail = ["service_unavailable"];
+    const failed = await run(); assert.ok(failed.error); assert.equal(failed.stage, "publishing");
+    assert.ok(failed.publication.slackReplyTs); assert.equal(failed.publication.slackReplyTs, failed.publication.storefrontReplyTs); assert.equal(failed.publication.slackReaction, undefined);
+    const used = f.requests.length, sent = posts().length; tasks.retryTask(failed.taskId);
+    const r2 = await success();
+    assert.equal(f.requests.length, used, "the retry runs no new session"); assert.equal(posts().length, sent, "the retry posts no new root or reply"); assert.equal(sent, 4);
+    const second = all(s.slackThreads).find((row) => row.subjectId === f.row(s.tasks, r2.taskId).subjectId), later = audits().findLast((request) => request.context.input.end === next).context;
+    assert.deepEqual(reactions().slice(1).map((call) => [call.body.timestamp, call.body.name]), [[second.ts, "large_red_square"], [second.ts, "large_red_square"]]);
+    assert.equal(r2.publication.slackReaction, "large_red_square"); assert.equal(r2.result.verdict, "breaking");
+    const [secondRoot, secondReply] = posts().slice(2);
+    assert.deepEqual([secondRoot.body.thread_ts, secondReply.body.thread_ts], [undefined, second.ts]); assert.equal(secondRoot.body.text, "The store has 1 problem today: the checkout does not open (2 pages checked).");
+    assert.match(secondReply.body.text, /^• New breakage `cart:checkout`: Checkout does not open\n• Lighthouse mobile \(2 runs\): Performance 64 \(\+4\), Accessibility 90 \(±0\)/); assert.match(secondReply.body.text, /• Lighthouse desktop \(2 runs\): Performance 90 \(±0\)/);
+    assert.deepEqual(secondReply.body.blocks.map((block) => block.type), ["rich_text", "table"]);
+    const baselines = JSON.parse(readFileSync(later.files.baselines, "utf8")); assert.deepEqual(Object.keys(baselines), ["home"]); assert.equal(baselines.home.screenshots.mobile.sha, tip);
+    assert.equal(readFileSync(baselines.home.screenshots.mobile.path, "utf8"), "png / 390 v1", "the audit reads its own previous screenshots");
+    assert.match(readFileSync(later.files.history, "utf8"), /## 2026-10-21T09:00:00\.000Z, \S+, complete\n\nYour store is healthy today & all 2 pages were checked <0 problems>\./);
+    assert.deepEqual(json("audits/alerts.json"), { "cart:checkout": { title: "Checkout does not open", sha: tip } }); assert.equal(json("audits/lighthouse.json").mobile.scores.performance, 64);
+    assert.equal(json("audits/baselines/index.json").home.devices.mobile, tip, "a run that is not clean keeps the baselines");
+    assert.ok(state(`audits/${next}.md`).includes("### Confirmed breakage\n\n- **Checkout does not open** (`cart:checkout`, new on this commit)")); assert.ok(existsSync(`data/storefront/audits/${first}.md`));
+    assert.ok(!existsSync("data/storefront/lighthouse.json")); assert.equal(all(s.slackThreads).length, 2);
   } },
   storefront_preview: { title: "an enabled storefront gives each Scrat PR review one recorded MAIN duplicate through Loggie, adopts a duplicate whose reply was lost, resumes its processing wait, replaces a theme that vanished, reuses it and deletes it when the PR closes, retrying a failed delete; a refused Loggie call only logs, and a disabled storefront or a human PR makes no Loggie call", configure: [(config) => { Object.assign(config.storefront, { store: "fixture.myshopify.com", publicHost: "shop.example.test" }); Object.assign(config.storefront.preview, { processingPollSeconds: 1, filesPageSize: 2 }); }], run: async () => {
     const { config: live } = await f.app("config.ts"), { loggie } = await f.app("storefront-loggie.ts"), { childEnvironment, containsSecret } = await f.app("secrets.ts");

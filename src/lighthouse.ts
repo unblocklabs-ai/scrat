@@ -104,8 +104,8 @@ const signed = (value: number, digits = 0) => {
 const formatMetric = (id: Metric, value: number) => `${value.toFixed(metrics[id].digits)}${metrics[id].unit}`;
 const capitalised = (device: Device) => device[0]!.toUpperCase() + device.slice(1);
 
-export async function recordLighthouse(results: Run[], sha: string) {
-  const previous = await readState<Previous>("lighthouse.json", {}) ?? {}, current: Previous = {};
+export async function recordLighthouse(results: Run[], sha: string, state: string) {
+  const previous = await readState<Previous>(join(state, "lighthouse.json"), {}) ?? {}, current: Previous = {};
   const slack: string[] = [], missing: string[] = [], columns: { device: Device; cells: string[] }[] = [];
   for (const device of devices) {
     const all = results.filter((run) => run.device === device), scored = all.filter((run) => run.scores && run.metrics);
@@ -123,7 +123,7 @@ export async function recordLighthouse(results: Run[], sha: string) {
     slack.push(`Lighthouse ${device} (${count}${before ? "" : ", no previous run"}): ${ids.map((id) => `${categories[id]} ${shown(id)}`).join(", ")}; ${metricIds.map((id) => `${metrics[id].label} ${shownMetric(id)}`).join(", ")}`);
     columns.push({ device, cells: [scored.length === all.length ? String(all.length) : `${scored.length} of ${all.length}`, ...ids.map(shown), ...metricIds.map(shownMetric)] });
   }
-  if (Object.keys(current).length) await writeState("lighthouse.json", { ...previous, ...current });
+  if (Object.keys(current).length) await writeState(join(state, "lighthouse.json"), { ...previous, ...current });
   const compared = devices.flatMap((device) => current[device] && previous[device] ? [`${device} with ${previous[device].sha.slice(0, 7)}`] : []);
   const labels = ["Runs", ...ids.map((id) => categories[id]), ...metricIds.map((id) => metrics[id].label)];
   const tableHeader = ["Lighthouse", ...columns.map(({ device }) => capitalised(device))], tableRows = columns.length ? labels.map((label, index) => [label, ...columns.map(({ cells }) => cells[index]!)]) : [];
@@ -133,7 +133,7 @@ export async function recordLighthouse(results: Run[], sha: string) {
     `| ${device} | \`${page}\` | ${run} | ${scores && measured ? `${[...ids.map((id) => scores[id]), ...metricIds.map((id) => formatMetric(id, shownUnits(id, measured[id])))].join(" | ")} | \`${relative(process.cwd(), report!)}\`` : `${perRunLabels.map(() => "-").join(" | ")} | ${error!.replaceAll("|", "\\|")}`} |`);
   const report = [
     "### Lighthouse",
-    `Average scores and metrics of ${config.storefront.lighthouse.pages.map((page) => `\`${page}\``).join(", ")} per device${compared.length ? `, with the change from the previous main run (${compared.join(", ")})` : ""}.`,
+    `Average scores and metrics of ${config.storefront.lighthouse.pages.map((page) => `\`${page}\``).join(", ")} per device${compared.length ? `, with the change from the ${state ? "previous audit" : "previous main run"} (${compared.join(", ")})` : ""}.`,
     ...averages,
     "Each run:",
     `| Device | Page | Run | ${perRunLabels.join(" | ")} | Report |\n| --- | --- | --- | ${perRunLabels.map(() => "---").join(" | ")} | --- |\n${perRun.join("\n")}`,

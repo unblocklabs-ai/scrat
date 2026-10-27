@@ -102,11 +102,12 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
       if (slack) {
         if (!process.env.SLACK_BOT_TOKEN) problems.push(`${action}: SLACK_BOT_TOKEN is not set`);
         if (!entry.channel?.trim()) problems.push(`${action}: channel must not be empty`);
-        if (!entry.startMessage?.trim()) problems.push(`${action}: startMessage must not be empty`);
-        if (!entry.branch?.trim()) problems.push(`${action}: branch must not be empty`);
+        if (manifest.trigger.source === "github_commits" && !entry.startMessage?.trim()) problems.push(`${action}: startMessage must not be empty`);
+        if (manifest.trigger.source === "github_commits" && !entry.branch?.trim()) problems.push(`${action}: branch must not be empty`);
         const unknown = [...(entry.startMessage ?? "").matchAll(/\{\{(.*?)\}\}/g)].map((match) => match[1]).filter((name) => !templateVariables.has(name));
         if (unknown.length) problems.push(`${action}: unknown startMessage variable ${unknown.map((name) => `{{${name}}}`).join(", ")}`);
       }
+      if (manifest.files.includes("storefront") && manifest.trigger.source === "schedule" && !storefront?.enabled) problems.push(`${action}: files: storefront requires storefront.enabled`);
       if (slack && process.env.SLACK_BOT_TOKEN) await checkSlackAuth(`${action}: Slack`);
       if (manifest.browser || (storefront?.enabled && manifest.tools.includes("browser"))) await loadPlaywright().catch((error: unknown) => { problems.push(`${action}: ${errorMessage(error)}`); });
       if (storefront?.enabled && manifest.publish.includes("slack_reply")) {

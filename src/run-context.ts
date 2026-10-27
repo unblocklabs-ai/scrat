@@ -51,7 +51,7 @@ export async function runAgent({ run, task, manifest, operation, stop }: Ctx, { 
   const { prompt, contextDir, revisions, storefront } = await buildAgentInput({ run, task, ...input });
   const { browserSteps, browserSeconds } = config.storefront.limits;
   const browser = storefront && manifest.tools.includes("browser")
-    ? { navigationHosts: "any" as const, resourceHosts: "any" as const, ...manifest.browser, limits: { steps: browserSteps, milliseconds: browserSeconds * 1000 } } : manifest.browser;
+    ? { navigationHosts: "any" as const, resourceHosts: "any" as const, ...manifest.browser, limits: { steps: manifest.browserSteps ?? browserSteps, milliseconds: (manifest.browserSeconds ?? browserSeconds) * 1000 } } : manifest.browser;
   const options = { run, cwd: workspace.path, tools: manifest.tools, scoped: { ...manifest, browser }, storefront, contextDir, revisions, environment, log: operation.log, stop };
   const agentResult = panel
     ? await reviewPullRequest({ ...options, baseSha: panel.baseSha }, prompt, panel.requireGrade)

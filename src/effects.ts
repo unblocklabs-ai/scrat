@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { manifestOf } from "./actions.ts";
-import { postCommitReply, reactToCommitRoot, verdictReaction } from "./commit-review.ts";
+import { postReply, reactToRoot, verdictReaction } from "./commit-review.ts";
 import { upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
@@ -140,12 +140,15 @@ const issue = {
 const slackReply = {
   receipted: (publication, { run }) => Boolean(publication.slackReplyTs) && (!run.result?.storefrontReview || Boolean(publication.storefrontReplyTs)) && publication.slackReaction === verdictReaction(run),
   async apply(context) {
-    const { subject, task, run, publication, saveReceipt } = context;
-    if (!publication().slackReplyTs) saveReceipt({ slackReplyTs: await postCommitReply(subject, task.action, run) });
-    if (run.result?.storefrontReview && !publication().storefrontReplyTs) await (await import("./storefront-main.ts")).publishStorefront(context);
+    const { subject, task, run, publication, saveReceipt } = context, audit = subject.kind === "window";
+    if (!publication().slackReplyTs && !audit) saveReceipt({ slackReplyTs: await postReply(subject, task.action, run) });
+    if (run.result?.storefrontReview && !publication().storefrontReplyTs) {
+      const storefront = await import("./storefront-main.ts");
+      await (audit ? storefront.publishAudit(context) : storefront.publishStorefront(context));
+    }
     const name = verdictReaction(run);
     if (!name) return;
-    await reactToCommitRoot(subject, name);
+    await reactToRoot(subject, name);
     saveReceipt({ slackReaction: name });
   },
 } satisfies Effect;

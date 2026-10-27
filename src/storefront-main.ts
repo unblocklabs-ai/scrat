@@ -2,6 +2,7 @@ import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promis
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { contextDirOf, contextFiles } from "./agent-input.ts";
+import { inferenceRunOf } from "./run-history.ts";
 import { commitInput, postReply } from "./commit-review.ts";
 import { config } from "./config.ts";
 import type { EffectContext } from "./effects.ts";
@@ -94,8 +95,8 @@ const settled = <T>({ operation, stop }: Ctx, sha: string, part: string, work: P
   return { error: errorMessage(error).replace(/\s+/g, " ") };
 });
 
-async function finishStorefront(ctx: Ctx, { sha, state, known, pages, session, title, intro }: {
-  sha: string; state: string; known: Alerts | undefined; pages: Pages; session?: Storefront["session"]; title?: string; intro: string[];
+async function finishStorefront(ctx: Ctx, { sha, state, known, pages, session, title, intro, shotsDir }: {
+  sha: string; state: string; known: Alerts | undefined; pages: Pages; session?: Storefront["session"]; title?: string; intro: string[]; shotsDir: string;
 }) {
   const { run, references, stop } = ctx, contextDir = contextDirOf(run.id);
   const lighthouse = await settled(ctx, sha, "lighthouse", runLighthouse(`https://${config.storefront.publicHost}/`, join(contextDir, "lighthouse"), references, stop));
@@ -103,7 +104,7 @@ async function finishStorefront(ctx: Ctx, { sha, state, known, pages, session, t
   const breakages = (review?.issues ?? []).map((issue) => ({ ...issue, since: known ? known[issue.fingerprint]?.sha : "" }));
   const fresh = breakages.filter((breakage) => breakage.since === undefined);
   const storefrontVerdict: Verdict | undefined = !review ? undefined : fresh.length ? "breaking" : review.verdict === "breaking" ? "concerns" : review.verdict;
-  const shots = (await readFile(join(contextDir, "screenshots.jsonl"), "utf8").catch(() => "")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as Shot);
+  const shots = (await readFile(join(shotsDir, "screenshots.jsonl"), "utf8").catch(() => "")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as Shot);
   const replaced = storefrontVerdict === "clean" ? await replaceBaselines(shots, sha, state) : undefined;
   if (review) await writeState(join(state, "alerts.json"), Object.fromEntries(breakages.map(({ fingerprint, title, since }) => [fingerprint, { title, sha: since || sha }])));
   const measured = "value" in lighthouse ? await recordLighthouse(lighthouse.value, sha, state)
@@ -150,7 +151,7 @@ export function reviewStorefront(ctx: Ctx, change: Change, result: AgentResult):
       const known = await readState<Alerts>("alerts.json", {});
       const pages = await settled(ctx, sha, "pages", reviewPages(ctx, change, known, (details) => { session = details; }));
       const { storefrontVerdict, storefrontReview } = await finishStorefront(ctx, {
-        sha, state: "", known, pages, session, title: short,
+        sha, state: "", known, pages, session, title: short, shotsDir: contextDirOf(ctx.run.id),
         intro: [`## Storefront review of ${sha}`, proof.paths.length ? `The live \`MAIN\` theme matches this commit for the ${proof.paths.length} theme file(s) the change touches.` : "The change touches no theme files; the live store was reviewed as it is."],
       });
       const verdict = result.verdict && storefrontVerdict && rank[storefrontVerdict] > rank[result.verdict] ? storefrontVerdict : result.verdict;
@@ -169,7 +170,7 @@ export function auditStorefront(ctx: Ctx, sha: string, result: AgentResult): Pro
     try {
       const known = await readState<Alerts>(join(auditState, "alerts.json"), {});
       const { storefrontVerdict, storefrontReview } = await finishStorefront(ctx, {
-        sha, state: auditState, known, pages: { value: result },
+        sha, state: auditState, known, pages: { value: result }, shotsDir: contextDirOf(inferenceRunOf(ctx.run).id),
         intro: [`## Store audit of ${tick.kind === "tick" ? tick.end : sha}`, `Lighthouse and the screenshots belong to \`${config.github.baseBranch}\` at ${sha}.`],
       });
       return { ...result, verdict: storefrontVerdict ?? result.verdict, storefrontReview };

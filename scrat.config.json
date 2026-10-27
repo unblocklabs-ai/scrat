@@ -22,6 +22,7 @@
     "workerErrorDelaySeconds": 1,
     "sandboxPreflightSeconds": 30,
     "retryJitter": 0.1,
+    "crashRequeues": 3,
     "corrections": { "incomplete": 1, "validation": 2, "format": 2 },
     "agentRetry": { "maxRetries": 3, "baseDelayMs": 2000 },
     "logLevel": "info"

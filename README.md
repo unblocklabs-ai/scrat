@@ -136,6 +136,7 @@ Per-install systemd overrides (for example a lower `MemoryMax` on a smaller host
 | `harness.agentTimeoutSeconds` | Longest one agent turn may run; the session is aborted and the run fails with `AGENT_TIMEOUT`. |
 | `harness.drainTimeoutSeconds` | How long a running agent turn may continue after the service is told to stop. Past it the turn is aborted; either way the run is recorded as `RUN_INTERRUPTED` and its task is requeued to resume after the restart. |
 | `harness.retryJitter` | Fraction (0 to 1) of random extra delay added to each durable review retry delay (see the `retry` action setting), capped at that action's `maxDelaySeconds`. |
+| `harness.crashRequeues` | How many times in a row a task is re-queued after the worker crashed during its run (startup recovery). Past that count the run is marked failed instead, so a run that keeps killing the worker cannot loop. |
 | `harness.corrections.incomplete` | Times a review session that returns `SCRAT_STATUS: incomplete` is re-prompted in the same session before the run fails as incomplete; 0 disables. Implementations are never continued. |
 | `harness.corrections.validation` | Times the agent is re-prompted in the same session after `workspace.validate` fails; 0 disables. |
 | `harness.corrections.format` | Times the agent is re-prompted when its final answer is not in the required result format; 0 disables. |

@@ -2008,6 +2008,10 @@ export const scenarios = {
     assert.equal(f.row(s.tasks, agent.task.id).status, "queued");
     const restarted = await success();
     assert.equal(restarted.retryOfRunId, null); assert.equal(restarted.inferenceFromRunId, null); assert.ok(f.requests.length > requests, "a crash during the agent starts the review over");
+    f.addIssue(3); f.enqueue(3); const looping = tasks.claimTask();
+    for (let crash = 1; crash <= f.config.harness.crashRequeues; crash++) { db.update(s.runs).set({ stage: "agent" }).where(eq(s.runs.id, tasks.claimTask()?.run.id ?? looping.run.id)).run(); recoverActive(); assert.equal(f.row(s.tasks, looping.task.id).status, "queued", `crash ${crash} re-queues`); }
+    tasks.claimTask(); recoverActive();
+    assert.equal(f.row(s.tasks, looping.task.id).status, "failed", "a task that crashes the worker past harness.crashRequeues is failed");
   } },
   cleanup: { title: "cleanup failure cannot turn a published review or comment-only implementation into a failed task, and cleanup never removes a change workspace through a review that stopped early", run: async () => {
     f.addIssue(1); f.enqueue(1); f.faults.cleanup.add(1); const r = await success();

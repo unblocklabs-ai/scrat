@@ -72,6 +72,7 @@ export async function buildAgentInput(options: {
   workspace: { path: string; branch: string | null };
   database?: Record<string, unknown>;
   validationFailure?: ErrorDetails;
+  baseOnly?: boolean;
 }) {
   const { run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha } = options;
   const { action } = task;
@@ -96,7 +97,7 @@ export async function buildAgentInput(options: {
   const triage = listed.includes("triage") ? completedRunsOfAction(task.subjectId, actionsPublishing("labels"), 1)[0]?.result : undefined;
   const issue = listed.includes("issue") ? issueOfPullRequest(config.github.repository, evaluated.item.number) : undefined;
   const found = listed.includes("validation") ? verificationOfCommit(headSha) : undefined, verification = found?.commands.length ? found : undefined;
-  const storefront = listed.includes("storefront") && config.storefront.enabled ? await (await import("./storefront-site.ts")).storefrontContext(task.subjectId, headSha, trigger.source === "storefront") : undefined;
+  const storefront = listed.includes("storefront") && config.storefront.enabled && !options.baseOnly ? await (await import("./storefront-site.ts")).storefrontContext(task.subjectId, headSha, trigger.source === "storefront") : undefined;
   const reviewedSha = evaluated.headSha;
   const checks = listed.includes("validation") && reviewedSha
     ? (await bestEffort(logger, "github.check_runs_failed", { sha: reviewedSha }, () => new GitHubRepository(config.github.repository).checkRunConclusions(reviewedSha))) ?? []

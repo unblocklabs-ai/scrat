@@ -1623,7 +1623,7 @@ export const scenarios = {
     assert.equal(relevant.kind, "stale"); assert.equal(relevant.reason, "base"); assert.ok(relevant.changedPaths.includes("src/app.ts"));
   } },
   relevance: { title: "root searches, unrelated development dependencies and ignored generated paths do not trigger re-review", seed: seedLockfile, configure: [configureLockfile, (config) => { config.relevance.ignoredPaths = ["^assets/\\.vite/"]; }], run: async () => {
-    f.addIssue(1); f.reset(1, "grep"); await route(); const r = await success();
+    branchOff("feature", "src/feature.ts", "export const feature = 1;\n"); f.addPr(1, "feature", "human"); f.reset(1, "grep"); await route(); const r = await success();
     assert.ok(r.result.paths.includes("src/app.ts")); assert.ok(!r.result.paths.includes("."));
     assert.ok(r.result.paths.includes("assets/.vite/manifest.json"), "The review read the generated manifest");
     changeMain("notes.md", "new docs\n"); await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"));

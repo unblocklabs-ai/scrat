@@ -38,10 +38,10 @@ const itemScope = async ({ run, task, repositoryPath }: Ctx, observed: Observed)
   return { mainSha, headSha, evaluated: evaluateContext(run, task, observed.observation), ...await readDiffScope(repositoryPath, mainSha, headSha, Boolean(observed.pullRequest)) };
 };
 
-async function prepareReviewCommands({ run, repositoryPath, references, operation, cleanup }: Ctx, { context, pullRequest, observation }: Observed, review: Review, environment: Environment) {
+async function prepareReviewCommands({ run, repositoryPath, references, operation, cleanup }: Ctx, { context, observation }: Observed, review: Review, environment: Environment) {
   try { await prepareWorkspace(review.workspace, environment, references); }
   catch (error) {
-    if (!pullRequest || isBotLogin(context.item.user?.login)) throw error;
+    if (isBotLogin(context.item.user?.login)) throw error;
     const { behind, conflicts } = await prepareTarget(review.workspace.path, review.mainSha, review.headSha);
     if (!behind) throw error;
     const { baseBranch } = observation;
@@ -74,7 +74,8 @@ export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   const review: Review = { workspace, mainSha, headSha, diffBaseSha };
   const environment: Environment = observed ? { ...config.workspace.environment } : {};
   stopBefore(stop, "workspace preparation");
-  if (observed) await prepareReviewCommands(ctx, observed, review, { ...childEnvironment(), ...environment });
+  if (observed?.pullRequest) await prepareReviewCommands(ctx, observed, review, { ...childEnvironment(), ...environment });
+  else if (observed) ctx.operation.log.info({ event: "workspace.prepare_skipped", reason: "issue review" });
   if (observed) await refreshPreview(ctx, observed, review);
   stopBefore(stop, "the agent");
   const changeContext = manifest.context === "change";

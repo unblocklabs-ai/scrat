@@ -1,6 +1,8 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir } from "node:fs/promises";
 import { type AddressInfo, createServer } from "node:net";
 import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { withValidationSlot } from "./commands.ts";
 import { config } from "./config.ts";
 import { errorMessage } from "./errors.ts";
@@ -24,8 +26,6 @@ type Scores = Record<Category, number>;
 type Metrics = Record<Metric, number>;
 type Run = { device: Device; page: string; run: number; scores?: Scores; metrics?: Metrics; report?: string; error?: string };
 type Previous = Partial<Record<Device, { sha: string; scores: Scores; metrics?: Metrics }>>;
-type Audit = (url: string, flags: Record<string, unknown>, settings?: unknown) => Promise<{ lhr: { categories: Record<string, { score: number | null } | undefined>; audits?: Record<string, { numericValue?: unknown } | undefined> }; report: string | string[] } | undefined>;
-type Lighthouse = { default: Audit; desktopConfig: unknown };
 
 const ids = Object.keys(categories) as Category[], metricIds = Object.keys(metrics) as Metric[];
 
@@ -33,7 +33,7 @@ export async function loadLighthouse() {
   const specifier = "lighthouse";
   return await import(specifier).catch((error: unknown) => {
     throw new Error("Storefront Lighthouse runs need the optional lighthouse package, which is not installed (see the README storefront section)", { cause: error });
-  }) as Lighthouse;
+  }) as { default: unknown };
 }
 
 const freePort = () => new Promise<number>((done, fail) => {
@@ -43,30 +43,31 @@ const freePort = () => new Promise<number>((done, fail) => {
   });
 });
 
-const abortable = <T>(work: Promise<T>, signal: AbortSignal) => new Promise<T>((done, fail) => {
-  const abort = () => fail(signal.reason);
-  if (signal.aborted) return abort();
-  signal.addEventListener("abort", abort, { once: true });
-  work.then(done, fail).finally(() => signal.removeEventListener("abort", abort));
+const auditScript = fileURLToPath(new URL("./lighthouse-audit.ts", import.meta.url));
+const labelled = (table: Record<string, { label: string }>) => Object.fromEntries(Object.entries(table).map(([id, { label }]) => [id, label]));
+
+const childAudit = (input: string, signal: AbortSignal) => new Promise<{ scores: Scores; metrics: Metrics }>((done, fail) => {
+  const child = spawn(process.execPath, [auditScript, input], { env: process.env, stdio: ["ignore", "pipe", "pipe"] }), out: Buffer[] = [], err: Buffer[] = [];
+  let killer: NodeJS.Timeout | undefined;
+  const abort = () => { child.kill("SIGTERM"); killer = setTimeout(() => child.kill("SIGKILL"), config.tools.browser.stepSeconds * 1000); };
+  if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
+  child.stdout.on("data", (chunk: Buffer) => out.push(chunk));
+  child.stderr.on("data", (chunk: Buffer) => err.push(chunk));
+  child.once("error", fail);
+  child.once("close", (code) => {
+    clearTimeout(killer);
+    signal.removeEventListener("abort", abort);
+    if (signal.aborted) return fail(signal.reason);
+    if (code !== 0) return fail(new Error(Buffer.concat(err).toString().slice(-config.harness.maxStderrBytes).trim() || `Lighthouse exited with code ${code}`));
+    try { done(JSON.parse(Buffer.concat(out).toString())); } catch (error) { fail(error); }
+  });
 });
 
-async function audited({ audit, desktopConfig }: { audit: Audit; desktopConfig: unknown }, url: string, device: Device, signal: AbortSignal) {
+async function audited(url: string, device: Device, reportPath: string, signal: AbortSignal) {
   const port = await freePort(), browser = await launchChromium([`--remote-debugging-port=${port}`]);
   try {
     const flags = { port, output: "json", logLevel: "error", onlyCategories: ids, disableFullPageScreenshot: true };
-    const result = await abortable(audit(url, flags, device === "desktop" ? desktopConfig : undefined), signal);
-    if (!result) throw new Error("Lighthouse returned no result");
-    const scores = Object.fromEntries(ids.map((id) => {
-      const score = result.lhr.categories[id]?.score;
-      if (typeof score !== "number") throw new Error(`Lighthouse returned no ${categories[id]} score`);
-      return [id, Math.round(score * 100)];
-    })) as Scores;
-    const measured = Object.fromEntries(metricIds.map((id) => {
-      const value = result.lhr.audits?.[id]?.numericValue;
-      if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`Lighthouse returned no ${metrics[id].label} value`);
-      return [id, value];
-    })) as Metrics;
-    return { scores, metrics: measured, report: Array.isArray(result.report) ? result.report[0]! : result.report };
+    return await childAudit(JSON.stringify({ url, device, reportPath, flags, categories, metrics: labelled(metrics) }), signal);
   } finally {
     await browser.close().catch(() => undefined);
   }
@@ -74,7 +75,7 @@ async function audited({ audit, desktopConfig }: { audit: Audit; desktopConfig: 
 
 export async function runLighthouse(origin: string, directory: string, references: EventReferences, stop?: AbortSignal) {
   const { runs, pages, timeoutSeconds } = config.storefront.lighthouse;
-  const { default: audit, desktopConfig } = await loadLighthouse();
+  await loadLighthouse();
   await mkdir(directory, { recursive: true });
   return withValidationSlot(async () => {
     const budget = AbortSignal.timeout(timeoutSeconds * 1000), signal = stop ? AbortSignal.any([budget, stop]) : budget, results: Run[] = [];
@@ -82,9 +83,8 @@ export async function runLighthouse(origin: string, directory: string, reference
       if (stop?.aborted) throw stop.reason;
       if (budget.aborted) { results.push({ device, page, run, error: `not run, the ${timeoutSeconds}s budget was spent` }); continue; }
       try {
-        const { scores, metrics, report } = await audited({ audit, desktopConfig }, new URL(page, origin).href, device, signal);
         const path = join(directory, `${device}-${index + 1}-${run}.json`);
-        await writeFile(path, report);
+        const { scores, metrics } = await audited(new URL(page, origin).href, device, path, signal);
         results.push({ device, page, run, scores, metrics, report: path });
       } catch (error) {
         if (stop?.aborted) throw error;

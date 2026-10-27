@@ -143,7 +143,15 @@ const storefrontScores = (performance, accessibility, practices, seo, [fcp, lcp,
   value: { "first-contentful-paint": fcp, "largest-contentful-paint": lcp, "total-blocking-time": tbt, "cumulative-layout-shift": cls, "speed-index": speed },
 });
 const mainStorefront = async () => {
-  const fakes = globalThis.storefrontFakes = { launches: [], launchOptions: [], visits: [], audits: [], scores: { mobile: [], desktop: [] }, look: "v1" };
+  const scriptPath = resolve("lighthouse-script.json"), auditsPath = scriptPath + ".audits.jsonl";
+  process.env.SCRAT_TEST_LIGHTHOUSE = scriptPath;
+  writeFileSync(scriptPath, JSON.stringify({ mobile: [], desktop: [] })); writeFileSync(auditsPath, "");
+  const script = (device) => ({ push: (...entries) => {
+    const pending = JSON.parse(readFileSync(scriptPath, "utf8"));
+    pending[device].push(...entries.map((entry) => typeof entry === "string" ? entry : { scores: { ...entry }, metrics: entry.metrics }));
+    writeFileSync(scriptPath, JSON.stringify(pending));
+  } });
+  const fakes = globalThis.storefrontFakes = { launches: [], launchOptions: [], visits: [], get audits() { return readFileSync(auditsPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)); }, scores: { mobile: script("mobile"), desktop: script("desktop") }, look: "v1" };
   const pkg = (name, source) => {
     const directory = resolve("app/src/node_modules", name); mkdirSync(directory, { recursive: true });
     writeFileSync(resolve(directory, "package.json"), JSON.stringify({ name, type: "module", main: "index.js" })); writeFileSync(resolve(directory, "index.js"), source);
@@ -166,14 +174,16 @@ export const chromium = {
   },
 };
 `);
-  pkg("lighthouse", `const fakes = globalThis.storefrontFakes;
+  pkg("lighthouse", `import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 export const desktopConfig = { extends: "lighthouse:default", settings: { formFactor: "desktop" } };
 export default async function lighthouse(url, flags, settings) {
-  const device = settings === desktopConfig ? "desktop" : "mobile", next = fakes.scores[device].shift();
-  fakes.audits.push({ url, device, port: flags.port, output: flags.output, categories: flags.onlyCategories, screenshot: !flags.disableFullPageScreenshot });
-  if (next === "hang") return new Promise(() => {});
+  const path = process.env.SCRAT_TEST_LIGHTHOUSE, pending = JSON.parse(readFileSync(path, "utf8"));
+  const device = settings === desktopConfig ? "desktop" : "mobile", next = pending[device].shift();
+  writeFileSync(path, JSON.stringify(pending));
+  appendFileSync(path + ".audits.jsonl", JSON.stringify({ url, device, port: flags.port, output: flags.output, categories: flags.onlyCategories, screenshot: !flags.disableFullPageScreenshot }) + "\\n");
+  if (next === "hang") { setInterval(() => {}, 1000); return new Promise(() => {}); }
   if (typeof next === "string") throw new Error(next);
-  return { lhr: { categories: Object.fromEntries(Object.entries(next).map(([id, score]) => [id, { score }])), audits: Object.fromEntries(Object.entries(next.metrics).map(([id, numericValue]) => [id, { numericValue }])) }, report: JSON.stringify({ url, device, next }) };
+  return { lhr: { categories: Object.fromEntries(Object.entries(next.scores).map(([id, score]) => [id, { score }])), audits: Object.fromEntries(Object.entries(next.metrics).map(([id, numericValue]) => [id, { numericValue }])) }, report: JSON.stringify({ url, device, next: next.scores }) };
 }
 `);
   const dns = createRequire(import.meta.url)("node:dns/promises"), lookup = dns.lookup;

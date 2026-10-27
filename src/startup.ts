@@ -3,7 +3,7 @@ import { manifests } from "./actions.ts";
 import { type Resolver, publicAnswers, resolveHost, validateBindings } from "./bindings.ts";
 import { config } from "./config.ts";
 import { configError, type ScratConfig } from "./config-schema.ts";
-import { type ActionSettings, deploymentDefaults, entryProblems, resolveAction, type Manifest } from "./manifests.ts";
+import { type ActionSettings, deploymentDefaults, entryProblems, resolveAction, scheduleProblem, type Manifest } from "./manifests.ts";
 import { slugOf } from "./identity.ts";
 import { logger } from "./logging.ts";
 import { errorMessage } from "./errors.ts";
@@ -96,6 +96,10 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
     const action = manifest.name, entry = resolvedEntry(manifest);
     checkEntry(action, entry);
     problems.push(...entryProblems(manifest, entry).map((problem) => `${action}: ${problem}`));
+    for (const key of ["cron", "window"] as const) {
+      const override = settings.actions[action]?.[key], problem = override === undefined ? undefined : scheduleProblem(key, override);
+      if (problem) problems.push(`actions.${action}.${key}: ${problem}`);
+    }
     entry.reviewers.forEach((reviewer, index) => checkEntry(`${action} reviewer ${index + 1}`, reviewer));
     if (entry.enabled !== false) {
       const slack = [...manifest.start ?? [], ...manifest.publish].some((effect) => effect.startsWith("slack_"));

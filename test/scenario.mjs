@@ -3857,7 +3857,7 @@ export const scenarios = {
     broken("review_issue", (text) => trigger(text, '{ source: schedule, kind: item_changed, cron: "0 * * * *", window: 1h }'), /does not belong to source schedule/);
     broken("review_issue", (text) => trigger(text, '{ source: schedule, kind: tick, item: issue, cron: "0 * * * *", window: 1h }'), /trigger\.item is required for github_items/);
 
-    const cursors = () => Object.fromEntries(all(s.sourceCursors).map((row) => [row.action, row.sha]));
+    const cursors = () => Object.fromEntries(all(s.sourceCursors).map((row) => [row.action, JSON.parse(row.sha).next]));
     const tasksOf = (action) => all(s.tasks).filter((t) => t.action === action);
     const poll = (at) => pollSchedules(undefined, new Date(at));
     const first = "2026-10-21T12:00:00.000Z", monday = "2026-10-26T03:30:00.000Z";
@@ -3899,6 +3899,22 @@ export const scenarios = {
     assert.equal(await poll("2026-10-27T07:00:00Z"), 0);
     assert.deepEqual(cursors(), { error_sweep: "2026-10-27T12:00:00.000Z", slow_sweep: "2026-11-02T03:30:00.000Z" }); assert.equal(all(s.tasks).length, 4);
     assert.equal(all(s.sourceCursors).length, 2);
+    const { validateStaticConfig } = await f.app("startup.ts"), withAction = (name, change) => ({ ...f.config, actions: { ...f.config.actions, [name]: { ...f.config.actions[name], ...change } } });
+    await validateStaticConfig(withAction("error_sweep", { cron: "0 */4 * * *", window: "4h" }));
+    await assert.rejects(validateStaticConfig(withAction("error_sweep", { cron: "0 * * *" })), /actions\.error_sweep\.cron: A cron expression needs 5 fields/);
+    await assert.rejects(validateStaticConfig(withAction("error_sweep", { window: "6" })), /actions\.error_sweep\.window: A window must be/);
+    await assert.rejects(validateStaticConfig(withAction("review_issue", { cron: "0 * * * *" })), /review_issue: cron and window are only allowed with source schedule/);
+    const logs = captureLogs();
+    Object.assign(live.actions.error_sweep, { cron: "0 */4 * * *", window: "4h" });
+    assert.equal(await poll("2026-10-27T07:30:00Z"), 0);
+    restoreLogs();
+    const reseeded = logs.find((line) => line.event === "schedule.reseeded");
+    assert.deepEqual([reseeded.action, reseeded.from, reseeded.to, reseeded.next], ["error_sweep", { cron: "0 */6 * * *", window: "6h" }, { cron: "0 */4 * * *", window: "4h" }, "2026-10-27T08:00:00.000Z"]);
+    assert.deepEqual(cursors(), { error_sweep: "2026-10-27T08:00:00.000Z", slow_sweep: "2026-11-02T03:30:00.000Z" }); assert.equal(all(s.tasks).length, 4);
+    assert.equal(await poll("2026-10-27T07:59:59Z"), 0); assert.equal(all(s.tasks).length, 4);
+    assert.equal(await poll("2026-10-27T08:00:00Z"), 1);
+    assert.deepEqual(tasksOf("error_sweep").at(-1).input, { source: "schedule", kind: "tick", triggerKey: "2026-10-27T08:00:00.000Z", start: "2026-10-27T04:00:00.000Z", end: "2026-10-27T08:00:00.000Z" });
+    assert.deepEqual(cursors(), { error_sweep: "2026-10-27T12:00:00.000Z", slow_sweep: "2026-11-02T03:30:00.000Z" });
   } },
   window_review: { title: "a schedule-triggered review runs on the base branch with the window bounds, reads no GitHub item, publishes through its listed issue effect and sees its earlier reports as history", configure: [configureSchedule], run: async () => {
     const { pollSchedules } = await f.app("schedule-source.ts");

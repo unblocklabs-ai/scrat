@@ -19,6 +19,8 @@ type Review = { workspace: Workspace; mainSha: string; headSha: string; diffBase
 const reviewsStorefront = ({ subject, manifest, run }: Ctx) => config.storefront.enabled && subject.kind === "commit"
   && manifest.publish.includes("slack_reply") && commitInput(run.input).branch === config.github.baseBranch;
 
+const auditsStorefront = ({ subject, manifest }: Ctx) => config.storefront.enabled && subject.kind === "window" && manifest.files.includes("storefront") && manifest.publish.includes("slack_reply");
+
 async function settleReviewPlan(ctx: Ctx, { item, observation, mainSha }: Observed) {
   const { run, manifest } = ctx;
   if (run.reviewers.length !== 1) return false;
@@ -101,5 +103,6 @@ export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   updateRun(run.id, { result, stage: "validating" });
   assertComplete(result);
   if (reviewsStorefront(ctx)) updateRun(run.id, { result: await (await import("./storefront-main.ts")).reviewStorefront(ctx, { ...review, diffPaths, item: evaluated.item }, result) });
+  else if (auditsStorefront(ctx)) updateRun(run.id, { result: await (await import("./storefront-main.ts")).auditStorefront(ctx, mainSha, result) });
   updateRun(run.id, { stage: "publishing" });
 }

@@ -97,7 +97,8 @@ export async function buildAgentInput(options: {
   const triage = listed.includes("triage") ? completedRunsOfAction(task.subjectId, actionsPublishing("labels"), 1)[0]?.result : undefined;
   const issue = listed.includes("issue") ? issueOfPullRequest(config.github.repository, evaluated.item.number) : undefined;
   const found = listed.includes("validation") ? verificationOfCommit(headSha) : undefined, verification = found?.commands.length ? found : undefined;
-  const storefront = listed.includes("storefront") && config.storefront.enabled && !options.baseOnly ? await (await import("./storefront-site.ts")).storefrontContext(task.subjectId, headSha, trigger.source === "storefront") : undefined;
+  const site = listed.includes("storefront") && config.storefront.enabled && !options.baseOnly ? await import("./storefront-site.ts") : undefined;
+  const storefront = await site?.storefrontContext(task.subjectId, headSha, trigger.source);
   const reviewedSha = evaluated.headSha;
   const checks = listed.includes("validation") && reviewedSha
     ? (await bestEffort(logger, "github.check_runs_failed", { sha: reviewedSha }, () => new GitHubRepository(config.github.repository).checkRunConclusions(reviewedSha))) ?? []
@@ -117,6 +118,7 @@ export async function buildAgentInput(options: {
     history && writeContext("history", "history.md", history),
     storefront && writeContext("storefront", "storefront.json", JSON.stringify(storefront.context, null, 2)),
     storefront?.siteMap && writeContext("siteMap", "site.md", storefront.siteMap),
+    storefront && trigger.source === "schedule" && site?.stageBaselines(contextDir, writeContext, site.auditState),
     failure && writeContext("previousFailure", "previous-failure.json", JSON.stringify(failure, null, 2)),
     options.validationFailure && writeContext("validationFailure", "validation-failure.json", JSON.stringify(options.validationFailure, null, 2)),
   ]);
@@ -129,6 +131,7 @@ export async function buildAgentInput(options: {
   const prompt = JSON.stringify({
     action,
     reason: task.reason,
+    rootInstructions: manifestOf(action).rootInstructions,
     revision: evaluated.revision, baseBranch: evaluated.baseBranch, headSha: evaluated.headSha, item: evaluated.item, commentRevisions: evaluated.commentRevisions,
     input,
     workspace: { path: options.workspace.path, branch: options.workspace.branch, baseRef: options.baseRef, baseBranch: evaluated.baseBranch, mainSha, headSha, mergeInProgress: options.mergeInProgress },

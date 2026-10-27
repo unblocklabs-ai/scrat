@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
-import { readdir, readFile, rm, stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { cp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { config, isActionEnabled } from "./config.ts";
 import { ifMissing } from "./errors.ts";
 import { botName } from "./identity.ts";
@@ -8,8 +8,13 @@ import { upsertSubject } from "./items.ts";
 import type { Evaluated } from "./effects.ts";
 import type { Subject, Task } from "./schema.ts";
 import { enqueueOnce, pollSource, sourceCursor } from "./sources.ts";
-import { previewContext, statePath, writeStateText } from "./storefront.ts";
+import { previewContext, readState, statePath, writeStateText } from "./storefront.ts";
+import type { TriggerInput } from "./triggers.ts";
 
+export type Baselines = Record<string, { url: string; devices: Record<string, string> }>;
+export type Alerts = Record<string, { title: string; sha: string }>;
+
+export const auditState = "audits";
 const scope = "site_map", dayMs = 86_400_000;
 const siteMapPath = () => statePath("site.md");
 const liveUrl = () => `https://${config.storefront.publicHost}/`;
@@ -31,14 +36,24 @@ export async function saveSiteMap({ subject, task, run }: { subject: Subject; ta
   sourceCursor(subject.repository, task.action, scope).save(written);
 }
 
-export async function storefrontContext(subjectId: string, headSha: string, discovery: boolean) {
-  const preview = discovery ? undefined : previewContext(subjectId, headSha);
-  if (!discovery && !preview) return undefined;
-  const { devices, limits: { confirmationRuns, regressionMaxGrade } } = config.storefront;
-  return {
-    context: preview ? { ...preview, liveUrl: liveUrl(), devices, confirmationRuns, regressionMaxGrade } : { liveUrl: liveUrl() },
-    siteMap: await ifMissing(readFile(siteMapPath(), "utf8"), undefined), browse: preview?.available ?? true,
-  };
+export const knownBreakages = (known: Alerts | undefined) => Object.entries(known ?? {}).map(([fingerprint, { title, sha }]) => ({ fingerprint, title, since: sha }));
+
+export async function stageBaselines(contextDir: string, write: (key: string, name: string, content: string) => Promise<void>, state: string) {
+  const baselines = await readState<Baselines>(join(state, "baselines/index.json"), {}) ?? {};
+  if (!Object.keys(baselines).length) return;
+  await cp(statePath(state, "baselines"), join(contextDir, "baselines"), { recursive: true });
+  await write("baselines", "baselines.json", JSON.stringify(Object.fromEntries(Object.entries(baselines).map(([key, { url, devices }]) => [key, {
+    url, screenshots: Object.fromEntries(Object.entries(devices).map(([device, sha]) => [device, { path: join(contextDir, "baselines", key, `${device}.png`), sha }])),
+  }])), null, 2));
+}
+
+export async function storefrontContext(subjectId: string, headSha: string, source: TriggerInput["source"]) {
+  const discovery = source === "storefront", audit = source === "schedule", preview = discovery || audit ? undefined : previewContext(subjectId, headSha);
+  if (!discovery && !audit && !preview) return undefined;
+  const { devices, auditPaths, limits: { confirmationRuns, regressionMaxGrade } } = config.storefront;
+  const context = preview ? { ...preview, liveUrl: liveUrl(), devices, confirmationRuns, regressionMaxGrade }
+    : audit ? { liveUrl: liveUrl(), devices, confirmationRuns, auditPaths, knownBreakages: knownBreakages(await readState<Alerts>(join(auditState, "alerts.json"), {})) } : { liveUrl: liveUrl() };
+  return { context, siteMap: await ifMissing(readFile(siteMapPath(), "utf8"), undefined), browse: preview?.available ?? true };
 }
 
 export async function pruneScreenshots(now = Date.now()) {

@@ -26,6 +26,7 @@ const positive = Type.Integer({ minimum: 1 });
 const settings = {
   enabled: Type.Optional(Type.Boolean()), priority: Type.Integer(), skill: Type.String(),
   channel: Type.Optional(Type.String()), maxRangeCommits: Type.Optional(positive), startMessage: Type.Optional(Type.String()),
+  browserSteps: Type.Optional(positive), browserSeconds: Type.Optional(positive), rootInstructions: Type.Optional(Type.String()),
   maxSelfRepairs: Type.Optional(Type.Integer({ minimum: 0 })), exhaustedLabel: Type.Optional(nullable(Type.String())), failedLabel: Type.Optional(nullable(Type.String())),
 };
 export const actionSettings = Type.Object({
@@ -59,7 +60,7 @@ export type Manifest = Resolved & { file: string; root: string };
 const defaultTools = ({ mode, agent, context }: Pick<Resolved, "mode" | "agent" | "context">): ToolName[] => mode === "change" ? ["read", "grep", "find", "ls", "bash", "edit", "write"]
   : ["read", "grep", "find", "ls", "git", ...agent === "panel" || context === "change" ? ["read_base" as const] : []];
 
-type EntrySettings = Partial<Pick<ActionSettings, "reviewers" | "retry" | "failedLabel" | "maxSelfRepairs" | "exhaustedLabel" | "channel" | "startMessage" | "maxRangeCommits" | "branch">>;
+type EntrySettings = Partial<Pick<ActionSettings, "reviewers" | "retry" | "failedLabel" | "maxSelfRepairs" | "exhaustedLabel" | "channel" | "startMessage" | "maxRangeCommits" | "branch" | "browserSteps" | "browserSeconds" | "rootInstructions">>;
 
 export function entryProblems({ mode, agent, trigger }: Pick<Resolved, "mode" | "agent" | "trigger">, entry: EntrySettings) {
   const checks: [boolean, string][] = [
@@ -68,7 +69,10 @@ export function entryProblems({ mode, agent, trigger }: Pick<Resolved, "mode" | 
     [!entry.retry || entry.retry.maxDelaySeconds >= entry.retry.initialDelaySeconds, "retry.maxDelaySeconds must be at least retry.initialDelaySeconds"],
     [!entry.failedLabel || mode === "change", "failedLabel requires mode change"],
     [(entry.maxSelfRepairs === undefined && !entry.exhaustedLabel) || trigger.kind === "low_grade", "maxSelfRepairs and exhaustedLabel are only allowed with kind low_grade"],
-    [(entry.channel === undefined && entry.startMessage === undefined && entry.maxRangeCommits === undefined && entry.branch === undefined) || trigger.source === "github_commits", "channel, startMessage, maxRangeCommits and branch are only allowed with source github_commits"],
+    [(entry.startMessage === undefined && entry.maxRangeCommits === undefined && entry.branch === undefined) || trigger.source === "github_commits", "startMessage, maxRangeCommits and branch are only allowed with source github_commits"],
+    [entry.channel === undefined || trigger.source === "github_commits" || trigger.source === "schedule", "channel is only allowed with source github_commits or schedule"],
+    [(entry.browserSteps === undefined && entry.browserSeconds === undefined) || trigger.source === "schedule" || trigger.source === "storefront", "browserSteps and browserSeconds are only allowed with source schedule or storefront"],
+    [entry.rootInstructions === undefined || trigger.source === "schedule", "rootInstructions is only allowed with source schedule"],
   ];
   return checks.filter(([ok]) => !ok).map(([, message]) => message);
 }
@@ -97,7 +101,9 @@ function crossChecks(m: Resolved) {
   need(t.grades === undefined || t.kind === "low_grade", "trigger.grades is only allowed with kind low_grade");
   need(t.kind !== "low_grade" || m.maxSelfRepairs !== undefined, "kind low_grade requires maxSelfRepairs");
   need(!commits || m.maxRangeCommits !== undefined, "source github_commits requires maxRangeCommits");
-  need(!any(slack, ["slack_post", "slack_reply"]) || commits, "slack effects require source github_commits");
+  need(!any(slack, ["slack_post"]) || commits, "the slack_post start effect requires source github_commits");
+  need(!publish.includes("slack_reply") || commits || scheduled, "the slack_reply effect requires source github_commits or schedule");
+  need(!scheduled || !publish.includes("slack_reply") || files.includes("storefront"), "the slack_reply effect on a schedule trigger requires files: storefront");
   need(!publish.includes("issue") || !commits, "the issue effect requires source github_items or schedule");
   need(!any(publish, ["labels", "comment"]) || items, "labels and comment effects require a github_items trigger");
   need(!publish.includes("pr_assessment") || (t.item === "pr" && agent === "panel"), "pr_assessment requires item: pr and agent: panel");
@@ -125,7 +131,7 @@ function crossChecks(m: Resolved) {
   need(!files.includes("history") || !publish.includes("pr_assessment"), "files: history is not allowed with the pr_assessment effect");
   need(!files.includes("triage") || t.item === "issue", "files: triage requires trigger.item issue");
   need(!files.includes("issue") || t.item === "pr", "files: issue requires trigger.item pr");
-  need(!files.includes("storefront") || publish.includes("pr_assessment") || storefront, "files: storefront requires the pr_assessment effect or a storefront trigger");
+  need(!files.includes("storefront") || publish.includes("pr_assessment") || storefront || scheduled, "files: storefront requires the pr_assessment effect, a storefront trigger or a schedule trigger");
   return problems;
 }
 
@@ -192,7 +198,7 @@ export const resolveAction = (manifest: Manifest, entry: ActionSettings) => ({ .
 export type Action = ReturnType<typeof resolveAction>;
 
 export function deploymentDefaults(m: Manifest) {
-  const optional = { branch: m.trigger.branch, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel, failedLabel: m.failedLabel, retry: m.retry };
+  const optional = { branch: m.trigger.branch, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, browserSteps: m.browserSteps, browserSeconds: m.browserSeconds, rootInstructions: m.rootInstructions, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel, failedLabel: m.failedLabel, retry: m.retry };
   return {
     enabled: m.enabled ?? true, priority: m.priority, skill: m.skill, ...m.model, reviewers: m.reviewers,
     ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== undefined)),

@@ -1,0 +1,15 @@
+name: store_audit
+enabled: false
+trigger: { source: schedule, kind: tick, cron: "0 9 * * *", window: 1d }
+mode: review
+tools: [read, grep, find, ls, browser]
+files: [storefront, history]
+publish: [slack_reply]
+skill: skills/store_audit/SKILL.md
+model: { provider: codex-lb, model: gpt-6.1-terra, thinkingLevel: high }
+priority: 40
+channel: ""
+browserSteps: 200
+browserSeconds: 2700
+rootInstructions: "One sentence for a non-technical reader: how the live store is doing today, how many pages were checked and how many problems were found. No file names, no technical terms."
+retry: { initialDelaySeconds: 60, maxDelaySeconds: 3600 }

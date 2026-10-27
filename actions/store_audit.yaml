@@ -1,6 +1,6 @@
 name: store_audit
 enabled: false
-trigger: { source: schedule, kind: tick, cron: "0 9 * * *", window: 1d }
+trigger: { source: schedule, kind: tick, cron: "15 13 * * *", window: 1d }
 mode: review
 tools: [read, grep, find, ls, browser]
 files: [storefront, history]

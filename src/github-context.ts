@@ -11,5 +11,5 @@ export function evaluateGithubContext({ item, comments }: GithubContext) {
   const commentKeys = external.map((comment) => commentKey(comment)).sort();
   const described = { title: item.title, body: item.body, head: pullRequest?.head.sha, base: pullRequest?.base.ref, comments: commentKeys };
   const revision = pullRequest ? digest({ head: pullRequest.head.sha, base: pullRequest.base.ref, comments: commentKeys }) : digest(described);
-  return { comments: external, revision, priorRevision: pullRequest ? digest(described) : undefined };
+  return { comments: external, revision };
 }

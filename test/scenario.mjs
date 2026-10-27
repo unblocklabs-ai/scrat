@@ -1619,7 +1619,6 @@ export const scenarios = {
     for (const mode of ["exact", "relevant-paths"]) assert.deepEqual(await freshness(saved, now, mode), { kind: "current", baseMoved: false });
     for (const mode of ["exact", "relevant-paths"]) {
       assert.deepEqual(await freshness(saved, { ...now, revision: "changed" }, mode), { kind: "stale", reason: "context", changedPaths: [] });
-      assert.equal((await freshness(saved, { ...now, revision: "changed", priorRevision: saved.revision }, mode)).kind, "current", "a pre-2.0.51 PR revision still counts");
       assert.deepEqual(await freshness(saved, { ...now, baseBranch: "release" }, mode), { kind: "stale", reason: "context", changedPaths: [] });
     }
     let fetched = false;

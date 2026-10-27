@@ -31,6 +31,7 @@ const settings = {
 };
 export const actionSettings = Type.Object({
   ...settings, ...modelSettings.properties, reviewers: Type.Array(modelSettings), branch: Type.Optional(Type.String()), retry: Type.Optional(nullable(retrySettings)),
+  cron: Type.Optional(Type.String()), window: Type.Optional(Type.String()),
 }, strict);
 export type ActionSettings = Static<typeof actionSettings>;
 const trigger = Type.Object({
@@ -60,7 +61,11 @@ export type Manifest = Resolved & { file: string; root: string };
 const defaultTools = ({ mode, agent, context }: Pick<Resolved, "mode" | "agent" | "context">): ToolName[] => mode === "change" ? ["read", "grep", "find", "ls", "bash", "edit", "write"]
   : ["read", "grep", "find", "ls", "git", ...agent === "panel" || context === "change" ? ["read_base" as const] : []];
 
-type EntrySettings = Partial<Pick<ActionSettings, "reviewers" | "retry" | "failedLabel" | "maxSelfRepairs" | "exhaustedLabel" | "channel" | "startMessage" | "maxRangeCommits" | "branch" | "browserSteps" | "browserSeconds" | "rootInstructions">>;
+type EntrySettings = Partial<Pick<ActionSettings, "reviewers" | "retry" | "failedLabel" | "maxSelfRepairs" | "exhaustedLabel" | "channel" | "startMessage" | "maxRangeCommits" | "branch" | "cron" | "window" | "browserSteps" | "browserSeconds" | "rootInstructions">>;
+
+export function scheduleProblem(key: "cron" | "window", value: string) {
+  try { if (key === "cron") nextTick(parseCron(value), new Date(0)); else parseWindow(value); } catch (error) { return (error as Error).message; }
+}
 
 export function entryProblems({ mode, agent, trigger }: Pick<Resolved, "mode" | "agent" | "trigger">, entry: EntrySettings) {
   const checks: [boolean, string][] = [
@@ -73,6 +78,7 @@ export function entryProblems({ mode, agent, trigger }: Pick<Resolved, "mode" | 
     [entry.channel === undefined || trigger.source === "github_commits" || trigger.source === "schedule", "channel is only allowed with source github_commits or schedule"],
     [(entry.browserSteps === undefined && entry.browserSeconds === undefined) || trigger.source === "schedule" || trigger.source === "storefront", "browserSteps and browserSeconds are only allowed with source schedule or storefront"],
     [entry.rootInstructions === undefined || trigger.source === "schedule", "rootInstructions is only allowed with source schedule"],
+    [(entry.cron === undefined && entry.window === undefined) || trigger.source === "schedule", "cron and window are only allowed with source schedule"],
   ];
   return checks.filter(([ok]) => !ok).map(([, message]) => message);
 }
@@ -92,8 +98,9 @@ function crossChecks(m: Resolved) {
   need(t.author === undefined || (commits ? true : items && t.author === "bot"), 'trigger.author must be "bot" for github_items and is forbidden for schedule');
   need((t.message === undefined && t.granularity === undefined) || commits, "trigger.message and trigger.granularity are only allowed with source github_commits");
   need(scheduled === (t.cron !== undefined && t.window !== undefined) && (scheduled || (t.cron === undefined && t.window === undefined)), "trigger.cron and trigger.window are required for schedule and forbidden for other sources");
-  if (scheduled && t.cron !== undefined && t.window !== undefined) {
-    try { nextTick(parseCron(t.cron), new Date(0)); parseWindow(t.window); } catch (error) { problems.push((error as Error).message); }
+  for (const key of ["cron", "window"] as const) {
+    const problem = t[key] === undefined ? undefined : scheduleProblem(key, t[key]);
+    if (scheduled && problem) problems.push(problem);
   }
   need(!scheduled || mode === "review", "a schedule trigger requires mode review");
   need(!storefront || mode === "review", "a storefront trigger requires mode review");
@@ -194,11 +201,11 @@ export function findTriggerConflicts<T extends Pick<Manifest, "file" | "trigger"
   return problems;
 }
 
-export const resolveAction = (manifest: Manifest, entry: ActionSettings) => ({ ...manifest, ...entry, skill: resolve(manifest.root, entry.skill), trigger: { ...manifest.trigger, branch: entry.branch } });
+export const resolveAction = (manifest: Manifest, entry: ActionSettings) => ({ ...manifest, ...entry, skill: resolve(manifest.root, entry.skill), trigger: { ...manifest.trigger, branch: entry.branch, cron: entry.cron, window: entry.window } });
 export type Action = ReturnType<typeof resolveAction>;
 
 export function deploymentDefaults(m: Manifest) {
-  const optional = { branch: m.trigger.branch, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, browserSteps: m.browserSteps, browserSeconds: m.browserSeconds, rootInstructions: m.rootInstructions, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel, failedLabel: m.failedLabel, retry: m.retry };
+  const optional = { branch: m.trigger.branch, cron: m.trigger.cron, window: m.trigger.window, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, browserSteps: m.browserSteps, browserSeconds: m.browserSeconds, rootInstructions: m.rootInstructions, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel, failedLabel: m.failedLabel, retry: m.retry };
   return {
     enabled: m.enabled ?? true, priority: m.priority, skill: m.skill, ...m.model, reviewers: m.reviewers,
     ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== undefined)),

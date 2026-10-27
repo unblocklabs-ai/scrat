@@ -7,7 +7,7 @@ import { bestEffort } from "./logging.ts";
 import { createMergeCommit, prepareTarget } from "./git.ts";
 import { currentPrReview } from "./pr-assessment.ts";
 import { completedRunsOfAction, getRun, updateRun } from "./run-history.ts";
-import { assertComplete } from "./results.ts";
+import { assertComplete, hasReviewCheckpoint } from "./results.ts";
 import type { Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { isBaseOnly, parseTriggerInput } from "./triggers.ts";
@@ -78,8 +78,22 @@ async function refreshPreview({ manifest, operation, stop, references, repositor
   catch (error) { if (!stop?.aborted) operation.log.warn({ event: "storefront.preview_failed", subjectId: references.subjectId, number, err: error }); }
 }
 
+async function resumeReview(ctx: Ctx) {
+  const { run, repositoryPath, references } = ctx;
+  if (!hasReviewCheckpoint(run)) throw new Error("No complete review checkpoint to resume");
+  const { result, mainSha, headSha } = run;
+  if (reviewsStorefront(ctx)) {
+    const { diffPaths, diffBaseSha, evaluated } = await describeCommit(ctx);
+    const workspace = ctx.cleanup.reviewWorkspace = await createWorkspace({ repositoryPath, baseRef: headSha }, references);
+    updateRun(run.id, { workspaceId: workspace.id });
+    updateRun(run.id, { result: await (await import("./storefront-main.ts")).reviewStorefront(ctx, { workspace, headSha, diffBaseSha, diffPaths, item: evaluated.item }, result) });
+  } else if (auditsStorefront(ctx)) updateRun(run.id, { result: await (await import("./storefront-main.ts")).auditStorefront(ctx, mainSha, result) });
+  updateRun(run.id, { stage: "publishing" });
+}
+
 export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   const { run, subject, manifest, repositoryPath, stop } = ctx;
+  if (run.stage === "validating") return resumeReview(ctx);
   const { mainSha, headSha, evaluated, diffPaths, diffBaseSha } = observed ? await itemScope(ctx, observed)
     : subject.kind === "window" ? await describeWindow(ctx) : await describeCommit(ctx);
   const workspace = ctx.cleanup.reviewWorkspace = await createWorkspace({ repositoryPath, baseRef: headSha }, ctx.references);

@@ -11,6 +11,7 @@ export type JournalEvent = (
   | { type: "database.created"; data: { container: string; image: string } }
   | { type: "database.removed"; data: { container: string } }
   | { type: "run.started"; data: { action: TaskDetails["action"]; skill: string; provider: string; model: string; thinkingLevel: string } }
+  | { type: "run.resumed"; data: { stage: string; fromRunId: string; reason: "drain" | "crash" | "retry" } }
   | { type: "run.completed"; data: { stage: string } }
   | { type: "run.interrupting"; data: { stage: string; reason: string } }
   | { type: "run.requeued"; data: { stage: string; retryMode: "repair" | "validation"; attempt?: number; nextAttemptAt?: string } }

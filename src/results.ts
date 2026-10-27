@@ -16,8 +16,16 @@ export function hasValidationCheckpoint(run: Run | undefined): run is Run & {
     && Boolean(run.context && run.agentCheckpoint && run.workspaceId && run.mainSha);
 }
 
-export function entryStage(previousRun: Run | undefined, retryMode: "repair" | "validation"): Run["stage"] {
-  return retryMode === "validation" ? "validating" : hasPublicationSnapshot(previousRun) ? "publishing" : "preparing";
+export function hasReviewCheckpoint(run: Run | undefined): run is Run & {
+  result: AgentResult; context: NonNullable<Run["context"]>; mainSha: string; headSha: string;
+} {
+  return run?.stage === "validating" && run.result?.outcome === "complete" && Boolean(run.context && run.mainSha && run.headSha);
+}
+
+export const workerStoppedMessage = "Worker stopped before finishing this run";
+
+export function entryStage(previousRun: Run | undefined, retryMode: "repair" | "validation", reviewResume: Run | undefined): Run["stage"] {
+  return retryMode === "validation" || reviewResume ? "validating" : hasPublicationSnapshot(previousRun) ? "publishing" : "preparing";
 }
 
 export const prGrades = ["S", "A", "B", "C", "D", "F"] as const;

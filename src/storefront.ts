@@ -40,6 +40,11 @@ const deleteMutation = "mutation DeleteTheme($id: ID!) { themeDelete(id: $id) { 
 const environment = "shopify-preview", unverified = "";
 
 const refused = (request: string, { userErrors }: UserErrors) => Object.assign(new Error(`Shopify refused ${request}: ${userErrors.map((error) => error.message).join("; ") || "no result"}`), { code: "USER_ERRORS" });
+const gone = (error: unknown) => {
+  const { code, data } = error as { code?: string; data?: { theme?: unknown } };
+  if (code === "NOT_FOUND" && data?.theme === null) return { theme: null };
+  throw error;
+};
 const now = () => new Date().toISOString();
 export const md5 = (bytes: Buffer) => createHash("md5").update(bytes).digest("hex");
 const fileBody = (bytes: Buffer) => isUtf8(bytes) && !bytes.includes(0) ? { type: "TEXT", value: bytes.toString("utf8") } : { type: "BASE64", value: bytes.toString("base64") };
@@ -110,7 +115,7 @@ async function duplicate(preview: ThemePreview, retried: boolean, stop?: AbortSi
 }
 
 async function readTheme<T>(preview: ThemePreview, query: string, variables: Record<string, unknown>, stop?: AbortSignal) {
-  const { theme } = await loggie<{ theme: T | null }>("theme", query, { id: preview.themeGid, ...variables }, { stop });
+  const { theme } = await loggie<{ theme: T | null }>("theme", query, { id: preview.themeGid, ...variables }, { stop }).catch(gone);
   if (theme) return theme;
   savePreview(preview, { deletedAt: now() });
   throw new Error(`Preview theme ${preview.name} (${preview.themeId}) is gone from the store; the next review creates a new one`);
@@ -275,7 +280,7 @@ export async function ensurePreview(target: Target, revision: Revision, stop?: A
 
 async function removeTheme(preview: ThemePreview) {
   const id = preview.themeGid ?? (await namedTheme(preview))?.id;
-  const theme = id ? (await loggie<{ theme: { role: string } | null }>("theme", processingQuery, { id })).theme : null;
+  const theme = id ? (await loggie<{ theme: { role: string } | null }>("theme", processingQuery, { id }).catch(gone)).theme : null;
   if (!id || !theme) return `${themeLabel(preview)} was already gone from the store`;
   if (theme.role !== "UNPUBLISHED") {
     logger.warn({ event: "storefront.preview_kept", subjectId: preview.subjectId, themeId: preview.themeId, name: preview.name, role: theme.role });

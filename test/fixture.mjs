@@ -102,7 +102,7 @@ export async function fixture(scenario, spec) {
       const userErrors = variables.files.filter((filename) => loggie.stuckDeletes.has(filename)).map((filename) => ({ field: ["files"], message: `${filename} could not be deleted` }));
       return send({ data: { themeFilesDelete: { deletedThemeFiles: deleted.map((filename) => ({ filename })), userErrors } } });
     }
-    if (!theme) return send({ data: { theme: null } });
+    if (!theme) return send({ data: { theme: null }, errors: [{ message: "Theme does not exist", extensions: { code: "NOT_FOUND" } }] });
     const processing = theme.polls > 0;
     if (processing && query.includes("processing")) theme.polls--;
     const bodyOf = (filename) => {

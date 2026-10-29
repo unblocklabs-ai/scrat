@@ -40,8 +40,9 @@ async function liveProof({ repositoryPath, operation, stop }: Ctx, { headSha, di
   const blobs = await treeBlobs(repositoryPath, headSha, paths), live = await liveFiles(paths, stop);
   for (const path of paths) {
     const oid = blobs.get(path), expected = oid ? md5(await blobBytes(repositoryPath, oid)) : null;
-    const actual = live.checksums.has(path) ? live.checksums.get(path) ?? md5(await live.bytes(path)) : null;
-    if (actual !== expected) differing.push(path);
+    const matches = !live.checksums.has(path) ? expected === null
+      : expected !== null && (live.checksums.get(path) === expected || md5(await live.bytes(path)) === expected);
+    if (!matches) differing.push(path);
   }
   if (differing.length) operation.log.warn({ event: "storefront.live_mismatch", sha: headSha, paths: differing });
   return { paths, differing };

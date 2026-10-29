@@ -3349,7 +3349,7 @@ export const scenarios = {
     await success();
     assert.deepEqual(replies().slice(messages), [codeText]); assert.equal(f.loggie.requests.length, 0); assert.deepEqual(counts(), before, "a disabled storefront changes nothing");
   } },
-  commit_review_storefront_failures: { title: "the main-branch storefront review handles a change with no theme files, a deleted theme file and a live file without a checksum, reports a Loggie or agent failure without holding back the code review, posts its block without a link when the commit comment is refused, and abandons Lighthouse runs that outlive their budget", seed: seedTheme, configure: [configureCommitSource, configureMainStorefront], run: async () => {
+  commit_review_storefront_failures: { title: "the main-branch storefront review handles a change with no theme files, a deleted theme file and a live file whose checksum is not the MD5 of its bytes, reports a Loggie or agent failure without holding back the code review, posts its block without a link when the commit comment is refused, and abandons Lighthouse runs that outlive their budget", seed: seedTheme, configure: [configureCommitSource, configureMainStorefront], run: async () => {
     const { fakes, push, scored, code, codeText, replies, reactions, reports, link } = await mainStorefront();
     const { config: live } = await f.app("config.ts"), main = f.loggie.themes.get(f.loggie.mainTheme), done = "Nothing visible changed.\nSCRAT_VERDICT: clean\nSCRAT_STATUS: complete";
 
@@ -3362,10 +3362,10 @@ export const scenarios = {
 
     const deleting = await push({ "templates/index.json": null, "config/settings_data.json": "{\"current\":{\"color\":\"red\"}}\n" }, false);
     f.loggie.setLive({ ...Object.fromEntries([...main.bodies].map(([path, { value }]) => [path, value])), "config/settings_data.json": "{\"current\":{\"color\":\"red\"}}\n" });
-    main.files.set("config/settings_data.json", null);
+    main.files.set("config/settings_data.json", f.loggie.md5("{\"current\":{\"color\":\"red\"}}"));
     f.script = [code];
     const unsynced = await success();
-    assert.equal(replies().at(-1), `*Storefront*: the live theme does not match ${deleting.slice(0, 7)} yet (1 of 2 changed theme files differ), so the visual review and Lighthouse were skipped.`, "a file without a checksum is compared by its bytes, and a deleted file must be gone");
+    assert.equal(replies().at(-1), `*Storefront*: the live theme does not match ${deleting.slice(0, 7)} yet (1 of 2 changed theme files differ), so the visual review and Lighthouse were skipped.`, "a file whose checksum Shopify took over its own serialization is compared by its bytes, and a deleted file must be gone");
     main.files.delete("templates/index.json"); main.bodies.delete("templates/index.json");
     scored(); f.reset(0, "normal"); f.script = [code, done];
     tasks.enqueueTask({ subjectId: f.row(s.tasks, unsynced.taskId).subjectId, action: "review_base_change", reason: "Synced", input: f.row(s.tasks, unsynced.taskId).input });

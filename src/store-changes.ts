@@ -96,7 +96,7 @@ async function read(watched: Set<string>, log: OperationScope["log"]) {
   const shop = await all<{ shop: { metafields: Connection<Metafield> } }, Metafield>("shop", `query ($after: String, $keys: [String!]) { shop { metafields(first: ${size.shopMetafields}, after: $after, keys: $keys) { nodes { namespace key value } ${pageInfo} } } }`, (data) => data.shop.metafields, { keys: [...watched] });
   put("shop", "shop", "shop", mine(watched, shop));
   kinds.add("shop");
-  const objects = await metaobjects(log);
+  const objects = config.storefront.changes.metaobjects ? await metaobjects(log) : undefined;
   if (objects) {
     for (const { id, handle, type, fields } of objects) put(id, "metaobject", `${type}/${handle}`, Object.fromEntries(fields.map(({ key, value }) => [`field:${key}`, value])));
     kinds.add("metaobject");

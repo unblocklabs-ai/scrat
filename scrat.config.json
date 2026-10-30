@@ -95,6 +95,7 @@
       "pageSizes": { "products": 100, "collections": 100, "pages": 100, "menus": 50, "metafields": 250, "shopMetafields": 100, "metaobjectDefinitions": 250, "metaobjects": 50, "events": 50 },
       "extraMetafields": [],
       "ignoreMetafields": [],
+      "metaobjects": true,
       "ignoreMetaobjectTypes": "^(shopify|app)--"
     }
   },

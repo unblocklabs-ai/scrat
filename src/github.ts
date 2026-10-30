@@ -101,7 +101,7 @@ async function githubForRepository(repository: string, access: keyof typeof perm
 function issueView(item: GithubIssue): GithubIssue {
   return {
     node_id: item.node_id, number: item.number, title: item.title, body: item.body,
-    html_url: item.html_url, state: item.state, updated_at: item.updated_at,
+    html_url: item.html_url, state: item.state, state_reason: item.state_reason, closed_at: item.closed_at, updated_at: item.updated_at,
     user: item.user ? { login: item.user.login } : null,
     labels: item.labels.map((label) => typeof label === "string" ? label : { name: label.name }),
   };
@@ -359,13 +359,13 @@ export class GitHubRepository {
   }
 
   async createIssue(
-    { title, body, fingerprint }: { title: string; body: string; fingerprint: string },
+    { title, body, fingerprint, labels }: { title: string; body: string; fingerprint: string; labels?: string[] },
     references: EventReferences = {},
   ) {
     const marked = withMarker(body, fingerprintMarker(fingerprint));
     const response = await this.write("github.create_issue", { fingerprint }, references, "write", {
       inspect: () => assertPublishable(title, marked),
-      request: ({ github, owner, repo }) => github.rest.issues.create({ owner, repo, title, body: marked }),
+      request: ({ github, owner, repo }) => github.rest.issues.create({ owner, repo, title, body: marked, labels }),
       journal: ({ data }) => ({
         event: { type: "github.issue_created", data: { repository: this.repository, issueNumber: data.number, url: data.html_url, fingerprint } },
         details: { issueNumber: data.number },

@@ -259,7 +259,7 @@ const configureCommitPanel = (config) => {
   Object.assign(config.actions.review_base_change, { reviewers });
 };
 const configureNoStart = () => writeFileSync("app/actions/review_base_change.yaml", readFileSync("app/actions/review_base_change.yaml", "utf8").replace("start: [slack_post]\n", ""));
-const configureHistory = () => writeFileSync("app/actions/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace("files: [discussion, previous_assessment]", "files: [discussion, previous_assessment, history]"));
+const configureHistory = () => writeFileSync("app/actions/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace("files: [discussion, previous_assessment, cloudflare]", "files: [discussion, previous_assessment, history]"));
 const configureScoped = (config) => {
   config.bindings = { scout: { secret: "${SCOUT_TOKEN}", hosts: ["api.example.test", "other.example.test"], header: "Authorization", prefix: "Bearer " } };
   const scopedTools = { scoped_http: ["[read, grep, http]", "http: { binding: scout, methods: [GET] }"], bindings_startup: ["[read, grep, http]", "http: { binding: scout }"], scoped_github_search: ["[read, grep, github_search]", ""],
@@ -3439,7 +3439,7 @@ export const scenarios = {
     broken("review_pr", (text) => text.replace("[pr_assessment]", "[teleport]"), /actions\/review_pr\.yaml: \/publish\/0/);
     broken("implement", (text) => text.replace("nonempty_diff", "sometimes"), /actions\/implement\.yaml: \/acceptance/);
     broken("review_issue", (text) => withTools(text, "[read, teleport]"), /actions\/review_issue\.yaml: \/tools\/1/);
-    broken("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [secrets]"), /actions\/review_issue\.yaml: \/files\/0/);
+    broken("review_issue", (text) => text.replace("files: [discussion, previous_assessment, cloudflare]", "files: [secrets]"), /actions\/review_issue\.yaml: \/files\/0/);
     broken("review_issue", (text) => text.replace("name: review_issue", "name: Review-Issue"), /actions\/review_issue\.yaml: \/name/);
     broken("review_issue", (text) => withTools(text, "[read, bash]"), /mode review forbids the bash, edit and write tools/);
     f.addIssue(1); f.enqueue(1);
@@ -3515,11 +3515,11 @@ export const scenarios = {
     rejects("review_issue", (text) => withTools(text, "[read, git, read_base]"), /read_base requires a review with agent: panel or context: change/);
     rejects("review_pr", (text) => text.replace("[discussion, previous_assessment, previous_repair, validation, issue, storefront]", "[history]"), /files: history is not allowed with the pr_assessment effect/);
     rejects("review_pr", (text) => text.replace("validation, issue, storefront]", "validation, triage, storefront]"), /files: triage requires trigger.item issue/);
-    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [issue]"), /files: issue requires trigger.item pr/);
-    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [review]"), /files: review requires trigger.kind low_grade/);
+    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment, cloudflare]", "files: [issue]"), /files: issue requires trigger.item pr/);
+    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment, cloudflare]", "files: [review]"), /files: review requires trigger.kind low_grade/);
     rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [labels]"), /files: previous_assessment requires the pr_assessment effect or a review that publishes comment/);
-    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [discussion, previous_repair]"), /files: previous_repair requires the pr_assessment effect/);
-    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment]", "files: [discussion, previous_assessment, storefront]"), /files: storefront requires the pr_assessment effect, a storefront trigger or a schedule trigger/);
+    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment, cloudflare]", "files: [discussion, previous_repair]"), /files: previous_repair requires the pr_assessment effect/);
+    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment, cloudflare]", "files: [discussion, previous_assessment, storefront]"), /files: storefront requires the pr_assessment effect, a storefront trigger or a schedule trigger/);
     rejects("storefront_discover", (text) => text.replace("files: [storefront]", "files: []"), /the browser tool and the browser setting require each other, except that a manifest listing the storefront file may list browser alone/);
     rejects("storefront_discover", (text) => text.replace("publish: [site_map]", "publish: [issue]"), /the site_map effect and a storefront trigger require each other/);
     rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [comment, labels, site_map]"), /the site_map effect and a storefront trigger require each other/);
@@ -4053,7 +4053,7 @@ export const scenarios = {
     assert.ok(!existsSync("data/storefront/lighthouse.json")); assert.equal(all(s.slackThreads).length, 2);
   } },
   storefront_preview: { title: "an enabled storefront gives each Scrat PR review one recorded MAIN duplicate through Loggie, adopts a duplicate whose reply was lost, resumes its processing wait, replaces a theme that vanished, reuses it and deletes it when the PR closes, retrying a failed delete; a refused Loggie call only logs, and a disabled storefront or a human PR makes no Loggie call", configure: [(config) => { Object.assign(config.storefront, { store: "fixture.myshopify.com", publicHost: "shop.example.test" }); Object.assign(config.storefront.preview, { processingPollSeconds: 1, filesPageSize: 2 }); }], run: async () => {
-    const { config: live } = await f.app("config.ts"), { loggie } = await f.app("storefront-loggie.ts"), { childEnvironment, containsSecret } = await f.app("secrets.ts");
+    const { config: live } = await f.app("config.ts"), { loggie } = await f.app("loggie.ts"), { childEnvironment, containsSecret } = await f.app("secrets.ts");
     const fields = (from = 0) => f.loggie.requests.slice(from).map((request) => request.field), previews = () => all(s.themePreviews);
     const named = (name) => [...f.loggie.themes.values()].filter((theme) => theme.name === name);
     const pr = (number) => f.prs.find((entry) => entry.number === number), review = async (number) => { tasks.enqueueManualTasks("review_pr", [String(number)]); return success(); };
@@ -4456,6 +4456,78 @@ export const scenarios = {
     const disabled = await reviewOf("normal");
     const skill = readFileSync(resolve("app/skills/review_pr/SKILL.md"), "utf8").replace(/^\{\{#storefront\}\}\n[\s\S]*?^\{\{\/storefront\}\}\n/m, "").replaceAll("{{bot}}", "Scrat");
     assert.ok(disabled.requests.length && disabled.requests.every((request) => request.context.item.number === 201 && request.context.files.storefront === undefined && request.text.startsWith(skill) && JSON.stringify(names(request)) === panel), "a disabled storefront gets the unchanged skill and tools");
+  } },
+  cloudflare_issues: { title: "an enabled Cloudflare source files each active exception issue once it reaches the threshold and while fewer than maxOpen are open, files a new issue when a version unseen before a completed close recurs after it, but not for the old version or a not-planned close, never refiles across rounds, and gives the review a context file without headers or user data", configure: [(config) => { Object.assign(config.cloudflare, { enabled: true, services: ["api"] }); config.cloudflare.issues.maxOpen = 2; }], run: async () => {
+    const { pollSources } = await f.app("poll-sources.ts"), { cloudflare } = f, base = Date.UTC(2026, 9, 30, 12);
+    const leaked = "ghp_" + "a1B2c3D4e".repeat(4);
+    const entry = (id, title, type, count, lastObserved) => ({ id, service: "api", title, type, status: "active", count, firstObserved: base, lastObserved, created: base, updated: lastObserved, activity: [] });
+    cloudflare.issues.push(entry("cf-a", "Below threshold", "exception", 4, base + 1000), entry("cf-b", "TypeError in orders", "exception", 5, base + 2000), entry("cf-c", "Noisy log", "log", 9, base + 3000),
+      entry("cf-d", "RangeError in cart", "exception", 7, base + 4000), entry("cf-e", "Over the cap", "exception", 6, base + 5000));
+    const occurrence = (id, trace, extra = {}) => ({
+      id, timestamp: base + 2500, error: { name: "TypeError", message: `Cannot read properties of undefined; token ${leaked}`, mechanism: "exception", handled: false, stack: "TypeError: Cannot read properties of undefined\n    at handler (assets/worker-entry-abc.js:10:5)\n    at async main (assets/worker-entry-abc.js:20:1)" },
+      worker: { scriptName: "api", entrypoint: "default", executionModel: "stateless", scriptVersion: { id: "ver-1", tag: "v1" } },
+      invocation: { id: "inv-" + id, type: "fetch", traceId: trace, method: "GET", path: "/orders", url: "https://api.example.test/orders?email=jo@example.test&session=SESSIONQ", statusCode: 500 },
+      trail: [{ type: "log", level: "error", message: "order lookup failed", timestamp: base + 2400 }],
+      request: { headers: { authorization: "Bearer hunter2hunter2" } }, context: { user: { id: "user-77" } }, ...extra,
+    });
+    for (const [id, trace] of [["cf-b", "trace-b"], ["cf-d", "trace-d"], ["cf-e", "trace-e"]]) cloudflare.occurrences.set(id, [occurrence("occ-" + id, trace)]);
+    cloudflare.events.set("trace-b", [{ timestamp: base + 2450, level: "info", message: "fetching order 42" }]);
+    const filed = () => f.written("issue"), closeIssue = (number, reason, at) => Object.assign(f.issues.get(number), { state: "closed", state_reason: reason, closed_at: new Date(at).toISOString() });
+    const drain = async () => { while (all(s.tasks).some((task) => task.status === "queued")) await success(); };
+
+    await pollSources();
+    assert.deepEqual(filed().map((write) => write.title), ["api: TypeError in orders", "api: RangeError in cart"], "below the threshold, a log issue and the issue beyond maxOpen are not filed");
+    const [first, second] = filed().map((write) => f.issues.get(write.number));
+    assert.deepEqual(first.labels, [{ name: "cloudflare" }]);
+    assert.ok(first.body.trimEnd().endsWith("<!-- scrat-fingerprint:cloudflare:cf-b -->") && first.body.includes("```text\nerror.name: TypeError") && first.body.includes("at handler (assets/worker-entry-abc.js:10:5)") && first.body.includes("- Occurrences: 5"));
+    assert.ok(!first.body.includes(leaked) && first.body.includes("[redacted]") && !first.body.includes("hunter2hunter2") && !first.body.includes("user-77"));
+    const listing = cloudflare.requests.find((request) => request.path.startsWith("/api/proxy/cf-fixture/accounts/acct123/workers/observability/issues?"));
+    assert.equal(new URL("http://x" + listing.path).searchParams.get("perPage"), "50"); assert.equal(listing.key, f.loggie.key);
+
+    await route(); await drain();
+    const reviewed = f.requests.filter((request) => request.context.action === "review_issue" && request.context.item.number === first.number);
+    assert.ok(reviewed.length && reviewed.every((request) => request.context.files.cloudflare !== undefined));
+    const context = readFileSync(reviewed[0].context.files.cloudflare, "utf8");
+    assert.ok(context.includes("untrusted") && context.includes("at async main (assets/worker-entry-abc.js:20:1)") && context.includes("order lookup failed") && context.includes("fetching order 42") && context.includes('"id": "ver-1"'));
+    assert.ok(context.includes("https://api.example.test/orders\"") && !context.includes("jo@example.test") && !context.includes("SESSIONQ") && !context.includes("hunter2hunter2") && !context.includes("user-77") && !context.includes(leaked) && context.includes("[redacted]"));
+    const query = cloudflare.requests.find((request) => request.path.endsWith("telemetry/query")).body;
+    assert.equal(query.dry, true); assert.equal(query.view, "events"); assert.equal(query.limit, 50); assert.equal(query.parameters.filters[0].value, "trace-b");
+
+    await pollSources(); await pollSources();
+    assert.equal(filed().length, 2, "later rounds file nothing again");
+    const row = (id) => JSON.parse(db.select().from(s.sourceCursors).all().find((cursor) => cursor.branch === id).sha);
+    assert.deepEqual(row("cf-b"), { number: first.number, count: 5, lastObserved: base + 2000, updated: base + 2000 });
+
+    cloudflare.issues = cloudflare.issues.filter((issue) => issue.id !== "cf-e");
+    const closedAt = base + 10_000, version = (id) => ({ scriptName: "api", scriptVersion: { id } }), newest = (id, occurrences) => cloudflare.occurrences.set(id, [...occurrences, ...cloudflare.occurrences.get(id)]);
+    const seen = (id, count, at) => Object.assign(cloudflare.issues.find((issue) => issue.id === id), { count, lastObserved: at, updated: at });
+    closeIssue(first.number, "completed", closedAt); closeIssue(second.number, "not_planned", closedAt);
+    newest("cf-b", [occurrence("occ-b2", "trace-b2", { timestamp: closedAt + 5000, worker: version("ver-1") })]); seen("cf-b", 9, closedAt + 5000);
+    newest("cf-d", [occurrence("occ-d2", "trace-d2", { timestamp: closedAt + 6000, worker: version("ver-2") })]); seen("cf-d", 11, closedAt + 6000);
+    await pollSources(); await pollSources();
+    assert.equal(filed().length, 2, "an occurrence of the pre-close version and a not-planned close file nothing");
+    cloudflare.occurrences.set("cf-b", cloudflare.occurrences.get("cf-b").filter((entry) => entry.timestamp > closedAt));
+    newest("cf-b", [occurrence("occ-b4", "trace-b4", { timestamp: closedAt + 7000, worker: version("ver-1") })]); seen("cf-b", 10, closedAt + 7000);
+    await pollSources();
+    assert.equal(filed().length, 2, "the pre-close versions stay known after Cloudflare stops retaining their occurrences");
+    newest("cf-b", [occurrence("occ-b3", "trace-b3", { timestamp: closedAt + 8000, worker: version("ver-2") })]); seen("cf-b", 11, closedAt + 8000);
+    await pollSources();
+    assert.equal(filed().length, 3, "an occurrence of a version never seen before the close files the recurrence");
+    const recurrence = f.issues.get(filed()[2].number);
+    assert.equal(recurrence.title, "api: TypeError in orders"); assert.deepEqual(recurrence.labels, [{ name: "cloudflare" }]);
+    assert.ok(recurrence.body.startsWith(`Recurred after #${first.number} was closed on 2026-10-30; first seen again in Worker version \`ver-2\`.\n\n`) && recurrence.body.trimEnd().endsWith("<!-- scrat-fingerprint:cloudflare:cf-b -->"));
+    assert.equal(f.issues.get(first.number).state, "closed"); assert.equal(f.issues.get(second.number).state, "closed");
+    assert.equal(row("cf-b").number, recurrence.number);
+    await pollSources(); await pollSources();
+    assert.equal(filed().length, 3, "the recurrence is filed once");
+    const { pollCloudflareIssues } = await f.app("cloudflare.ts"), lostTitle = "api: Lost response [redacted]";
+    cloudflare.issues.push(entry("cf-f", "Lost response " + leaked, "exception", 5, closedAt + 9000)); cloudflare.occurrences.set("cf-f", [occurrence("occ-f", "trace-f", { timestamp: closedAt + 9000 })]);
+    f.faults.issue.add(lostTitle);
+    await pollCloudflareIssues();
+    assert.equal(filed().length, 4); assert.ok(!all(s.sourceCursors).some((cursor) => cursor.branch === "cf-f"), "the lost response left no mapping");
+    await pollCloudflareIssues(); await pollCloudflareIssues();
+    assert.equal(filed().length, 4, "the issue created behind a lost response is adopted, not filed again");
+    assert.equal(f.issues.get(row("cf-f").number).title, lostTitle, "the title is redacted");
   } },
   database: { title: "real PostgreSQL runs isolate databases, apply new migrations and remove resources", needsDocker: true, configure: [configureDatabase], run: async () => {
     const original = process.env.DATABASE_URL; f.addIssue(1); f.addIssue(2); f.enqueue(1, "implement"); f.enqueue(2, "implement");

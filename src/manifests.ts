@@ -10,7 +10,7 @@ import { triggerKinds, triggerSource } from "./triggers.ts";
 
 const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const toolNames = ["read", "grep", "find", "ls", "git", "read_base", "bash", "edit", "write", "http", "browser", "github_search"] as const;
-const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "history", "validation", "triage", "issue", "storefront"] as const;
+const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "history", "validation", "triage", "issue", "storefront", "cloudflare"] as const;
 const effectNames = ["push", "pull_request", "comment", "labels", "pr_assessment", "issue", "slack_reply", "site_map"] as const;
 const startEffectNames = ["slack_post"] as const;
 export type ThinkingLevel = (typeof thinkingLevels)[number];
@@ -140,6 +140,7 @@ function crossChecks(m: Resolved) {
   need(!files.includes("triage") || t.item === "issue", "files: triage requires trigger.item issue");
   need(!files.includes("issue") || t.item === "pr", "files: issue requires trigger.item pr");
   need(!files.includes("storefront") || publish.includes("pr_assessment") || storefront || scheduled, "files: storefront requires the pr_assessment effect, a storefront trigger or a schedule trigger");
+  need(!files.includes("cloudflare") || t.item === "issue", "files: cloudflare requires trigger.item issue");
   return problems;
 }
 

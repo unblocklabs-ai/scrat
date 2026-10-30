@@ -43,6 +43,12 @@ const schema = Type.Object({
     }, strict),
     lighthouse: Type.Object({ runs: positive, pages: Type.Array(Type.String({ pattern: "^/(?!/)" }), { minItems: 1, uniqueItems: true }), timeoutSeconds: positive }, strict),
   }, strict),
+  cloudflare: Type.Object({
+    enabled: Type.Boolean(), accountId: Type.String(), services: Type.Array(Type.String(), { uniqueItems: true }),
+    loggie: Type.Object({ url: Type.String(), slug: Type.String(), timeoutSeconds: positive }, strict),
+    issues: Type.Object({ types: Type.Array(Type.Enum(["exception", "log"]), { minItems: 1, uniqueItems: true }), minOccurrences: positive, maxOpen: positive, label: Type.String({ minLength: 1 }), pageSize: positive, stackFrames: positive, bodyBytes: positive }, strict),
+    context: Type.Object({ occurrences: positive, logEvents: positive, maxBytes: positive, logWindowSeconds: positive }, strict),
+  }, strict),
   slack: Type.Object({ enabled: Type.Boolean(), channel: Type.String(), maxRetryAfterSeconds: positive, minimumGapMs: Type.Integer({ minimum: 0 }), maxErrorLength: positive, maxTextLength: positive }, strict),
   workspace: Type.Object({
     sandbox: Type.Boolean(),

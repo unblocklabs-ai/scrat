@@ -8,8 +8,8 @@ import { recordEvent } from "./events.ts";
 import { bestEffort } from "./logging.ts";
 import { createMergeCommit, prepareTarget } from "./git.ts";
 import { currentPrReview } from "./pr-assessment.ts";
-import { completedRunsOfAction, getRun, updateRun } from "./run-history.ts";
-import { assertComplete, hasReviewCheckpoint } from "./results.ts";
+import { getRun, latestCompletedRun, updateRun } from "./run-history.ts";
+import { type AgentResult, assertComplete, hasReviewCheckpoint } from "./results.ts";
 import type { Run, Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { isBaseOnly, parseTriggerInput } from "./triggers.ts";
@@ -52,7 +52,7 @@ async function retainedScope({ run, task }: Ctx, { item, observation, mainSha, p
   const trigger = parseTriggerInput(run.input);
   if (trigger.kind !== "item_changed") return paths;
   const state = pullRequest ? await currentPrReview(item.id, observation, mainSha) : undefined;
-  const previous = state ? "assessment" in state ? state.assessment.run : undefined : completedRunsOfAction(item.id, task.action, 1)[0];
+  const previous = state ? "assessment" in state ? state.assessment.run : undefined : latestCompletedRun(item.id, task.action);
   if (!previous || previous.context?.revision !== evaluated.revision) return paths;
   const mainOnly = new Set(trigger.changedPaths);
   return [...new Set([...previous.result?.paths ?? [], ...diffPaths, ...paths.filter((path) => !mainOnly.has(path))])];
@@ -90,17 +90,25 @@ async function refreshPreview({ manifest, operation, stop, references, repositor
   catch (error) { if (!stop?.aborted) operation.log.warn({ event: "storefront.preview_failed", subjectId: references.subjectId, number, err: error }); }
 }
 
+type StorefrontChange = Parameters<typeof import("./storefront-main.ts").reviewStorefront>[1];
+
+async function checkStorefront(ctx: Ctx, mainSha: string, result: AgentResult, change: () => Promise<StorefrontChange>) {
+  const { id } = ctx.run;
+  if (reviewsStorefront(ctx)) updateRun(id, { result: await (await import("./storefront-main.ts")).reviewStorefront(ctx, await change(), result) });
+  else if (auditsStorefront(ctx)) updateRun(id, { result: await (await import("./storefront-main.ts")).auditStorefront(ctx, mainSha, result) });
+  updateRun(id, { stage: "publishing" });
+}
+
 async function resumeReview(ctx: Ctx) {
   const { run, repositoryPath, references } = ctx;
   if (!hasReviewCheckpoint(run)) throw new Error("No complete review checkpoint to resume");
   const { result, mainSha, headSha } = run;
-  if (reviewsStorefront(ctx)) {
+  await checkStorefront(ctx, mainSha, result, async () => {
     const { diffPaths, diffBaseSha, evaluated } = await describeCommit(ctx);
     const workspace = ctx.cleanup.reviewWorkspace = await createWorkspace({ repositoryPath, baseRef: headSha }, references);
     updateRun(run.id, { workspaceId: workspace.id });
-    updateRun(run.id, { result: await (await import("./storefront-main.ts")).reviewStorefront(ctx, { workspace, headSha, diffBaseSha, diffPaths, item: evaluated.item }, result) });
-  } else if (auditsStorefront(ctx)) updateRun(run.id, { result: await (await import("./storefront-main.ts")).auditStorefront(ctx, mainSha, result) });
-  updateRun(run.id, { stage: "publishing" });
+    return { workspace, headSha, diffBaseSha, diffPaths, item: evaluated.item };
+  });
 }
 
 export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
@@ -129,7 +137,5 @@ export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   if (observed) result.paths = await retainedScope(ctx, observed, evaluated, diffPaths, result.paths);
   updateRun(run.id, { result, stage: "validating" });
   assertComplete(result);
-  if (reviewsStorefront(ctx)) updateRun(run.id, { result: await (await import("./storefront-main.ts")).reviewStorefront(ctx, { ...review, diffPaths, item: evaluated.item }, result) });
-  else if (auditsStorefront(ctx)) updateRun(run.id, { result: await (await import("./storefront-main.ts")).auditStorefront(ctx, mainSha, result) });
-  updateRun(run.id, { stage: "publishing" });
+  await checkStorefront(ctx, mainSha, result, async () => ({ ...review, diffPaths, item: evaluated.item }));
 }

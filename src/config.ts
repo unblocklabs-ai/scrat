@@ -2,14 +2,13 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { isAbsolute, resolve } from "node:path";
 import settings from "../scrat.config.json" with { type: "json" };
-import { buildConfig, type Json } from "./config-merge.ts";
+import { buildConfig, isObject, type Json } from "./config-merge.ts";
 import { configError, validateConfig } from "./config-schema.ts";
 import { deploymentDefaults, findTriggerConflicts, readManifests, resolveAction } from "./manifests.ts";
 
 const configUrl = new URL("../scrat.config.json", import.meta.url);
 const localConfigUrl = new URL("../scrat.local.json", import.meta.url);
 
-const isObject = (value: unknown): value is Json => typeof value === "object" && value !== null && !Array.isArray(value);
 
 function loadOverrides(): Json {
   try { writeFileSync(localConfigUrl, "{}\n", { flag: "wx" }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }

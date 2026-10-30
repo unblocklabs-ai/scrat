@@ -20,12 +20,12 @@ import { parseTriggerInput } from "./triggers.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { bestEffort } from "./logging.ts";
 import { reconcileObserved, serializePr } from "./pr-review-publication.ts";
-import { completedRunsOfAction, latestFinishedRun, latestRunOfTask, runHistory } from "./run-history.ts";
+import { latestCompletedRun, latestFinishedRun, latestRunOfTask, runHistory } from "./run-history.ts";
 import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
 import { planIssueTasks, planPrMaintenance, planReview, planSelfRepair, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
 
 type SyncContext = {
-  github: GitHubRepository; repository: string; repositoryPath: string; log: Logger;
+  github: GitHubRepository; log: Logger;
 };
 type PrMaintenanceFacts = Parameters<typeof planPrMaintenance>[0];
 type Routes = { review?: string; conflicts?: string; feedback?: string; repairs: string[]; repairFor: (grade: Signal["grade"]) => string | undefined };
@@ -35,7 +35,7 @@ const signalFor = (item: Item, login: string | null | undefined, kind: Signal["k
 const latestOf = (subjectId: string, action: string | undefined) => action ? latestTask(subjectId, action) : undefined;
 
 function hasScratLabel(item: Item) {
-  return item.payload.labels?.some((label) => labelName(label) === botSlug);
+  return item.payload.labels?.some((label) => labelName(label) === botSlug) ?? false;
 }
 
 function applyDecisions(subjectId: string, decisions: RoutingDecision[]) {
@@ -67,7 +67,7 @@ async function cleanupClosedItem({ github, log }: SyncContext, item: Item) {
 }
 
 async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observation: ItemObservation, pr: GithubPullRequest, mainSha: string, routes: Routes): Promise<PrMaintenanceFacts> {
-  const { repositoryPath, github } = ctx;
+  const { github } = ctx, repositoryPath = getRepositoryPath();
   const { headSha, conflicts, behind } = await prepareTarget(repositoryPath, mainSha, await github.fetchPullRequestHead(pr));
   const lastRun = latestFinishedRun(item.id);
   const stale = !conflicts && Boolean(lastRun?.error) && lastRun?.stage === "preparing" && lastRun.headSha === headSha && behind;
@@ -141,14 +141,14 @@ async function routeIssueReview(item: Item, observation: ItemObservation, mainSh
   const attempt = latest ? latestRunOfTask(latest.id) : undefined;
   const { revision } = observation;
   if (reviewTrigger({ latest, attempt, revision, mainSha }).covered) return 0;
-  const completed = completedRunsOfAction(item.id, action, 1)[0];
+  const completed = latestCompletedRun(item.id, action);
   const state = completed ? await freshness(savedEvaluation(completed), { ...observation, mainSha }, "relevant-paths") : undefined;
   return applyDecisions(item.id, planReview({ kind: "issue", action, completed, freshness: state, latest, attempt, revision, mainSha }));
 }
 
 async function routeObserved(ctx: SyncContext, item: Item, context: GithubContext, defaultBaseSha: string) {
   if (context.item.state !== "open") return 0;
-  const { github, repository, log } = ctx;
+  const { github, log } = ctx;
   const observation = observe(context);
   const mainSha = observation.kind === "pr" && observation.baseBranch !== config.github.baseBranch
     ? await github.fetchBranch(observation.baseBranch) : defaultBaseSha;
@@ -164,7 +164,7 @@ async function routeObserved(ctx: SyncContext, item: Item, context: GithubContex
   let added = 0;
   if ((routes.conflicts || routes.feedback || routes.repairs.length) && "head" in context.item) {
     const pullRequest = context.item;
-    if (pullRequest.head.repo?.full_name !== repository) return added;
+    if (pullRequest.head.repo?.full_name !== github.repository) return added;
     if (routes.conflicts || routes.feedback) {
       added += await bestEffort(log, "github.pr_maintenance_skipped", { subjectId: item.id }, async () => applyDecisions(item.id, planPrMaintenance(await gatherPrMaintenanceFacts(ctx, item, observation, pullRequest, mainSha, routes)))) ?? 0;
     }
@@ -178,9 +178,7 @@ async function routeObserved(ctx: SyncContext, item: Item, context: GithubContex
 }
 
 export async function routeGithubTasks(github: GitHubRepository, current: Item[], previous: Map<string, Item>, log: Logger) {
-  const { repository } = github;
-  const repositoryPath = getRepositoryPath();
-  const ctx: SyncContext = { github, repository, repositoryPath, log };
+  const ctx: SyncContext = { github, log };
   const defaultBaseSha = await github.fetchBranch(config.github.baseBranch);
   const implemented = new Set(current.filter((item) => item.kind === "pr" && item.state === "open")
     .flatMap((item) => [...(item.payload.body ?? "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi)]
@@ -191,7 +189,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
   const issueSignal = (item: Item, kind: Signal["kind"]) => signalFor(item, item.payload.user?.login, kind);
   const selects = (item: Item) => hasScratLabel(item) && routeFor(issueSignal(item, "label")) !== undefined;
   const reviewable = ordered.filter((item) => item.state === "open" && item.kind === "issue" && !selects(item));
-  const contexts = await github.fetchItemContexts(reviewable.map((item) => ({ kind: "issue", number: item.payload.number, item: item.payload })), { defer: true });
+  const contexts = await github.fetchItemContexts(reviewable.map((item) => ({ kind: "issue", number: item.payload.number, item: item.payload })));
   const issueContexts = new Map(reviewable.map((item, index) => [item.id, contexts[index]]));
   const routeItem = async (item: Item) => {
     if (item.state === "closed") {
@@ -207,8 +205,8 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       const previousItem = previous.get(item.externalId);
       const labelAction = routeFor(issueSignal(item, "label"));
       const plan = planIssueTasks({
-        labelAction, reviewAction: routeFor(issueSignal(item, "item_changed")), labelled: Boolean(hasScratLabel(item)), implemented: implemented.has(item.payload.number), workspaceId: item.workspaceId,
-        previouslyLabelled: previousItem ? Boolean(hasScratLabel(previousItem)) : undefined,
+        labelAction, reviewAction: routeFor(issueSignal(item, "item_changed")), labelled: hasScratLabel(item), implemented: implemented.has(item.payload.number), workspaceId: item.workspaceId,
+        previouslyLabelled: previousItem ? hasScratLabel(previousItem) : undefined,
         latest: latestOf(item.id, labelAction), updatedAt: item.payload.updated_at, mainSha: defaultBaseSha,
       });
       queued += applyDecisions(item.id, plan.decisions);

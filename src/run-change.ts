@@ -8,7 +8,7 @@ import { createRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
 import { describeError, type ErrorDetails, errorExitCode } from "./errors.ts";
 import { bestEffort } from "./logging.ts";
-import { conventionalTitle, git, headOf, hasPendingMerge, mergeBase, prepareTarget } from "./git.ts";
+import { conventionalTitle, git, headOf, hasPendingMerge, mergeBase, prepareTarget, shortSha } from "./git.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { executePi } from "./pi.ts";
 import { getRun, inferenceRunOf, latestSessionRun, updateRun } from "./run-history.ts";
@@ -40,8 +40,6 @@ function validationMessage(error: CheckFailure, round: number) {
 
 const unresolvedConflict = "PR still conflicts with its base branch after resolution";
 
-const commitPurposes: Record<string, string> = { address_review: "Address review", address_pr_feedback: "Address feedback", resolve_conflicts: "Resolve conflicts" };
-
 async function runChecks({ run, references, stop }: Ctx, p: Change) {
   const { workspace, commandEnvironment } = p;
   updateRun(run.id, { agentCheckpoint: await checkpointWorkspace(workspace) });
@@ -57,12 +55,11 @@ async function runChecks({ run, references, stop }: Ctx, p: Change) {
 }
 
 async function validateAndCommit(ctx: Ctx, p: Change, kind: Acceptance) {
-  const { run, task, references } = ctx;
+  const { run, manifest, references } = ctx;
   const { workspace } = p;
   const { commands, validationTree } = await runChecks(ctx, p);
   await assertNoCommittedSecrets(workspace, p.validationOnly ? run.headSha ?? p.mainSha : p.startHeadSha, validationTree);
-  const purpose = commitPurposes[task.action];
-  const message = purpose ? `${purpose}: ${p.title}` : conventionalTitle(p.title);
+  const message = manifest.commitPrefix ? `${manifest.commitPrefix}: ${p.title}` : conventionalTitle(p.title);
   const commitSha = await commitWorkspace(workspace, message, botAuthor(), references);
   if (await git(workspace.path, ["rev-parse", `${commitSha}^{tree}`]) !== validationTree) throw new Error("Committed tree differs from the validated tree; revalidation required");
   if (kind === "conflict_free") {
@@ -147,7 +144,7 @@ async function mergeBehind(ctx: Ctx, observed: Observed, p: Change, diffPaths: s
   if (acceptance !== "conflict_free" || p.mergeInProgress || run.retryOfRunId) return false;
   if (!await mergeBehindBase(p, observed)) return false;
   const { baseBranch } = observed.observation;
-  p.result = { text: `Merged ${baseBranch} (${p.mainSha.slice(0, 7)}) into this branch; no conflicts`, ready: false, paths: [...new Set(diffPaths)], outcome: "complete" };
+  p.result = { text: `Merged ${baseBranch} (${shortSha(p.mainSha)}) into this branch; no conflicts`, ready: false, paths: [...new Set(diffPaths)], outcome: "complete" };
   updateRun(run.id, { result: p.result, stage: "validating" });
   try {
     await validateAndCommit(ctx, p, acceptance);

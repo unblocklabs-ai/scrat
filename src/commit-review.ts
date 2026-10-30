@@ -3,7 +3,7 @@ import type { evaluateContext } from "./agent-input.ts";
 import { manifestOf } from "./actions.ts";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
-import { changedPaths, git } from "./git.ts";
+import { changedPaths, git, shortSha } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { botName } from "./identity.ts";
 import { bestEffort, logger } from "./logging.ts";
@@ -70,7 +70,7 @@ async function threadRoot(subject: Subject, action: string, { sha, branch, commi
   const { channel = "", startMessage = "" } = manifestOf(action);
   const metadata = commitMetadata(subject);
   const values: Record<string, string> = {
-    sha, short_sha: sha.slice(0, 7), author: escapeSlack(metadata.author), title: escapeSlack(metadata.title),
+    sha, short_sha: shortSha(sha), author: escapeSlack(metadata.author), title: escapeSlack(metadata.title),
     url: metadata.url, branch, count: String(commitCount), bot: botName, change: startMessage.includes("{{change}}") ? await describeChange(subject, commitCount) : "",
   };
   return rootPost(subject, channel, startMessage.replaceAll(/\{\{(\w+)\}\}/g, (match, name: string) => Object.hasOwn(values, name) ? values[name]! : match));

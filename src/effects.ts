@@ -4,7 +4,7 @@ import { postReply, reactToRoot, verdictReaction } from "./commit-review.ts";
 import { upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
-import { branchContainsCommit, conventionalTitle } from "./git.ts";
+import { branchContainsCommit, conventionalTitle, shortSha } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { isBotLogin } from "./config.ts";
@@ -44,7 +44,7 @@ type Effect = {
 
 function validationLine({ verification }: Run) {
   const passed = verification?.commands.filter((check) => check.status === "passed").map((check) => check.name);
-  return verification && passed?.length ? `Validated on ${verification.headSha.slice(0, 7)}: ${passed.join(", ")} passed.\n\n` : "";
+  return verification && passed?.length ? `Validated on ${shortSha(verification.headSha)}: ${passed.join(", ")} passed.\n\n` : "";
 }
 
 function observed({ current }: EffectContext) {
@@ -138,11 +138,11 @@ const issue = {
 } satisfies Effect;
 
 const slackReply = {
-  receipted: (publication, { run }) => Boolean(publication.slackReplyTs) && (!run.result?.storefrontReview || Boolean(publication.storefrontReplyTs)) && publication.slackReaction === verdictReaction(run),
+  receipted: (publication, { run }) => Boolean(publication.slackReplyTs) && (!run.result.storefrontReview || Boolean(publication.storefrontReplyTs)) && publication.slackReaction === verdictReaction(run),
   async apply(context) {
     const { subject, task, run, publication, saveReceipt } = context, audit = subject.kind === "window";
     if (!publication().slackReplyTs && !audit) saveReceipt({ slackReplyTs: await postReply(subject, task.action, run) });
-    if (run.result?.storefrontReview && !publication().storefrontReplyTs) {
+    if (run.result.storefrontReview && !publication().storefrontReplyTs) {
       const storefront = await import("./storefront-main.ts");
       await (audit ? storefront.publishAudit(context) : storefront.publishStorefront(context));
     }

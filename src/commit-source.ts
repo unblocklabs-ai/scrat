@@ -1,5 +1,5 @@
 import { config, getRepositoryPath, isBotLogin } from "./config.ts";
-import { commitOf, git, gitList, isAncestor } from "./git.ts";
+import { commitOf, git, gitList, isAncestor, shortSha } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { type OperationScope } from "./logging.ts";
 import type { Action } from "./manifests.ts";
@@ -98,6 +98,6 @@ function enqueueCommit({ repository, action, branch, sha, previousSha, commitCou
     repository, kind: "commit", key: `${branch}:${sha}`,
     metadata: { title, author, ...kind, url: `https://github.com/${repository}/commit/${sha}` },
   });
-  return enqueueOnce(subject, action, `${branch} moved to ${sha.slice(0, 7)}`,
+  return enqueueOnce(subject, action, `${branch} moved to ${shortSha(sha)}`,
     { source: "github_commits", kind: "commit", triggerKey: sha, sha, previousSha, branch, commitCount, truncated });
 }

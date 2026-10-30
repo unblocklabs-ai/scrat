@@ -4,6 +4,7 @@ mode: change
 context: feedback
 files: [discussion, issue]
 acceptance: complete
+commitPrefix: Address feedback
 publish: [push, comment]
 skill: skills/address_pr_feedback/SKILL.md
 model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }

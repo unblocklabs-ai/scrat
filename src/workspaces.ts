@@ -179,7 +179,7 @@ export async function pushWorkspace(workspace: Workspace, remote: string, commit
     await git(workspace.path, ["bundle", "create", bundle, tip]);
   }
   if (!(await lstat(bundle)).isFile() || await realpath(bundle) !== bundle) throw new Error("Publication bundle is not an owned regular file");
-  await git(workspace.repositoryPath, ["fetch", "--no-tags", "--", bundle, `refs/heads/${workspace.branch}`]);
+  await git(workspace.repositoryPath, ["fetch", "--no-tags", "--", bundle, tip]);
   await pinWorkspaceBase(workspace, commitSha);
   await git(workspace.repositoryPath, ["push", "--", remote, `${commitSha}:refs/heads/${workspace.branch}`], env);
   recordEvent({ ...references, type: "workspace.pushed", data: { workspaceId: workspace.id, commitSha } });

@@ -4,10 +4,11 @@ import { cp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { config, getRepositoryPath, isActionEnabled } from "./config.ts";
 import { ifMissing } from "./errors.ts";
-import { commitOf, gitList } from "./git.ts";
+import { commitOf, gitList, shortSha } from "./git.ts";
 import { botName } from "./identity.ts";
 import { upsertSubject } from "./items.ts";
 import type { Evaluated } from "./effects.ts";
+import { agentIncompleteCode } from "./results.ts";
 import { latestRunOfTask } from "./run-history.ts";
 import type { Subject, Task } from "./schema.ts";
 import { pollSource, sourceCursor } from "./sources.ts";
@@ -28,10 +29,10 @@ async function structureChange(mapped: string | undefined) {
   if (!mapped) return undefined;
   const path = getRepositoryPath(), branch = config.github.baseBranch, tip = await commitOf(path, `refs/remotes/origin/${branch}`);
   if (!tip || tip === mapped) return undefined;
-  if (!await commitOf(path, mapped)) return `the commit ${mapped.slice(0, 7)} the site map was made from is not in the clone`;
+  if (!await commitOf(path, mapped)) return `the commit ${shortSha(mapped)} the site map was made from is not in the clone`;
   const pattern = new RegExp(config.storefront.siteMapPaths), changes = await gitList(path, ["diff", "--name-status", "--no-renames", "--diff-filter=AD", "-z", mapped, tip]);
   const index = changes.findIndex((entry, at) => at % 2 === 1 && pattern.test(entry));
-  return index < 0 ? undefined : `${changes[index]} was ${changes[index - 1] === "A" ? "added" : "deleted"} on ${branch} between ${mapped.slice(0, 7)} and ${tip.slice(0, 7)}`;
+  return index < 0 ? undefined : `${changes[index]} was ${changes[index - 1] === "A" ? "added" : "deleted"} on ${branch} between ${shortSha(mapped)} and ${shortSha(tip)}`;
 }
 
 export function pollSiteMap(repository = config.github.repository, now = new Date()) {
@@ -47,7 +48,7 @@ export function pollSiteMap(repository = config.github.repository, now = new Dat
     const subject = upsertSubject({ repository, kind: "window", key: `${action}:${written ?? "none"}`, metadata: { start: written ?? end, end } });
     const latest = latestTask(subject.id, action), run = latest && latestRunOfTask(latest.id);
     if (latest && (latest.status === "queued" || latest.status === "running" || now.getTime() - Date.parse(run?.finishedAt ?? latest.createdAt) < hours * hourMs)) return 0;
-    const retry = latest ? `; the last discovery ${run?.error?.code === "AGENT_INCOMPLETE" ? "was incomplete" : latest.status}, retrying after ${hours} h` : "";
+    const retry = latest ? `; the last discovery ${run?.error?.code === agentIncompleteCode ? "was incomplete" : latest.status}, retrying after ${hours} h` : "";
     enqueueTask({ subjectId: subject.id, action, reason: due + retry, input: { source: "storefront", kind: "site_map", triggerKey: written ?? "none" } });
     return 1;
   });

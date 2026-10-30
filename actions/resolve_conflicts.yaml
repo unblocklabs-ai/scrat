@@ -3,6 +3,7 @@ trigger: { source: github_items, kind: pr_conflicts, item: pr, author: bot }
 mode: change
 files: [discussion]
 acceptance: conflict_free
+commitPrefix: Resolve conflicts
 publish: [push, comment]
 skill: skills/resolve_conflicts/SKILL.md
 model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }

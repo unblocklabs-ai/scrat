@@ -4,7 +4,7 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { config } from "./config.ts";
-import { errorExitCode } from "./errors.ts";
+import { errorExitCode, ifMissing } from "./errors.ts";
 import { childEnvironment } from "./secrets.ts";
 import { serialized } from "./single-flight.ts";
 import { inWorkspace, sandboxCommand } from "./sandbox.ts";
@@ -85,7 +85,7 @@ async function assertOrigin(repositoryPath: string, remote: string) {
 
 async function excludeWorkingNotes(repositoryPath: string) {
   const exclude = resolve(repositoryPath, await git(repositoryPath, ["rev-parse", "--git-common-dir"]), "info", "exclude");
-  const current = existsSync(exclude) ? await readFile(exclude, "utf8") : "";
+  const current = await ifMissing(readFile(exclude, "utf8"), "");
   if (current.split("\n").includes("/.scrat/")) return;
   await mkdir(dirname(exclude), { recursive: true });
   await appendFile(exclude, `${current && !current.endsWith("\n") ? "\n" : ""}/.scrat/\n`);
@@ -156,6 +156,8 @@ export async function branchContainsCommit(workspace: { path: string; repository
 export async function isAncestor(repositoryPath: string, ancestor: string, descendant: string) {
   return !await exitsOne(git(repositoryPath, ["merge-base", "--is-ancestor", ancestor, descendant]));
 }
+
+export const shortSha = (sha: string) => sha.slice(0, 7);
 
 export const conventionalTitle = (title: string) => /^[a-z]+(\([^)]*\))?!?: /.test(title) ? title : `fix: ${title}`;
 

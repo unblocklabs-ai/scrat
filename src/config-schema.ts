@@ -38,7 +38,7 @@ const schema = Type.Object({
     loggie: Type.Object({ url: Type.String(), slug: Type.String(), timeoutSeconds: positive }, strict),
     preview: Type.Object({
       themeNamePrefix: Type.String(), themePaths: Type.String(), processingWaitSeconds: positive, processingPollSeconds: positive,
-      filesPageSize: Type.Integer({ minimum: 1, maximum: 250 }), uploadBatch: Type.Integer({ minimum: 1, maximum: 50 }), uploadBatchBytes: positive, requestTimeoutSeconds: positive,
+      filesPageSize: Type.Integer({ minimum: 1, maximum: 250 }), filenamesPerRequest: Type.Integer({ minimum: 1, maximum: 50 }), uploadBatch: Type.Integer({ minimum: 1, maximum: 50 }), uploadBatchBytes: positive, requestTimeoutSeconds: positive,
     }, strict),
     lighthouse: Type.Object({ runs: positive, pages: Type.Array(Type.String({ pattern: "^/(?!/)" }), { minItems: 1, uniqueItems: true }), timeoutSeconds: positive }, strict),
   }, strict),

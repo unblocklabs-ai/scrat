@@ -138,15 +138,15 @@ async function settle(preview: ThemePreview, stop?: AbortSignal) {
 }
 
 export async function liveFiles(paths: string[], stop?: AbortSignal) {
-  const { filesPageSize, requestTimeoutSeconds } = config.storefront.preview;
+  const { filenamesPerRequest, requestTimeoutSeconds } = config.storefront.preview;
   const { themes } = await loggie<{ themes: { nodes: { id: string }[] } }>("themes", mainThemeQuery, {}, { stop });
   const id = themes.nodes[0]?.id;
   if (!id) throw new Error("The store has no MAIN theme");
   const read = async <T>(query: string, filenames: string[]) =>
     (await loggie<{ theme: { files: { nodes: T[] } } | null }>("theme", query, { id, filenames, first: filenames.length }, { stop })).theme?.files.nodes ?? [];
   const checksums = new Map<string, string | null>();
-  for (let start = 0; start < paths.length; start += filesPageSize) {
-    for (const { filename, checksumMd5 } of await read<ThemeFile>(checksumsQuery, paths.slice(start, start + filesPageSize))) checksums.set(filename, checksumMd5);
+  for (let start = 0; start < paths.length; start += filenamesPerRequest) {
+    for (const { filename, checksumMd5 } of await read<ThemeFile>(checksumsQuery, paths.slice(start, start + filenamesPerRequest))) checksums.set(filename, checksumMd5);
   }
   const bytes = async (path: string) => {
     const [file] = await read<LiveFile>(bodyQuery, [path]);

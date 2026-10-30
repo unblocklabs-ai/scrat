@@ -45,7 +45,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
     problems.push("github.botName must contain a letter or digit; its lowercase form names the selection label and the branch prefix");
   }
   if (settings.tools && settings.tools.readBytes.max < settings.tools.readBytes.default) problems.push("tools.readBytes.max must not be less than tools.readBytes.default");
-  for (const [key, patterns] of Object.entries({ "workspace.heavyCommands": settings.workspace?.heavyCommands, "relevance.ignoredPaths": settings.relevance?.ignoredPaths })) {
+  for (const [key, patterns] of Object.entries({ "workspace.heavyCommands": settings.workspace?.heavyCommands, "relevance.ignoredPaths": settings.relevance?.ignoredPaths, "harness.transientErrors": settings.harness?.transientErrors })) {
     patterns?.forEach((pattern, index) => {
       try { new RegExp(pattern); } catch { problems.push(`${key}[${index}] is not a valid regular expression`); }
     });

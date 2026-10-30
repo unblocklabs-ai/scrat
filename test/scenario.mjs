@@ -1375,7 +1375,7 @@ export const scenarios = {
     const invalid = await run(); assert.match(invalid.error.message, /grade/i);
     assert.equal(f.written("comment").length, 0);
   } },
-  review_retry: { title: "a review whose reviewers all fail transiently is held until due and publishes once after recovery, while a mixed panel stays failed", configure: [(config) => { config.harness.agentRetry.maxRetries = 1; config.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 100 }; }], run: async () => {
+  review_retry: { title: "a review whose reviewers all fail transiently is held until due and publishes once after recovery, while a mixed panel stays failed, and a dropped consolidation retries only the consolidation", configure: [(config) => { config.harness.agentRetry.maxRetries = 1; config.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 100 }; }], run: async () => {
     await implement(2); await route(); f.transient.failures = 4; f.reset(202, "transient");
     let failed = await run(); const task = () => f.row(s.tasks, failed.taskId);
     const delay = () => (Date.parse(task().availableAt) - Date.parse(f.row(s.runs, failed.id).finishedAt)) / 1000;
@@ -1400,6 +1400,12 @@ export const scenarios = {
     const closing = await run(); assert.equal(f.row(s.tasks, closing.taskId).status, "queued");
     f.prs.find((pr) => pr.number === 205).state = "closed"; await route();
     assert.equal(f.row(s.tasks, closing.taskId).status, "cancelled"); assert.equal(await f.runNextTask(), undefined);
+    await implement(6); await route(); f.reset(206, "dropped-consolidation");
+    const dropped = await run(); assert.equal(dropped.error.code, "TRANSIENT_INFERENCE"); assert.equal(f.row(s.tasks, dropped.taskId).status, "queued");
+    const requested = f.requests.length; tasks.retryTask(dropped.taskId);
+    const consolidated = await success(); assert.deepEqual(consolidated.reviewers, dropped.reviewers);
+    assert.ok(f.requests.slice(requested).length && f.requests.slice(requested).every((request) => request.consolidating), "the retry reruns only the consolidation");
+    assert.ok(all(s.events).some((event) => event.type === "run.reviewers_reused" && event.runId === consolidated.id && event.data.fromRunId === dropped.id));
   } },
   footer: { title: "quoted control markers stay report text and cannot supply a PR grade or issue approval", run: async () => {
     await implement(1); f.reset(201, "quoted-grade"); await route();

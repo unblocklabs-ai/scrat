@@ -11,6 +11,7 @@ export async function reviewPullRequest(options: PiOptions & { contextDir: strin
   const panel = run.reviewers.length > 1;
   const review = async (index: number, context: string, requireGrade?: boolean) => {
     const reviewer = run.reviewers[index];
+    if (panel && reviewer.result?.outcome === "complete") return reviewer.result;
     try {
       const result = await executePi({ ...options, run: { ...run, ...reviewer }, log: log.child({ reviewer: index, model: reviewer.model }) }, { context, reviewerIndex: index, requireGrade });
       saveReviewer(run.id, index, { result });

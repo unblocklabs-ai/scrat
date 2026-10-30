@@ -138,6 +138,11 @@ export async function fixture(scenario, spec) {
       res.writeHead(503, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "Service temporarily unavailable" } }));
     }
+    if (mode === "dropped-consolidation" && consolidating && !transient.seen.has("consolidation")) {
+      transient.seen.set("consolidation", 1);
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      return res.end("data: " + JSON.stringify({ error: { message: "stream_incomplete: Upstream closed stream without completion" } }) + "\n\n");
+    }
     const key = `${context.item.number}/${request.model === config.storefront.model?.model ? config.providers.fixture.models[0].id : request.model}/${consolidating}/${context.database?.container ?? ""}`;
     const step = steps.get(key) ?? 0; steps.set(key, step + 1);
     requests.push({ request, text, context, consolidating });

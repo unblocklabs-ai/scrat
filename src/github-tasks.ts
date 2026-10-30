@@ -19,7 +19,7 @@ import { cancelQueuedTasks, enqueueTask, latestTask } from "./tasks.ts";
 import { parseTriggerInput } from "./triggers.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { bestEffort } from "./logging.ts";
-import { reconcileObserved, serializePr } from "./pr-review-publication.ts";
+import { reconcileObserved, serializePr, type ResolvedReview } from "./pr-review-publication.ts";
 import { latestCompletedRun, latestFinishedRun, latestRunOfTask, runHistory } from "./run-history.ts";
 import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
 import { planIssueTasks, planPrMaintenance, planReview, planSelfRepair, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
@@ -113,7 +113,7 @@ async function reconcileFailedLabels(ctx: SyncContext, item: Item) {
 
 async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObservation, mainSha: string, routes: Routes) {
   const action = routes.review;
-  if (!action) return 0;
+  if (!action) return { added: 0 };
   const latest = latestTask(item.id, action);
   const reviews = prReviewHistory(item.id);
   const attempt = reviews.find(({ task }) => task.id === latest?.id)?.run;
@@ -132,7 +132,7 @@ async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObse
   }
   added += applyDecisions(item.id, repair.decisions);
   await reconcileExhaustedLabel(ctx, item, observation, routes, repairAction, state, count);
-  return added;
+  return { added, resolved: { reviews, state, mainSha } };
 }
 
 async function routeIssueReview(item: Item, observation: ItemObservation, mainSha: string, action: string | undefined) {
@@ -169,10 +169,15 @@ async function routeObserved(ctx: SyncContext, item: Item, context: GithubContex
       added += await bestEffort(log, "github.pr_maintenance_skipped", { subjectId: item.id }, async () => applyDecisions(item.id, planPrMaintenance(await gatherPrMaintenanceFacts(ctx, item, observation, pullRequest, mainSha, routes)))) ?? 0;
     }
   }
+  let resolved: ResolvedReview | undefined;
   try {
-    added += item.kind === "pr" ? await routePrReview(ctx, item, observation, mainSha, routes) : await routeIssueReview(item, observation, mainSha, routes.review);
+    if (item.kind === "pr") {
+      const routed = await routePrReview(ctx, item, observation, mainSha, routes);
+      added += routed.added;
+      resolved = routed.resolved;
+    } else added += await routeIssueReview(item, observation, mainSha, routes.review);
   } finally {
-    if (item.kind === "pr") await bestEffort(log, "github.review_reconciliation_pending", { subjectId: item.id }, () => reconcileObserved(github, item.id, item.payload.number, { subjectId: item.id }, context));
+    if (item.kind === "pr") await bestEffort(log, "github.review_reconciliation_pending", { subjectId: item.id }, () => reconcileObserved(github, item.id, item.payload.number, { subjectId: item.id }, context, resolved));
   }
   return added;
 }

@@ -11,7 +11,7 @@ type Current = Pick<ItemObservation, "revision" | "baseBranch"> & {
   mainSha?: string | (() => Promise<string>);
 };
 
-export const savedEvaluation = (run: Pick<Run, "mainSha" | "result"> & { context: Pick<NonNullable<Run["context"]>, "revision" | "baseBranch"> | null }): SavedEvaluation => ({
+export const savedEvaluation = (run: Pick<Run, "mainSha"> & { result: Pick<NonNullable<Run["result"]>, "paths"> | null; context: Pick<NonNullable<Run["context"]>, "revision" | "baseBranch"> | null }): SavedEvaluation => ({
   revision: run.context?.revision, baseBranch: run.context?.baseBranch, mainSha: run.mainSha, paths: run.result?.paths ?? [],
 });
 

@@ -2,8 +2,8 @@ import type { ErrorDetails } from "./errors.ts";
 import { fingerprintPattern } from "./markers.ts";
 import { type Run } from "./schema.ts";
 
-export function hasPublicationSnapshot<R extends Pick<Run, "stage" | "result"> & { context: object | null }>(run: R | undefined): run is R & {
-  result: AgentResult; context: NonNullable<R["context"]>;
+export function hasPublicationSnapshot<R extends Pick<Run, "stage"> & { result: object | null; context: object | null }>(run: R | undefined): run is R & {
+  result: NonNullable<R["result"]>; context: NonNullable<R["context"]>;
 } {
   return run?.stage === "publishing" && Boolean(run.result && run.context);
 }

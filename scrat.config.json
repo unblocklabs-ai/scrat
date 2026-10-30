@@ -89,6 +89,7 @@
       "pollMinutes": 5,
       "quietMinutes": 10,
       "valueBytes": 2048,
+      "batchRetentionDays": 30,
       "maxPages": 12,
       "summaryEvents": 3,
       "pageSizes": { "products": 100, "collections": 100, "pages": 100, "menus": 50, "metafields": 250, "shopMetafields": 100, "metaobjectDefinitions": 250, "metaobjects": 50, "events": 50 },

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
-import { readFile, rm } from "node:fs/promises";
+import { readdir, readFile, rm, stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import { config, getRepositoryPath, isActionEnabled } from "./config.ts";
+import { ifMissing } from "./errors.ts";
 import { git } from "./git.ts";
 import { upsertSubject } from "./items.ts";
 import { clip, loggie } from "./loggie.ts";
@@ -19,7 +21,7 @@ type Change = { resource: string; gid: string; handle: string; field: string; be
 type State = { polledAt?: string; since?: string; changedAt?: string; pending: Change[] };
 type Listing = { kind: string; root: string; first: number; selection: string; visible?: (node: Node) => boolean; fields: (node: Node) => Record<string, unknown> };
 
-const stateFile = "changes/state.json", snapshotFile = "changes/snapshot.json", batches = "changes/batches", minuteMs = 60_000;
+const stateFile = "changes/state.json", snapshotFile = "changes/snapshot.json", batches = "changes/batches", minuteMs = 60_000, dayMs = 86_400_000;
 const denied = new Set(["ACCESS_DENIED", "SCOPE_UPGRADE_REQUIRED"]);
 const route: Record<string, string> = { product: "products", collection: "collections", page: "pages" };
 const subjectTypes: Record<string, string> = { product: "PRODUCT", collection: "COLLECTION", page: "PAGE" };
@@ -34,7 +36,7 @@ export const batchText = (key: string) => readFile(statePath(batches, `${key}.js
 
 async function watchedKeys() {
   const { extraMetafields, ignoreMetafields } = config.storefront.changes;
-  const listed = await git(getRepositoryPath(), ["grep", "-ohE", String.raw`metafields\.[a-z_0-9]+\.[a-z_0-9]+`, `refs/remotes/origin/${config.github.baseBranch}`, "--", "*.liquid", "*.json"])
+  const listed = await git(getRepositoryPath(), ["grep", "-ohE", String.raw`metafields\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`, `refs/remotes/origin/${config.github.baseBranch}`, "--", "*.liquid", "*.json"])
     .catch((error: { code?: number }) => { if (error.code === 1) return ""; throw error; });
   const keys = new Set([...listed.split("\n").filter(Boolean).map((line) => line.slice("metafields.".length)), ...extraMetafields]);
   for (const key of ignoreMetafields) keys.delete(key);
@@ -67,13 +69,13 @@ function listings(watched: Set<string>): Listing[] {
 }
 
 async function metaobjects(log: OperationScope["log"]) {
-  const { pageSizes: size, ignoreMetaobjectTypes } = config.storefront.changes, ignored = new RegExp(ignoreMetaobjectTypes);
+  const { pageSizes: size, ignoreMetaobjectTypes } = config.storefront.changes, ignored = ignoreMetaobjectTypes ? new RegExp(ignoreMetaobjectTypes) : undefined;
   try {
     const definitions = await all<{ metaobjectDefinitions: Connection<{ type: string }> }, { type: string }>("metaobject_definitions",
       `query ($after: String) { metaobjectDefinitions(first: ${size.metaobjectDefinitions}, after: $after) { nodes { type } ${pageInfo} } }`, (data) => data.metaobjectDefinitions);
     const query = `query ($type: String!, $after: String) { metaobjects(type: $type, first: ${size.metaobjects}, after: $after) { nodes { id handle type fields { key value } } ${pageInfo} } }`;
     const found: { id: string; handle: string; type: string; fields: { key: string; value: string | null }[] }[] = [];
-    for (const { type } of definitions) if (!ignored.test(type)) found.push(...await all<{ metaobjects: Connection<(typeof found)[number]> }, (typeof found)[number]>("metaobjects", query, (data) => data.metaobjects, { type }));
+    for (const { type } of definitions) if (!ignored?.test(type)) found.push(...await all<{ metaobjects: Connection<(typeof found)[number]> }, (typeof found)[number]>("metaobjects", query, (data) => data.metaobjects, { type }));
     return found;
   } catch (error) {
     const code = (error as { code?: string }).code;
@@ -150,11 +152,30 @@ function summarize(changes: Change[]) {
   const groups = new Map<string, Change[]>(), shown = [...new Set(changes.flatMap(({ events }) => events ?? []))].slice(0, config.storefront.changes.summaryEvents);
   for (const change of changes) groups.set(`${change.resource}:${change.field}`, [...groups.get(`${change.resource}:${change.field}`) ?? [], change]);
   const parts = [...groups.values()].map((list) => {
-    const { resource, field, handle } = list[0]!, many = list.length > 1, name = `\`${field.replace(/^(metafield|field):/, "")}\``;
-    const subject = resource === "shop" ? "the shop" : many ? `${list.length} ${resource}s` : `${resource} \`${handle}\``;
+    const { resource, field, handle } = list[0]!, count = new Set(list.map(({ gid }) => gid)).size, many = count > 1, name = `\`${field.replace(/^(metafield|field):/, "")}\``;
+    const subject = resource === "shop" ? "the shop" : many ? `${count} ${resource}s` : `${resource} \`${handle}\``;
     return `${subject} ${field === "created" ? many ? "were created" : "was created" : field === "deleted" ? many ? "were deleted" : "was deleted" : `had ${name} edited`}`;
   });
   return `Store data update in Shopify admin: ${parts.join("; ")}${shown.length ? ` (${shown.join("; ")})` : ""}.`;
+}
+
+function collapse(pending: Change[], incoming: Change[]) {
+  const merged = [...pending];
+  for (const change of incoming) {
+    const at = merged.findIndex(({ gid, field }) => gid === change.gid && field === change.field);
+    if (at < 0) { merged.push(change); continue; }
+    const events = [...new Set([...merged[at]!.events ?? [], ...change.events ?? []])];
+    merged[at] = { ...change, before: merged[at]!.before, ...events.length && { events } };
+  }
+  return merged.filter(({ before, after }) => before !== after);
+}
+
+async function prune(now: Date) {
+  const root = statePath(batches);
+  for (const name of await ifMissing(readdir(root), [])) {
+    const stats = await ifMissing(stat(resolve(root, name)), undefined);
+    if (stats && now.getTime() - stats.mtimeMs > config.storefront.changes.batchRetentionDays * dayMs) await rm(resolve(root, name), { force: true });
+  }
 }
 
 async function detect(state: State, now: Date, log: OperationScope["log"]) {
@@ -165,7 +186,7 @@ async function detect(state: State, now: Date, log: OperationScope["log"]) {
   state.polledAt = now.toISOString();
   if (previous && changes.length) {
     if (polledAt) await bestEffort(log, "store_changes.events_failed", {}, () => attribute(changes, polledAt));
-    state.pending.push(...changes);
+    state.pending = collapse(state.pending, changes);
     state.changedAt = state.polledAt;
     state.since ??= state.polledAt;
   }
@@ -173,21 +194,24 @@ async function detect(state: State, now: Date, log: OperationScope["log"]) {
 }
 
 async function flush(repository: string, action: string, state: State, end: string) {
+  const start = state.since!;
   const { maxPages } = config.storefront.changes, summary = summarize(state.pending);
   const paths = [...new Set(state.pending.flatMap(({ paths }) => paths))], pages = paths.slice(0, maxPages).map((path) => `https://${config.storefront.publicHost}${path}`);
-  await writeStateText(`${batches}/${end}.json`, JSON.stringify({ summary, pages, pagesNotListed: paths.length - pages.length, changes: state.pending }, null, 2) + "\n");
-  const subject = upsertSubject({ repository, kind: "window", key: `${action}:${end}`, metadata: { start: state.since!, end, summary } });
-  return enqueueOnce(subject, action, summary, { source: "shopify", kind: "store_change", triggerKey: end });
+  await writeStateText(`${batches}/${start}.json`, JSON.stringify({ summary, pages, pagesNotListed: paths.length - pages.length, changes: state.pending }, null, 2) + "\n");
+  const subject = upsertSubject({ repository, kind: "window", key: `${action}:${start}`, metadata: { start, end, summary } });
+  return enqueueOnce(subject, action, summary, { source: "shopify", kind: "store_change", triggerKey: start });
 }
 
 async function pollAction({ name: action }: Action, operation: OperationScope, repository: string, now: Date) {
   if (!isActionEnabled(action)) {
-    await rm(statePath("changes"), { recursive: true, force: true });
+    await rm(statePath(stateFile), { force: true });
+    await rm(statePath(snapshotFile), { force: true });
     return 0;
   }
   const { pollMinutes, quietMinutes } = config.storefront.changes;
   const state = await readState<State>(stateFile, { pending: [] }) ?? { pending: [] };
   const snapshot = !state.polledAt || now.getTime() - Date.parse(state.polledAt) >= pollMinutes * minuteMs ? await detect(state, now, operation.log) : undefined;
+  await prune(now);
   let queued = 0;
   if (state.pending.length && now.getTime() - Date.parse(state.changedAt!) >= quietMinutes * minuteMs) {
     operation.stage("enqueue");

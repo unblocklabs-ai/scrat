@@ -4060,7 +4060,7 @@ export const scenarios = {
     const { pollStoreChanges } = await f.app("store-changes.ts"), { GitHubRepository } = await f.app("github.ts"), { config: live } = await f.app("config.ts"), { admin } = f.loggie, site = "https://shop.example.test", minute = 60_000, t0 = Date.parse("2026-10-30T12:00:00Z");
     await new GitHubRepository(live.github.repository).fetchBranch("main");
     const poll = (minutes) => pollStoreChanges(undefined, new Date(t0 + minutes * minute)), reviews = () => all(s.tasks).filter((task) => task.action === "review_store_change");
-    const meta = (namespace, key, value) => ({ namespace, key, value }), gid = "gid://shopify/Product/1", key = new Date(t0 + 20 * minute).toISOString();
+    const meta = (namespace, key, value) => ({ namespace, key, value }), gid = "gid://shopify/Product/1", key = new Date(t0 + 10 * minute).toISOString();
     const product = (nodes) => ({ id: gid, handle: "a-shirt", title: "A shirt", status: "ACTIVE", descriptionHtml: "<p>Soft</p>", templateSuffix: null, onlineStoreUrl: site + "/products/a-shirt", metafields: { nodes } });
     const draft = (value) => ({ ...product([meta("custom", "watched", value)]), id: "gid://shopify/Product/2", handle: "a-draft", status: "DRAFT", onlineStoreUrl: null });
     admin.roots.products = [product([meta("custom", "watched", "one"), meta("custom", "skipped", "x"), meta("custom", "unlisted", "x"), meta("okendo", "summary", "1")]), draft("a")];

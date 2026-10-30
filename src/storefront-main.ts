@@ -200,6 +200,7 @@ export async function publishStorefront({ github, subject, task, run, references
 export async function publishAudit({ subject, task, run, saveReceipt }: EffectContext) {
   const { slack, blocks, report } = run.result.storefrontReview!, tick = parseTriggerInput(run.input);
   if (report && tick.kind === "tick") await writeStateText(join(auditState, `${tick.end}.md`), report);
+  else if (report && tick.kind === "store_change") await writeStateText(`changes/batches/${tick.triggerKey}.md`, report);
   const ts = await postReply(subject, task.action, run, escapeSlack(slack), blocks);
   saveReceipt({ slackReplyTs: ts, storefrontReplyTs: ts });
 }

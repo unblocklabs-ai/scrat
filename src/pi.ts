@@ -143,7 +143,8 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
       const last = session.messages.findLast((message) => message.role === "assistant");
       if (!last || last.role !== "assistant" || last.stopReason !== "stop") {
         if (last?.role !== "assistant") throw new Error("Pi returned no assistant response");
-        const transient = !isContextOverflow(last, model.contextWindow) && isRetryableAssistantError(last);
+        const transient = !isContextOverflow(last, model.contextWindow) && (isRetryableAssistantError(last)
+          || last.stopReason === "error" && config.harness.transientErrors.some((pattern) => new RegExp(pattern, "i").test(last.errorMessage ?? "")));
         throw Object.assign(new Error(last.errorMessage || `Pi stopped: ${last.stopReason}`), transient ? { code: transientInferenceCode } : {});
       }
       try {

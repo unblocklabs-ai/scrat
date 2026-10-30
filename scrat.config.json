@@ -25,6 +25,7 @@
     "crashRequeues": 3,
     "corrections": { "incomplete": 1, "validation": 2, "format": 2 },
     "agentRetry": { "maxRetries": 3, "baseDelayMs": 2000 },
+    "transientErrors": ["stream_incomplete"],
     "logLevel": "info"
   },
   "github": {

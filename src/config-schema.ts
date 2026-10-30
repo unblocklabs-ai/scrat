@@ -13,6 +13,7 @@ const schema = Type.Object({
     retryJitter: Type.Number({ minimum: 0, maximum: 1 }), crashRequeues: Type.Integer({ minimum: 0 }),
     corrections: Type.Object({ incomplete: Type.Integer({ minimum: 0 }), validation: Type.Integer({ minimum: 0 }), format: Type.Integer({ minimum: 0 }) }, strict),
     agentRetry: Type.Object({ maxRetries: Type.Integer({ minimum: 0 }), baseDelayMs: Type.Integer({ minimum: 0 }) }, strict),
+    transientErrors: Type.Array(Type.String()),
     logLevel: Type.Enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]),
   }, strict),
   github: Type.Object({

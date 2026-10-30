@@ -1,14 +1,16 @@
+import { isDeepStrictEqual } from "node:util";
 import { evaluateContext, readDiffScope } from "./agent-input.ts";
 import { commitInput, describeCommit } from "./commit-review.ts";
 import { describeWindow } from "./window-review.ts";
 import { config, isBotLogin } from "./config.ts";
 import { branchConflictCode } from "./errors.ts";
+import { recordEvent } from "./events.ts";
 import { bestEffort } from "./logging.ts";
 import { createMergeCommit, prepareTarget } from "./git.ts";
 import { currentPrReview } from "./pr-assessment.ts";
 import { completedRunsOfAction, getRun, updateRun } from "./run-history.ts";
 import { assertComplete, hasReviewCheckpoint } from "./results.ts";
-import type { Workspace } from "./schema.ts";
+import type { Run, Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { isBaseOnly, parseTriggerInput } from "./triggers.ts";
 import { createWorkspace, removeWorkspace } from "./workspaces.ts";
@@ -34,6 +36,16 @@ async function settleReviewPlan(ctx: Ctx, { item, observation, mainSha }: Observ
   updateRun(run.id, { reviewers, provider, model, thinkingLevel });
   ctx.run = getRun(run.id)!;
   return false;
+}
+
+function reuseReviewers(ctx: Ctx, mainSha: string, headSha: string, revision: string) {
+  const { run, references } = ctx, prior = run.retryOfRunId ? getRun(run.retryOfRunId) : undefined;
+  const models = ({ reviewers }: Run) => reviewers.map(({ provider, model }) => `${provider}/${model}`);
+  if (!prior || run.reviewers.length < 2 || prior.mainSha !== mainSha || prior.headSha !== headSha || prior.context?.revision !== revision
+    || !isDeepStrictEqual(models(prior), models(run)) || prior.reviewers.some(({ result }) => result?.outcome !== "complete")) return;
+  updateRun(run.id, { reviewers: prior.reviewers });
+  ctx.run = getRun(run.id)!;
+  recordEvent({ ...references, type: "run.reviewers_reused", data: { fromRunId: prior.id } });
 }
 
 async function retainedScope({ run, task }: Ctx, { item, observation, mainSha, pullRequest }: Observed, evaluated: ReturnType<typeof evaluateContext>, diffPaths: string[], paths: string[]) {
@@ -107,6 +119,7 @@ export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   stopBefore(stop, "the agent");
   const changeContext = manifest.context === "change";
   const baseOnly = observed ? await settleReviewPlan(ctx, observed) : false;
+  if (manifest.agent === "panel") reuseReviewers(ctx, mainSha, headSha, evaluated.revision);
   updateRun(run.id, { stage: "agent" });
   const { result } = await runAgent(ctx, {
     environment, baseSha: changeContext ? review.diffBaseSha : undefined,

@@ -4,7 +4,7 @@ import fs, { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileS
 import { eq } from "drizzle-orm";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { DatabaseSync } from "node:sqlite";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { bearer, fixture } from "./fixture.mjs";
 
@@ -1209,9 +1209,9 @@ export const scenarios = {
     assert.equal(older.piSessionFile, implemented.piSessionFile);
     const copy = implemented.piSessionFile.replace(/\.jsonl$/, "-copy.jsonl");
     copyFileSync(implemented.piSessionFile, copy);
-    db.update(s.runs).set({ piSessionFile: copy }).where(eq(s.runs.id, older.id)).run();
+    db.update(s.runs).set({ piSessionFile: resolve("pruned-release", basename(copy)) }).where(eq(s.runs.id, older.id)).run();
     assert.ok(older.sequence > implemented.sequence);
-    const next = await feedback(); assert.equal(next.piSessionFile, copy); assert.ok(next.sequence > older.sequence);
+    const next = await feedback(); assert.equal(next.piSessionFile, realpathSync(copy)); assert.ok(next.sequence > older.sequence);
   } },
   scope_snapshots: { title: "PR-only, renamed and deleted paths keep their identities across unrelated base changes", seed: seedScopeSnapshots, configure: [configureScopeSnapshots], run: async () => {
     const implemented = await implement(1), workspace = f.row(s.workspaces, implemented.workspaceId);

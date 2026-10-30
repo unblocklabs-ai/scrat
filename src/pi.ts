@@ -1,5 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { mkdir, readFile, realpath } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
 import { isContextOverflow, isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { Logger } from "pino";
@@ -90,9 +90,10 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
     ],
   });
   await resourceLoader.reload();
-  const sessionDir = resolve("data/pi-sessions");
+  await mkdir("data/pi-sessions", { recursive: true });
+  const sessionDir = await realpath("data/pi-sessions");
   const sessionManager = sessionFile
-    ? SessionManager.open(sessionFile, sessionDir, cwd)
+    ? SessionManager.open(join(sessionDir, basename(sessionFile)), sessionDir, cwd)
     : SessionManager.create(cwd, sessionDir);
   const { session } = await createAgentSession({
     cwd, modelRuntime, model, thinkingLevel, settingsManager, sessionManager, resourceLoader,

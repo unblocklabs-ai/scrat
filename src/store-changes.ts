@@ -12,12 +12,12 @@ import { readState, statePath, writeState, writeStateText } from "./storefront.t
 type Connection<T> = { nodes: T[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
 type Metafield = { namespace: string; key: string; value: string };
 type Node = { id: string; handle: string; [field: string]: any };
-type Resource = { kind: string; handle: string; fields: Record<string, string> };
-type Stored = { kind: string; handle: string; fields: Record<string, { hash: string; value: string }> };
+type Resource = { kind: string; handle: string; visible: boolean; fields: Record<string, string> };
+type Stored = { kind: string; handle: string; visible?: boolean; fields: Record<string, { hash: string; value: string }> };
 type Snapshot = { resources: Record<string, Stored>; metaobjects: boolean; watched: string[] };
 type Change = { resource: string; gid: string; handle: string; field: string; before?: string; after?: string; paths: string[]; note?: string; events?: string[] };
 type State = { polledAt?: string; since?: string; changedAt?: string; pending: Change[] };
-type Listing = { kind: string; root: string; first: number; selection: string; fields: (node: Node) => Record<string, unknown> };
+type Listing = { kind: string; root: string; first: number; selection: string; visible?: (node: Node) => boolean; fields: (node: Node) => Record<string, unknown> };
 
 const stateFile = "changes/state.json", snapshotFile = "changes/snapshot.json", batches = "changes/batches", minuteMs = 60_000;
 const denied = new Set(["ACCESS_DENIED", "SCOPE_UPGRADE_REQUIRED"]);
@@ -26,7 +26,7 @@ const subjectTypes: Record<string, string> = { product: "PRODUCT", collection: "
 const pageInfo = "pageInfo { hasNextPage endCursor }";
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const urlOf = ({ kind, handle }: Pick<Resource, "kind" | "handle">) => route[kind] ? `/${route[kind]}/${handle}` : undefined;
-const metafields = (first: number) => `metafields(first: ${first}) { nodes { namespace key value } }`;
+const metafields = (first: number) => `metafields(first: ${first}, keys: $keys) { nodes { namespace key value } }`;
 const mine = (watched: Set<string>, nodes: Metafield[]) => Object.fromEntries(nodes.filter(({ namespace, key }) => watched.has(`${namespace}.${key}`)).map(({ namespace, key, value }) => [`metafield:${namespace}.${key}`, value]));
 const keyOf = (field: string) => field.startsWith("metafield:") ? field.slice("metafield:".length) : undefined;
 
@@ -55,11 +55,11 @@ async function all<D, N>(request: string, query: string, pick: (data: D) => Conn
 function listings(watched: Set<string>): Listing[] {
   const { pageSizes: size } = config.storefront.changes;
   return [
-    { kind: "product", root: "products", first: size.products, selection: `handle title status descriptionHtml templateSuffix onlineStoreUrl ${metafields(size.metafields)}`,
+    { kind: "product", root: "products", first: size.products, selection: `handle title status descriptionHtml templateSuffix onlineStoreUrl ${metafields(size.metafields)}`, visible: (node) => node.status === "ACTIVE" && node.onlineStoreUrl !== null,
       fields: (node) => ({ handle: node.handle, title: node.title, status: node.status, descriptionHtml: node.descriptionHtml, templateSuffix: node.templateSuffix, published: node.onlineStoreUrl !== null, ...mine(watched, node.metafields.nodes) }) },
-    { kind: "collection", root: "collections", first: size.collections, selection: `handle title descriptionHtml templateSuffix onlineStoreUrl image { url } ${metafields(size.metafields)}`,
-      fields: (node) => ({ handle: node.handle, title: node.title, descriptionHtml: node.descriptionHtml, image: node.image?.url, templateSuffix: node.templateSuffix, published: node.onlineStoreUrl !== null, ...mine(watched, node.metafields.nodes) }) },
-    { kind: "page", root: "pages", first: size.pages, selection: "handle title body templateSuffix isPublished",
+    { kind: "collection", root: "collections", first: size.collections, selection: `handle title descriptionHtml templateSuffix image { url } ${metafields(size.metafields)}`,
+      fields: (node) => ({ handle: node.handle, title: node.title, descriptionHtml: node.descriptionHtml, image: node.image?.url, templateSuffix: node.templateSuffix, ...mine(watched, node.metafields.nodes) }) },
+    { kind: "page", root: "pages", first: size.pages, selection: "handle title body templateSuffix isPublished", visible: (node) => node.isPublished,
       fields: (node) => ({ handle: node.handle, title: node.title, body: node.body, templateSuffix: node.templateSuffix, published: node.isPublished }) },
     { kind: "menu", root: "menus", first: size.menus, selection: "handle title items { title url items { title url items { title url } } }",
       fields: (node) => ({ handle: node.handle, title: node.title, items: JSON.stringify(node.items) }) },
@@ -85,13 +85,13 @@ async function metaobjects(log: OperationScope["log"]) {
 
 async function read(watched: Set<string>, log: OperationScope["log"]) {
   const current = new Map<string, Resource>(), kinds = new Set<string>(), { pageSizes: size } = config.storefront.changes;
-  const put = (gid: string, kind: string, handle: string, fields: Record<string, unknown>) => current.set(gid, { kind, handle, fields: Object.fromEntries(Object.entries(fields).map(([field, value]) => [field, value === null || value === undefined ? "" : String(value)])) });
-  for (const { kind, root, first, selection, fields } of listings(watched)) {
-    const query = `query ($after: String) { ${root}(first: ${first}, after: $after) { nodes { id ${selection} } ${pageInfo} } }`;
-    for (const node of await all<Record<string, Connection<Node>>, Node>(root, query, (data) => data[root]!)) put(node.id, kind, node.handle, fields(node));
+  const put = (gid: string, kind: string, handle: string, fields: Record<string, unknown>, visible = true) => current.set(gid, { kind, handle, visible, fields: Object.fromEntries(Object.entries(fields).map(([field, value]) => [field, value === null || value === undefined ? "" : String(value)])) });
+  for (const { kind, root, first, selection, fields, visible } of listings(watched)) {
+    const query = `query ($after: String${selection.includes("$keys") ? ", $keys: [String!]" : ""}) { ${root}(first: ${first}, after: $after) { nodes { id ${selection} } ${pageInfo} } }`;
+    for (const node of await all<Record<string, Connection<Node>>, Node>(root, query, (data) => data[root]!, { keys: [...watched] })) put(node.id, kind, node.handle, fields(node), visible?.(node) ?? true);
     kinds.add(kind);
   }
-  const shop = await all<{ shop: { metafields: Connection<Metafield> } }, Metafield>("shop", `query ($after: String) { shop { metafields(first: ${size.shopMetafields}, after: $after) { nodes { namespace key value } ${pageInfo} } } }`, (data) => data.shop.metafields);
+  const shop = await all<{ shop: { metafields: Connection<Metafield> } }, Metafield>("shop", `query ($after: String, $keys: [String!]) { shop { metafields(first: ${size.shopMetafields}, after: $after, keys: $keys) { nodes { namespace key value } ${pageInfo} } } }`, (data) => data.shop.metafields, { keys: [...watched] });
   put("shop", "shop", "shop", mine(watched, shop));
   kinds.add("shop");
   const objects = await metaobjects(log);
@@ -119,9 +119,10 @@ function compare(previous: Snapshot, current: Map<string, Resource>, kinds: Set<
   const comparable = (field: string) => { const key = keyOf(field); return key === undefined || (before.has(key) && watched.has(key)); };
   for (const [gid, resource] of current) {
     const stored = previous.resources[gid];
-    resources[gid] = { kind: resource.kind, handle: resource.handle, fields: Object.fromEntries(Object.entries(resource.fields).map(([field, value]) => [field, { hash: sha(value), value: clip(value, valueBytes) }])) };
+    resources[gid] = { kind: resource.kind, handle: resource.handle, visible: resource.visible, fields: Object.fromEntries(Object.entries(resource.fields).map(([field, value]) => [field, { hash: sha(value), value: clip(value, valueBytes) }])) };
     if (resource.kind === "metaobject" && !previous.metaobjects) continue;
-    if (!stored) { record(gid, resource, "created", undefined, resource.handle); continue; }
+    if (!stored) { if (resource.visible) record(gid, resource, "created", undefined, resource.handle); continue; }
+    if (!resource.visible && stored.visible === false) continue;
     for (const field of new Set([...Object.keys(stored.fields), ...Object.keys(resource.fields)])) {
       const was = stored.fields[field], now = resource.fields[field];
       if (comparable(field) && was?.hash !== (now === undefined ? undefined : sha(now))) record(gid, resource, field, was?.value, now === undefined ? undefined : clip(now, valueBytes));
@@ -129,7 +130,7 @@ function compare(previous: Snapshot, current: Map<string, Resource>, kinds: Set<
   }
   for (const [gid, stored] of Object.entries(previous.resources)) {
     if (!kinds.has(stored.kind)) resources[gid] = stored;
-    else if (!current.has(gid)) record(gid, stored, "deleted", stored.handle);
+    else if (!current.has(gid) && stored.visible !== false) record(gid, stored, "deleted", stored.handle);
   }
   return { changes, snapshot: { resources, metaobjects: previous.metaobjects || kinds.has("metaobject"), watched: [...watched] } satisfies Snapshot };
 }

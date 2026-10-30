@@ -91,7 +91,7 @@
       "valueBytes": 2048,
       "maxPages": 12,
       "summaryEvents": 3,
-      "pageSizes": { "products": 8, "collections": 8, "pages": 50, "menus": 50, "metafields": 100, "shopMetafields": 100, "metaobjectDefinitions": 250, "metaobjects": 50, "events": 50 },
+      "pageSizes": { "products": 100, "collections": 100, "pages": 100, "menus": 50, "metafields": 250, "shopMetafields": 100, "metaobjectDefinitions": 250, "metaobjects": 50, "events": 50 },
       "extraMetafields": [],
       "ignoreMetafields": [],
       "ignoreMetaobjectTypes": "^(shopify|app)--"

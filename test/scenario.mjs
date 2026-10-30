@@ -4062,11 +4062,12 @@ export const scenarios = {
     const poll = (minutes) => pollStoreChanges(undefined, new Date(t0 + minutes * minute)), reviews = () => all(s.tasks).filter((task) => task.action === "review_store_change");
     const meta = (namespace, key, value) => ({ namespace, key, value }), gid = "gid://shopify/Product/1", key = new Date(t0 + 20 * minute).toISOString();
     const product = (nodes) => ({ id: gid, handle: "a-shirt", title: "A shirt", status: "ACTIVE", descriptionHtml: "<p>Soft</p>", templateSuffix: null, onlineStoreUrl: site + "/products/a-shirt", metafields: { nodes } });
-    admin.roots.products = [product([meta("custom", "watched", "one"), meta("custom", "skipped", "x"), meta("custom", "unlisted", "x"), meta("okendo", "summary", "1")])];
+    const draft = (value) => ({ ...product([meta("custom", "watched", value)]), id: "gid://shopify/Product/2", handle: "a-draft", status: "DRAFT", onlineStoreUrl: null });
+    admin.roots.products = [product([meta("custom", "watched", "one"), meta("custom", "skipped", "x"), meta("custom", "unlisted", "x"), meta("okendo", "summary", "1")]), draft("a")];
     admin.roots.shop = [meta("custom", "watched", "banner")];
     admin.denied.add("metaobjectDefinitions");
     assert.equal(await poll(0), 0); assert.equal(await poll(5), 0); assert.equal(reviews().length, 0, "the first poll seeds and queues nothing");
-    admin.roots.products = [{ ...product([meta("custom", "watched", "two"), meta("custom", "skipped", "y"), meta("custom", "unlisted", "y"), meta("okendo", "summary", "2")]), descriptionHtml: "<p>Softer</p>" }];
+    admin.roots.products = [{ ...product([meta("custom", "watched", "two"), meta("custom", "skipped", "y"), meta("custom", "unlisted", "y"), meta("okendo", "summary", "2")]), descriptionHtml: "<p>Softer</p>" }, draft("b")];
     admin.roots.events = [{ message: '<a href="/admin/staff/1">Jane Doe</a>  updated product A shirt', subjectId: gid }];
     assert.equal(await poll(7), 0, "a poll inside pollMinutes reads nothing");
     assert.equal(await poll(10), 0); assert.equal(await poll(15), 0); assert.equal(await poll(19), 0); assert.equal(reviews().length, 0, "nothing is queued during the quiet window");

@@ -84,7 +84,18 @@
       "uploadBatchBytes": 8388608,
       "requestTimeoutSeconds": 180
     },
-    "lighthouse": { "runs": 2, "pages": ["/"], "timeoutSeconds": 600 }
+    "lighthouse": { "runs": 2, "pages": ["/"], "timeoutSeconds": 600 },
+    "changes": {
+      "pollMinutes": 5,
+      "quietMinutes": 10,
+      "valueBytes": 2048,
+      "maxPages": 12,
+      "summaryEvents": 3,
+      "pageSizes": { "products": 8, "collections": 8, "pages": 50, "menus": 50, "metafields": 100, "shopMetafields": 100, "metaobjectDefinitions": 250, "metaobjects": 50, "events": 50 },
+      "extraMetafields": [],
+      "ignoreMetafields": [],
+      "ignoreMetaobjectTypes": "^(shopify|app)--"
+    }
   },
   "cloudflare": {
     "enabled": false,

@@ -1,0 +1,14 @@
+name: review_store_change
+enabled: false
+trigger: { source: shopify, kind: store_change }
+mode: review
+tools: [read, grep, find, ls, browser]
+files: [storefront, store_changes]
+publish: [slack_reply]
+skill: skills/review_store_change/SKILL.md
+model: { provider: codex-lb, model: gpt-6.1-terra, thinkingLevel: high }
+priority: 100
+channel: ""
+browserSteps: 120
+browserSeconds: 1800
+retry: { initialDelaySeconds: 60, maxDelaySeconds: 3600 }

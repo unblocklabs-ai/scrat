@@ -20,6 +20,7 @@ export type Baselines = Record<string, { url: string; devices: Record<string, st
 export type Alerts = Record<string, { title: string; sha: string }>;
 
 export const auditState = "audits";
+export const stateOf = (source: TriggerInput["source"]) => source === "shopify" ? "" : auditState;
 const scope = "site_map", dayMs = 86_400_000, hourMs = 3_600_000;
 const siteMapPath = () => statePath("site.md");
 const liveUrl = () => `https://${config.storefront.publicHost}/`;
@@ -72,11 +73,11 @@ export async function stageBaselines(contextDir: string, write: (key: string, na
 }
 
 export async function storefrontContext(subjectId: string, headSha: string, source: TriggerInput["source"]) {
-  const discovery = source === "storefront", audit = source === "schedule", preview = discovery || audit ? undefined : previewContext(subjectId, headSha);
+  const discovery = source === "storefront", audit = source === "schedule" || source === "shopify", preview = discovery || audit ? undefined : previewContext(subjectId, headSha);
   if (!discovery && !audit && !preview) return undefined;
   const { devices, auditPaths, limits: { confirmationRuns, regressionMaxGrade } } = config.storefront;
   const context = preview ? { ...preview, liveUrl: liveUrl(), devices, confirmationRuns, regressionMaxGrade }
-    : audit ? { liveUrl: liveUrl(), devices, confirmationRuns, auditPaths, knownBreakages: knownBreakages(await readState<Alerts>(join(auditState, "alerts.json"), {})) } : { liveUrl: liveUrl() };
+    : audit ? { liveUrl: liveUrl(), devices, confirmationRuns, auditPaths, knownBreakages: knownBreakages(await readState<Alerts>(join(stateOf(source), "alerts.json"), {})) } : { liveUrl: liveUrl() };
   return { context, siteMap: await ifMissing(readFile(siteMapPath(), "utf8"), undefined), browse: preview?.available ?? true };
 }
 

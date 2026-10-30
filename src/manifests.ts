@@ -10,7 +10,7 @@ import { triggerKinds, triggerSource } from "./triggers.ts";
 
 const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const toolNames = ["read", "grep", "find", "ls", "git", "read_base", "bash", "edit", "write", "http", "browser", "github_search"] as const;
-const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "history", "validation", "triage", "issue", "storefront", "cloudflare"] as const;
+const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "history", "validation", "triage", "issue", "storefront", "cloudflare", "store_changes"] as const;
 const effectNames = ["push", "pull_request", "comment", "labels", "pr_assessment", "issue", "slack_reply", "site_map"] as const;
 const startEffectNames = ["slack_post"] as const;
 export type ThinkingLevel = (typeof thinkingLevels)[number];
@@ -35,7 +35,7 @@ export const actionSettings = Type.Object({
 }, strict);
 export type ActionSettings = Static<typeof actionSettings>;
 const trigger = Type.Object({
-  source: Type.Enum(["github_items", "github_commits", "schedule", "storefront"]), kind: Type.Enum(triggerKinds),
+  source: Type.Enum(["github_items", "github_commits", "schedule", "storefront", "shopify"]), kind: Type.Enum(triggerKinds),
   item: Type.Optional(Type.Enum(["issue", "pr"])), author: Type.Optional(Type.String({ minLength: 1 })),
   grades: Type.Optional(list(Type.Enum(prGrades), 1)),
   manual: Type.Optional(Type.Boolean()), branch: Type.Optional(Type.String()),
@@ -75,8 +75,8 @@ export function entryProblems({ mode, agent, trigger }: Pick<Resolved, "mode" | 
     [!entry.failedLabel || mode === "change", "failedLabel requires mode change"],
     [(entry.maxSelfRepairs === undefined && !entry.exhaustedLabel) || trigger.kind === "low_grade", "maxSelfRepairs and exhaustedLabel are only allowed with kind low_grade"],
     [(entry.startMessage === undefined && entry.maxRangeCommits === undefined && entry.branch === undefined) || trigger.source === "github_commits", "startMessage, maxRangeCommits and branch are only allowed with source github_commits"],
-    [entry.channel === undefined || trigger.source === "github_commits" || trigger.source === "schedule", "channel is only allowed with source github_commits or schedule"],
-    [(entry.browserSteps === undefined && entry.browserSeconds === undefined) || trigger.source === "schedule" || trigger.source === "storefront", "browserSteps and browserSeconds are only allowed with source schedule or storefront"],
+    [entry.channel === undefined || trigger.source === "github_commits" || trigger.source === "schedule" || trigger.source === "shopify", "channel is only allowed with source github_commits, schedule or shopify"],
+    [(entry.browserSteps === undefined && entry.browserSeconds === undefined) || trigger.source === "schedule" || trigger.source === "storefront" || trigger.source === "shopify", "browserSteps and browserSeconds are only allowed with source schedule, storefront or shopify"],
     [entry.rootInstructions === undefined || trigger.source === "schedule", "rootInstructions is only allowed with source schedule"],
     [(entry.cron === undefined && entry.window === undefined) || trigger.source === "schedule", "cron and window are only allowed with source schedule"],
   ];
@@ -88,7 +88,7 @@ function crossChecks(m: Resolved) {
   const problems: string[] = [];
   const need = (ok: boolean, message: string) => { if (!ok) problems.push(message); };
   const any = (list: readonly string[], names: readonly string[]) => names.some((name) => list.includes(name));
-  const items = t.source === "github_items", commits = t.source === "github_commits", scheduled = t.source === "schedule", storefront = t.source === "storefront", slack = [...m.start ?? [], ...publish];
+  const items = t.source === "github_items", commits = t.source === "github_commits", scheduled = t.source === "schedule", storefront = t.source === "storefront", shopify = t.source === "shopify", slack = [...m.start ?? [], ...publish];
   need(triggerSource(t.kind) === t.source, `trigger.kind ${t.kind} does not belong to source ${t.source}`);
   need(items === (t.item !== undefined), "trigger.item is required for github_items and forbidden for github_commits");
   need(!["pr_conflicts", "pr_feedback", "low_grade"].includes(t.kind) || (t.item === "pr" && t.author === "bot"), `trigger.kind ${t.kind} requires item: pr and author: bot`);
@@ -104,13 +104,14 @@ function crossChecks(m: Resolved) {
   }
   need(!scheduled || mode === "review", "a schedule trigger requires mode review");
   need(!storefront || mode === "review", "a storefront trigger requires mode review");
+  need(!shopify || mode === "review", "a shopify trigger requires mode review");
   need(storefront === publish.includes("site_map"), "the site_map effect and a storefront trigger require each other");
   need(t.grades === undefined || t.kind === "low_grade", "trigger.grades is only allowed with kind low_grade");
   need(t.kind !== "low_grade" || m.maxSelfRepairs !== undefined, "kind low_grade requires maxSelfRepairs");
   need(!commits || m.maxRangeCommits !== undefined, "source github_commits requires maxRangeCommits");
   need(!any(slack, ["slack_post"]) || commits, "the slack_post start effect requires source github_commits");
-  need(!publish.includes("slack_reply") || commits || scheduled, "the slack_reply effect requires source github_commits or schedule");
-  need(!scheduled || !publish.includes("slack_reply") || files.includes("storefront"), "the slack_reply effect on a schedule trigger requires files: storefront");
+  need(!publish.includes("slack_reply") || commits || scheduled || shopify, "the slack_reply effect requires source github_commits, schedule or shopify");
+  need(!(scheduled || shopify) || !publish.includes("slack_reply") || files.includes("storefront"), "the slack_reply effect on a schedule or shopify trigger requires files: storefront");
   need(!publish.includes("issue") || !commits, "the issue effect requires source github_items or schedule");
   need(!any(publish, ["labels", "comment"]) || items, "labels and comment effects require a github_items trigger");
   need(!publish.includes("pr_assessment") || (t.item === "pr" && agent === "panel"), "pr_assessment requires item: pr and agent: panel");
@@ -139,7 +140,8 @@ function crossChecks(m: Resolved) {
   need(!files.includes("history") || !publish.includes("pr_assessment"), "files: history is not allowed with the pr_assessment effect");
   need(!files.includes("triage") || t.item === "issue", "files: triage requires trigger.item issue");
   need(!files.includes("issue") || t.item === "pr", "files: issue requires trigger.item pr");
-  need(!files.includes("storefront") || publish.includes("pr_assessment") || storefront || scheduled, "files: storefront requires the pr_assessment effect, a storefront trigger or a schedule trigger");
+  need(!files.includes("storefront") || publish.includes("pr_assessment") || storefront || scheduled || shopify, "files: storefront requires the pr_assessment effect, a storefront trigger, a schedule trigger or a shopify trigger");
+  need(!files.includes("store_changes") || shopify, "files: store_changes requires a shopify trigger");
   need(!files.includes("cloudflare") || t.item === "issue", "files: cloudflare requires trigger.item issue");
   return problems;
 }

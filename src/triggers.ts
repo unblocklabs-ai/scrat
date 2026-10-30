@@ -20,6 +20,7 @@ const commit = Type.Object({
 });
 const tick = Type.Object({ source: Type.Literal("schedule"), kind: Type.Literal("tick"), triggerKey: text, start: text, end: text });
 const siteMap = Type.Object({ source: Type.Literal("storefront"), kind: Type.Literal("site_map"), triggerKey: text });
+const storeChange = Type.Object({ source: Type.Literal("shopify"), kind: Type.Literal("store_change"), triggerKey: text });
 
 const members = {
   item_changed: { source: "github_items", schema: itemChanged },
@@ -31,10 +32,11 @@ const members = {
   commit: { source: "github_commits", schema: commit },
   tick: { source: "schedule", schema: tick },
   site_map: { source: "storefront", schema: siteMap },
+  store_change: { source: "shopify", schema: storeChange },
 } as const;
 
 export type TriggerInput = Static<typeof itemChanged> | Static<typeof label> | Static<typeof prConflicts> | Static<typeof prFeedback>
-  | Static<typeof lowGrade> | Static<typeof manual> | Static<typeof commit> | Static<typeof tick> | Static<typeof siteMap>;
+  | Static<typeof lowGrade> | Static<typeof manual> | Static<typeof commit> | Static<typeof tick> | Static<typeof siteMap> | Static<typeof storeChange>;
 export type KeyedTriggerInput = Extract<TriggerInput, { triggerKey: string }>;
 type Kind = keyof typeof members;
 type ManifestKind = Exclude<Kind, "manual">;

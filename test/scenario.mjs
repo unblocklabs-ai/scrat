@@ -131,6 +131,9 @@ const configureDatabase = (config) => {
 const themeFiles = { "layout/theme.liquid": "<html>{{ content_for_layout }}</html>\n", "assets/app.css": "body { color: black; }\n", "templates/index.json": "{\"sections\":{}}\n", "config/settings_data.json": "{\"current\":{}}\n", "README.md": "# Theme\n" };
 const heroPng = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02, 0x03]);
 const seedTheme = () => { for (const [path, text] of Object.entries(themeFiles)) { mkdirSync(resolve("seed", dirname(path)), { recursive: true }); writeFileSync(resolve("seed", path), text); } };
+const seedStoreTheme = () => {
+  mkdirSync("seed/snippets"); writeFileSync("seed/snippets/details.liquid", "{{ product.metafields.custom.watched.value }}{{ product.metafields.custom.skipped.value }}{{ shop.metafields.custom.watched.value }}\n");
+};
 const configureStorefront = (config) => {
   Object.assign(config.storefront, { enabled: true, store: "fixture.myshopify.com", publicHost: "shop.example.test" });
   Object.assign(config.storefront.preview, { processingPollSeconds: 1, uploadBatch: 2 });
@@ -3451,7 +3454,7 @@ export const scenarios = {
   manifest_directory: { title: "a deployment manifest directory adds an action for a freed trigger, rejects duplicate enabled triggers, unknown tools and files, and bad directories", configure: [configureManifestDirectory], run: async () => {
     const { manifests, routeFor } = await f.app("actions.ts");
     const { validateStaticConfig } = await f.app("startup.ts");
-    assert.deepEqual(manifests.map((m) => m.name).sort(), ["address_pr_feedback", "address_review", "implement", "my_pr_review", "resolve_conflicts", "review_base_change", "review_issue", "review_pr", "review_triage", "store_audit", "storefront_discover"]);
+    assert.deepEqual(manifests.map((m) => m.name).sort(), ["address_pr_feedback", "address_review", "implement", "my_pr_review", "resolve_conflicts", "review_base_change", "review_issue", "review_pr", "review_store_change", "review_triage", "store_audit", "storefront_discover"]);
     await validateStaticConfig(f.config);
     await assert.rejects(validateStaticConfig({ ...f.config, actions: { ...f.config.actions, review_issue: { ...f.config.actions.review_issue, enabled: true } } }), /review_issue, review_triage would share one review comment on each issue; enable only one/);
     const issue = { source: "github_items", kind: "item_changed", item: "issue", author: "other" };
@@ -3519,7 +3522,7 @@ export const scenarios = {
     rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment, cloudflare]", "files: [review]"), /files: review requires trigger.kind low_grade/);
     rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [labels]"), /files: previous_assessment requires the pr_assessment effect or a review that publishes comment/);
     rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment, cloudflare]", "files: [discussion, previous_repair]"), /files: previous_repair requires the pr_assessment effect/);
-    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment, cloudflare]", "files: [discussion, previous_assessment, storefront]"), /files: storefront requires the pr_assessment effect, a storefront trigger or a schedule trigger/);
+    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment, cloudflare]", "files: [discussion, previous_assessment, storefront]"), /files: storefront requires the pr_assessment effect, a storefront trigger, a schedule trigger or a shopify trigger/);
     rejects("storefront_discover", (text) => text.replace("files: [storefront]", "files: []"), /the browser tool and the browser setting require each other, except that a manifest listing the storefront file may list browser alone/);
     rejects("storefront_discover", (text) => text.replace("publish: [site_map]", "publish: [issue]"), /the site_map effect and a storefront trigger require each other/);
     rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [comment, labels, site_map]"), /the site_map effect and a storefront trigger require each other/);
@@ -4051,6 +4054,43 @@ export const scenarios = {
     assert.equal(json("audits/baselines/index.json").home.devices.mobile, tip, "a run that is not clean keeps the baselines");
     assert.ok(state(`audits/${next}.md`).includes("### Confirmed breakage\n\n- **Checkout does not open** (`cart:checkout`, new on this commit)")); assert.ok(existsSync(`data/storefront/audits/${first}.md`));
     assert.ok(!existsSync("data/storefront/lighthouse.json")); assert.equal(all(s.slackThreads).length, 2);
+  } },
+  store_changes: { title: "the Shopify admin source seeds silently, reports a watched metafield change once after the quiet window with its before and after, the admin log line and its page, ignores app, unwatched and ignored metafields, skips metaobjects while their scope is denied, and its review posts the summary as the root and the verdict as the reply without Lighthouse", seed: seedStoreTheme, configure: [configureMainStorefront, (config) => { config.storefront.changes.ignoreMetafields = ["custom.skipped"]; Object.assign(config.actions.review_store_change, { enabled: true, channel: "C0123456789" }); }], run: async () => {
+    const { fakes, state } = await mainStorefront();
+    const { pollStoreChanges } = await f.app("store-changes.ts"), { GitHubRepository } = await f.app("github.ts"), { config: live } = await f.app("config.ts"), { admin } = f.loggie, site = "https://shop.example.test", minute = 60_000, t0 = Date.parse("2026-10-30T12:00:00Z");
+    await new GitHubRepository(live.github.repository).fetchBranch("main");
+    const poll = (minutes) => pollStoreChanges(undefined, new Date(t0 + minutes * minute)), reviews = () => all(s.tasks).filter((task) => task.action === "review_store_change");
+    const meta = (namespace, key, value) => ({ namespace, key, value }), gid = "gid://shopify/Product/1", key = new Date(t0 + 20 * minute).toISOString();
+    const product = (nodes) => ({ id: gid, handle: "a-shirt", title: "A shirt", status: "ACTIVE", descriptionHtml: "<p>Soft</p>", templateSuffix: null, onlineStoreUrl: site + "/products/a-shirt", metafields: { nodes } });
+    admin.roots.products = [product([meta("custom", "watched", "one"), meta("custom", "skipped", "x"), meta("custom", "unlisted", "x"), meta("okendo", "summary", "1")])];
+    admin.roots.shop = [meta("custom", "watched", "banner")];
+    admin.denied.add("metaobjectDefinitions");
+    assert.equal(await poll(0), 0); assert.equal(await poll(5), 0); assert.equal(reviews().length, 0, "the first poll seeds and queues nothing");
+    admin.roots.products = [{ ...product([meta("custom", "watched", "two"), meta("custom", "skipped", "y"), meta("custom", "unlisted", "y"), meta("okendo", "summary", "2")]), descriptionHtml: "<p>Softer</p>" }];
+    admin.roots.events = [{ message: '<a href="/admin/staff/1">Jane Doe</a>  updated product A shirt', subjectId: gid }];
+    assert.equal(await poll(7), 0, "a poll inside pollMinutes reads nothing");
+    assert.equal(await poll(10), 0); assert.equal(await poll(15), 0); assert.equal(await poll(19), 0); assert.equal(reviews().length, 0, "nothing is queued during the quiet window");
+    assert.equal(await poll(20), 1); assert.equal(await poll(25), 0); assert.equal(await poll(60), 0); assert.equal(reviews().length, 1);
+    const [task] = reviews(), batch = JSON.parse(state(`changes/batches/${key}.json`)), summary = "Store data update in Shopify admin: product `a-shirt` had `descriptionHtml` edited; product `a-shirt` had `custom.watched` edited (Jane Doe updated product A shirt).";
+    assert.deepEqual(task.input, { source: "shopify", kind: "store_change", triggerKey: key }); assert.equal(task.reason, summary);
+    assert.deepEqual(batch.changes.map(({ field, before, after, paths, events }) => [field, before, after, paths, events]), [
+      ["descriptionHtml", "<p>Soft</p>", "<p>Softer</p>", ["/products/a-shirt"], ["Jane Doe updated product A shirt"]],
+      ["metafield:custom.watched", "one", "two", ["/products/a-shirt"], ["Jane Doe updated product A shirt"]],
+    ]);
+    assert.deepEqual(batch.pages, [site + "/products/a-shirt"]);
+    assert.ok(f.loggie.requests.every((request) => request.key === f.loggie.key));
+
+    f.script = [{ name: "browser", args: { action: "goto", url: site + "/products/a-shirt" } }, { name: "browser", args: { action: "screenshot", viewport: "mobile", fullPage: true } },
+      "The shirt page shows the new details.\n• `/products/a-shirt` mobile: the details list shows the new text.\n\n## Checked\n- `/products/a-shirt`.\nSCRAT_VERDICT: clean\nSCRAT_STATUS: complete"];
+    const run = await success(), [request] = f.requests.filter((entry) => entry.context.action === "review_store_change"), files = request.context.files;
+    assert.equal(run.result.verdict, "clean"); assert.deepEqual(request.context.input, { kind: "store_change", triggerKey: key });
+    assert.deepEqual(JSON.parse(readFileSync(files.storeChanges, "utf8")).pages, batch.pages); assert.deepEqual(JSON.parse(readFileSync(files.storefront, "utf8")).knownBreakages, []);
+    assert.deepEqual(fakes.visits, [site + "/products/a-shirt"]); assert.deepEqual(fakes.audits, [], "a content review runs no Lighthouse");
+    const [root, reply] = f.slack.calls.filter((call) => call.method === "chat.postMessage"), [thread] = all(s.slackThreads);
+    assert.equal(root.body.text, summary); assert.equal(root.body.channel, "C0123456789"); assert.equal(reply.body.thread_ts, thread.ts);
+    assert.equal(reply.body.text, "The shirt page shows the new details.\n• `/products/a-shirt` mobile: the details list shows the new text.");
+    assert.deepEqual(JSON.parse(state("baselines/index.json")), { "products_a-shirt": { url: site + "/products/a-shirt", devices: { mobile: run.mainSha } } });
+    assert.ok(!existsSync("data/storefront/lighthouse.json"));
   } },
   storefront_preview: { title: "an enabled storefront gives each Scrat PR review one recorded MAIN duplicate through Loggie, adopts a duplicate whose reply was lost, resumes its processing wait, replaces a theme that vanished, reuses it and deletes it when the PR closes, retrying a failed delete; a refused Loggie call only logs, and a disabled storefront or a human PR makes no Loggie call", configure: [(config) => { Object.assign(config.storefront, { store: "fixture.myshopify.com", publicHost: "shop.example.test" }); Object.assign(config.storefront.preview, { processingPollSeconds: 1, filesPageSize: 2 }); }], run: async () => {
     const { config: live } = await f.app("config.ts"), { loggie } = await f.app("loggie.ts"), { childEnvironment, containsSecret } = await f.app("secrets.ts");

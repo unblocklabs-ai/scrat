@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { contextDirOf, contextFiles } from "./agent-input.ts";
@@ -19,7 +19,7 @@ import { serialized } from "./single-flight.ts";
 import { escapeSlack } from "./slack.ts";
 import { linkSection, reviewBlocks, tableBlock } from "./slack-blocks.ts";
 import { liveFiles, md5, readState, statePath, treeBlobs, writeState, writeStateText } from "./storefront.ts";
-import { type Alerts, type Baselines, auditState, knownBreakages, stageBaselines, storefrontContext } from "./storefront-site.ts";
+import { type Alerts, type Baselines, auditState, knownBreakages, stageBaselines, stateOf, storefrontContext } from "./storefront-site.ts";
 import { parseTriggerInput } from "./triggers.ts";
 
 type Change = { workspace: Workspace; headSha: string; diffBaseSha: string; diffPaths: string[]; item: NonNullable<Run["context"]>["item"] };
@@ -73,13 +73,16 @@ async function reviewPages({ run, task, operation, stop }: Ctx, { workspace, hea
   }, { context, onSession: record });
 }
 
-async function replaceBaselines(shots: Shot[], sha: string, state: string) {
-  const { publicHost, devices } = config.storefront, next = statePath(state, "baselines.next"), index: Baselines = {};
+async function replaceBaselines(shots: Shot[], sha: string, state: string, keep: boolean) {
+  const { publicHost, devices } = config.storefront, next = statePath(state, "baselines.next"), taken = new Set<string>();
+  const index = keep ? await readState<Baselines>(join(state, "baselines/index.json"), {}) ?? {} : {};
   await rm(next, { recursive: true, force: true });
+  if (Object.keys(index).length) await cp(statePath(state, "baselines"), next, { recursive: true });
   await mkdir(next, { recursive: true });
   for (const { path, viewport, url: raw } of shots) {
     const url = new URL(raw), key = pageKey(url);
-    if (url.host !== publicHost || !viewport || !devices.includes(viewport) || index[key]?.devices[viewport]) continue;
+    if (url.host !== publicHost || !viewport || !devices.includes(viewport) || taken.has(`${key}/${viewport}`)) continue;
+    taken.add(`${key}/${viewport}`);
     await mkdir(join(next, key), { recursive: true });
     await copyFile(path, join(next, key, `${viewport}.png`));
     index[key] = { url: url.origin + url.pathname, devices: { ...index[key]?.devices, [viewport]: sha } };
@@ -96,24 +99,24 @@ const settled = <T>({ operation, stop }: Ctx, sha: string, part: string, work: P
   return { error: errorMessage(error).replace(/\s+/g, " ") };
 });
 
-async function finishStorefront(ctx: Ctx, { sha, state, known, pages, session, title, intro, shotsDir }: {
-  sha: string; state: string; known: Alerts | undefined; pages: Pages; session?: Storefront["session"]; title?: string; intro: string[]; shotsDir: string;
+async function finishStorefront(ctx: Ctx, { sha, state, known, pages, session, title, intro, shotsDir, changes = false }: {
+  sha: string; state: string; known: Alerts | undefined; pages: Pages; session?: Storefront["session"]; title?: string; intro: string[]; shotsDir: string; changes?: boolean;
 }) {
   const { run, references, stop } = ctx, contextDir = contextDirOf(run.id);
-  const lighthouse = await settled(ctx, sha, "lighthouse", runLighthouse(`https://${config.storefront.publicHost}/`, join(contextDir, "lighthouse"), references, stop));
+  const lighthouse = changes ? undefined : await settled(ctx, sha, "lighthouse", runLighthouse(`https://${config.storefront.publicHost}/`, join(contextDir, "lighthouse"), references, stop));
   const review = "value" in pages && pages.value.outcome === "complete" ? pages.value : undefined;
   const breakages = (review?.issues ?? []).map((issue) => ({ ...issue, since: known ? known[issue.fingerprint]?.sha : "" }));
   const fresh = breakages.filter((breakage) => breakage.since === undefined);
   const storefrontVerdict: Verdict | undefined = !review ? undefined : fresh.length ? "breaking" : review.verdict === "breaking" ? "concerns" : review.verdict;
   const shots = (await readFile(join(shotsDir, "screenshots.jsonl"), "utf8").catch(() => "")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as Shot);
-  const replaced = storefrontVerdict === "clean" ? await replaceBaselines(shots, sha, state) : undefined;
-  if (review) await writeState(join(state, "alerts.json"), Object.fromEntries(breakages.map(({ fingerprint, title, since }) => [fingerprint, { title, sha: since || sha }])));
-  const measured = "value" in lighthouse ? await recordLighthouse(lighthouse.value, sha, state)
+  const replaced = storefrontVerdict === "clean" ? await replaceBaselines(shots, sha, state, changes) : undefined;
+  if (review) await writeState(join(state, "alerts.json"), { ...changes && known, ...Object.fromEntries(breakages.map(({ fingerprint, title, since }) => [fingerprint, { title, sha: since || sha }])) });
+  const measured = !lighthouse ? { slack: [] as string[], report: "" } : "value" in lighthouse ? await recordLighthouse(lighthouse.value, sha, state)
     : { slack: [`Lighthouse: not run (${lighthouse.error})`], report: `### Lighthouse\n\nNot run: ${lighthouse.error}` };
   const [headline = "", ...rest] = review?.text.trim().split("\n") ?? [], end = rest.findIndex((line) => !line.startsWith("• "));
   const failure = "error" in pages ? `failed (${pages.error})` : review ? undefined : `returned ${pages.value.outcome}`;
   const lines = [
-    ...title === undefined ? [] : [`*Storefront* on ${title}: ${failure ? `the visual review ${failure}` : headline}`],
+    ...title !== undefined ? [`*Storefront* on ${title}: ${failure ? `the visual review ${failure}` : headline}`] : changes ? [failure ? `The visual review ${failure}.` : headline] : [],
     ...end < 0 ? rest : rest.slice(0, end),
     ...breakages.map(({ title, fingerprint, since }) => since === undefined ? `• New breakage \`${fingerprint}\`: ${title}` : `• Still broken${since ? ` since ${shortSha(since)}` : ""} \`${fingerprint}\`: ${title}`),
   ], bullets = measured.slack.map((line) => `• ${line}`), table = "table" in measured && measured.table.rows.length ? measured.table : undefined;
@@ -128,12 +131,12 @@ async function finishStorefront(ctx: Ctx, { sha, state, known, pages, session, t
     ...intro,
     review?.text.trim() ?? `The visual review ${failure}.`,
     ...breakages.length ? [`### Confirmed breakage\n\n${breakages.map(({ title, fingerprint, body, since }) => `- **${title}** (\`${fingerprint}\`, ${reported(since)})\n\n${body.replace(/^/gm, "  ")}`).join("\n\n")}`] : [],
-    measured.report,
+    ...measured.report ? [measured.report] : [],
     [
       `### Screenshots\n\n${shots.length} screenshot(s) under \`${shown(contextDir)}\`${shots.length ? ":" : "."}`,
       ...shots.map(({ path, viewport, url }) => `- \`${url}\` at ${viewport ?? "the current viewport"}: \`${shown(path)}\``),
       "",
-      replaced !== undefined ? `The baselines under \`${shown(statePath(state, "baselines"))}\` are now this run's ${replaced} screenshot(s).`
+      replaced !== undefined ? `The baselines under \`${shown(statePath(state, "baselines"))}\` ${changes ? `now hold this run's screenshots of the pages it reviewed, ${replaced} in all` : `are now this run's ${replaced} screenshot(s)`}.`
         : `The baselines under \`${shown(statePath(state, "baselines"))}\` were kept, because ${review ? `the storefront verdict is ${storefrontVerdict ?? "missing"}` : "the visual review did not complete"}.`,
     ].join("\n"),
   ].join("\n\n");
@@ -169,10 +172,11 @@ export function auditStorefront(ctx: Ctx, sha: string, result: AgentResult): Pro
   const { operation, stop } = ctx, tick = parseTriggerInput(ctx.run.input);
   return serialized(locks, "storefront", async () => {
     try {
-      const known = await readState<Alerts>(join(auditState, "alerts.json"), {});
+      const state = stateOf(tick.source), changes = tick.source === "shopify", known = await readState<Alerts>(join(state, "alerts.json"), {});
       const { storefrontVerdict, storefrontReview } = await finishStorefront(ctx, {
-        sha, state: auditState, known, pages: { value: result }, shotsDir: contextDirOf(inferenceRunOf(ctx.run).id),
-        intro: [`## Store audit of ${tick.kind === "tick" ? tick.end : sha}`, `Lighthouse and the screenshots belong to \`${config.github.baseBranch}\` at ${sha}.`],
+        sha, state, known, changes, pages: { value: result }, shotsDir: contextDirOf(inferenceRunOf(ctx.run).id),
+        intro: changes ? [`## Store change review of ${tick.triggerKey}`, `The screenshots belong to \`${config.github.baseBranch}\` at ${sha}.`]
+          : [`## Store audit of ${tick.kind === "tick" ? tick.end : sha}`, `Lighthouse and the screenshots belong to \`${config.github.baseBranch}\` at ${sha}.`],
       });
       return { ...result, verdict: storefrontVerdict ?? result.verdict, storefrontReview };
     } catch (error) {

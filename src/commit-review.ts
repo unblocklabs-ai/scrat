@@ -90,7 +90,7 @@ export async function describeCommit({ subject, run, task, manifest, operation, 
 
 export async function postReply(subject: Subject, action: string, run: Evaluated, text?: string, blocks?: unknown[]) {
   const thread = subject.kind === "window"
-    ? savedRoot(subject) ?? await rootPost(subject, manifestOf(action).channel ?? "", escapeSlack(run.result.text.split("\n").find((line) => line.trim())!.trim()))
+    ? savedRoot(subject) ?? await rootPost(subject, manifestOf(action).channel ?? "", escapeSlack((subject.metadata && "summary" in subject.metadata && subject.metadata.summary) || run.result.text.split("\n").find((line) => line.trim())!.trim()))
     : await threadRoot(subject, action, commitInput(run.input));
   return postMessage({ channel: thread.channel, text: text ?? escapeSlack(run.result.text), blocks: text === undefined ? reviewBlocks(run.result.text) : blocks, threadTs: thread.ts });
 }

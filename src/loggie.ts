@@ -5,6 +5,7 @@ type Reply<T> = { data?: T; errors?: { message: string; extensions?: { code?: st
 export type LoggieTarget = { url: string; slug: string; timeoutSeconds: number };
 type Call = { path?: string; method?: "GET" | "POST"; body?: unknown; stop?: AbortSignal };
 
+export const clip = (text: string, bytes: number) => Buffer.byteLength(text) <= bytes ? text : Buffer.from(text).subarray(0, bytes).toString().replace(/�$/, "");
 export const failure = (message: string, code: string, status: number, data?: unknown) => Object.assign(new Error(message), { code, status, data });
 
 export function loggieCall<R, T>(operationName: string, context: Record<string, unknown>, request: string, { url, slug, timeoutSeconds }: LoggieTarget, { path = "", method = "POST", body, stop }: Call, accept: (reply: R, status: number) => T) {

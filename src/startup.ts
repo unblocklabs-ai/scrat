@@ -87,6 +87,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
     if (storefront.publicHost.trim() && !/^[\w.-]+(?::\d+)?$/.test(storefront.publicHost)) problems.push("storefront.publicHost must be a host name, without a scheme or path");
     if (!URL.canParse(storefront.loggie.url)) problems.push("storefront.loggie.url must be an absolute URL");
     try { new RegExp(storefront.preview.themePaths); } catch { problems.push("storefront.preview.themePaths is not a valid regular expression"); }
+    try { new RegExp(storefront.changes.ignoreMetaobjectTypes); } catch { problems.push("storefront.changes.ignoreMetaobjectTypes is not a valid regular expression"); }
     try { new RegExp(storefront.siteMapPaths); } catch { problems.push("storefront.siteMapPaths is not a valid regular expression"); }
     for (const device of storefront.devices) if (!Object.hasOwn(settings.tools?.browser.viewports ?? {}, device)) problems.push(`storefront.devices: ${device} is not a tools.browser.viewports preset`);
   }
@@ -121,7 +122,7 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
         const unknown = [...(entry.startMessage ?? "").matchAll(/\{\{(.*?)\}\}/g)].map((match) => match[1]).filter((name) => !templateVariables.has(name));
         if (unknown.length) problems.push(`${action}: unknown startMessage variable ${unknown.map((name) => `{{${name}}}`).join(", ")}`);
       }
-      if (manifest.files.includes("storefront") && manifest.trigger.source === "schedule" && !storefront?.enabled) problems.push(`${action}: files: storefront requires storefront.enabled`);
+      if (manifest.files.includes("storefront") && (manifest.trigger.source === "schedule" || manifest.trigger.source === "shopify") && !storefront?.enabled) problems.push(`${action}: files: storefront requires storefront.enabled`);
       if (slack && process.env.SLACK_BOT_TOKEN) await checkSlackAuth(`${action}: Slack`);
       if (manifest.browser || (storefront?.enabled && manifest.tools.includes("browser"))) await loadPlaywright().catch((error: unknown) => { problems.push(`${action}: ${errorMessage(error)}`); });
       if (storefront?.enabled && manifest.publish.includes("slack_reply")) {

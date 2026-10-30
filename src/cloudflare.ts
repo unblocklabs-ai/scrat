@@ -128,7 +128,7 @@ async function reconcile(round: Round, issue: Issue) {
       const found = await recurrence(issue.id, closedAt, known.lastObserved, known.versions);
       versions = found.versions; pending = found.fresh;
     }
-    if (pending === undefined) return save(known.number, { versions });
+    if (pending === undefined) return save(known.number, closed ? { versions } : {});
     recurred = `Recurred after #${known.number} was closed on ${payload.closed_at!.slice(0, 10)}; first seen again in Worker version ${pending ? `\`${pending}\`` : "unknown"}.`;
   }
   if (issue.count < minOccurrences) return;

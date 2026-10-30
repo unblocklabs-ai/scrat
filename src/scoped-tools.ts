@@ -167,7 +167,10 @@ const themeIdOf = (html: string) => {
   try { const id = end < 0 ? undefined : (JSON.parse(html.slice(start, end + 1)) as { id?: unknown }).id; return Number.isSafeInteger(id) ? (id as number) : undefined; } catch { return undefined; }
 };
 
-const describeElement = (tag: string) => `${/^<([\w-]+)/.exec(tag)?.[1] ?? "?"}${/\sid="([^"]*)"/.exec(tag)?.[1] ? `#${/\sid="([^"]*)"/.exec(tag)?.[1]}` : ""}${(/\sclass="([^"]*)"/.exec(tag)?.[1] ?? "").split(/\s+/).filter(Boolean).map((name) => `.${name}`).join("")}`;
+const describeElement = (tag: string) => {
+  const id = /\sid="([^"]*)"/.exec(tag)?.[1], classes = /\sclass="([^"]*)"/.exec(tag)?.[1] ?? "";
+  return `${/^<([\w-]+)/.exec(tag)?.[1] ?? "?"}${id ? `#${id}` : ""}${classes.split(/\s+/).filter(Boolean).map((name) => `.${name}`).join("")}`;
+};
 
 export function createBrowserTool({ settings, binding, contextDir, runId, prefix, launch = launchChromium, resolve = resolveHost, acquire, limits = { steps: config.tools.browser.steps, milliseconds: config.tools.browser.sessionSeconds * 1000 }, log }: {
   settings: { navigationHosts: Hosts; resourceHosts: Hosts };

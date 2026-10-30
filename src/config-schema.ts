@@ -33,7 +33,7 @@ const schema = Type.Object({
     redactionMarginBytes: positive,
   }, strict),
   storefront: Type.Object({
-    enabled: Type.Boolean(), store: Type.String(), publicHost: Type.String(), model: Type.Optional(modelSettings), siteMapMaxAgeDays: positive, auditPaths: Type.Array(Type.String({ pattern: "^/(?!/)" }), { uniqueItems: true }), screenshotRetentionDays: positive,
+    enabled: Type.Boolean(), store: Type.String(), publicHost: Type.String(), model: Type.Optional(modelSettings), siteMapMaxAgeDays: positive, siteMapRetryHours: positive, siteMapPaths: Type.String(), auditPaths: Type.Array(Type.String({ pattern: "^/(?!/)" }), { uniqueItems: true }), screenshotRetentionDays: positive,
     devices: Type.Array(Type.String(), { minItems: 1, uniqueItems: true }),
     limits: Type.Object({ browsers: positive, browserSteps: positive, browserSeconds: positive, confirmationRuns: Type.Integer({ minimum: 0 }), regressionMaxGrade: Type.Enum(prGrades) }, strict),
     loggie: Type.Object({ url: Type.String(), slug: Type.String(), timeoutSeconds: positive }, strict),

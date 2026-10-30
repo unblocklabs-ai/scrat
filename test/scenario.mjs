@@ -4282,12 +4282,12 @@ export const scenarios = {
     assert.equal(f.loggie.requests.length, from);
     for (const { field, variables } of f.loggie.requests) if (field === "themeFilesUpsert" || field === "themeFilesDelete") assert.equal(variables.themeId, preview.themeGid);
   } },
-  storefront_site_map: { title: "the service poll queues no discovery while the storefront is off and one per missing or stale site map while it is on; the read-only session gets the storefront browser with its own budget and the live URL, its response is stored with its date as data/storefront/site.md and handed to later storefront reviews and to the next discovery after siteMapMaxAgeDays or once the file is gone; an incomplete discovery stores nothing and is not queued again, one left queued when the storefront is turned off is refused, and a manifest listing browser alone gets the browser only in a review of a preview that matches the head", seed: seedTheme, configure: [configureStorefront], run: async () => {
+  storefront_site_map: { title: "the service poll queues no discovery while the storefront is off and one per missing or stale site map while it is on; the read-only session gets the storefront browser with its own budget and the live URL, its response is stored with its date as data/storefront/site.md and handed to later storefront reviews and to the next discovery after siteMapMaxAgeDays, once the file is gone, once the discovery skill changes or once a template is added on main (not when one is modified); an incomplete discovery stores nothing and is queued again only after siteMapRetryHours, one left queued when the storefront is turned off is refused, and a manifest listing browser alone gets the browser only in a review of a preview that matches the head", seed: seedTheme, configure: [configureStorefront], run: async () => {
     const { pollSiteMap } = await f.app("storefront-site.ts"), { pollSources } = await f.app("poll-sources.ts"), { config: live } = await f.app("config.ts");
     const day = 86_400_000, start = Date.parse("2026-10-25T00:00:00Z"), at = (iso, days = 0) => (Date.parse(iso) - start) / day + days, poll = (days) => pollSiteMap(undefined, new Date(start + days * day));
     const discoveries = () => all(s.tasks).filter((task) => task.action === "storefront_discover");
     const sessions = () => f.requests.filter((request) => request.context.action === "storefront_discover");
-    const site = resolve("data/storefront/site.md"), written = () => all(s.sourceCursors).find((row) => row.action === "storefront_discover" && row.branch === "site_map")?.sha;
+    const site = resolve("data/storefront/site.md"), written = () => all(s.sourceCursors).find((row) => row.action === "storefront_discover" && row.branch === "site_map")?.sha.split(" ")[0];
     const stored = (iso) => `Site map of https://shop.example.test/, written by Scrat on ${iso}.\n\n- \`/products/<handle>\`: product page with add to cart.\n`;
     const names = (request) => request.request.tools.map((tool) => tool.function.name), panel = JSON.stringify(["read", "grep", "find", "ls", "git", "read_base"]);
     const reviewed = async () => { const from = f.requests.length; await route(); await success(); return f.requests.slice(from).filter((request) => request.context.action === "review_pr"); };
@@ -4339,16 +4339,33 @@ export const scenarios = {
     const secondWritten = written();
     assert.ok(secondWritten > firstWritten); assert.equal(readFileSync(site, "utf8"), stored(secondWritten));
     assert.equal(await poll(at(secondWritten, 1)), 0);
+    const skill = resolve("app/skills/storefront_discover/SKILL.md"), { GitHubRepository } = await f.app("github.ts");
+    const pushMain = async (path, text) => { const sha = pushFile("main", path, text); await new GitHubRepository("fixture/project").fetchBranch("main"); return sha; };
+    writeFileSync(skill, readFileSync(skill, "utf8") + "\nName the close control of each blocking overlay.\n");
+    assert.equal(await poll(at(secondWritten, 1)), 1, "a changed discovery skill makes the map due");
+    assert.match(discoveries().at(-1).reason, /^the discovery skill changed after the site map written /);
+    await success();
+    await pushMain("templates/index.json", "{\"sections\":{\"hero\":{}}}\n");
+    assert.equal(await poll(at(written(), 1)), 0, "a template modified on main keeps the map");
+    const added = await pushMain("templates/page.faq.json", "{\"sections\":{}}\n");
+    assert.equal(await poll(at(written(), 1)), 1, "a template added on main makes the map due");
+    assert.match(discoveries().at(-1).reason, new RegExp(`^templates/page\\.faq\\.json was added on main between \\w{7} and ${added.slice(0, 7)}$`));
+    await success();
+    const mapWritten = written();
+    assert.equal(await poll(at(mapWritten, 1)), 0, "a map of the current main is kept");
     rmSync(site);
-    assert.equal(await poll(at(secondWritten, 1)), 1, "a stored map that is gone is rediscovered");
+    assert.equal(await poll(at(mapWritten, 1)), 1, "a stored map that is gone is rediscovered");
     f.reset(0, "incomplete");
     const incomplete = await run();
     assert.equal(incomplete.error.code, "AGENT_INCOMPLETE"); assert.equal(f.row(s.tasks, incomplete.taskId).status, "failed");
-    assert.equal(existsSync(site), false, "an incomplete discovery stores nothing"); assert.equal(written(), secondWritten);
-    assert.equal(await poll(at(secondWritten, 2)), 0, "a failed discovery is not queued again");
-    assert.equal(discoveries().length, 3);
+    assert.equal(existsSync(site), false, "an incomplete discovery stores nothing"); assert.equal(written(), mapWritten);
+    const retryAt = at(incomplete.finishedAt, live.storefront.siteMapRetryHours / 24);
+    assert.equal(await poll(retryAt - 1 / 1440), 0, "an incomplete discovery is not queued again before siteMapRetryHours");
+    assert.equal(await poll(retryAt + 1 / 1440), 1, "an incomplete discovery is queued again after siteMapRetryHours");
+    assert.equal(discoveries().length, 6); assert.equal(discoveries().at(-1).subjectId, f.row(s.tasks, incomplete.taskId).subjectId);
+    assert.match(discoveries().at(-1).reason, /is due; the last discovery was incomplete, retrying after \d+ h$/);
 
-    f.reset(0, "normal"); tasks.retryTask(incomplete.taskId); live.storefront.enabled = false;
+    f.reset(0, "normal"); live.storefront.enabled = false;
     const before = sessions().length, refused = await run();
     assert.match(refused.error.message, /storefront_discover runs only while storefront\.enabled is true/);
     assert.equal(sessions().length, before, "a discovery refused while the storefront is off reaches no agent"); assert.equal(existsSync(site), false);

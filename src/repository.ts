@@ -1,8 +1,8 @@
-import { and, eq, exists, inArray, isNotNull, isNull, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, exists, inArray, isNotNull, isNull, notExists, or, sql, type SQL } from "drizzle-orm";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { asItem } from "./items.ts";
-import { items, subjects, tasks, themePreviews, workspaces } from "./schema.ts";
+import { items, runs, subjects, tasks, themePreviews, workspaces } from "./schema.ts";
 
 export const remoteUrl = (repository: string) => `https://github.com/${repository}.git`;
 export const sameRepository = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -26,7 +26,8 @@ export function closedItemsWithCleanup(repository: string) {
   const pullRequest = eq(items.kind, "pr");
   return itemRows(and(inRepository(repository), eq(subjects.state, "closed"), or(
     exists(db.select({ id: tasks.id }).from(tasks).where(and(eq(tasks.subjectId, subjects.id), eq(tasks.status, "queued")))),
-    and(pullRequest, exists(db.select({ id: workspaces.id }).from(workspaces).where(and(eq(workspaces.id, subjects.workspaceId), isNull(workspaces.removedAt))))),
+    and(pullRequest, exists(db.select({ id: workspaces.id }).from(workspaces).where(and(eq(workspaces.id, subjects.workspaceId), isNull(workspaces.removedAt),
+      notExists(db.select({ id: runs.id }).from(runs).where(and(eq(runs.workspaceId, workspaces.id), isNull(runs.finishedAt)))))))),
     config.storefront.enabled ? and(pullRequest, exists(db.select({ id: themePreviews.id }).from(themePreviews)
       .where(and(eq(themePreviews.subjectId, subjects.id), or(isNull(themePreviews.deletedAt), isNotNull(themePreviews.deploymentId)))))) : undefined,
   )));

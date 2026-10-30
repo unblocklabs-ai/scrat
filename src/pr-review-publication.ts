@@ -23,8 +23,9 @@ function reviewBody(text: string, taskId: string) {
 function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeof runHistory>) {
   const issueComments = own.filter(isIssueComment);
   for (const { run, task } of reviews) {
+    let body: string | undefined;
     const existing = issueComments.findLast((comment) => comment.id === issueCommentId(run.publication.commentId)
-      || (run.result && comment.body === reviewBody(runText(run.id), task.id)));
+      || (run.result && comment.body === (body ??= reviewBody(runText(run.id), task.id))));
     if (existing) return existing;
   }
 }

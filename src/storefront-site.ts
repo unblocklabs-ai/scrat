@@ -25,8 +25,10 @@ const liveUrl = () => `https://${config.storefront.publicHost}/`;
 const skillHash = async (path: string) => createHash("sha256").update(await readFile(path)).digest("hex");
 
 async function structureChange(mapped: string | undefined) {
+  if (!mapped) return undefined;
   const path = getRepositoryPath(), branch = config.github.baseBranch, tip = await commitOf(path, `refs/remotes/origin/${branch}`);
-  if (!mapped || !tip || tip === mapped) return undefined;
+  if (!tip || tip === mapped) return undefined;
+  if (!await commitOf(path, mapped)) return `the commit ${mapped.slice(0, 7)} the site map was made from is not in the clone`;
   const pattern = new RegExp(config.storefront.siteMapPaths), changes = await gitList(path, ["diff", "--name-status", "--no-renames", "--diff-filter=AD", "-z", mapped, tip]);
   const index = changes.findIndex((entry, at) => at % 2 === 1 && pattern.test(entry));
   return index < 0 ? undefined : `${changes[index]} was ${changes[index - 1] === "A" ? "added" : "deleted"} on ${branch} between ${mapped.slice(0, 7)} and ${tip.slice(0, 7)}`;

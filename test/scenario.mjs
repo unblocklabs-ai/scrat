@@ -4299,6 +4299,7 @@ export const scenarios = {
     await pollSources();
     assert.equal(discoveries().length, 1); assert.equal(await poll(0), 0, "a queued discovery is not queued again");
     const [task] = discoveries();
+    assert.equal(await poll(at(task.createdAt, 2)), 0, "a queued discovery blocks another past siteMapRetryHours");
     assert.deepEqual(task.input, { source: "storefront", kind: "site_map", triggerKey: "none" });
     assert.deepEqual({ kind: f.row(s.subjects, task.subjectId).kind, key: f.row(s.subjects, task.subjectId).key, priority: task.priority }, { kind: "window", key: "storefront_discover:none", priority: 20 });
     const first = await success();

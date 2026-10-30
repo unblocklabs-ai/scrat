@@ -167,6 +167,8 @@ const themeIdOf = (html: string) => {
   try { const id = end < 0 ? undefined : (JSON.parse(html.slice(start, end + 1)) as { id?: unknown }).id; return Number.isSafeInteger(id) ? (id as number) : undefined; } catch { return undefined; }
 };
 
+const describeElement = (tag: string) => `${/^<([\w-]+)/.exec(tag)?.[1] ?? "?"}${/\sid="([^"]*)"/.exec(tag)?.[1] ? `#${/\sid="([^"]*)"/.exec(tag)?.[1]}` : ""}${(/\sclass="([^"]*)"/.exec(tag)?.[1] ?? "").split(/\s+/).filter(Boolean).map((name) => `.${name}`).join("")}`;
+
 export function createBrowserTool({ settings, binding, contextDir, runId, prefix, launch = launchChromium, resolve = resolveHost, acquire, limits = { steps: config.tools.browser.steps, milliseconds: config.tools.browser.sessionSeconds * 1000 }, log }: {
   settings: { navigationHosts: Hosts; resourceHosts: Hosts };
   binding?: Binding;
@@ -311,6 +313,10 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
             else if (action === "fill") await page.fill(selector, value ?? "", timeout);
             else await page.selectOption(selector, value ?? "", timeout);
             await page.waitForLoadState("load", navigation);
+          } catch (error) {
+            const blockers = error instanceof Error && /Timeout/.test(error.message) ? [...new Set([...error.message.matchAll(/^\s*- (<[^>]*>).*?(?: from (<[^>]*>).*? subtree)? intercepts pointer events/gm)].map(([, inner, root]) => describeElement(root ?? inner)))] : [];
+            if (blockers.length === 0) throw error;
+            throw new Error(redactSecrets(`${action} on ${selector} was blocked after ${config.tools.browser.actionSeconds} s: ${blockers.join(", ")} intercepted pointer events. If one is an overlay such as a popup or consent banner, close it (its close button, Escape or a click outside) and retry; otherwise scroll or use another element.`));
           } finally { page.off("popup", onPopup); }
           operation.complete();
           return text(JSON.stringify({ url: redactSecrets(page.url()), title: redactSecrets(await page.title()), ...await servedTheme(page, timeout), ...(page.url() === before && { matched }), ...(popups.length > 0 && { popupClosed: true }), ...(blockedNavigation !== undefined && { blocked: redactSecrets(blockedNavigation) }) }));

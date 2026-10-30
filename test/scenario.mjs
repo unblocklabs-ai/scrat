@@ -3647,6 +3647,7 @@ export const scenarios = {
         click: async (selector, { timeout }) => {
           state.timeouts.push(timeout);
           if (selector === "#boom") throw new Error("element detached");
+          if (selector === "#covered") throw new Error("page.click: Timeout 12000ms exceeded.\nCall log:\n  - waiting for locator('#covered')\n    - <div class=\"octane-popup--mask\"></div> from <div class=\"octane-wrapper big\" id=\"w1\">…</div> subtree intercepts pointer events\n  - retrying click action\n    - <iframe id=\"PBarNextFrame\" src=\"https://x/y\" sandbox=\"allow-scripts\"></iframe> intercepts pointer events\n    - <div class=\"octane-popup--mask\"></div> from <div class=\"octane-wrapper big\" id=\"w1\">…</div> subtree intercepts pointer events");
           if (selector === "#popup") for (const listener of state.listeners) listener({ close: async () => { state.popups.push("closed"); } });
           if (selector === "#checkout") await page.goto("https://shop.example.test/checkout");
           if (selector === "#escape") { const outcome = await page.request("https://evil.example.net/", true); if (outcome.aborted) return; }
@@ -3717,6 +3718,7 @@ export const scenarios = {
     assert.deepEqual(JSON.parse(textOf(await act(bound, { action: "click", selector: "#popup" }))), { url: "https://shop.example.test/checkout", title: "Shop", matched: 2, popupClosed: true });
     assert.deepEqual(bound.state.popups, ["closed"]); assert.equal(bound.state.listeners.length, 0);
     await assert.rejects(act(bound, { action: "click", selector: "#boom" }), /element detached/); assert.equal(bound.state.listeners.length, 0);
+    await assert.rejects(act(bound, { action: "click", selector: "#covered" }), (error) => error.message === "click on #covered was blocked after 12 s: div#w1.octane-wrapper.big, iframe#PBarNextFrame intercepted pointer events. If one is an overlay such as a popup or consent banner, close it (its close button, Escape or a click outside) and retry; otherwise scroll or use another element.");
     await assert.rejects(act(bound, { action: "screenshot", viewport: "constructor" }), /viewport must be one of: desktop, mobile/);
     assert.equal(bound.state.visited.at(-1), "https://shop.example.test/checkout");
     assert.deepEqual(JSON.parse(textOf(await act(bound, { action: "fill", selector: "#q", text: "socks" }))).matched, 2);

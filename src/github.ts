@@ -208,11 +208,11 @@ export class GitHubRepository {
     return { item, comments };
   }
 
-  async fetchItemContexts(items: readonly { kind: "issue" | "pr"; number: number; item?: GithubItem }[], options: { defer?: boolean } = {}) {
+  async fetchItemContexts(items: readonly { kind: "issue" | "pr"; number: number; item?: GithubItem }[]) {
     const contexts = new Array<GithubContext | undefined>(items.length);
     await mapConcurrent(items, async ({ kind, number, item }, index) => {
       contexts[index] = await this.fetchItemContext(kind, number, { item });
-    }, () => options.defer === true && rateLimitLow());
+    }, rateLimitLow);
     return contexts;
   }
 

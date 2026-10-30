@@ -1,7 +1,9 @@
+import { setTimeout } from "node:timers/promises";
 import { eq } from "drizzle-orm";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import type { JournalEvent } from "./events.ts";
+import { shortSha } from "./git.ts";
 import { bestEffort, logger } from "./logging.ts";
 import { items, slackThreads, subjects, type Subject } from "./schema.ts";
 import { escapeSlack, postMessage } from "./slack.ts";
@@ -21,7 +23,7 @@ function messageFor(event: JournalEvent, subject: Pick<Subject, "repository">): 
     case "github.issue_created": return `Created ${link(event.data.url, `issue #${event.data.issueNumber}`)}`;
     case "github.labels_added": return `Added labels: ${escapeSlack(event.data.labels.join(", "))}`;
     case "github.label_removed": return `Removed label: ${escapeSlack(event.data.label)}`;
-    case "workspace.pushed": return `Pushed ${link(`https://github.com/${subject.repository}/commit/${event.data.commitSha}`, event.data.commitSha.slice(0, 7))}`;
+    case "workspace.pushed": return `Pushed ${link(`https://github.com/${subject.repository}/commit/${event.data.commitSha}`, shortSha(event.data.commitSha))}`;
     default: return undefined;
   }
 }
@@ -31,7 +33,7 @@ let lastPostAt = 0;
 
 async function send(message: Parameters<typeof postMessage>[0]) {
   const wait = lastPostAt + config.slack.minimumGapMs - Date.now();
-  if (wait > 0) await new Promise((done) => setTimeout(done, wait));
+  if (wait > 0) await setTimeout(wait);
   try { return await postMessage(message); } finally { lastPostAt = Date.now(); }
 }
 

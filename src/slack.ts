@@ -1,3 +1,4 @@
+import { setTimeout } from "node:timers/promises";
 import { config } from "./config.ts";
 import { withOperation } from "./logging.ts";
 import { assertPublishable } from "./secrets.ts";
@@ -20,7 +21,7 @@ async function call(method: string, body: Record<string, unknown>): Promise<Reco
       if (attempt > 0 || !Number.isFinite(seconds) || seconds < 0 || seconds > config.slack.maxRetryAfterSeconds) {
         throw new Error(`Slack ${method} was rate limited (retry-after ${response.headers.get("retry-after")})`);
       }
-      await new Promise((done) => setTimeout(done, seconds * 1000));
+      await setTimeout(seconds * 1000);
       continue;
     }
     if (!response.ok) throw new Error(`Slack ${method} failed with HTTP ${response.status}`);

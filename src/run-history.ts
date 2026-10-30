@@ -34,10 +34,10 @@ export const runHistory = (subjectId: string, actions: string | readonly string[
     .where(and(eq(tasks.subjectId, subjectId), inArray(tasks.action, [actions].flat())))
     .orderBy(desc(runs.sequence)).all();
 
-export const completedRunsOfAction = (subjectId: string, actions: string | readonly string[], limit: number): Run[] =>
+export const latestCompletedRun = (subjectId: string, actions: string | readonly string[]): Run | undefined =>
   db.select({ run: runs }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
     .where(and(eq(tasks.subjectId, subjectId), inArray(tasks.action, [actions].flat()), completedOnly))
-    .orderBy(desc(runs.sequence)).limit(limit).all().map(({ run }) => run);
+    .orderBy(desc(runs.sequence)).limit(1).get()?.run;
 
 export const issueOfPullRequest = (repository: string, pullRequestNumber: number) =>
   db.select({ payload: items.payload }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))

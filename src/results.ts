@@ -77,9 +77,11 @@ export class SecretLeakError extends Error {
   readonly code = "SECRET_IN_OUTPUT";
 }
 
+export const agentIncompleteCode = "AGENT_INCOMPLETE";
+
 export function assertComplete(result: AgentResult) {
   if (result.outcome !== "complete") {
-    throw Object.assign(new Error(`Agent returned ${result.outcome}: ${result.text}`), { code: "AGENT_INCOMPLETE" });
+    throw Object.assign(new Error(`Agent returned ${result.outcome}: ${result.text}`), { code: agentIncompleteCode });
   }
 }
 

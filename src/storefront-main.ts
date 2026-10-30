@@ -7,7 +7,7 @@ import { commitInput, postReply } from "./commit-review.ts";
 import { config } from "./config.ts";
 import type { EffectContext } from "./effects.ts";
 import { errorMessage } from "./errors.ts";
-import { blobBytes } from "./git.ts";
+import { blobBytes, shortSha } from "./git.ts";
 import { recordLighthouse, runLighthouse } from "./lighthouse.ts";
 import { bestEffort, logger } from "./logging.ts";
 import { storefrontMarker } from "./markers.ts";
@@ -115,7 +115,7 @@ async function finishStorefront(ctx: Ctx, { sha, state, known, pages, session, t
   const lines = [
     ...title === undefined ? [] : [`*Storefront* on ${title}: ${failure ? `the visual review ${failure}` : headline}`],
     ...end < 0 ? rest : rest.slice(0, end),
-    ...breakages.map(({ title, fingerprint, since }) => since === undefined ? `• New breakage \`${fingerprint}\`: ${title}` : `• Still broken${since ? ` since ${since.slice(0, 7)}` : ""} \`${fingerprint}\`: ${title}`),
+    ...breakages.map(({ title, fingerprint, since }) => since === undefined ? `• New breakage \`${fingerprint}\`: ${title}` : `• Still broken${since ? ` since ${shortSha(since)}` : ""} \`${fingerprint}\`: ${title}`),
   ], bullets = measured.slack.map((line) => `• ${line}`), table = "table" in measured && measured.table.rows.length ? measured.table : undefined;
   const slack = [...lines, ...bullets].join("\n"), shownText = [...lines, ...("missing" in measured && table ? measured.missing.map((line) => `• ${line}`) : bullets)].join("\n");
   const blocks = [
@@ -141,7 +141,7 @@ async function finishStorefront(ctx: Ctx, { sha, state, known, pages, session, t
 }
 
 export function reviewStorefront(ctx: Ctx, change: Change, result: AgentResult): Promise<AgentResult> {
-  const { operation, stop } = ctx, { headSha: sha } = change, short = sha.slice(0, 7);
+  const { operation, stop } = ctx, { headSha: sha } = change, short = shortSha(sha);
   return serialized(locks, "storefront", async () => {
     let session: Storefront["session"];
     try {

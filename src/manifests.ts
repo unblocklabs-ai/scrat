@@ -49,7 +49,7 @@ const schema = Type.Object({
   trigger, mode: Type.Enum(["review", "change"]), agent: Type.Optional(Type.Enum(["single", "panel"])), reviewers: Type.Optional(Type.Array(modelSettings)),
   context: Type.Optional(Type.Enum(["all", "feedback", "change"])),
   tools: Type.Optional(list(Type.Enum(toolNames), 1)), http: Type.Optional(httpSettings), browser: Type.Optional(browserSettings), files: Type.Optional(list(Type.Enum(contextFileNames))),
-  acceptance: Type.Optional(Type.Enum(["complete", "nonempty_diff", "conflict_free"])),
+  acceptance: Type.Optional(Type.Enum(["complete", "nonempty_diff", "conflict_free"])), commitPrefix: Type.Optional(Type.String({ minLength: 1 })),
   start: Type.Optional(list(Type.Enum(startEffectNames))), publish: list(Type.Enum(effectNames), 1),
   ...settings, model: modelSettings, retry: Type.Optional(retrySettings),
 }, strict);
@@ -129,6 +129,7 @@ function crossChecks(m: Resolved) {
     need(!any(tools, ["git", "read_base"]), "mode change forbids the git and read_base tools");
   } else {
     need(m.acceptance === undefined, "mode review forbids acceptance");
+    need(m.commitPrefix === undefined, "mode review forbids commitPrefix");
     need(!any(publish, ["push", "pull_request"]), "mode review forbids the push and pull_request effects");
     need(!any(tools, ["bash", "edit", "write"]), "mode review forbids the bash, edit and write tools");
   }

@@ -7,6 +7,7 @@ import { withValidationSlot } from "./commands.ts";
 import { config } from "./config.ts";
 import { errorMessage } from "./errors.ts";
 import type { EventReferences } from "./events.ts";
+import { shortSha } from "./git.ts";
 import { launchChromium } from "./scoped-tools.ts";
 import { readState, writeState } from "./storefront.ts";
 
@@ -124,7 +125,7 @@ export async function recordLighthouse(results: Run[], sha: string, state: strin
     columns.push({ device, cells: [scored.length === all.length ? String(all.length) : `${scored.length} of ${all.length}`, ...ids.map(shown), ...metricIds.map(shownMetric)] });
   }
   if (Object.keys(current).length) await writeState(join(state, "lighthouse.json"), { ...previous, ...current });
-  const compared = devices.flatMap((device) => current[device] && previous[device] ? [`${device} with ${previous[device].sha.slice(0, 7)}`] : []);
+  const compared = devices.flatMap((device) => current[device] && previous[device] ? [`${device} with ${shortSha(previous[device].sha)}`] : []);
   const labels = ["Runs", ...ids.map((id) => categories[id]), ...metricIds.map((id) => metrics[id].label)];
   const tableHeader = ["Lighthouse", ...columns.map(({ device }) => capitalised(device))], tableRows = columns.length ? labels.map((label, index) => [label, ...columns.map(({ cells }) => cells[index]!)]) : [];
   const averages = columns.length ? [`| ${tableHeader.join(" | ")} |\n| ${tableHeader.map(() => "---").join(" | ")} |\n${tableRows.map((row) => `| ${row.join(" | ")} |`).join("\n")}`] : [];

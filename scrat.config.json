@@ -76,6 +76,7 @@
       "processingWaitSeconds": 300,
       "processingPollSeconds": 5,
       "filesPageSize": 250,
+      "filenamesPerRequest": 50,
       "uploadBatch": 50,
       "uploadBatchBytes": 8388608,
       "requestTimeoutSeconds": 180

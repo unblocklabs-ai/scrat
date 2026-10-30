@@ -527,7 +527,8 @@ The agent has no path to Loggie: no tool, no binding and no environment variable
 | `storefront.preview.themePaths` | Regular expression for the repository paths that are theme files; other changed paths are not synced. The default matches Shopify's theme directories at the repository root, including `templates/customers` and `templates/metaobject`. |
 | `storefront.preview.processingWaitSeconds` | Longest one review waits for a new duplicate to finish processing. |
 | `storefront.preview.processingPollSeconds` | Interval between processing checks. |
-| `storefront.preview.filesPageSize` | Files per request when reading the duplicate's checksums, at most 250 (Shopify's page limit). |
+| `storefront.preview.filesPageSize` | Files per request when listing the whole duplicate theme, at most 250 (Shopify's page limit). |
+| `storefront.preview.filenamesPerRequest` | Files per request when reading files by name, at most 50 (Shopify's `filenames` limit). |
 | `storefront.preview.uploadBatch` | Files per `themeFilesUpsert` or `themeFilesDelete` call, at most 50 (Shopify's limit). |
 | `storefront.preview.uploadBatchBytes` | Encoded bytes per `themeFilesUpsert` call; a file larger than this goes in a batch of its own. Keeps committed build output such as source maps from making one request too large. |
 | `storefront.preview.requestTimeoutSeconds` | Timeout of one upload batch, which may carry several multi-megabyte assets, and of downloading a live file's URL body; other Loggie requests use `storefront.loggie.timeoutSeconds`. |

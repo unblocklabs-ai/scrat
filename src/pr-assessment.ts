@@ -3,8 +3,7 @@ import { branchConflictCode } from "./errors.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import type { ItemObservation } from "./observation.ts";
 import { hasPublicationSnapshot } from "./results.ts";
-import { runHistory } from "./run-history.ts";
-import type { Run } from "./schema.ts";
+import { runHistory, runText } from "./run-history.ts";
 
 type History = ReturnType<typeof runHistory>;
 
@@ -12,7 +11,7 @@ export const prReviewHistory = (subjectId: string) => runHistory(subjectId, acti
 
 function selectAssessment(history: History) {
   const byId = new Map(history.map((entry) => [entry.run.id, entry]));
-  let selected: (History[number] & { result: NonNullable<Run["result"]>; originSequence: number; originId: string }) | undefined;
+  let selected: (History[number] & { result: NonNullable<History[number]["run"]["result"]>; originSequence: number; originId: string }) | undefined;
   for (const entry of history) {
     const { run } = entry;
     if (!hasPublicationSnapshot(run) || run.result.outcome !== "complete" || run.publication.status === "not_needed") continue;
@@ -38,9 +37,9 @@ function selectAssessment(history: History) {
 export function priorReviewTexts(subjectId: string) {
   const assessment = selectAssessment(prReviewHistory(subjectId));
   if (!assessment) return undefined;
-  const repair = runHistory(subjectId, manifests.filter((manifest) => manifest.trigger.kind === "low_grade").map((manifest) => manifest.name))
-    .find(({ run }) => run.result?.outcome === "complete" && run.sequence > assessment.run.sequence)?.run.result?.text;
-  return { assessment: assessment.result.text, repair };
+  const repairRun = runHistory(subjectId, manifests.filter((manifest) => manifest.trigger.kind === "low_grade").map((manifest) => manifest.name))
+    .find(({ run }) => run.result?.outcome === "complete" && run.sequence > assessment.run.sequence)?.run;
+  return { assessment: runText(assessment.run.id), repair: repairRun && runText(repairRun.id) };
 }
 
 type Assessment = NonNullable<ReturnType<typeof selectAssessment>>;

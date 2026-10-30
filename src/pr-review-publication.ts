@@ -9,8 +9,8 @@ import { gradeLabels, reconcileLabels } from "./labels.ts";
 import { acknowledgedTaskIds, isIssueComment, issueCommentId, parseIssueCommentId, reviewMarker, taskMarker, withMarker } from "./markers.ts";
 import { logger } from "./logging.ts";
 import { observe, type ItemObservation } from "./observation.ts";
-import { prReviewHistory, resolvePrReview } from "./pr-assessment.ts";
-import { runHistory, updateRun } from "./run-history.ts";
+import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
+import { runHistory, runText, updateRun } from "./run-history.ts";
 import type { Run, Task } from "./schema.ts";
 import { serialized } from "./single-flight.ts";
 
@@ -24,18 +24,20 @@ function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeo
   const issueComments = own.filter(isIssueComment);
   for (const { run, task } of reviews) {
     const existing = issueComments.findLast((comment) => comment.id === issueCommentId(run.publication.commentId)
-      || (run.result && comment.body === reviewBody(run.result.text, task.id)));
+      || (run.result && comment.body === reviewBody(runText(run.id), task.id)));
     if (existing) return existing;
   }
 }
 
-async function reconcile(github: GitHubRepository, subjectId: string, number: number, references: EventReferences, publication?: { task: Task; run: Run }, observed?: GithubContext) {
+export type ResolvedReview = { reviews: ReturnType<typeof runHistory>; state: PrReviewState; mainSha: string };
+
+async function reconcile(github: GitHubRepository, subjectId: string, number: number, references: EventReferences, publication?: { task: Task; run: Run }, observed?: GithubContext, known?: ResolvedReview) {
   const current = observed ?? await github.fetchItemContext("pr", number);
-  const reviews = prReviewHistory(subjectId);
+  const reviews = known?.reviews ?? prReviewHistory(subjectId);
   const observation = observe(current);
   const existing = canonicalComment(observation.own, reviews);
   const mainSha = await git(getRepositoryPath(), ["rev-parse", `refs/remotes/origin/${observation.baseBranch}`]);
-  const state = await resolvePrReview(reviews, observation, mainSha);
+  const state = known?.mainSha === mainSha ? known.state : await resolvePrReview(reviews, observation, mainSha);
   const desired = state.kind === "current" ? state.assessment : undefined;
   const shown = desired ?? (state.kind === "blocked" ? state.attempt : undefined);
   const deliveryReferences = shown ? { ...references, subjectId, taskId: shown.task.id, runId: shown.run.id } : references;
@@ -49,7 +51,7 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
 
   let commentId: number | undefined;
   if (shown) {
-    const text = desired ? desired.result.text : `This PR is behind ${observation.baseBranch} and does not merge cleanly; update the branch and ${botName} will review it.`;
+    const text = desired ? runText(desired.run.id) : `This PR is behind ${observation.baseBranch} and does not merge cleanly; update the branch and ${botName} will review it.`;
     const body = reviewBody(text, shown.task.id);
     const { run } = shown;
     const unchanged = existing && acknowledgedTaskIds(existing.body).some((id) => existing.body === reviewBody(text, id));
@@ -71,5 +73,5 @@ export const serializePr = <T>(github: GitHubRepository, number: number, work: (
 export const reconcilePrReview = (github: GitHubRepository, subjectId: string, number: number, references: EventReferences = {}, publication?: { task: Task; run: Run }) =>
   serializePr(github, number, () => reconcile(github, subjectId, number, references, publication));
 
-export const reconcileObserved = (github: GitHubRepository, subjectId: string, number: number, references: EventReferences, current: GithubContext) =>
-  reconcile(github, subjectId, number, references, undefined, current);
+export const reconcileObserved = (github: GitHubRepository, subjectId: string, number: number, references: EventReferences, current: GithubContext, known?: ResolvedReview) =>
+  reconcile(github, subjectId, number, references, undefined, current, known);

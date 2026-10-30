@@ -1,7 +1,7 @@
 name: implement
 trigger: { source: github_items, kind: label, item: issue }
 mode: change
-files: [discussion, triage]
+files: [discussion, triage, cloudflare]
 acceptance: nonempty_diff
 publish: [push, pull_request]
 skill: skills/implement/SKILL.md

@@ -5,6 +5,8 @@ export type GithubIssue = {
   body?: string | null;
   html_url: string;
   state: string;
+  state_reason?: string | null;
+  closed_at?: string | null;
   updated_at: string;
   user?: { login: string } | null;
   labels: (string | { name?: string })[];

@@ -69,7 +69,30 @@ export async function fixture(scenario, spec) {
       for (const [filename, content] of Object.entries(entries)) Buffer.isBuffer(content) ? store(main, filename, "URL", content.toString("base64")) : store(main, filename, "TEXT", content);
     } };
   loggie.setLive(Object.fromEntries(["layout/theme.liquid", "assets/app.css", "config/settings_data.json"].map((name) => [name, name])));
-  if (scenario.startsWith("storefront")) process.env.LOGGIE_API_KEY = loggie.key;
+  if (scenario.startsWith("storefront") || scenario === "cloudflare_issues") process.env.LOGGIE_API_KEY = loggie.key;
+  const cloudflare = { slug: "cf-fixture", accountId: "acct123", requests: [], issues: [], occurrences: new Map(), events: new Map() };
+  const cloudflareApi = (req, res, body) => {
+    const send = (data, status = 200) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
+    const url = new URL(req.url, "http://fixture"), key = req.headers["x-api-key"], prefix = `/api/proxy/${cloudflare.slug}/accounts/${cloudflare.accountId}/workers/observability/`;
+    cloudflare.requests.push({ method: req.method, path: url.pathname + url.search, key, body: body ? JSON.parse(body) : undefined });
+    if (key !== loggie.key) return send({ error: { code: "UNAUTHORIZED", message: "Invalid API key" } }, 401);
+    if (!url.pathname.startsWith(prefix)) return send({ error: { code: "NOT_FOUND", message: "Unknown integration" } }, 404);
+    const path = url.pathname.slice(prefix.length), ok = (result, result_info) => send({ success: true, errors: [], result, result_info });
+    if (path === "issues") {
+      const active = cloudflare.issues.filter((issue) => issue.status === url.searchParams.get("status") && issue.service === url.searchParams.get("service"));
+      const size = Number(url.searchParams.get("perPage") ?? 20), page = Number(url.searchParams.get("page") ?? 1);
+      return ok(active.slice((page - 1) * size, page * size), { page, per_page: size, count: active.length, total_count: active.length, total_pages: Math.max(1, Math.ceil(active.length / size)) });
+    }
+    let match = path.match(/^issues\/([^/]+)$/);
+    if (match) return ok({ issue: cloudflare.issues.find((issue) => issue.id === match[1]) });
+    match = path.match(/^issues\/([^/]+)\/occurrences$/);
+    if (match) return ok((cloudflare.occurrences.get(match[1]) ?? []).slice(0, Number(url.searchParams.get("perPage") ?? 20)), { cursors: { after: null } });
+    if (path === "telemetry/query") {
+      const traceId = JSON.parse(body).parameters.filters[0].value;
+      return ok({ events: { events: (cloudflare.events.get(traceId) ?? []).map(({ timestamp, level, message }) => ({ timestamp, $metadata: { level, message, traceId } })) } });
+    }
+    return send({ error: { code: "NOT_FOUND", message: path } }, 404);
+  };
   const shopify = (req, res, body) => {
     const send = (data, status = 200) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
     const { query, variables = {} } = JSON.parse(body), field = query.match(/\{\s*(\w+)/)?.[1], key = req.headers["x-api-key"];
@@ -117,6 +140,7 @@ export async function fixture(scenario, spec) {
   };
   const server = createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
+    if (req.url.startsWith(`/api/proxy/${cloudflare.slug}/`)) return cloudflareApi(req, res, body);
     if (req.url.startsWith("/api/proxy/")) return shopify(req, res, body);
     if (req.url.startsWith("/cdn/")) {
       const [, , number, ...path] = req.url.split("/"), file = loggie.themes.get(`gid://shopify/OnlineStoreTheme/${number}`)?.bodies.get(path.join("/"));
@@ -269,6 +293,8 @@ export async function fixture(scenario, spec) {
   ] } };
   config.storefront.model = { ...config.storefront.model, provider: "fixture" };
   config.storefront.loggie = { ...config.storefront.loggie, url: `http://127.0.0.1:${server.address().port}`, slug: loggie.slug };
+  config.cloudflare.loggie = { ...config.cloudflare.loggie, url: `http://127.0.0.1:${server.address().port}`, slug: cloudflare.slug };
+  config.cloudflare.accountId = cloudflare.accountId;
   config.actions = Object.fromEntries(readdirSync("app/actions").map((file) => parseYaml(readFileSync("app/actions/" + file, "utf8")))
     .map(({ name, reviewers = [] }) => [name, { provider: "fixture", ...reviewers.length && { reviewers: reviewers.map((reviewer) => ({ ...reviewer, provider: "fixture" })) } }]));
   for (const configure of spec.configure ?? []) configure(config);
@@ -344,7 +370,7 @@ export async function fixture(scenario, spec) {
     if (path.endsWith("/issues") && method === "POST") {
       if (!can("issues")) return reply({ message: "Resource not accessible by integration" }, 403);
       const number = ++nextIssueNumber;
-      const created = githubItem("issue", number, { title: body.title, body: body.body, updated_at: "2026-10-19T02:00:00Z", user: { login: config.github.botLogin } });
+      const created = githubItem("issue", number, { title: body.title, body: body.body, labels: (body.labels ?? []).map((name) => ({ name })), updated_at: "2026-10-19T02:00:00Z", user: { login: config.github.botLogin } });
       issues.set(number, created); writes.push({ type: "issue", number, title: body.title });
       return lostResponse(faults.issue, body.title, "Lost issue response", created);
     }
@@ -445,7 +471,7 @@ export async function fixture(scenario, spec) {
   const addPr = (number, branch, login, extra = {}) => { prs.push(githubItem("pr", number, { title: "PR " + number, body: "", user: { login }, head: { ref: branch, sha: git(resolve("remote.git"), "rev-parse", branch), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } }, ...extra })); };
   const botComments = (number) => (comments.get(number) ?? []).filter((c) => c.user.login !== "human");
   const written = (type, predicate = () => true) => writes.filter((write) => write.type === type && predicate(write));
-  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, loggie, pat, user, githubApp, modes, verdicts, requests, calls, slack, rate, issues, prs, comments, reviews, writes, deployments, checkRuns, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
+  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, loggie, cloudflare, pat, user, githubApp, modes, verdicts, requests, calls, slack, rate, issues, prs, comments, reviews, writes, deployments, checkRuns, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
     set onModel(value) { onModel = value; },
     set script(value) { script = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },

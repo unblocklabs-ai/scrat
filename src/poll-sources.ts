@@ -14,4 +14,8 @@ export async function pollSources() {
     await attempt(async () => { if (await site.pollSiteMap()) signalWork(); });
     await attempt(() => site.pruneScreenshots());
   }
+  if (config.cloudflare.enabled) {
+    const cloudflare = await import("./cloudflare.ts");
+    await attempt(() => cloudflare.pollCloudflareIssues());
+  }
 }

@@ -86,6 +86,14 @@
     },
     "lighthouse": { "runs": 2, "pages": ["/"], "timeoutSeconds": 600 }
   },
+  "cloudflare": {
+    "enabled": false,
+    "accountId": "",
+    "loggie": { "url": "https://app.loggie.ai", "slug": "", "timeoutSeconds": 30 },
+    "services": [],
+    "issues": { "types": ["exception"], "minOccurrences": 5, "maxOpen": 10, "label": "cloudflare", "pageSize": 50, "stackFrames": 10, "bodyBytes": 16384 },
+    "context": { "occurrences": 5, "logEvents": 50, "maxBytes": 65536, "logWindowSeconds": 600 }
+  },
   "slack": {
     "enabled": false,
     "channel": "",

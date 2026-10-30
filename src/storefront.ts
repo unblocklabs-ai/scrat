@@ -15,7 +15,7 @@ import type { GithubComment, GithubItem } from "./github-types.ts";
 import { bestEffort, logger } from "./logging.ts";
 import { endsWithMarker, isIssueComment, previewMarker, withMarker } from "./markers.ts";
 import { themePreviews, type ThemePreview } from "./schema.ts";
-import { loggie } from "./storefront-loggie.ts";
+import { loggie } from "./loggie.ts";
 
 type UserErrors = { userErrors: { field?: string[] | null; message: string }[] };
 type Theme = { id: string; name: string };

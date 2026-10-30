@@ -90,6 +90,15 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
     try { new RegExp(storefront.siteMapPaths); } catch { problems.push("storefront.siteMapPaths is not a valid regular expression"); }
     for (const device of storefront.devices) if (!Object.hasOwn(settings.tools?.browser.viewports ?? {}, device)) problems.push(`storefront.devices: ${device} is not a tools.browser.viewports preset`);
   }
+  const cloudflare = settings.cloudflare;
+  if (cloudflare?.enabled) {
+    if (!process.env.LOGGIE_API_KEY) problems.push("cloudflare.enabled is true but LOGGIE_API_KEY is not set");
+    for (const [key, value] of Object.entries({ "cloudflare.accountId": cloudflare.accountId, "cloudflare.loggie.slug": cloudflare.loggie.slug })) {
+      if (!value.trim()) problems.push(`${key} must not be empty when cloudflare.enabled is true`);
+    }
+    if (!cloudflare.services.length) problems.push("cloudflare.services must not be empty when cloudflare.enabled is true");
+    if (!URL.canParse(cloudflare.loggie.url)) problems.push("cloudflare.loggie.url must be an absolute URL");
+  }
   for (const [name, { apiKey }] of Object.entries(settings.providers ?? {})) {
     if (apiKey && !/\$\{\w+\}/.test(apiKey)) logger.warn({ provider: name }, "Provider apiKey is not a ${VAR} placeholder; it will not be redacted from output");
   }

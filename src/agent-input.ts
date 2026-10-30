@@ -99,6 +99,7 @@ export async function buildAgentInput(options: {
   const found = listed.includes("validation") ? verificationOfCommit(headSha) : undefined, verification = found?.commands.length ? found : undefined;
   const site = listed.includes("storefront") && config.storefront.enabled && !options.baseOnly ? await import("./storefront-site.ts") : undefined;
   const storefront = await site?.storefrontContext(task.subjectId, headSha, trigger.source);
+  const cloudflare = listed.includes("cloudflare") && config.cloudflare.enabled ? await (await import("./cloudflare.ts")).cloudflareContext(config.github.repository, evaluated.item.number) : undefined;
   const reviewedSha = evaluated.headSha;
   const checks = listed.includes("validation") && reviewedSha
     ? (await bestEffort(logger, "github.check_runs_failed", { sha: reviewedSha }, () => new GitHubRepository(config.github.repository).checkRunConclusions(reviewedSha))) ?? []
@@ -116,6 +117,7 @@ export async function buildAgentInput(options: {
     triage?.ready && writeContext("triage", "triage.md", triage.text),
     issue && writeContext("issue", "issue.md", `# ${issue.title} (#${issue.number})\n\n${issue.body ?? ""}\n`),
     history && writeContext("history", "history.md", history),
+    cloudflare && writeContext("cloudflare", "cloudflare.md", cloudflare),
     storefront && writeContext("storefront", "storefront.json", JSON.stringify(storefront.context, null, 2)),
     storefront?.siteMap && writeContext("siteMap", "site.md", storefront.siteMap),
     storefront && trigger.source === "schedule" && site?.stageBaselines(contextDir, writeContext, site.auditState),

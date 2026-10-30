@@ -1,7 +1,7 @@
 name: review_issue
 trigger: { source: github_items, kind: item_changed, item: issue }
 mode: review
-files: [discussion, previous_assessment]
+files: [discussion, previous_assessment, cloudflare]
 publish: [comment, labels]
 skill: skills/review_issue/SKILL.md
 model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }

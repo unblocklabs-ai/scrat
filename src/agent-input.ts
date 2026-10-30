@@ -77,7 +77,7 @@ export async function buildAgentInput(options: {
   const { run, task, evaluated, diffBaseSha, diffPaths, mainSha, headSha } = options;
   const { action } = task;
   const trigger = parseTriggerInput(run.input);
-  if (trigger.source === "storefront" && !config.storefront.enabled) throw new Error(`${action} runs only while storefront.enabled is true`);
+  if ((trigger.source === "storefront" || trigger.source === "shopify") && !config.storefront.enabled) throw new Error(`${action} runs only while storefront.enabled is true`);
   const input = { ...run.input };
   delete input.manual;
   delete input.source;
@@ -120,7 +120,8 @@ export async function buildAgentInput(options: {
     cloudflare && writeContext("cloudflare", "cloudflare.md", cloudflare),
     storefront && writeContext("storefront", "storefront.json", JSON.stringify(storefront.context, null, 2)),
     storefront?.siteMap && writeContext("siteMap", "site.md", storefront.siteMap),
-    storefront && trigger.source === "schedule" && site?.stageBaselines(contextDir, writeContext, site.auditState),
+    storefront && (trigger.source === "schedule" || trigger.source === "shopify") && site?.stageBaselines(contextDir, writeContext, site.stateOf(trigger.source)),
+    trigger.kind === "store_change" && listed.includes("store_changes") && (await import("./store-changes.ts")).batchText(trigger.triggerKey).then((text) => writeContext("storeChanges", "store-changes.json", text)),
     failure && writeContext("previousFailure", "previous-failure.json", JSON.stringify(failure, null, 2)),
     options.validationFailure && writeContext("validationFailure", "validation-failure.json", JSON.stringify(options.validationFailure, null, 2)),
   ]);

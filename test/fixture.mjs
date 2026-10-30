@@ -52,7 +52,7 @@ export async function fixture(scenario, spec) {
   if (patMode || scenario === "isolation") process.env.GITHUB_PAT = pat;
   const scoped = ["scoped_http", "scoped_github_search", "scoped_browser", "bindings_startup"].includes(scenario);
   if (scoped) process.env.SCOUT_TOKEN = "scout-" + "k9Xq2LmPz7".repeat(3);
-  if (scenario.startsWith("commit_review") || scenario === "store_audit" || scenario === "recovery" || scenario === "isolation" || scenario.startsWith("slack_status") || scenario === "publish_effects") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
+  if (scenario.startsWith("commit_review") || scenario === "store_audit" || scenario === "store_changes" || scenario === "recovery" || scenario === "isolation" || scenario.startsWith("slack_status") || scenario === "publish_effects") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
   const verdicts = {}, modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), checkRuns = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [], deployments = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set(), permissions: new Set(), commitComment: new Set() };
@@ -62,7 +62,7 @@ export async function fixture(scenario, spec) {
   const external = [], searches = [], commitComments = new Map();
   const md5 = (text) => createHash("md5").update(text).digest("hex"), mainTheme = "gid://shopify/OnlineStoreTheme/1";
   const store = (theme, filename, type, value, checksum) => { theme.files.set(filename, checksum ?? md5(Buffer.from(value, type === "TEXT" ? "utf8" : "base64"))); theme.bodies.set(filename, { type, value }); };
-  const loggie = { key: "loggie-" + "Z8wQ4nR2tY".repeat(3), slug: "shop-fixture", requests: [], restricted: new Set(), lostDuplicate: false, wrongMd5: new Set(), upsertErrors: new Set(), stuckDeletes: new Set(), processingPolls: 1, nextId: 9000, mainTheme, md5,
+  const loggie = { key: "loggie-" + "Z8wQ4nR2tY".repeat(3), slug: "shop-fixture", requests: [], restricted: new Set(), admin: { denied: new Set(), roots: { products: [], collections: [], pages: [], menus: [], shop: [], events: [], metaobjectDefinitions: [], metaobjects: [] } }, lostDuplicate: false, wrongMd5: new Set(), upsertErrors: new Set(), stuckDeletes: new Set(), processingPolls: 1, nextId: 9000, mainTheme, md5,
     themes: new Map([[mainTheme, { id: mainTheme, name: "live", role: "MAIN", polls: 0, files: new Map(), bodies: new Map() }]]),
     setLive: (entries) => {
       const main = loggie.themes.get(mainTheme); main.files.clear(); main.bodies.clear();
@@ -99,6 +99,11 @@ export async function fixture(scenario, spec) {
     loggie.requests.push({ field, variables, key, path: req.url });
     if (key !== loggie.key) return send({ error: { code: "UNAUTHORIZED", message: "Invalid API key" } }, 401);
     if (req.url !== `/api/proxy/${loggie.slug}/`) return send({ error: { code: "NOT_FOUND", message: "Unknown integration" } }, 404);
+    if (Object.hasOwn(loggie.admin.roots, field)) {
+      if (loggie.admin.denied.has(field)) return send({ errors: [{ message: `Access denied for ${field}`, extensions: { code: "ACCESS_DENIED" } }] });
+      const connection = { nodes: loggie.admin.roots[field].filter((node) => !variables.type || node.type === variables.type), pageInfo: { hasNextPage: false, endCursor: null } };
+      return send({ data: field === "shop" ? { shop: { metafields: connection } } : { [field]: connection } });
+    }
     if (!["themes", "theme", "themeDuplicate", "themeFilesUpsert", "themeFilesDelete", "themeDelete"].includes(field) || loggie.restricted.has(field)) {
       return send({ error: { code: "ENDPOINT_RESTRICTED", message: `${field} is not allowed by this profile` } }, 403);
     }

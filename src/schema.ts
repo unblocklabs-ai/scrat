@@ -12,7 +12,7 @@ export const subjects = sqliteTable("subjects", {
   key: text("key").notNull(),
   state: text("state", { enum: ["open", "closed"] }).notNull().default("open"),
   workspaceId: text("workspace_id").references(() => workspaces.id),
-  metadata: text("metadata", { mode: "json" }).$type<{ title: string; author: string; url: string; pr?: number; shopify?: boolean; paths?: string[] } | { start: string; end: string }>(),
+  metadata: text("metadata", { mode: "json" }).$type<{ title: string; author: string; url: string; pr?: number; shopify?: boolean; paths?: string[] } | { start: string; end: string; summary?: string }>(),
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
 }, (table) => [unique().on(table.repository, table.kind, table.key)]);
 

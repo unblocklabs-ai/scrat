@@ -6,7 +6,7 @@ import { GitHubRepository } from "./github.ts";
 import type { GithubIssue } from "./github-types.ts";
 import { botName } from "./identity.ts";
 import { upsertItem } from "./items.ts";
-import { failure, loggieCall } from "./loggie.ts";
+import { clip, failure, loggieCall } from "./loggie.ts";
 import { bestEffort, logger, withOperation } from "./logging.ts";
 import { endsWithMarker, fingerprintMarker } from "./markers.ts";
 import { assertConfiguredRepository, findItem, openItems } from "./repository.ts";
@@ -28,7 +28,6 @@ type Round = { github: GitHubRepository; repository: string; log: typeof logger;
 const scope = "cloudflare_issues", titleLimit = 256;
 const iso = (ms: number) => new Date(ms).toISOString();
 const fingerprintOf = (id: string) => `cloudflare:${id}`;
-const clip = (text: string, bytes: number) => Buffer.byteLength(text) <= bytes ? text : Buffer.from(text).subarray(0, bytes).toString().replace(/�$/, "");
 const fence = (text: string) => {
   const ticks = "`".repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map((run) => run[0].length + 1)));
   return `${ticks}text\n${text}\n${ticks}`;

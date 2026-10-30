@@ -42,6 +42,12 @@ const schema = Type.Object({
       filesPageSize: Type.Integer({ minimum: 1, maximum: 250 }), filenamesPerRequest: Type.Integer({ minimum: 1, maximum: 50 }), uploadBatch: Type.Integer({ minimum: 1, maximum: 50 }), uploadBatchBytes: positive, requestTimeoutSeconds: positive,
     }, strict),
     lighthouse: Type.Object({ runs: positive, pages: Type.Array(Type.String({ pattern: "^/(?!/)" }), { minItems: 1, uniqueItems: true }), timeoutSeconds: positive }, strict),
+    changes: Type.Object({
+      pollMinutes: positive, quietMinutes: Type.Integer({ minimum: 0 }), valueBytes: positive, batchRetentionDays: positive, maxPages: positive, summaryEvents: Type.Integer({ minimum: 0 }),
+      pageSizes: Type.Object({ products: positive, collections: positive, pages: positive, menus: positive, metafields: positive, shopMetafields: positive, metaobjectDefinitions: positive, metaobjects: positive, events: positive }, strict),
+      extraMetafields: Type.Array(Type.String({ pattern: "^[\\w-]+\\.[\\w-]+$" }), { uniqueItems: true }), ignoreMetafields: Type.Array(Type.String({ pattern: "^[\\w-]+\\.[\\w-]+$" }), { uniqueItems: true }),
+      ignoreMetaobjectTypes: Type.String(),
+    }, strict),
   }, strict),
   cloudflare: Type.Object({
     enabled: Type.Boolean(), accountId: Type.String(), services: Type.Array(Type.String(), { uniqueItems: true }),

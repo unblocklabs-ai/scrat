@@ -13,6 +13,8 @@ export async function pollSources() {
     const site = await import("./storefront-site.ts");
     await attempt(async () => { if (await site.pollSiteMap()) signalWork(); });
     await attempt(() => site.pruneScreenshots());
+    const changes = await import("./store-changes.ts");
+    await attempt(async () => { if (await changes.pollStoreChanges()) signalWork(); });
   }
   if (config.cloudflare.enabled) {
     const cloudflare = await import("./cloudflare.ts");

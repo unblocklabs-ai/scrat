@@ -4,7 +4,7 @@ import { db } from "./db.ts";
 import { GitHubRepository, mapConcurrent } from "./github.ts";
 import { routeGithubTasks } from "./github-tasks.ts";
 import { upsertItem } from "./items.ts";
-import { itemsInRepository } from "./repository.ts";
+import { closedItemsWithCleanup, openItems, openOrListedItems } from "./repository.ts";
 import { withOperation } from "./logging.ts";
 import type { GithubContext } from "./github-types.ts";
 
@@ -13,9 +13,10 @@ export async function syncGitHub(repository = config.github.repository, queueTas
     operation.stage("repository");
     const github = new GitHubRepository(repository);
     operation.stage("fetch");
-    const previousItems = itemsInRepository(repository);
-    const previous = new Map(previousItems.map((item) => [item.externalId, item]));
     const { issues, pullRequests } = await github.fetchOpenItems();
+    const known = openOrListedItems(repository, [...issues, ...pullRequests].map((payload) => payload.node_id));
+    const previous = new Map(known.map((item) => [item.externalId, item]));
+    const previousItems = known.filter((item) => item.state === "open");
     operation.stage("persistence");
     db.transaction((transaction) => {
       for (const payload of issues) upsertItem({ externalId: payload.node_id, kind: "issue", payload }, transaction);
@@ -25,7 +26,7 @@ export async function syncGitHub(repository = config.github.repository, queueTas
     if (queueTasks) {
       operation.stage("reconcile_closed");
       const openIds = new Set([...issues, ...pullRequests].map((payload) => payload.node_id));
-      const missing = previousItems.filter((item) => item.state === "open" && !openIds.has(item.externalId));
+      const missing = previousItems.filter((item) => !openIds.has(item.externalId));
       const reads = new Array<PromiseSettledResult<GithubContext>>(missing.length);
       await mapConcurrent(missing, async (item, index) => {
         try { reads[index] = { status: "fulfilled", value: await github.fetchItemContext(item.kind, item.payload.number, { comments: false }) }; }
@@ -42,7 +43,7 @@ export async function syncGitHub(repository = config.github.repository, queueTas
         }
       }
       operation.stage("route_tasks");
-      const current = itemsInRepository(repository);
+      const current = [...openItems(repository), ...closedItemsWithCleanup(repository)];
       queued = await routeGithubTasks(github, current, previous, operation.log);
     }
     operation.complete({ issues: issues.length, pullRequests: pullRequests.length, ...(queueTasks ? { queued } : {}) });

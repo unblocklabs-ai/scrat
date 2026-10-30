@@ -1,8 +1,8 @@
-import { eq } from "drizzle-orm";
+import { and, eq, exists, inArray, isNotNull, isNull, or, sql, type SQL } from "drizzle-orm";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { asItem } from "./items.ts";
-import { items, subjects } from "./schema.ts";
+import { items, subjects, tasks, themePreviews, workspaces } from "./schema.ts";
 
 export const remoteUrl = (repository: string) => `https://github.com/${repository}.git`;
 export const sameRepository = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -14,8 +14,20 @@ export function itemRepository(item: { payload: { html_url: string } }) {
 export function assertConfiguredRepository(repository: string) {
   if (!sameRepository(repository, config.github.repository)) throw new Error(`Scrat serves only ${config.github.repository}, not ${repository}`);
 }
-export function itemsInRepository(repository: string) {
-  return db.select({ item: items, subject: subjects }).from(items).innerJoin(subjects, eq(items.id, subjects.id)).all()
-    .filter(({ subject }) => sameRepository(subject.repository, repository))
-    .map(({ item, subject }) => asItem(item, subject));
+const inRepository = (repository: string) => sql`lower(${subjects.repository}) = ${repository.toLowerCase()}`;
+const itemRows = (where: SQL | undefined) => db.select({ item: items, subject: subjects }).from(items).innerJoin(subjects, eq(items.id, subjects.id)).where(where).all()
+  .map(({ item, subject }) => asItem(item, subject));
+export const openItems = (repository: string) => itemRows(and(inRepository(repository), eq(subjects.state, "open")));
+export const openOrListedItems = (repository: string, externalIds: string[]) =>
+  itemRows(and(inRepository(repository), or(eq(subjects.state, "open"), inArray(items.externalId, externalIds))));
+export const findItem = (repository: string, target: string) =>
+  itemRows(and(inRepository(repository), /^\d+$/.test(target) ? sql`${items.payload} ->> '$.number' = ${Number(target)}` : eq(items.id, target)))[0];
+export function closedItemsWithCleanup(repository: string) {
+  const pullRequest = eq(items.kind, "pr");
+  return itemRows(and(inRepository(repository), eq(subjects.state, "closed"), or(
+    exists(db.select({ id: tasks.id }).from(tasks).where(and(eq(tasks.subjectId, subjects.id), eq(tasks.status, "queued")))),
+    and(pullRequest, exists(db.select({ id: workspaces.id }).from(workspaces).where(and(eq(workspaces.id, subjects.workspaceId), isNull(workspaces.removedAt))))),
+    config.storefront.enabled ? and(pullRequest, exists(db.select({ id: themePreviews.id }).from(themePreviews)
+      .where(and(eq(themePreviews.subjectId, subjects.id), or(isNull(themePreviews.deletedAt), isNotNull(themePreviews.deploymentId)))))) : undefined,
+  )));
 }

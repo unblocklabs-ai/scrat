@@ -3,7 +3,7 @@ import { and, asc, count, desc, eq, isNotNull, isNull, lte, notExists, or, sql }
 import { alias } from "drizzle-orm/sqlite-core";
 import { manifestOf, manifests } from "./actions.ts";
 import { config, isActionEnabled } from "./config.ts";
-import { itemsInRepository, sameRepository } from "./repository.ts";
+import { findItem, sameRepository } from "./repository.ts";
 import { db } from "./db.ts";
 import { describeError, type ErrorDetails, errorCode, errorMessage, transientInferenceCode } from "./errors.ts";
 import { recordEvent, type JournalEvent } from "./events.ts";
@@ -106,10 +106,8 @@ export function enqueueManualTasks(action: string, targets: string[], priority?:
   if (manifest.trigger.manual === false) throw new Error(`${action} is queued automatically by sync and cannot be enqueued by hand`);
   const needs = manifest.trigger.item;
   if (!needs) throw new Error(`${action} is not triggered by an issue or PR`);
-  const candidates = itemsInRepository(config.github.repository);
   return targets.map((target): ManualEnqueueResult => {
-    const item = /^\d+$/.test(target) ? candidates.find((candidate) => candidate.payload.number === Number(target))
-      : candidates.find((candidate) => candidate.id === target);
+    const item = findItem(config.github.repository, target);
     if (!item) return { target, error: `No item ${target} in ${config.github.repository}` };
     const base = { target, number: item.payload.number, itemId: item.id };
     if (item.state !== "open") return { ...base, error: "Item is closed" };

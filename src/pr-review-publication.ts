@@ -1,5 +1,6 @@
 import { upsertComment } from "./comments.ts";
 import { getRepositoryPath } from "./config.ts";
+import { redactSecrets } from "./errors.ts";
 import type { EventReferences } from "./events.ts";
 import { git } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
@@ -10,9 +11,10 @@ import { acknowledgedTaskIds, isIssueComment, issueCommentId, parseIssueCommentI
 import { logger } from "./logging.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
-import { runHistory, runText, updateRun } from "./run-history.ts";
+import { getRun, runHistory, runText, updateRun } from "./run-history.ts";
 import type { Run, Task } from "./schema.ts";
 import { serialized } from "./single-flight.ts";
+import { latestTask } from "./tasks.ts";
 
 const pendingReviews = new Map<string, Promise<unknown>>();
 
@@ -28,6 +30,9 @@ function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeo
       || (run.result && comment.body === (body ??= reviewBody(runText(run.id), task.id))));
     if (existing) return existing;
   }
+  const taskIds = new Set(reviews.map(({ task }) => task.id));
+  return issueComments.findLast((comment) => acknowledgedTaskIds(comment.body)
+    .some((id) => taskIds.has(id) && comment.body.trimEnd().endsWith(`${reviewMarker}\n${taskMarker(id)}`)));
 }
 
 export type ResolvedReview = { reviews: ReturnType<typeof runHistory>; state: PrReviewState; mainSha: string };
@@ -40,7 +45,12 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
   const mainSha = await git(getRepositoryPath(), ["rev-parse", `refs/remotes/origin/${observation.baseBranch}`]);
   const state = known?.mainSha === mainSha ? known.state : await resolvePrReview(reviews, observation, mainSha);
   const desired = state.kind === "current" ? state.assessment : undefined;
-  const shown = desired ?? (state.kind === "blocked" ? state.attempt : undefined);
+  const latest = reviews[0];
+  const failed = latest?.task.status === "failed" && latest.run.error && latest.run.finishedAt
+    && latestTask(subjectId, latest.task.action)?.id === latest.task.id
+    && (latest.run.context?.revision ?? latest.task.input.revision ?? observation.revision) === observation.revision
+    && (latest.run.mainSha ?? latest.task.input.mainSha ?? mainSha) === mainSha ? latest : undefined;
+  const shown = desired ?? (state.kind === "blocked" ? state.attempt : failed);
   const deliveryReferences = shown ? { ...references, subjectId, taskId: shown.task.id, runId: shown.run.id } : references;
   const labels = observation.labels;
   const managed = Object.values(gradeLabels);
@@ -52,7 +62,15 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
 
   let commentId: number | undefined;
   if (shown) {
-    const text = desired ? runText(desired.run.id) : `This PR is behind ${observation.baseBranch} and does not merge cleanly; update the branch and ${botName} will review it.`;
+    let text: string;
+    if (desired) text = runText(desired.run.id);
+    else if (state.kind === "blocked") text = `This PR is behind ${observation.baseBranch} and does not merge cleanly; update the branch and ${botName} will review it.`;
+    else {
+      let error = getRun(shown.run.id)!.error!;
+      while (error.cause) error = error.cause;
+      const reason = redactSecrets(error.message).replace(/\s+/g, " ").slice(0, 500);
+      text = `${botName} review failed during the **${shown.run.stage}** stage. No completed assessment was published by this attempt.\n\n> ${reason}\n\nAutomatic retry is not scheduled for this failure. Retry task \`${shown.task.id}\` with \`npm run retry -- ${shown.task.id}\`, or push an update to request a fresh review.`;
+    }
     const body = reviewBody(text, shown.task.id);
     const { run } = shown;
     const unchanged = existing && acknowledgedTaskIds(existing.body).some((id) => existing.body === reviewBody(text, id));

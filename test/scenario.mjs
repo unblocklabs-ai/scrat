@@ -1368,15 +1368,45 @@ export const scenarios = {
     assert.equal(types(settled).filter((type) => type === "comment").length, 1, "the review is published as one comment");
     assert.equal(f.slack.calls.length, slackSettled);
   } },
-  reviewer_failure: { title: "a failed reviewer prevents consolidation and publication", run: async () => {
-    await implement(2); await route(); f.reset(202, "reviewer-failure");
+  reviewer_failure: { title: "a terminal reviewer failure posts one recoverable notice without publishing a partial assessment", run: async () => {
+    await implement(2); await route(); f.reset(202, "reviewer-failure"); f.faults.comment.add(202);
     const r = await run(); assert.ok(r.error); assert.ok(r.reviewers.some((r) => r.error));
     assert.equal(f.requests.filter((r) => r.consolidating).length, 0);
-    assert.equal(f.written("comment").length, 0);
+    const notice = () => (f.comments.get(202) ?? []).find((comment) => comment.body.includes("<!-- scrat-review -->"));
+    assert.match(notice()?.body ?? "", /review failed/i);
+    assert.match(notice().body, /agent/); assert.match(notice().body, new RegExp(r.taskId));
+    const commentId = notice().id, written = f.written("comment").length;
+    const quoted = "Feedback quoting the failed review:\n```\n" + notice().body + "\n```";
+    f.comments.get(202).push({ ...notice(), id: 9000, body: quoted });
+    await route(); await route();
+    assert.equal(f.written("comment").length, written, "unchanged failures do not repost");
+    assert.equal(f.comments.get(202)[1].body, quoted, "quoted failure markers never identify the notice");
     assert.ok(f.row(s.workspaces, r.workspaceId).removedAt);
     f.reset(202, "missing-grade"); tasks.retryTask(r.taskId);
     const invalid = await run(); assert.match(invalid.error.message, /grade/i);
-    assert.equal(f.written("comment").length, 0);
+    assert.equal(notice().id, commentId, "a second failure updates the existing notice");
+    assert.match(notice().body, /grade/i);
+    f.reset(202, "normal"); tasks.retryTask(r.taskId);
+    const recovered = await success();
+    assert.equal(recovered.publication.commentId, commentId);
+    assert.doesNotMatch(notice().body, /review failed/i);
+    assert.equal(f.comments.get(202).length, 2, "the notice and quoted feedback are retained without duplicates");
+    const config = (await f.app("config.ts")).config;
+    config.providers.fixture.api = "openai-responses";
+    (await f.app("model-runtime.ts")).dropModelRuntime();
+    touchPr(202); await route();
+    const malformed = await run();
+    for (const reviewer of malformed.reviewers) {
+      assert.equal(reviewer.error.name, "TypeError");
+      assert.match(reviewer.error.stack, /processResponsesStream/);
+      assert.equal(JSON.parse(reviewer.error.evidence).responseId, "fixture-stream-error");
+      const saved = readFileSync(reviewer.piSessionFile, "utf8").trim().split("\n").map(JSON.parse)
+        .findLast((entry) => entry.message?.stopReason === "error");
+      assert.match(saved.message.errorStack, /processResponsesStream/);
+    }
+    assert.match(notice().body, /review failed/i);
+    assert.doesNotMatch(notice().body, /processResponsesStream/);
+    assert.equal(notice().id, commentId);
   } },
   review_retry: { title: "a review whose reviewers all fail transiently is held until due and publishes once after recovery, while a mixed panel stays failed, and a dropped consolidation retries only the consolidation", configure: [(config) => { config.harness.agentRetry.maxRetries = 1; config.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 100 }; }], run: async () => {
     await implement(2); await route(); f.transient.failures = 4; f.reset(202, "transient");
@@ -1475,7 +1505,7 @@ export const scenarios = {
     f.addIssue(6); f.reset(6, "incomplete-once"); f.enqueue(6, "implement");
     const partial = await run(); assert.ok(partial.error); assert.equal(prompts(), asked);
   } },
-  pr_head: { title: "a stale refs/pull head is replaced by the API head, and a head the remote lacks fails the run without publishing", run: async () => {
+  pr_head: { title: "a stale refs/pull head is replaced by the API head, and a head the remote lacks fails the run without pushing", run: async () => {
     await implement(1);
     const remote = resolve("remote.git"), branch = f.prs[0].head.ref, stale = git(remote, "rev-parse", branch);
     f.frozen.add(201);
@@ -1488,11 +1518,11 @@ export const scenarios = {
     const { fetchPullRequestHead } = await f.app("git.ts");
     assert.equal(await fetchPullRequestHead(resolve("checkout"), resolve("missing.git"), 201, newer), newer, "A matching local ref needs no fetch");
     await assert.rejects(fetchPullRequestHead(resolve("checkout"), resolve("missing.git"), 201, stale), /fetch/);
-    const writes = f.writes.length;
+    const heads = git(remote, "for-each-ref", "refs/heads");
     f.forced.set(201, "0".repeat(40)); tasks.enqueueManualTasks("review_pr", ["201"]);
     const failed = await run();
     assert.match(failed.error.message, /PR #201 head 0{40} could not be fetched/);
-    assert.equal(f.writes.length, writes);
+    assert.equal(git(remote, "for-each-ref", "refs/heads"), heads);
     await implement(2); await route();
     const second = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 202);
     assert.ok(all(s.tasks).some((t) => t.subjectId === second.id && t.action === "review_pr" && t.status === "queued"));

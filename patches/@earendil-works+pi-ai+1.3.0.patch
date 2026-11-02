@@ -1,0 +1,16 @@
+diff --git a/node_modules/@earendil-works/pi-ai/dist/api/openai-responses.js b/node_modules/@earendil-works/pi-ai/dist/api/openai-responses.js
+index 2ab985c..762bfba 100644
+--- a/node_modules/@earendil-works/pi-ai/dist/api/openai-responses.js
++++ b/node_modules/@earendil-works/pi-ai/dist/api/openai-responses.js
+@@ -171,6 +171,11 @@ export const stream = (model, context, options) => {
+             stream.end();
+         }
+         catch (error) {
++            // Keep local adapter failures diagnosable after the error becomes a message.
++            if (error instanceof Error) {
++                output.errorName = error.name;
++                output.errorStack = error.stack;
++            }
+             for (const block of output.content) {
+                 delete block.index;
+                 // Streaming scratch buffers are only used during parsing; never persist them.

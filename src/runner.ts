@@ -1,11 +1,13 @@
 import { manifestOf } from "./actions.ts";
 import { getRepositoryPath } from "./config.ts";
+import { branchConflictCode } from "./errors.ts";
 import { removeRunDatabase } from "./databases.ts";
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { bestEffort, startOperation } from "./logging.ts";
 import { observe } from "./observation.ts";
 import { currentPrReview } from "./pr-assessment.ts";
+import { reconcilePrReview } from "./pr-review-publication.ts";
 import { getRun } from "./run-history.ts";
 import { publishRun } from "./publication.ts";
 import { InterruptedError } from "./results.ts";
@@ -102,6 +104,10 @@ export async function runNextTask(stop?: AbortSignal) {
     }
     const failed = finishRun(run.id, { status: "failed", error });
     operation.fail(error, { heapUsedMb: heapUsed() });
+    if (item?.kind === "pr" && ctx.manifest.publish.includes("pr_assessment") && failed.stage !== "publishing" && failed.error?.code !== branchConflictCode) {
+      await bestEffort(operation.log, "github.review_reconciliation_pending", references,
+        () => reconcilePrReview(new GitHubRepository(subject.repository), subject.id, item.payload.number, references));
+    }
     return failed;
   } finally {
     if (cleanup.databaseRequested) await bestEffort(operation.log, "run.cleanup_pending", { resource: "database" }, () => removeRunDatabase(run.id, references));

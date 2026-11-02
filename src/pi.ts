@@ -145,7 +145,13 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
         if (last?.role !== "assistant") throw new Error("Pi returned no assistant response");
         const transient = !isContextOverflow(last, model.contextWindow) && (isRetryableAssistantError(last)
           || last.stopReason === "error" && config.harness.transientErrors.some((pattern) => new RegExp(pattern, "i").test(last.errorMessage ?? "")));
-        throw Object.assign(new Error(last.errorMessage || `Pi stopped: ${last.stopReason}`), transient ? { code: transientInferenceCode } : {});
+        const error = new Error(last.errorMessage || `Pi stopped: ${last.stopReason}`);
+        if ("errorStack" in last && typeof last.errorStack === "string") error.stack = last.errorStack;
+        if ("errorName" in last && typeof last.errorName === "string") error.name = last.errorName;
+        throw Object.assign(error, {
+          evidence: JSON.stringify({ provider: run.provider, model: run.model, responseId: last.responseId, durationMs: last.durationMs, stopReason: last.stopReason }),
+          ...transient ? { code: transientInferenceCode } : {},
+        });
       }
       try {
         const output = session.getLastAssistantText()?.trim();

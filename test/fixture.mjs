@@ -152,6 +152,16 @@ export async function fixture(scenario, spec) {
       res.writeHead(file ? 200 : 404); return res.end(file ? Buffer.from(file.value, "base64") : "");
     }
     const request = JSON.parse(body);
+    if (scenario === "reviewer_failure" && request.input) {
+      const item = { type: "reasoning", id: "reasoning-error", summary: [] };
+      const events = [
+        { type: "response.created", response: { id: "fixture-stream-error" } },
+        { type: "response.output_item.added", output_index: 0, item },
+        { type: "response.output_item.done", output_index: 0, item: { ...item, summary: {} } },
+      ];
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      return res.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n");
+    }
     const texts = request.messages.filter((message) => message.role === "user")
       .map((message) => typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("\n"));
     const text = texts.findLast((entry) => entry.includes('{\n  "action"'));

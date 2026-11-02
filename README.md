@@ -23,6 +23,8 @@ Repository commands, Git hooks and Pi's Bash receive a minimal inherited environ
 
 The newest complete PR assessment is authoritative. Context and observed source/dependency changes determine freshness—a relevance heuristic, not a full dependency graph. A re-review's scope keeps the earlier scope and the item's own files, but files it looked at only because the base branch changed them do not join it. Stale assessments lose their grade and require a fresh review; older opinions never regain authority. Publication-only retries reuse saved results. Scrat does not automatically merge PRs.
 
+A terminal PR-review failure without a current assessment writes a notice into the same assessment comment, with the stage, redacted reason and task retry command. Later syncs retry delivery without duplicating the notice; a successful review replaces it. Delayed automatic retries do not post failure notices. This works even when Slack status is disabled. OpenAI Responses adapter errors retain their original name and stack in the Pi session and redacted run error, together with the response ID and duration. `npm ci` applies the checked-in patch to the pinned Pi adapter; a failed patch stops installation rather than silently losing diagnostics.
+
 ## Configure and run
 
 Requires Node.js **22.19+**, Git, and the tools used by the target repository's workspace commands. Workspace commands and agents run on Scrat's Node, so the deployment uses the target repository's Node major (24 on the VM). Docker is required when per-run databases are configured.

@@ -4,7 +4,7 @@ import { isContextOverflow, isRetryableAssistantError } from "@earendil-works/pi
 import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { Logger } from "pino";
 import { config } from "./config.ts";
-import type { ThinkingLevel } from "./manifests.ts";
+import type { LabelCategory, ThinkingLevel } from "./manifests.ts";
 import { db } from "./db.ts";
 import { botName, withBotName } from "./identity.ts";
 import { getRun, updateRun } from "./run-history.ts";
@@ -20,12 +20,12 @@ import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 
 const withStorefront = (skill: string, shown: boolean) => skill.replace(/^\{\{#storefront\}\}\n([\s\S]*?)^\{\{\/storefront\}\}\n/gm, (_, body: string) => shown ? body : "");
 
-function correctionMessage(error: string, requireGrade: boolean, storefront: boolean) {
-  return `Your previous final answer was not accepted: ${error}.\n\nSend your complete final answer again, with the same content, correctly formatted. It must end with these footer lines, in this order:\n${footerRules(requireGrade, storefront)}`;
+function correctionMessage(error: string, requireGrade: boolean, storefront: boolean, requireLabels: boolean) {
+  return `Your previous final answer was not accepted: ${error}.\n\nSend your complete final answer again, with the same content, correctly formatted. It must end with these footer lines, in this order:\n${footerRules(requireGrade, storefront, requireLabels)}`;
 }
 
-function continuationMessage(requireGrade: boolean, storefront: boolean) {
-  return `Your assessment was returned incomplete. Finish the remaining inspection, then return the full final assessment. It must end with these footer lines, in this order:\n${footerRules(requireGrade, storefront)}`;
+function continuationMessage(requireGrade: boolean, storefront: boolean, requireLabels: boolean) {
+  return `Your assessment was returned incomplete. Finish the remaining inspection, then return the full final assessment. It must end with these footer lines, in this order:\n${footerRules(requireGrade, storefront, requireLabels)}`;
 }
 
 export function saveReviewer(runId: string, index: number, patch: Partial<Reviewer>) {
@@ -41,12 +41,13 @@ export type PiOptions = {
   environment?: NodeJS.ProcessEnv; log: Logger; stop?: AbortSignal;
 };
 
-export async function executePi(options: PiOptions, { context, sessionFile, reviewerIndex, onSession, requireGrade = false, followUp }: {
+export async function executePi(options: PiOptions, { context, sessionFile, reviewerIndex, onSession, requireGrade = false, labelCategories, followUp }: {
   context: string;
   sessionFile?: string;
   reviewerIndex?: number;
   onSession?: (details: Pick<Reviewer, "piSessionId" | "piSessionFile" | "thinkingLevel">) => void;
   requireGrade?: boolean;
+  labelCategories?: readonly LabelCategory[];
   followUp?: string;
 }) {
   const { run, cwd, tools, scoped, storefront = false, baseSha, log, stop } = options;
@@ -156,14 +157,14 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
       try {
         const output = session.getLastAssistantText()?.trim();
         if (!output) throw new ResultFormatError("Pi returned an empty response");
-        const result = parseResult(output, [], { requireGrade });
+        const result = parseResult(output, [], { requireGrade, labelCategories });
         const problem = graded && result.outcome === "complete" ? storefrontProblem(result, config.storefront.limits.regressionMaxGrade, regressionReported) : undefined;
         regressionReported ||= result.storefront === "regression";
         if (problem) throw new ResultFormatError(problem);
         if (readOnly && result.outcome === "incomplete" && continuations < config.harness.corrections.incomplete) {
           continuations++;
           log.warn({ event: "pi.incomplete_continue", attempt: continuations });
-          await prompt(continuationMessage(requireGrade, graded));
+          await prompt(continuationMessage(requireGrade, graded, labelCategories !== undefined));
           corrections--;
           continue;
         }
@@ -177,7 +178,7 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
       } catch (error) {
         if (!(error instanceof ResultFormatError) || corrections >= config.harness.corrections.format) throw error;
         log.warn({ event: "pi.format_retry", attempt: corrections + 1, err: error });
-        await prompt(correctionMessage(error.message, requireGrade, graded));
+        await prompt(correctionMessage(error.message, requireGrade, graded, labelCategories !== undefined));
       }
     }
   } finally {

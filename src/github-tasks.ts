@@ -7,6 +7,7 @@ import { botSlug } from "./identity.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { acknowledgedTaskIds, commentKey } from "./markers.ts";
 import type { Item } from "./items.ts";
+import { categoriesFor, itemLabelKey } from "./item-labels.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { labelName, reconcileLabels } from "./labels.ts";
 import { db } from "./db.ts";
@@ -22,7 +23,7 @@ import { bestEffort } from "./logging.ts";
 import { reconcileObserved, serializePr, type ResolvedReview } from "./pr-review-publication.ts";
 import { latestCompletedRun, latestFinishedRun, latestRunOfTask, runHistory } from "./run-history.ts";
 import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
-import { planIssueTasks, planPrMaintenance, planReview, planSelfRepair, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
+import { planIssueTasks, planKeyedTask, planPrMaintenance, planReview, planSelfRepair, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
 
 type SyncContext = {
   github: GitHubRepository; log: Logger;
@@ -109,6 +110,23 @@ async function reconcileFailedLabels(ctx: SyncContext, item: Item) {
     desired: labelled.filter(({ name, selected }) => selected && latestTask(item.id, name)?.status === "failed").map(({ label }) => label),
     managed: labelled.map(({ label }) => label),
   }, { subjectId: item.id }));
+}
+
+function routeItemLabels(item: Item) {
+  let queued = 0;
+  for (const action of matchingActions(signalFor(item, item.payload.user?.login, "item_labels"))) {
+    const settings = manifestOf(action);
+    const categories = settings.enabled === false ? [] : categoriesFor(settings, item.kind);
+    if (!categories.length) {
+      cancelQueuedTasks(item.id, "Item labeling disabled for this kind", action);
+      continue;
+    }
+    const triggerKey = itemLabelKey(item.payload, categories);
+    const latest = latestTask(item.id, action);
+    const evaluatedKey = latest && latest.status !== "queued" ? latestRunOfTask(latest.id)?.context?.labeling?.key : undefined;
+    queued += applyDecisions(item.id, planKeyedTask(latest, action, latest ? "Item or label policy changed" : "Initial item labeling (backfill)", { source: "github_items", kind: "item_labels", triggerKey }, evaluatedKey));
+  }
+  return queued;
 }
 
 async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObservation, mainSha: string, routes: Routes) {
@@ -201,6 +219,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       await cleanupClosedItem(ctx, item);
       return;
     }
+    queued += routeItemLabels(item);
     if (item.workspaceId && getWorkspace(item.workspaceId)?.removedAt) {
       db.update(subjects).set({ workspaceId: null }).where(eq(subjects.id, item.id)).run();
       item.workspaceId = null;

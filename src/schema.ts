@@ -4,6 +4,7 @@ import { type AnySQLiteColumn, integer, primaryKey, sqliteTable, text, unique, u
 import type { ErrorDetails } from "./errors.ts";
 import type { AgentResult, Reviewer } from "./results.ts";
 import type { GithubComment, GithubItem } from "./github-types.ts";
+import type { LabelCategory } from "./manifests.ts";
 
 export const subjects = sqliteTable("subjects", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
@@ -80,6 +81,7 @@ export const runs = sqliteTable("runs", {
     item: { number: number; title: string; body?: string | null; url: string };
     comments: GithubComment[];
     commentRevisions: string[];
+    labeling?: { key: string; categories: LabelCategory[] };
   }>(),
   skill: text("skill").notNull(),
   provider: text("provider").notNull(),

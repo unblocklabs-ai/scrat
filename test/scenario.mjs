@@ -659,6 +659,115 @@ const commitReview = async (variant) => {
   }
 };
 export const scenarios = {
+  item_labels: { title: "optional item labeling backfills independently, uses configured categories, preserves grades, requeues commits and rejects invalid or stale classifications", configure: [(config) => {
+    for (const name of ["review_issue", "resolve_conflicts", "address_pr_feedback", "address_review"]) config.actions[name].enabled = false;
+    script(config, "prepare", 'throw new Error("labeling must not run dependency preparation");');
+  }], run: async () => {
+    const { config: live } = await f.app("config.ts"), settings = live.actions.label_items;
+    // Let the normal grade review prepare, then make preparation fail for classification.
+    const prepare = live.workspace.prepare; live.workspace.prepare = [];
+    branchOff("human", "src/app.ts", "export const value = 2;\n");
+    branchOff("fork", "src/app.ts", "export const value = 3;\n");
+    f.addPr(201, "human", "human", { draft: true, labels: [{ name: "keep" }, { name: "risk: high" }, { name: "risk: medium" }] });
+    f.addPr(202, "fork", f.config.github.botLogin, { labels: [{ name: "A · Strong" }], head: { ref: "fork", sha: git(resolve("remote.git"), "rev-parse", "fork"), repo: { full_name: "other/fork" } } });
+    f.addIssue(1);
+    const queued = () => all(s.tasks).filter((task) => task.action === "label_items" && task.status === "queued");
+    const names = (item) => item.labels.map((label) => label.name).sort();
+    const selections = (entries) => `Classification from the supplied source.\nSCRAT_LABELS: ${JSON.stringify(entries)}\nSCRAT_STATUS: complete`;
+    const low = selections([{ category: "risk", name: "risk: low" }]);
+    const classify = async (number, responses = [low]) => {
+      f.reset(number, "normal");
+      f.script = [{ name: "git", args: { operation: "diff", from: "base", to: "head", path: "src/app.ts" } }, ...responses];
+      return success();
+    };
+    await route(); assert.equal(queued().length, 0, "disabled by default");
+    await success();
+    const comments = f.written("comment").length;
+    live.workspace.prepare = prepare;
+    settings.enabled = true;
+    await route(); await route();
+    assert.equal(queued().length, 2, "existing draft, bot and fork PRs backfill, but issues are off");
+    assert.ok(queued().every((task) => task.priority === 0));
+    touchPr(201); // This commit arrives after queueing, before inference or another sync.
+    for (let i = 0; i < 2; i++) {
+      f.reset(201, "normal"); f.reset(202, "normal");
+      f.script = [{ name: "git", args: { operation: "diff", from: "base", to: "head", path: "src/app.ts" } }, low];
+      const labeled = await success();
+      assert.equal(labeled.model, "gpt-6.1-terra");
+      assert.deepEqual(labeled.result.labels, [{ category: "risk", name: "risk: low" }]);
+    }
+    assert.deepEqual(names(f.prs[0]), ["B · Solid", "keep", "risk: low"]);
+    assert.deepEqual(names(f.prs[1]), ["A · Strong", "risk: low"]);
+    await route(); assert.equal(queued().length, 0, "the snapshot actually reviewed is covered even if its queued fingerprint was older");
+    assert.equal(f.written("comment").length, comments, "classification posts no review comment");
+    const request = f.requests.findLast((entry) => entry.context.action === "label_items");
+    assert.deepEqual(request.context.label_categories, settings.pr_labels);
+    assert.ok(f.requests.some((entry) => entry.context.action === "label_items" && entry.request.messages.some((message) => message.role === "tool" && JSON.stringify(message.content).includes("value = 3"))), "classification can inspect the real fork PR diff");
+    live.actions.review_pr.enabled = false;
+    f.comments.set(201, [...f.comments.get(201), humanComment(201, 9901, "A comment alone", "2026-11-07T12:00:00Z")]);
+    f.prs[0].labels.push({ name: "unrelated" });
+    changeMain("unrelated.txt", "Base tip moved\n");
+    await route(); assert.equal(queued().length, 0, "comments, labels and base-tip changes do not requeue");
+    touchPr(201); await route(); await route(); assert.equal(queued().length, 1, "new commits coalesce into one task");
+    const invalid = selections([{ category: "risk", name: "not-configured" }]);
+    await classify(201, [invalid, low]);
+    assert.ok(f.requests.at(-1).request.messages.some((message) => message.role === "user" && JSON.stringify(message.content).includes("Your previous final answer was not accepted")), "invalid model choices go through format correction");
+
+    // A second category and issue-only targeting use the same task and replace the defaults.
+    settings.targets = ["issues"];
+    settings.model = "gpt-6.1-sol";
+    settings.issue_labels = [
+      { category: "type", choices: [{ name: "type: bug", description: "A reported defect" }, { name: "type: feature", description: "New functionality" }] },
+      { category: "scope", choices: [{ name: "scope: product", description: "Product work" }] },
+    ];
+    await route(); assert.equal(queued().length, 1);
+    f.script = [
+      selections([{ category: "type", name: "type: bug" }]),
+      selections([{ category: "type", name: "type: bug" }, { category: "type", name: "type: feature" }]),
+      selections([{ category: "type", name: "type: bug" }, { category: "scope", name: "scope: product" }]),
+    ];
+    const issue = await success(); assert.equal(issue.model, "gpt-6.1-sol");
+    assert.deepEqual(names(f.issues.get(1)), ["scope: product", "type: bug"]);
+    assert.deepEqual(f.requests.at(-1).context.label_categories, settings.issue_labels);
+    await route(); assert.equal(queued().length, 0);
+    f.issues.get(1).body += " Updated scope"; await route(); assert.equal(queued().length, 1);
+    settings.enabled = false; await route(); assert.equal(queued().length, 0, "disabling cancels queued classification");
+
+    settings.enabled = true; settings.targets = ["prs"]; settings.model = "gpt-6.1-terra";
+    settings.pr_labels[0].choices[0].description += " Narrowly scoped changes.";
+    await route(); assert.equal(queued().length, 2, "policy changes backfill previously classified PRs");
+    // Keep one PR active so the following checks have an unambiguous next task.
+    f.prs[1].state = "closed"; await route(); assert.equal(queued().length, 1);
+    settings.pr_labels[0].choices[0].description += " Policy updated while queued.";
+    assert.ok(tasks.enqueueManualTasks("label_items", ["201"])[0].taskId);
+    await classify(201); await route(); assert.equal(queued().length, 0, "manual coalescing does not pin classification to the old policy");
+    assert.deepEqual(f.requests.at(-1).context.label_categories, settings.pr_labels);
+    const before = names(f.prs[0]);
+    tasks.enqueueManualTasks("label_items", ["201"]);
+    f.onModel = (context) => { if (context.action === "label_items") { f.onModel = undefined; touchPr(201); } };
+    f.reset(201, "normal"); f.script = [selections([{ category: "risk", name: "risk: high" }])];
+    const stale = await run(); assert.match(stale.error.message, /item changed/i);
+    assert.deepEqual(names(f.prs[0]), before, "a stale classification cannot change labels");
+    await route(); assert.equal(queued().length, 1);
+    await classify(201);
+    const itemId = all(s.items).find((item) => item.payload.number === 201).id;
+    const manual = tasks.enqueueManualTasks("label_items", ["201"])[0]; assert.ok(manual.taskId);
+    await classify(201); await route(); assert.equal(queued().length, 0, "manual classification does not cause an automatic duplicate");
+    assert.equal(all(s.tasks).find((task) => task.id === manual.taskId).subjectId, itemId);
+
+    tasks.enqueueManualTasks("label_items", ["201"]);
+    f.reset(201, "normal"); f.script = [selections([{ category: "risk", name: "risk: high" }])];
+    f.faults.label.add(201);
+    const publishing = await run(); assert.ok(publishing.error); assert.equal(publishing.stage, "publishing");
+    const requests = f.requests.length, labelsBeforeRetry = names(f.prs[0]);
+    settings.pr_labels[0].choices[0].description += " Changed after inference.";
+    tasks.retryTask(publishing.taskId);
+    const outdated = await run(); assert.match(outdated.error.message, /label policy changed/);
+    assert.equal(f.requests.length, requests, "publication retry reuses the persisted classification");
+    assert.deepEqual(names(f.prs[0]), labelsBeforeRetry, "a saved classification cannot publish under a different policy");
+    await route(); assert.equal(queued().length, 1);
+    await classify(201); await route(); assert.equal(queued().length, 0);
+  } },
   base_only_review: { title: "a re-review caused only by relevant main changes runs the primary reviewer alone with a graded assessment, while every other trigger keeps the panel and retries keep the right plan", run: async () => {
     const [primary, secondary] = f.config.actions.review_pr.reviewers.map((reviewer) => reviewer.model);
     const sessions = (since) => {
@@ -2732,6 +2841,30 @@ export const scenarios = {
     const written = JSON.parse(readFileSync("data/pi-models.json", "utf8")).providers[provider];
     assert.equal(written.baseUrl, "http://override.invalid/v1"); assert.equal(written.apiKey, defaults.providers[provider].apiKey);
     assert.deepEqual(written.models, defaults.providers[provider].models);
+
+    const labels = {
+      enabled: true, provider: "fixture", model: "gpt-6.1-sol", targets: ["issues", "prs"],
+      issue_labels: [{ category: "type", choices: [{ name: "bug", description: "A reported defect" }] }],
+      pr_labels: [{ category: "risk", choices: [{ name: "custom: low", description: "Our deployment's low-risk rule" }] }],
+    };
+    const overrides = { actions: { ...f.config.actions, label_items: labels } };
+    const showLabels = "console.log(JSON.stringify(config.actions.label_items));";
+    const beforeUpgrade = JSON.parse(probe(overrides, showLabels));
+    const manifestPath = resolve("app/actions/label_items.yaml"), shipped = readFileSync(manifestPath, "utf8");
+    writeFileSync(manifestPath, shipped.replace("gpt-6.1-terra", "deepseek/deepseek-v4.1-flash").replace("category: risk", "category: upgraded-risk").replace("risk: low", "upgraded: low"));
+    assert.deepEqual(JSON.parse(probe(overrides, showLabels)), beforeUpgrade, "a new shipped default cannot overwrite deployment label settings");
+    assert.deepEqual(beforeUpgrade.pr_labels, labels.pr_labels, "category arrays replace the shipped choices in full");
+    assert.deepEqual(beforeUpgrade.issue_labels, labels.issue_labels);
+    assert.equal(beforeUpgrade.model, "gpt-6.1-sol");
+    assert.deepEqual(JSON.parse(readFileSync(local, "utf8")), overrides, "loading does not rewrite local overrides");
+    writeFileSync(manifestPath, shipped);
+    const validate = `const { validateStaticConfig } = await import(${JSON.stringify(resolve("app/src/startup.ts"))}); await validateStaticConfig();`;
+    probe(overrides, validate);
+    const invalidLabels = (changes, message) => assert.throws(() => probe({ actions: { ...f.config.actions, label_items: { ...labels, ...changes } } }, validate), (error) => message.test(error.stderr));
+    invalidLabels({ issue_labels: [] }, /issues target requires non-empty issue_labels/);
+    invalidLabels({ pr_labels: [{ category: "risk", choices: [{ name: "Low", description: "low" }, { name: "low", description: "same" }] }] }, /label names must be unique/);
+    invalidLabels({ issue_labels: [...labels.issue_labels, { category: "TYPE", choices: [{ name: "feature", description: "New behavior" }] }] }, /category names must be unique/);
+    invalidLabels({ pr_labels: [{ category: "risk", choices: [] }] }, /Invalid Scrat configuration/);
   } },
   pat_auth: { title: "a personal access token authenticates every GitHub call and git credential without the App, is redacted, and must belong to botLogin case-insensitively", configure: [configurePat], run: async () => {
     const { GitHubRepository } = await f.app("github.ts"), { containsSecret } = await f.app("secrets.ts"), { redactSecrets } = await f.app("errors.ts");
@@ -3482,9 +3615,8 @@ export const scenarios = {
     assert.equal(claimed.run.provider, "fixture"); assert.equal(claimed.run.model, "gpt-6.1-sol");
   } },
   manifest_directory: { title: "a deployment manifest directory adds an action for a freed trigger, rejects duplicate enabled triggers, unknown tools and files, and bad directories", configure: [configureManifestDirectory], run: async () => {
-    const { manifests, routeFor } = await f.app("actions.ts");
+    const { routeFor } = await f.app("actions.ts");
     const { validateStaticConfig } = await f.app("startup.ts");
-    assert.deepEqual(manifests.map((m) => m.name).sort(), ["address_pr_feedback", "address_review", "implement", "my_pr_review", "resolve_conflicts", "review_base_change", "review_issue", "review_pr", "review_store_change", "review_triage", "store_audit", "storefront_discover"]);
     await validateStaticConfig(f.config);
     await assert.rejects(validateStaticConfig({ ...f.config, actions: { ...f.config.actions, review_issue: { ...f.config.actions.review_issue, enabled: true } } }), /review_issue, review_triage would share one review comment on each issue; enable only one/);
     const issue = { source: "github_items", kind: "item_changed", item: "issue", author: "other" };

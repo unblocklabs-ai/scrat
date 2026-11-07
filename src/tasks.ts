@@ -11,6 +11,7 @@ import { withOperationSync } from "./logging.ts";
 import { entryStage, hasPublicationSnapshot, hasReviewCheckpoint, hasValidationCheckpoint, InterruptedError, workerStoppedMessage } from "./results.ts";
 import { getRun, getTask, latestRunOfTask } from "./run-history.ts";
 import { asItem } from "./items.ts";
+import { categoriesFor, itemLabelKey } from "./item-labels.ts";
 import { items, runs, type Run, subjects, tasks, type Task, type Subject } from "./schema.ts";
 import { isBaseOnly, isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
 import { signalWork } from "./work-signal.ts";
@@ -105,14 +106,18 @@ export function enqueueManualTasks(action: string, targets: string[], priority?:
   if (!manifest) throw new Error(`Unknown action: ${action}; expected one of ${manifests.map(({ name }) => name).join(", ")}`);
   if (manifest.trigger.manual === false) throw new Error(`${action} is queued automatically by sync and cannot be enqueued by hand`);
   const needs = manifest.trigger.item;
-  if (!needs) throw new Error(`${action} is not triggered by an issue or PR`);
+  if (!needs && manifest.trigger.kind !== "item_labels") throw new Error(`${action} is not triggered by an issue or PR`);
   return targets.map((target): ManualEnqueueResult => {
     const item = findItem(config.github.repository, target);
     if (!item) return { target, error: `No item ${target} in ${config.github.repository}` };
     const base = { target, number: item.payload.number, itemId: item.id };
     if (item.state !== "open") return { ...base, error: "Item is closed" };
-    if (item.kind !== needs) return { ...base, error: `${action} needs ${needs === "pr" ? "a PR" : "an issue"}, but ${target} is ${item.kind === "pr" ? "a PR" : "an issue"}` };
-    try { return { ...base, taskId: enqueueTask({ subjectId: item.id, action, priority, reason: "Manually enqueued", input: { source: "github_items", kind: "manual", manual: true } }).id }; }
+    if (needs && item.kind !== needs) return { ...base, error: `${action} needs ${needs === "pr" ? "a PR" : "an issue"}, but ${target} is ${item.kind === "pr" ? "a PR" : "an issue"}` };
+    if (manifest.trigger.kind === "item_labels" && !categoriesFor(manifestOf(action), item.kind).length) return { ...base, error: `${action} has no label categories enabled for ${item.kind}` };
+    const input: TriggerInput = manifest.trigger.kind === "item_labels"
+      ? { source: "github_items", kind: "item_labels", triggerKey: itemLabelKey(item.payload, categoriesFor(manifestOf(action), item.kind)), manual: true }
+      : { source: "github_items", kind: "manual", manual: true };
+    try { return { ...base, taskId: enqueueTask({ subjectId: item.id, action, priority, reason: "Manually enqueued", input }).id }; }
     catch (error) { return { ...base, error: errorMessage(error) }; }
   });
 }

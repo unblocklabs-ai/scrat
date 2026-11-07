@@ -305,6 +305,7 @@ Each action is one manifest, `actions/<name>.yaml`, validated at startup (`src/m
 | `provider` / `model` | Provider name and model ID for the action. For PR reviews, these select the consolidator. |
 | `thinkingLevel` | Requested Pi reasoning level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; provider/model support determines its mapping. |
 | `reviewers` | PR review panel: exactly two entries, each with its own `provider`, `model`, and `thinkingLevel`. |
+| `targets` / `issue_labels` / `pr_labels` | `label_items` only: item kinds to classify and their category/choice arrays; see Optional issue and PR labels. |
 | `maxSelfRepairs` | `address_review` only: most self-repair runs started for one PR; 0 disables self-repair; not enqueueable manually. A push makes the review stale and Scrat re-reviews; a reply-only repair is not retriggered for the same assessment. |
 | `retry` | Review-mode actions only, optional: `{ initialDelaySeconds, maxDelaySeconds }` (max not below initial). When every reviewer of a review (or its consolidation) fails at the agent stage with a transient provider error that survived Pi's own short retries (classified with `@earendil-works/pi-ai` or matched by `harness.transientErrors`: context overflow, quota/billing exhaustion, auth and setup errors, incomplete results and agent timeouts are excluded, and one permanent reviewer failure keeps the task failed), the failed run and its error are kept and the task is requeued with exponential backoff: `initialDelaySeconds`, doubled per attempt, capped at `maxDelaySeconds` (the delay is capped, not the attempt count), plus up to `harness.retryJitter` of random jitter. The retry count and next-attempt time are stored on the task; delayed tasks are not claimed until due and hold no worker slot, and the backoff survives restarts. A changed trigger or `npm run enqueue` resets the count and delay, `npm run retry -- <task-id>` on the delayed task makes it due now, and a successful run resets it. The `run.requeued` journal event carries `attempt` and `nextAttemptAt`, and the Slack status shows the time. A review restarted from the start uses the currently configured models and reviewers, not the failed run's, so changing a provider in `scrat.local.json` and restarting rescues delayed reviews. A retried panel review (durable or `npm run retry`) whose two reviewers both completed reuses their saved results and reruns only the consolidation when the task input, the base and head SHAs, the discussion revision, the configured reviewer models and whether the storefront was checked are unchanged, and journals `run.reviewers_reused` with `fromRunId`; a drain or crash during the consolidation still reruns both reviewers (#214). Omitted means no durable retries; `null` in `scrat.local.json` disables a shipped default. |
 | `exhaustedLabel` | `address_review` only, optional: label added to a Scrat PR whose current review is graded C or lower once `maxSelfRepairs` is reached, and removed when its current review grades better. `null` or `""` (e.g. in `scrat.local.json`) disables it; GitHub creates the label if it is missing. A repair counts toward `maxSelfRepairs` when it starts running, not when it is queued or cancelled. |
@@ -319,7 +320,7 @@ A deployment adds or changes actions without a code release. Set `actions.direct
 ```
 
 - Every `*.yaml` directly in that directory is a manifest, loaded after the shipped `actions/*.yaml`. The file name must equal `name` (lowercase letters, digits and underscores; `directory` is reserved). A file whose `name` matches a shipped action replaces that whole manifest, which is how a deployment changes its `tools`, `files`, `context`, `publish` or `trigger`; any other name adds an action.
-- Overrides in `scrat.local.json` apply by name after both sets are merged: `enabled`, `priority`, `skill`, `provider`, `model`, `thinkingLevel`, `reviewers`, `branch`, `cron` and `window` (schedule manifests only), `channel`, `maxRangeCommits`, `startMessage`, `browserSteps`, `browserSeconds`, `rootInstructions`, `maxSelfRepairs`, `exhaustedLabel`, `failedLabel`, `retry`. Everything else (`trigger` apart from those, `mode`, `agent`, `context`, `tools`, `files`, `acceptance`, `commitPrefix`, `start`, `publish`) is structural and changes only by shipping a manifest.
+- Overrides in `scrat.local.json` apply by name after both sets are merged: `enabled`, `priority`, `skill`, `provider`, `model`, `thinkingLevel`, `reviewers`, `branch`, `cron` and `window` (schedule manifests only), `channel`, `maxRangeCommits`, `startMessage`, `browserSteps`, `browserSeconds`, `rootInstructions`, `maxSelfRepairs`, `exhaustedLabel`, `failedLabel`, `retry`, and `targets`, `issue_labels`, `pr_labels` (item-labeling manifests only). Everything else (`trigger` apart from those, `mode`, `agent`, `context`, `tools`, `files`, `acceptance`, `commitPrefix`, `start`, `publish`) is structural and changes only by shipping a manifest.
 - A relative `skill` resolves against the directory the manifest came from, so a deployment keeps `<directory>/skills/<name>/SKILL.md` beside its YAML. Absolute paths work too.
 - Routing picks the action whose `trigger` matches what sync observed: `source` and `kind`, then `item` (`issue` or `pr`), `author: bot` (the item is authored by `github.botLogin`) and `grades` (for `low_grade`). `manual: false` stops `enqueue` by hand. Only an enabled match routes: a signal whose matching actions are all disabled queues nothing, and a selection label whose `label` action is disabled selects nothing.
 - Two enabled manifests may not share a trigger: startup fails naming both files. To give a trigger to a new action, disable the shipped one that owns it (`"review_issue": { "enabled": false }` above). The selection label still decides between the `label` and `item_changed` issue triggers.
@@ -399,13 +400,50 @@ trigger: { source: github_commits, kind: commit, branch: release, granularity: c
 
 ### Optional actions
 
-An action runs unless its `enabled` is `false`. Only `review_base_change` ships with `enabled: false` (in `actions/review_base_change.yaml`); a deployment turns it on in `scrat.local.json`:
+An action runs unless its `enabled` is `false`. Optional actions, including `label_items`, ship disabled; a deployment turns them on in `scrat.local.json`:
 
 ```json
 { "actions": { "review_base_change": { "enabled": true, "channel": "C0123456789" } } }
 ```
 
 Disabling an action stops its queued tasks from being claimed. For a disabled action, startup skips the skill file check and the settings checks.
+
+### Optional issue and PR labels
+
+`label_items` is an independent, read-only classification task. It ships disabled, at priority **0** (below the other shipped actions), using **codex-lb / gpt-6.1-terra**. It publishes labels only, without a comment or PR grade, and runs without dependency setup, tests or merge preparation. It covers human, bot and fork PRs, including drafts.
+
+Put overrides under `actions.label_items` in **`scrat.local.json`**. This deployment-owned file is preserved across upgrades; do not customize the shipped YAML. Arrays replace the defaults in full.
+
+```json
+{
+  "actions": {
+    "label_items": {
+      "enabled": true,
+      "targets": ["prs"],
+      "provider": "codex-lb",
+      "model": "gpt-6.1-terra",
+      "thinkingLevel": "high",
+      "priority": 0,
+      "issue_labels": [],
+      "pr_labels": [
+        {
+          "category": "risk",
+          "choices": [
+            { "name": "risk: low", "description": "Docs, copy, internal-only features, additive changes behind a flag, and UI fixes." },
+            { "name": "risk: medium", "description": "Ordinary product changes." },
+            { "name": "risk: high", "description": "Highest-risk code, including security and authentication changes." }
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+- `targets` accepts `"issues"`, `"prs"`, or both. Each enabled kind needs a nonempty corresponding `issue_labels` or `pr_labels` array. Each entry has a `category` and a nonempty `choices` array of `{ name, description }` objects. Label names must be unique across categories for that item kind, case-insensitively. The default is PRs only, with the risk choices above; `{"actions":{"label_items":{"enabled":true}}}` is enough to enable it.
+- Exactly one allowed choice per category is required before publication. Unknown, missing or duplicate selections are rejected and corrected through the normal format-retry path. For risk, the highest applicable choice wins. Other labels, including PR grades, are left alone; only unselected choices in configured categories are removed. If you rename or remove a configured label, its old name becomes unmanaged; remove obsolete labels separately.
+- **Backfill:** the next sync after enabling queues every existing open item of the selected kinds without a labeling task for its current snapshot and policy. New PR commits (including force pushes), retargets, title/body edits and category-rule changes requeue classification. Comments, label changes, and base-tip movement alone do not. Repeated syncs coalesce queued work and do not repeat an unchanged completed or failed task. Closed/merged items are not backfilled.
+- To force a fresh classification of selected open items: `npm run enqueue -- label_items 123 456`. A queued task reviews the latest fetched item and policy; publication and later syncs use that reviewed snapshot, not the original queue fingerprint. A commit or policy change during classification or before a publication retry cannot receive outdated labels. Use `npm run retry -- <task-id>` for a failed unchanged task.
 
 ### Slack status
 

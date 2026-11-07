@@ -13,8 +13,8 @@ export type RoutingDecision =
   | { type: "enqueue"; action: string; reason: string; input: KeyedTriggerInput }
   | { type: "cancel"; action: string; reason: string };
 
-function queue(latest: TaskFacts | undefined, action: string, reason: string, input: KeyedTriggerInput): RoutingDecision[] {
-  if (latest?.status !== "cancelled" && latest && triggerKeyOf(latest.input) === input.triggerKey) return [];
+export function planKeyedTask(latest: TaskFacts | undefined, action: string, reason: string, input: KeyedTriggerInput, coveredKey = latest && triggerKeyOf(latest.input)): RoutingDecision[] {
+  if (latest && latest.status !== "cancelled" && coveredKey === input.triggerKey) return [];
   return [{ type: "enqueue", action, reason, input }];
 }
 
@@ -29,7 +29,7 @@ export function planIssueTasks({ labelAction, reviewAction, labelled, implemente
   const decisions: RoutingDecision[] = reviewAction ? [{ type: "cancel", action: reviewAction, reason: "Issue selected for implementation" }] : [];
   if (implemented) decisions.push({ type: "cancel", action: labelAction, reason: "An open PR already implements this issue" });
   else if (!workspaceId && (!latest || latest.status === "queued" || latest.status === "cancelled" || previouslyLabelled === false)) {
-    decisions.push(...queue(latest, labelAction, `Issue has the ${botSlug} label`, {
+    decisions.push(...planKeyedTask(latest, labelAction, `Issue has the ${botSlug} label`, {
       source: "github_items", kind: "label", triggerKey: JSON.stringify({ labelledAt: updatedAt, mainSha }), mainSha,
     }));
   }
@@ -44,13 +44,13 @@ export function planPrMaintenance({ conflictAction, feedbackAction, conflicts, s
   const decisions: RoutingDecision[] = [];
   if (conflictAction) {
     decisions.push(...conflicts || stale
-      ? queue(conflictTask, conflictAction, conflicts ? `${botName} PR conflicts with its base branch` : `${botName} PR is behind its base branch and could not be prepared`, {
+      ? planKeyedTask(conflictTask, conflictAction, conflicts ? `${botName} PR conflicts with its base branch` : `${botName} PR is behind its base branch and could not be prepared`, {
         source: "github_items", kind: "pr_conflicts", triggerKey: JSON.stringify({ mainSha, headSha }), mainSha, headSha,
       }) : [{ type: "cancel", action: conflictAction, reason: "PR no longer conflicts" } as const]);
   }
   if (feedbackAction) {
     const commentRevisions = [...pendingComments].sort();
-    if (commentRevisions.length) decisions.push(...queue(feedbackTask, feedbackAction, `New feedback on a ${botName} PR`, {
+    if (commentRevisions.length) decisions.push(...planKeyedTask(feedbackTask, feedbackAction, `New feedback on a ${botName} PR`, {
       source: "github_items", kind: "pr_feedback", triggerKey: JSON.stringify(commentRevisions), commentRevisions,
     }));
     else decisions.push({ type: "cancel", action: feedbackAction, reason: "Feedback already handled" });
@@ -68,7 +68,7 @@ export function planSelfRepair({ repairAction, repairActions, state, feedbackTas
     return { decisions: cancel, limited: false };
   }
   const { originId } = state.assessment, grade = state.assessment.result.grade;
-  const decisions = queue(repairTask, repairAction, `Current review graded ${grade}`, { source: "github_items", kind: "low_grade", triggerKey: originId, assessmentRunId: originId, grade: grade! });
+  const decisions = planKeyedTask(repairTask, repairAction, `Current review graded ${grade}`, { source: "github_items", kind: "low_grade", triggerKey: originId, assessmentRunId: originId, grade: grade! });
   return decisions.length && limit !== undefined && count >= limit ? { decisions: cancel, limited: true } : { decisions, limited: false };
 }
 
@@ -108,7 +108,7 @@ export function planReview(facts: ReviewFacts): RoutingDecision[] {
       ? "Base changes do not affect the reviewed scope" : "No changes since the last review" }];
     changedPaths = facts.freshness.changedPaths;
   }
-  return queue(latest, action, completed ? "Relevant GitHub or base-branch changes" : "Initial GitHub review", {
+  return planKeyedTask(latest, action, completed ? "Relevant GitHub or base-branch changes" : "Initial GitHub review", {
     source: "github_items", kind: "item_changed", triggerKey, revision, mainSha, changedPaths,
     ...facts.kind === "pr" && facts.state.kind === "stale" && facts.state.reason === "base" && { baseOnly: true },
     previousMainSha: completed?.mainSha ?? null, previousHeadSha: completed?.headSha ?? null,

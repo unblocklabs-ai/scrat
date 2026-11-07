@@ -1,0 +1,22 @@
+name: label_items
+enabled: false
+trigger: { source: github_items, kind: item_labels }
+mode: review
+context: change
+files: []
+publish: [item_labels]
+skill: skills/label_items/SKILL.md
+model: { provider: codex-lb, model: gpt-6.1-terra, thinkingLevel: high }
+priority: 0
+retry: { initialDelaySeconds: 60, maxDelaySeconds: 3600 }
+targets: [prs]
+issue_labels: []
+pr_labels:
+  - category: risk
+    choices:
+      - name: "risk: low"
+        description: "Docs, copy, internal-only features, additive changes behind a flag, and UI fixes."
+      - name: "risk: medium"
+        description: "Ordinary product changes."
+      - name: "risk: high"
+        description: "Highest-risk code, including security and authentication changes."

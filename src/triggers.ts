@@ -14,6 +14,7 @@ const prConflicts = items("pr_conflicts", { triggerKey: text, mainSha: text, hea
 const prFeedback = items("pr_feedback", { triggerKey: text, commentRevisions: Type.Array(text) });
 const lowGrade = items("low_grade", { triggerKey: text, assessmentRunId: text, grade: text });
 const manual = items("manual", {});
+const itemLabels = items("item_labels", { triggerKey: text });
 const commit = Type.Object({
   source: Type.Literal("github_commits"), kind: Type.Literal("commit"),
   triggerKey: text, sha: text, previousSha: text, branch: text, commitCount: Type.Number(), truncated: Type.Boolean(),
@@ -29,6 +30,7 @@ const members = {
   pr_feedback: { source: "github_items", schema: prFeedback },
   low_grade: { source: "github_items", schema: lowGrade },
   manual: { source: "github_items", schema: manual },
+  item_labels: { source: "github_items", schema: itemLabels },
   commit: { source: "github_commits", schema: commit },
   tick: { source: "schedule", schema: tick },
   site_map: { source: "storefront", schema: siteMap },
@@ -36,7 +38,7 @@ const members = {
 } as const;
 
 export type TriggerInput = Static<typeof itemChanged> | Static<typeof label> | Static<typeof prConflicts> | Static<typeof prFeedback>
-  | Static<typeof lowGrade> | Static<typeof manual> | Static<typeof commit> | Static<typeof tick> | Static<typeof siteMap> | Static<typeof storeChange>;
+  | Static<typeof lowGrade> | Static<typeof manual> | Static<typeof itemLabels> | Static<typeof commit> | Static<typeof tick> | Static<typeof siteMap> | Static<typeof storeChange>;
 export type KeyedTriggerInput = Extract<TriggerInput, { triggerKey: string }>;
 type Kind = keyof typeof members;
 type ManifestKind = Exclude<Kind, "manual">;

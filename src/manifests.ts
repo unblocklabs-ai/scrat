@@ -11,7 +11,7 @@ import { triggerKinds, triggerSource } from "./triggers.ts";
 const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const toolNames = ["read", "grep", "find", "ls", "git", "read_base", "bash", "edit", "write", "http", "browser", "github_search"] as const;
 const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "history", "validation", "triage", "issue", "storefront", "cloudflare", "store_changes"] as const;
-const effectNames = ["push", "pull_request", "comment", "labels", "pr_assessment", "issue", "slack_reply", "site_map"] as const;
+const effectNames = ["push", "pull_request", "comment", "labels", "item_labels", "pr_assessment", "issue", "slack_reply", "site_map"] as const;
 const startEffectNames = ["slack_post"] as const;
 export type ThinkingLevel = (typeof thinkingLevels)[number];
 export type ToolName = (typeof toolNames)[number];
@@ -23,11 +23,21 @@ const list = <T extends TSchema>(items: T, minItems = 0) => Type.Array(items, { 
 export const modelSettings = Type.Object({ provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels) }, strict);
 const retrySettings = Type.Object({ initialDelaySeconds: Type.Integer({ minimum: 1 }), maxDelaySeconds: Type.Integer({ minimum: 1 }) }, strict);
 const positive = Type.Integer({ minimum: 1 });
+const labelCategories = Type.Array(Type.Object({
+  category: Type.String({ minLength: 1, pattern: "\\S" }),
+  choices: Type.Array(Type.Object({
+    name: Type.String({ minLength: 1, maxLength: 50, pattern: "^\\S(?:.*\\S)?$" }),
+    description: Type.String({ minLength: 1, pattern: "\\S" }),
+  }, strict), { minItems: 1 }),
+}, strict));
+export type LabelCategory = Static<typeof labelCategories>[number];
 const settings = {
   enabled: Type.Optional(Type.Boolean()), priority: Type.Integer(), skill: Type.String(),
   channel: Type.Optional(Type.String()), maxRangeCommits: Type.Optional(positive), startMessage: Type.Optional(Type.String()),
   browserSteps: Type.Optional(positive), browserSeconds: Type.Optional(positive), rootInstructions: Type.Optional(Type.String()),
   maxSelfRepairs: Type.Optional(Type.Integer({ minimum: 0 })), exhaustedLabel: Type.Optional(nullable(Type.String())), failedLabel: Type.Optional(nullable(Type.String())),
+  targets: Type.Optional(list(Type.Enum(["issues", "prs"]), 1)),
+  issue_labels: Type.Optional(labelCategories), pr_labels: Type.Optional(labelCategories),
 };
 export const actionSettings = Type.Object({
   ...settings, ...modelSettings.properties, reviewers: Type.Array(modelSettings), branch: Type.Optional(Type.String()), retry: Type.Optional(nullable(retrySettings)),
@@ -61,7 +71,7 @@ export type Manifest = Resolved & { file: string; root: string };
 const defaultTools = ({ mode, agent, context }: Pick<Resolved, "mode" | "agent" | "context">): ToolName[] => mode === "change" ? ["read", "grep", "find", "ls", "bash", "edit", "write"]
   : ["read", "grep", "find", "ls", "git", ...agent === "panel" || context === "change" ? ["read_base" as const] : []];
 
-type EntrySettings = Partial<Pick<ActionSettings, "reviewers" | "retry" | "failedLabel" | "maxSelfRepairs" | "exhaustedLabel" | "channel" | "startMessage" | "maxRangeCommits" | "branch" | "cron" | "window" | "browserSteps" | "browserSeconds" | "rootInstructions">>;
+type EntrySettings = Partial<Omit<ActionSettings, "model">>;
 
 export function scheduleProblem(key: "cron" | "window", value: string) {
   try { if (key === "cron") nextTick(parseCron(value), new Date(0)); else parseWindow(value); } catch (error) { return (error as Error).message; }
@@ -79,8 +89,19 @@ export function entryProblems({ mode, agent, trigger }: Pick<Resolved, "mode" | 
     [(entry.browserSteps === undefined && entry.browserSeconds === undefined) || trigger.source === "schedule" || trigger.source === "storefront" || trigger.source === "shopify", "browserSteps and browserSeconds are only allowed with source schedule, storefront or shopify"],
     [entry.rootInstructions === undefined || trigger.source === "schedule", "rootInstructions is only allowed with source schedule"],
     [(entry.cron === undefined && entry.window === undefined) || trigger.source === "schedule", "cron and window are only allowed with source schedule"],
+    [(entry.targets === undefined && entry.issue_labels === undefined && entry.pr_labels === undefined) || trigger.kind === "item_labels", "targets, issue_labels and pr_labels require kind item_labels"],
+    [trigger.kind !== "item_labels" || Boolean(entry.targets?.length), "kind item_labels requires targets"],
   ];
-  return checks.filter(([ok]) => !ok).map(([, message]) => message);
+  const problems = checks.filter(([ok]) => !ok).map(([, message]) => message);
+  for (const target of ["issues", "prs"] as const) {
+    const categories = (target === "issues" ? entry.issue_labels : entry.pr_labels) ?? [];
+    if (entry.targets?.includes(target) && !categories.length) problems.push(`${target} target requires non-empty ${target === "issues" ? "issue_labels" : "pr_labels"}`);
+    const names = categories.flatMap(({ choices }) => choices.map(({ name }) => name.toLowerCase()));
+    if (new Set(names).size !== names.length) problems.push(`${target}: label names must be unique across categories (case-insensitive)`);
+    const keys = categories.map(({ category }) => category.toLowerCase());
+    if (new Set(keys).size !== keys.length) problems.push(`${target}: category names must be unique (case-insensitive)`);
+  }
+  return problems;
 }
 
 function crossChecks(m: Resolved) {
@@ -90,7 +111,9 @@ function crossChecks(m: Resolved) {
   const any = (list: readonly string[], names: readonly string[]) => names.some((name) => list.includes(name));
   const items = t.source === "github_items", commits = t.source === "github_commits", scheduled = t.source === "schedule", storefront = t.source === "storefront", shopify = t.source === "shopify", slack = [...m.start ?? [], ...publish];
   need(triggerSource(t.kind) === t.source, `trigger.kind ${t.kind} does not belong to source ${t.source}`);
-  need(items === (t.item !== undefined), "trigger.item is required for github_items and forbidden for github_commits");
+  need(t.kind === "item_labels" ? t.item === undefined : items === (t.item !== undefined), "trigger.item is required for github_items except item_labels, which targets both kinds, and forbidden for other sources");
+  need((t.kind === "item_labels") === publish.includes("item_labels"), "the item_labels trigger and effect require each other");
+  need(t.kind !== "item_labels" || (mode === "review" && agent === "single" && publish.length === 1), "item_labels requires a single review publishing only item_labels");
   need(!["pr_conflicts", "pr_feedback", "low_grade"].includes(t.kind) || (t.item === "pr" && t.author === "bot"), `trigger.kind ${t.kind} requires item: pr and author: bot`);
   need(t.kind !== "label" || t.item === "issue", "trigger.kind label requires item: issue");
   need(t.kind !== "item_changed" || t.item !== "pr" || publish.includes("pr_assessment"), "an item_changed trigger on prs must publish pr_assessment");
@@ -209,7 +232,7 @@ export const resolveAction = (manifest: Manifest, entry: ActionSettings) => ({ .
 export type Action = ReturnType<typeof resolveAction>;
 
 export function deploymentDefaults(m: Manifest) {
-  const optional = { branch: m.trigger.branch, cron: m.trigger.cron, window: m.trigger.window, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, browserSteps: m.browserSteps, browserSeconds: m.browserSeconds, rootInstructions: m.rootInstructions, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel, failedLabel: m.failedLabel, retry: m.retry };
+  const optional = { targets: m.targets, issue_labels: m.issue_labels, pr_labels: m.pr_labels, branch: m.trigger.branch, cron: m.trigger.cron, window: m.trigger.window, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, browserSteps: m.browserSteps, browserSeconds: m.browserSeconds, rootInstructions: m.rootInstructions, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel, failedLabel: m.failedLabel, retry: m.retry };
   return {
     enabled: m.enabled ?? true, priority: m.priority, skill: m.skill, ...m.model, reviewers: m.reviewers,
     ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== undefined)),

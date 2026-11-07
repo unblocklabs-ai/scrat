@@ -59,7 +59,7 @@ async function publishStage({ task, run, subject, references, manifest }: Ctx, o
   const currentMainSha = review ? async () => run.stage === "publishing" ? mainSha
     : await github.fetchBranch(current.baseBranch) : undefined;
   if (manifest.publish.includes("pr_assessment")) await currentMainSha?.();
-  else {
+  else if (!manifest.publish.includes("item_labels")) {
     const state = await freshness(savedEvaluation(evaluatedRun), { ...current, mainSha: currentMainSha }, "relevant-paths", true);
     if (state.kind === "stale") throw new Error(state.reason === "context"
       ? "GitHub task context changed; enqueue a fresh task instead of retrying publication"

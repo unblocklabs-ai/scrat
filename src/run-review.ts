@@ -121,8 +121,8 @@ export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   const review: Review = { workspace, mainSha, headSha, diffBaseSha };
   const environment: Environment = observed ? { ...config.workspace.environment } : {};
   stopBefore(stop, "workspace preparation");
-  if (observed?.pullRequest) await prepareReviewCommands(ctx, observed, review, { ...childEnvironment(), ...environment });
-  else if (observed) ctx.operation.log.info({ event: "workspace.prepare_skipped", reason: "issue review" });
+  if (observed?.pullRequest && !manifest.publish.includes("item_labels")) await prepareReviewCommands(ctx, observed, review, { ...childEnvironment(), ...environment });
+  else if (observed) ctx.operation.log.info({ event: "workspace.prepare_skipped", reason: manifest.publish.includes("item_labels") ? "item labeling" : "issue review" });
   if (observed) await refreshPreview(ctx, observed, review);
   stopBefore(stop, "the agent");
   const changeContext = manifest.context === "change";

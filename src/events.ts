@@ -21,6 +21,7 @@ export type JournalEvent = (
   | { type: "task.rejected"; data: { action: string; reason: string } }
   | { type: "task.retried"; data: { action: TaskDetails["action"]; mode: "repair" | "validation" } }
   | { type: "workspace.committed" | "workspace.pushed"; data: { workspaceId: string; commitSha: string } }
+  | { type: "workspace.publication_refreshed"; data: { originalWorkspaceId: string; workspaceId: string; originalCommitSha: string; commitSha: string; base: string } }
   | { type: "task.enqueued"; data: TaskDetails }
   | { type: "task.coalesced"; data: {
       action: TaskDetails["action"];

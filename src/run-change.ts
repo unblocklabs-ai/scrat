@@ -4,7 +4,7 @@ import { config } from "./config.ts";
 import type { Manifest } from "./manifests.ts";
 import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
-import { createRunDatabase } from "./databases.ts";
+import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
 import { describeError, type ErrorDetails, errorExitCode } from "./errors.ts";
 import { bestEffort } from "./logging.ts";
@@ -40,12 +40,10 @@ function validationMessage(error: CheckFailure, round: number) {
 
 const unresolvedConflict = "PR still conflicts with its base branch after resolution";
 
-async function runChecks({ run, references, stop }: Ctx, p: Change) {
-  const { workspace, commandEnvironment } = p;
-  updateRun(run.id, { agentCheckpoint: await checkpointWorkspace(workspace) });
-  await asCheckFailure(() => prepareWorkspace(workspace, commandEnvironment, references, p.databaseConfig));
+async function checkWorkspace({ references, stop }: Ctx, { workspace, commandEnvironment, databaseConfig }: Pick<Change, "workspace" | "commandEnvironment" | "databaseConfig">, saveCheckpoint?: (checkpoint: Awaited<ReturnType<typeof checkpointWorkspace>>) => void) {
+  await asCheckFailure(() => prepareWorkspace(workspace, commandEnvironment, references, databaseConfig));
   const checkpoint = await checkpointWorkspace(workspace);
-  updateRun(run.id, { agentCheckpoint: checkpoint });
+  saveCheckpoint?.(checkpoint);
   const validationTree = checkpoint.treeSha;
   stopBefore(stop, "validation commands");
   const commands = await asCheckFailure(() => withValidationSlot(() => runCommands(config.workspace.validate, workspace.path, commandEnvironment, references, "validate"), references, stop)
@@ -57,7 +55,8 @@ async function runChecks({ run, references, stop }: Ctx, p: Change) {
 async function validateAndCommit(ctx: Ctx, p: Change, kind: Acceptance) {
   const { run, manifest, references } = ctx;
   const { workspace } = p;
-  const { commands, validationTree } = await runChecks(ctx, p);
+  updateRun(run.id, { agentCheckpoint: await checkpointWorkspace(workspace) });
+  const { commands, validationTree } = await checkWorkspace(ctx, p, (agentCheckpoint) => { updateRun(run.id, { agentCheckpoint }); });
   await assertNoCommittedSecrets(workspace, p.validationOnly ? run.headSha ?? p.mainSha : p.startHeadSha, validationTree);
   const message = manifest.commitPrefix ? `${manifest.commitPrefix}: ${p.title}` : conventionalTitle(p.title);
   const commitSha = await commitWorkspace(workspace, message, botAuthor(), references);
@@ -212,6 +211,18 @@ async function provisionDatabase({ run, references, cleanup }: Ctx) {
   return { databaseConfig, database, environment };
 }
 
+export async function validateRefreshedChange(ctx: Ctx, workspace: Workspace, base: string, head: string) {
+  stopBefore(ctx.stop, "publication recovery validation");
+  if (ctx.cleanup.databaseRequested) await removeRunDatabase(ctx.run.id, ctx.references);
+  const { databaseConfig, environment } = await provisionDatabase(ctx);
+  const { commands, validationTree } = await checkWorkspace(ctx, { workspace, commandEnvironment: { ...childEnvironment(), ...environment }, databaseConfig });
+  if (await git(workspace.path, ["rev-parse", `${head}^{tree}`]) !== validationTree || await headOf(workspace.path) !== head) {
+    throw new Error("The refreshed commit differs from the validated tree; original work was retained");
+  }
+  await assertNoCommittedSecrets(workspace, base, validationTree);
+  return { headSha: head, commands };
+}
+
 async function agentStage(ctx: Ctx, observed: Observed, p: Change, acceptance: Acceptance, { diffPaths, diffBaseSha }: Awaited<ReturnType<typeof readDiffScope>>) {
   const { task, run, stop } = ctx;
   const { workspace, mainSha, environment, database } = p;
@@ -240,6 +251,12 @@ export async function changeRun(ctx: Ctx, observed: Observed) {
   const acceptance = manifest.acceptance!;
   const acquired = await acquireChangeWorkspace(ctx, observed);
   const { workspace, validationOnly, mainSha, startHeadSha } = acquired;
+  const checkCompeting = async () => {
+    if (observed.item.kind === "issue" && manifest.publish.includes("pull_request")) {
+      await observed.github.assertNoCompetingImplementation(observed.item.payload.number, workspace.branch);
+    }
+  };
+  await checkCompeting();
   if (!validationOnly) updateRun(run.id, { workspaceId: workspace.id, mainSha, headSha: startHeadSha });
   const { databaseConfig, database, environment } = await provisionDatabase(ctx);
   const p: Change = {
@@ -250,6 +267,9 @@ export async function changeRun(ctx: Ctx, observed: Observed) {
   };
   const scope = await readDiffScope(workspace.path, mainSha, p.preparedHead, Boolean(observed.pullRequest));
   if (validationOnly) p.agentInput = { contextDir: contextDirOf(inferenceRunOf(run).id), revisions: { head: p.headSha, base: scope.diffBaseSha, main: mainSha } };
-  else await agentStage(ctx, observed, p, acceptance, scope);
+  else {
+    await agentStage(ctx, observed, p, acceptance, scope);
+    await checkCompeting();
+  }
   await validateStage(ctx, p, acceptance);
 }

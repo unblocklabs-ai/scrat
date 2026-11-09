@@ -5,6 +5,9 @@ import { commentKey } from "./markers.ts";
 
 const digest = (fields: Record<string, unknown>) => createHash("sha256").update(JSON.stringify(fields)).digest("hex");
 
+export const closingIssueNumbers = (body: string | null | undefined) =>
+  [...(body ?? "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi)].map((match) => Number(match[1]));
+
 export function evaluateGithubContext({ item, comments }: GithubContext) {
   const external = comments.filter((comment) => !isBotLogin(comment.author) && comment.body.trim());
   const pullRequest = "head" in item ? item : undefined;

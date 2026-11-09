@@ -8,7 +8,7 @@ import { changedPaths, commitOf, git, headOf, hasPendingMerge, identity, mergeHe
 import { botSlug } from "./identity.ts";
 import { withOperation } from "./logging.ts";
 import { runs, workspaces, type Run, type Workspace } from "./schema.ts";
-import { ifMissing } from "./errors.ts";
+import { errorMessage, ifMissing, WorkflowPushRejected } from "./errors.ts";
 import { SecretLeakError } from "./results.ts";
 import { containsSecret } from "./secrets.ts";
 import { sandboxHome, workspaceRoot } from "./sandbox.ts";
@@ -163,7 +163,8 @@ export async function commitWorkspace(workspace: Workspace, message: string, aut
   return headOf(workspace.path);
 }
 
-export async function pushWorkspace(workspace: Workspace, remote: string, commitSha: string, env: NodeJS.ProcessEnv, references: EventReferences = {}) {
+export async function importWorkspaceCommit(workspace: Workspace, commitSha: string) {
+  if (await commitOf(workspace.repositoryPath, commitSha)) return;
   const bundle = resolve(workspace.path, ".scrat/publish.bundle");
   const directory = dirname(bundle);
   const existing = await ifMissing(lstat(directory), undefined);
@@ -180,8 +181,16 @@ export async function pushWorkspace(workspace: Workspace, remote: string, commit
   }
   if (!(await lstat(bundle)).isFile() || await realpath(bundle) !== bundle) throw new Error("Publication bundle is not an owned regular file");
   await git(workspace.repositoryPath, ["fetch", "--no-tags", "--", bundle, tip]);
+}
+
+export async function pushWorkspace(workspace: Workspace, remote: string, commitSha: string, env: NodeJS.ProcessEnv, references: EventReferences = {}) {
+  await importWorkspaceCommit(workspace, commitSha);
   await pinWorkspaceBase(workspace, commitSha);
-  await git(workspace.repositoryPath, ["push", "--", remote, `${commitSha}:refs/heads/${workspace.branch}`], env);
+  try { await git(workspace.repositoryPath, ["push", "--", remote, `${commitSha}:refs/heads/${workspace.branch}`], env); }
+  catch (error) {
+    if (/refusing to allow .* to create or update workflow .* without [`']workflows?[`'] (?:permission|scope)/i.test(errorMessage(error))) throw new WorkflowPushRejected(error);
+    throw error;
+  }
   recordEvent({ ...references, type: "workspace.pushed", data: { workspaceId: workspace.id, commitSha } });
   return commitSha;
 }

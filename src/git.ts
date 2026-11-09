@@ -38,6 +38,7 @@ export async function blobBytes(repositoryPath: string, oid: string) {
 export const headOf = (repositoryPath: string) => git(repositoryPath, ["rev-parse", "HEAD"]);
 export const gitList = async (repositoryPath: string, args: string[]) => (await git(repositoryPath, args)).split("\0").filter(Boolean);
 export const changedPaths = (repositoryPath: string, ...range: string[]) => gitList(repositoryPath, ["diff", "--name-only", "--no-renames", "-z", ...range]);
+export const workflowPaths = (repositoryPath: string, from: string, to: string) => changedPaths(repositoryPath, from, to, "--", ".github/workflows/");
 
 export type GitPage = { text: string; end: number; more: boolean; total?: number };
 
@@ -137,10 +138,14 @@ const exitsOne = (command: Promise<unknown>) => command.then(() => false, (error
 
 const hasConflicts = (repositoryPath: string, base: string, head: string) => exitsOne(git(repositoryPath, ["merge-tree", "--write-tree", base, head]));
 
+export async function remoteBranchHead(repositoryPath: string, remote: string, branch: string, env = childEnvironment()) {
+  const advertised = await git(repositoryPath, ["ls-remote", "--heads", "--", remote, `refs/heads/${branch}`], env);
+  return advertised.split(/\s+/)[0] || undefined;
+}
+
 export async function branchContainsCommit(workspace: { path: string; repositoryPath: string }, remote: string, branch: string, commitSha: string, env = childEnvironment()) {
   const { repositoryPath } = workspace;
-  const advertised = await git(repositoryPath, ["ls-remote", "--heads", "--", remote, `refs/heads/${branch}`], env);
-  const remoteSha = advertised.split(/\s+/)[0];
+  const remoteSha = await remoteBranchHead(repositoryPath, remote, branch, env);
   if (!remoteSha) return false;
   if (remoteSha === commitSha) return true;
   await git(repositoryPath, ["fetch", "--no-write-fetch-head", "--", remote, remoteSha], env);

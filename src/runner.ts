@@ -1,6 +1,7 @@
 import { manifestOf } from "./actions.ts";
+import { refreshChangePublication } from "./change-publication.ts";
 import { getRepositoryPath } from "./config.ts";
-import { branchConflictCode } from "./errors.ts";
+import { branchConflictCode, CompetingImplementation, WorkflowPushRejected } from "./errors.ts";
 import { removeRunDatabase } from "./databases.ts";
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
@@ -8,16 +9,17 @@ import { bestEffort, startOperation } from "./logging.ts";
 import { observe } from "./observation.ts";
 import { currentPrReview } from "./pr-assessment.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
-import { getRun } from "./run-history.ts";
+import { getRun, updateRun } from "./run-history.ts";
 import { publishRun } from "./publication.ts";
 import { InterruptedError } from "./results.ts";
 import { recordEvent } from "./events.ts";
 import { claimTask, finishRun, interruptRun, retryTransientFailure } from "./tasks.ts";
 import { parseTriggerInput, type TriggerInput } from "./triggers.ts";
-import { removeWorkspace } from "./workspaces.ts";
+import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { changeRun } from "./run-change.ts";
 import { reviewRun } from "./run-review.ts";
 import { type Ctx, type Observed, stopBefore } from "./run-context.ts";
+import type { Run } from "./schema.ts";
 
 async function connect({ subject, item }: Ctx): Promise<Observed | undefined> {
   if (!item) return;
@@ -39,13 +41,10 @@ async function assertRepairCurrent(trigger: TriggerInput, { item, observation, m
   }
 }
 
-async function publishStage({ task, run, subject, references, manifest }: Ctx, observed: Observed | undefined) {
-  if (!observed) return publishRun(new GitHubRepository(subject.repository), subject, task, getRun(run.id)!, references);
+async function checkPublicationContext({ run, manifest }: Ctx, observed: Observed, evaluatedRun: Run, refetch: boolean) {
   const { github, context, item, observation, mainSha } = observed;
   const review = manifest.mode === "review";
-  const evaluatedRun = getRun(run.id)!;
-  const publicationContext = run.stage !== "publishing"
-    ? await github.fetchItemContext(observation.kind, item.payload.number) : context;
+  const publicationContext = refetch ? await github.fetchItemContext(observation.kind, item.payload.number) : context;
   if (publicationContext.item.state !== "open") throw new Error("GitHub item is no longer open");
   let headOverride: string | undefined;
   if (!review && "head" in publicationContext.item && evaluatedRun.context?.headSha) {
@@ -64,7 +63,38 @@ async function publishStage({ task, run, subject, references, manifest }: Ctx, o
       ? "GitHub task context changed; enqueue a fresh task instead of retrying publication"
       : "Reviewed code changed; enqueue a fresh review instead of retrying publication");
   }
-  await publishRun(github, subject, task, evaluatedRun, references, publicationContext);
+  if (item.kind === "issue" && manifest.publish.includes("pull_request") && !evaluatedRun.publication.commentOnly && !evaluatedRun.publication.publishedCommitSha) {
+    const workspace = evaluatedRun.workspaceId ? getWorkspace(evaluatedRun.workspaceId) : undefined;
+    if (workspace) await github.assertNoCompetingImplementation(item.payload.number, workspace.branch);
+  }
+  return publicationContext;
+}
+
+async function publishStage(ctx: Ctx, observed: Observed | undefined) {
+  const { task, run, subject, references, manifest } = ctx;
+  const evaluated = getRun(run.id)!;
+  if (!observed) return publishRun(new GitHubRepository(subject.repository), subject, task, evaluated, references);
+  const { github } = observed;
+  const current = await checkPublicationContext(ctx, observed, evaluated, run.stage !== "publishing");
+  if (manifest.mode === "review") return publishRun(github, subject, task, evaluated, references, current);
+
+  const publishRefreshed = async (candidate: Run) => {
+    stopBefore(ctx.stop, "refreshed publication");
+    const latest = await checkPublicationContext(ctx, observed, candidate, true);
+    await publishRun(github, subject, task, candidate, references, latest);
+  };
+  const candidate = await refreshChangePublication(ctx, github, evaluated);
+  if (candidate) return publishRefreshed(candidate);
+
+  try { await publishRun(github, subject, task, evaluated, references, current); }
+  catch (error) {
+    if (!(error instanceof WorkflowPushRejected)) throw error;
+    // Main can move between preflight and push. Retry only if a refresh can address it.
+    await checkPublicationContext(ctx, observed, evaluated, true);
+    const refreshed = await refreshChangePublication(ctx, github, getRun(run.id)!);
+    if (!refreshed) throw error;
+    await publishRefreshed(refreshed);
+  }
 }
 
 const heapUsed = () => Math.round(process.memoryUsage().heapUsed / 1048576);
@@ -98,6 +128,13 @@ export async function runNextTask(stop?: AbortSignal) {
     operation.complete({ heapUsedMb: heapUsed() });
     return getRun(run.id)!;
   } catch (error) {
+    if (error instanceof CompetingImplementation) {
+      const current = getRun(run.id)!;
+      updateRun(run.id, { publication: { ...current.publication, status: "not_needed" } });
+      const skipped = finishRun(run.id, { status: "completed" });
+      operation.complete({ skipped: error.message, competingPullRequest: error.pullRequestNumber });
+      return skipped;
+    }
     if (error instanceof InterruptedError) {
       recordEvent({ ...references, type: "run.interrupting", data: { stage: getRun(run.id)!.stage, reason: error.message } });
       operation.complete({ interrupted: true, heapUsedMb: heapUsed() });

@@ -28,6 +28,20 @@ export function redactSecrets(value: string) {
 export const transientInferenceCode = "TRANSIENT_INFERENCE";
 export const branchConflictCode = "BRANCH_CONFLICT";
 
+export class CompetingImplementation extends Error {
+  readonly pullRequestNumber: number;
+  constructor(pullRequestNumber: number) {
+    super(`PR #${pullRequestNumber} already implements this issue`);
+    this.pullRequestNumber = pullRequestNumber;
+  }
+}
+
+export class WorkflowPushRejected extends Error {
+  constructor(cause: unknown) {
+    super("GitHub rejected the push because the credential cannot write workflow files", { cause });
+  }
+}
+
 export function errorCode(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }

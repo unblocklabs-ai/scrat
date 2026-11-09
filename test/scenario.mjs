@@ -1773,6 +1773,57 @@ export const scenarios = {
     assert.deepEqual(f.writes.slice(written), [], "An unchanged follow-up makes no GitHub write");
     assert.equal(unchanged.publication.commentId, revised.publication.commentId); assert.equal(unchanged.publication.status, "published");
   } },
+  refresh_publication: { title: "stale workflow content is revalidated before a new PR and after a push race on an existing PR", configure: [configureValidation], seed: () => {
+    mkdirSync("seed/.github/workflows", { recursive: true }); writeFileSync("seed/.github/workflows/ci.yml", "name: old\n");
+  }, run: async () => {
+    const remote = resolve("remote.git"), workflow = ".github/workflows/ci.yml";
+    const advance = (name) => { f.onModel = () => { f.onModel = undefined; changeMain(workflow, `name: ${name}\n`); }; };
+    const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
+    advance("new"); const first = await implement(1);
+    const head = first.publication.publishedCommitSha;
+    assert.equal(git(remote, "show", `${head}:${workflow}`), "name: new");
+    assert.equal(git(remote, "show", `${head}:src/app.ts`), "export const value = 11;");
+    assert.equal(git(remote, "rev-parse", `${head}^`), git(remote, "rev-parse", "main"));
+    assert.equal(first.verification.headSha, head); assert.equal(validations(), 2);
+    assert.equal(f.requests.length, 2, "replay and validation do not ask the agent to rewrite the patch");
+
+    const pr = all(s.items).find((item) => item.kind === "pr");
+    tasks.enqueueTask({ subjectId: pr.id, action: "address_pr_feedback", reason: "Change existing branch", input: { source: "github_items", kind: "manual" } });
+    branchOff("next-main", workflow, "name: newer\n");
+    const next = git(remote, "rev-parse", "next-main");
+    writeFileSync(resolve(remote, "hooks/pre-receive"), `#!/bin/sh
+if test "$(git rev-parse refs/heads/main)" != '${next}'; then
+  unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_QUARANTINE_PATH
+  git update-ref refs/heads/main '${next}' || exit 2
+  echo 'refusing to allow a GitHub App to create or update workflow .github/workflows/ci.yml without \`workflows\` permission' >&2
+  exit 1
+fi
+`, { mode: 0o755 });
+    const second = await success();
+    const updated = second.publication.publishedCommitSha;
+    assert.equal(git(remote, "show", `${updated}:${workflow}`), "name: newer");
+    assert.equal(git(remote, "show", `${updated}:src/app.ts`), "export const value = 211;");
+    git(remote, "merge-base", "--is-ancestor", head, updated);
+    assert.equal(second.verification.headSha, updated); assert.equal(validations(), 4);
+    assert.equal(f.requests.length, 4); assert.equal(f.prs.length, 1);
+    assert.ok(![...f.tokens.values()].some(({ workflows }) => workflows), "inherited workflow content does not require workflow write access");
+  } },
+  workflow_push: { title: "an intentional workflow change uses a workflow-capable Git push token", run: async () => {
+    writeFileSync("remote.git/hooks/pre-receive", '#!/bin/sh\nprintf "%s\\n" "$GIT_CONFIG_VALUE_0" > ../push-auth\n', { mode: 0o755 });
+    f.script = [{ name: "bash", args: { command: "mkdir -p .github/workflows && printf 'name: agent-ci\\n' > .github/workflows/ci.yml" } }];
+    const published = await implement(1);
+    assert.equal(git(resolve("remote.git"), "show", `${published.publication.publishedCommitSha}:.github/workflows/ci.yml`), "name: agent-ci");
+    const credential = Buffer.from(readFileSync("push-auth", "utf8").trim().split(" ").at(-1), "base64").toString("utf8").split(":").at(-1);
+    assert.equal(f.tokens.get(credential)?.workflows, "write");
+  } },
+  competing_implementation: { title: "a human PR opened during implementation prevents validation and duplicate publication", configure: [configureValidation], run: async () => {
+    branchOff("human-fix", "src/app.ts", "export const value = 42;\n");
+    f.onModel = () => { f.onModel = undefined; f.addPr(301, "human-fix", "human", { body: "Closes #1" }); };
+    const remote = resolve("remote.git"), before = git(remote, "for-each-ref", "refs/heads");
+    const skipped = await implement(1);
+    assert.equal(f.prs.length, 1); assert.equal(git(remote, "for-each-ref", "refs/heads"), before);
+    assert.equal(skipped.publication.status, "not_needed"); assert.ok(!existsSync("validations.log"));
+  } },
   ambiguous_pr: { title: "a lost PR response is reconciled without another PR, inference or revalidation, resuming at the publishing stage", configure: [configureValidation], run: async () => {
     const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
     f.addIssue(1); f.enqueue(1, "implement"); f.faults.pr.add(1);

@@ -192,6 +192,7 @@ Per-install systemd overrides (for example a lower `MemoryMax` on a smaller host
 Two modes are supported; `github.auth` picks one.
 
 - **App (default).** A GitHub App installation token, minted per repository and per permission set (the check-run request uses a separate `checks: read` set and storefront preview deployments a separate `deployments: write` set, so an App without one of them loses only the GitHub checks section or the preview's deployment).
+- **Workflow changes.** To let Scrat edit `.github/workflows/`, grant the GitHub App repository permission **Workflows: Read and write** and approve it on the installation. Scrat requests `workflows: write` only for Git pushes that would publish actual workflow changes; ordinary pushes still use `contents: write`. A saved commit that carries older workflow content after its base advances is refreshed and revalidated without another agent turn. Scrat retains the original on conflicts or failed checks and never force-pushes. If a competing open PR already names the issue in a closing reference, Scrat skips creating a duplicate.
 - **PAT.** A classic personal access token from a dedicated account that has write access to the repository (an outside collaborator is enough). Put `GITHUB_PAT=ghp_...` in `.env`; `GITHUB_APP_PRIVATE_KEY`, `appId` and `installationId` are not used.
 
 Example `scrat.local.json` for a PAT deployment (every key already exists in the defaults, so the override loader accepts it):

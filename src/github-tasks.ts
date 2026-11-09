@@ -15,6 +15,7 @@ import { prepareTarget } from "./git.ts";
 import { rateLimitLow, rateLimitState } from "./github-http.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
+import { closingIssueNumbers } from "./github-context.ts";
 import { items, runs, subjects } from "./schema.ts";
 import { cancelQueuedTasks, enqueueTask, latestTask } from "./tasks.ts";
 import { parseTriggerInput } from "./triggers.ts";
@@ -206,8 +207,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
   const ctx: SyncContext = { github, log };
   const defaultBaseSha = await github.fetchBranch(config.github.baseBranch);
   const implemented = new Set(current.filter((item) => item.kind === "pr" && item.state === "open")
-    .flatMap((item) => [...(item.payload.body ?? "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi)]
-      .map((match) => Number(match[1]))));
+    .flatMap((item) => closingIssueNumbers(item.payload.body)));
   let queued = 0, deferred = 0;
   const offset = current.length ? syncRound++ % current.length : 0;
   const ordered = [...current.slice(offset), ...current.slice(0, offset)];

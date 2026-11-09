@@ -4,7 +4,7 @@ import { postReply, reactToRoot, verdictReaction } from "./commit-review.ts";
 import { upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
-import { branchContainsCommit, conventionalTitle, shortSha } from "./git.ts";
+import { branchContainsCommit, conventionalTitle, git, shortSha, workflowPaths } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { isBotLogin } from "./config.ts";
@@ -60,14 +60,26 @@ function changed(context: EffectContext) {
   return { workspace, commitSha };
 }
 
+async function changesWorkflows(path: string, commit: string, base: string, previousHead?: string) {
+  const candidateBase = await git(path, ["merge-base", base, commit]);
+  const intentional = await workflowPaths(path, candidateBase, commit);
+  if (!previousHead) return intentional.length > 0;
+  const delta = await workflowPaths(path, previousHead, commit);
+  if (!delta.length) return false;
+  const previousBase = await git(path, ["merge-base", candidateBase, previousHead]);
+  const inherited = await workflowPaths(path, previousBase, candidateBase);
+  return delta.some((file) => !inherited.includes(file) || intentional.includes(file));
+}
+
 const push = {
   receipted: (publication, context) => publication.publishedCommitSha === context.commitSha,
   async apply(context) {
-    const { github, references } = context;
+    const { github, references, run } = context;
     const { workspace, commitSha } = changed(context);
     const remote = remoteUrl(github.repository);
-    const env = await github.getGitEnvironment(true);
-    if (!await branchContainsCommit(workspace, remote, workspace.branch, commitSha, env)) {
+    if (!await branchContainsCommit(workspace, remote, workspace.branch, commitSha, await github.getGitEnvironment())) {
+      const workflows = run.mainSha && await changesWorkflows(workspace.path, commitSha, run.mainSha, run.context.headSha);
+      const env = await github.getGitEnvironment(workflows ? "workflows" : true);
       await pushWorkspace(workspace, remote, commitSha, env, references);
     }
     context.saveReceipt({ publishedCommitSha: commitSha });
@@ -82,10 +94,13 @@ const pullRequest = {
     const { context: evaluated, result } = run;
     let pr = await github.findPullRequest(workspace.branch, evaluated.baseBranch);
     if (pr?.state === "closed") throw new Error("The workspace PR was already closed");
-    pr ??= await github.createPullRequest({
-      title: conventionalTitle(evaluated.item.title), body: `${result.text}\n\n${validationLine(run)}Closes #${evaluated.item.number}\n\n${taskMarker(task.id)}`,
-      head: workspace.branch, base: evaluated.baseBranch,
-    }, references);
+    if (!pr) {
+      await github.assertNoCompetingImplementation(evaluated.item.number, workspace.branch);
+      pr = await github.createPullRequest({
+        title: conventionalTitle(evaluated.item.title), body: `${result.text}\n\n${validationLine(run)}Closes #${evaluated.item.number}\n\n${taskMarker(task.id)}`,
+        head: workspace.branch, base: evaluated.baseBranch,
+      }, references);
+    }
     const publishedPr = pr;
     db.transaction((transaction) => {
       const created = upsertItem({ externalId: publishedPr.node_id, kind: "pr", payload: publishedPr }, transaction);

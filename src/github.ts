@@ -7,9 +7,10 @@ import { labelName } from "./labels.ts";
 import { logger, withOperation } from "./logging.ts";
 import { endsWithMarker, fingerprintMarker, inlineCommentId, issueCommentId, reviewCommentId, withMarker } from "./markers.ts";
 import type { GithubComment, GithubContext, GithubIssue, GithubItem, GithubPullRequest } from "./github-types.ts";
-import { errorStatus } from "./errors.ts";
+import { closingIssueNumbers } from "./github-context.ts";
+import { CompetingImplementation, errorStatus } from "./errors.ts";
 import { fetchPullRequestHead as fetchHead, fetchRepository } from "./git.ts";
-import { assertConfiguredRepository, remoteUrl } from "./repository.ts";
+import { assertConfiguredRepository, remoteUrl, sameRepository } from "./repository.ts";
 import { conditionalFetch, rateLimitLow } from "./github-http.ts";
 import { assertPublishable, basicCredential, childEnvironment } from "./secrets.ts";
 
@@ -19,6 +20,7 @@ const permissions = {
   pull_request: { pull_requests: "write", contents: "read", metadata: "read" },
   contents_read: { contents: "read", metadata: "read" },
   contents_write: { contents: "write", metadata: "read" },
+  workflows_write: { contents: "write", metadata: "read", workflows: "write" },
   checks: { checks: "read", metadata: "read" },
   pr_checks: { pull_requests: "read", contents: "read", checks: "read", metadata: "read" },
   deployments: { deployments: "write", metadata: "read" },
@@ -168,8 +170,14 @@ export class GitHubRepository {
     this.repository = repository;
   }
 
-  async getGitEnvironment(write = false) {
-    const { token } = await githubForRepository(this.repository, write ? "contents_write" : "contents_read");
+  async getGitEnvironment(write: boolean | "workflows" = false) {
+    const scope = write === "workflows" ? "workflows_write" : write ? "contents_write" : "contents_read";
+    const { token } = await githubForRepository(this.repository, scope).catch((error: unknown) => {
+      if (write === "workflows" && config.github.auth === "app" && errorStatus(error) === 422) {
+        throw new Error("The GitHub App installation must approve Repository permissions → Workflows: Read and write", { cause: error });
+      }
+      throw error;
+    });
     return {
       ...childEnvironment(),
       GIT_TERMINAL_PROMPT: "0",
@@ -258,6 +266,15 @@ export class GitHubRepository {
     });
     const found = matches.find((pr) => isBotLogin(pr.user?.login) && pr.head.repo?.full_name === this.repository && pr.head.ref === branch);
     return found ? pullRequestView(found) : undefined;
+  }
+
+  async assertNoCompetingImplementation(issue: number, ownBranch: string) {
+    const { github, owner, repo } = await this.read();
+    for await (const { data } of github.paginate.iterator(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 })) {
+      const competing = data.find((pr) => !(sameRepository(pr.head.repo?.full_name ?? "", this.repository) && pr.head.ref === ownBranch)
+        && closingIssueNumbers(pr.body).includes(issue));
+      if (competing) throw new CompetingImplementation(competing.number);
+    }
   }
 
   async checkRunConclusions(sha: string) {

@@ -71,7 +71,9 @@ async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observatio
   const { github } = ctx, repositoryPath = getRepositoryPath();
   const { headSha, conflicts, behind } = await prepareTarget(repositoryPath, mainSha, await github.fetchPullRequestHead(pr));
   const lastRun = latestFinishedRun(item.id);
-  const stale = !conflicts && Boolean(lastRun?.error) && lastRun?.stage === "preparing" && lastRun.headSha === headSha && behind;
+  const preparationFailed = behind && !conflicts && Boolean(lastRun?.error) && lastRun?.stage === "preparing" && lastRun.headSha === headSha;
+  const ciBlocker = routes.conflicts && behind && !conflicts && !preparationFailed
+    ? await bestEffort(ctx.log, "github.pr_ci_unavailable", { subjectId: item.id }, () => github.prCiBlocker(pr, mainSha)) : undefined;
   const acknowledged = new Set(observation.own.flatMap((comment) => acknowledgedTaskIds(comment.body)));
   const handled = (routes.feedback ? runHistory(item.id, routes.feedback) : [])
     .filter(({ run, task }) => (!run.finishedAt && task.status === "running") || (run.finishedAt && !run.error)
@@ -84,7 +86,7 @@ async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observatio
   const pending = observation.external.filter((comment) => !consumed.has(commentKey(comment)));
   return {
     conflictAction: routes.conflicts, feedbackAction: routes.feedback,
-    conflicts, stale, mainSha, headSha, pendingComments: pending.map((comment) => commentKey(comment)),
+    conflicts, preparationFailed, ciBlocker, mainSha, headSha, pendingComments: pending.map((comment) => commentKey(comment)),
     conflictTask: latestOf(item.id, routes.conflicts), feedbackTask: latestOf(item.id, routes.feedback),
   };
 }

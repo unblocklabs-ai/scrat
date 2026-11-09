@@ -385,6 +385,41 @@ const staleBranch = async (variant) => {
     await route(); assert.deepEqual(queuedFor(201), ["review_pr"], "the new head gets a fresh review and no further update");
     await success(); await route(); assert.deepEqual(queuedFor(201), []);
     assert.equal(all(s.tasks).filter((t) => t.action === "resolve_conflicts").length, 1);
+
+    changeMain("ci-base.txt", "ok\n");
+    pr.mergeable_state = "blocked";
+    const testMerge = pr.merge_commit_sha = "a".repeat(40);
+    const requiredFailure = { __typename: "CheckRun", isRequired: true, status: "COMPLETED", conclusion: "FAILURE" };
+    const nonBlocking = [{ ...requiredFailure, isRequired: false }, { ...requiredFailure, status: "IN_PROGRESS", conclusion: null }];
+    f.checkRollups.set(merged, [requiredFailure]);
+    f.checkRollups.set(testMerge, nonBlocking);
+    await route(); assert.ok(!queuedFor(201).includes("resolve_conflicts"), "the test merge's pending and optional checks take precedence over a failing head check");
+    f.checkRollups.delete(testMerge);
+    await route(); assert.ok(queuedFor(201).includes("resolve_conflicts"), "when the test merge has no checks, a failed required head check queues a refresh");
+    f.checkRollups.set(testMerge, nonBlocking);
+    await route(); assert.ok(!queuedFor(201).includes("resolve_conflicts"), "a later poll cancels a refresh whose only trigger cleared");
+    pr.base.sha = remoteGit("rev-parse", "main^");
+    await route(); assert.ok(queuedFor(201).includes("resolve_conflicts"), "an obsolete test merge does not hide a failed check on the current head");
+    delete pr.base.sha;
+    f.checkRollups.set(testMerge, [...Array(100).fill(nonBlocking[0]), requiredFailure]);
+    await route(); await route();
+    assert.equal(queuedFor(201).filter((action) => action === "resolve_conflicts").length, 1, "a required test-merge failure queues one refresh across polls");
+    const refreshed = await success();
+    assert.deepEqual(parents(resolve("remote.git"), refreshed.publication.publishedCommitSha), [merged, mainHead()]);
+    await route(); assert.ok(!queuedFor(201).includes("resolve_conflicts"), "a red check does not trigger a refresh when the branch is current");
+    await success();
+
+    changeMain("strict-base.txt", "ok\n");
+    pr.mergeable_state = "behind";
+    f.checkRollups.delete(testMerge);
+    await route(); assert.ok(queuedFor(201).includes("resolve_conflicts"), "GitHub's up-to-date requirement queues a refresh even without failed CI");
+    changeMain("new-base.txt", "ok\n");
+    await success();
+    assert.equal(remoteGit("rev-parse", pr.head.ref), refreshed.publication.publishedCommitSha, "a refresh queued for an older base does not push");
+    await route();
+    const strictRefresh = await success();
+    assert.deepEqual(parents(resolve("remote.git"), strictRefresh.publication.publishedCommitSha), [refreshed.publication.publishedCommitSha, mainHead()]);
+
     await implement(2); drainExcept(202);
     changeMain("bad.txt", "bad\n"); writeFileSync("require-validation", "");
     const fallback = tasks.enqueueTask({ subjectId: prItem(202).id, action: "resolve_conflicts", reason: "Exercise fallback", input: { source: "github_items", kind: "manual", manual: true } });

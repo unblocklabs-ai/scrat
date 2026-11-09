@@ -14,7 +14,9 @@ export type GithubIssue = {
 
 export type GithubPullRequest = GithubIssue & {
   head: { sha: string; ref: string; repo: { full_name: string } | null };
-  base: { ref: string };
+  base: { ref: string; sha?: string };
+  mergeable_state?: string;
+  merge_commit_sha?: string | null;
 };
 
 export type GithubItem = GithubIssue | GithubPullRequest;

@@ -13,7 +13,7 @@ import { publishRun } from "./publication.ts";
 import { InterruptedError } from "./results.ts";
 import { recordEvent } from "./events.ts";
 import { claimTask, finishRun, interruptRun, retryTransientFailure } from "./tasks.ts";
-import { parseTriggerInput } from "./triggers.ts";
+import { parseTriggerInput, type TriggerInput } from "./triggers.ts";
 import { removeWorkspace } from "./workspaces.ts";
 import { changeRun } from "./run-change.ts";
 import { reviewRun } from "./run-review.ts";
@@ -31,8 +31,7 @@ async function connect({ subject, item }: Ctx): Promise<Observed | undefined> {
   return { repository, github, context, pullRequest, item, observation, mainSha };
 }
 
-async function assertRepairCurrent({ task }: Ctx, { item, observation, mainSha }: Observed) {
-  const trigger = parseTriggerInput(task.input);
+async function assertRepairCurrent(trigger: TriggerInput, { item, observation, mainSha }: Observed) {
   if (trigger.kind !== "low_grade") return;
   const state = await currentPrReview(item.id, observation, mainSha);
   if (state.kind !== "current" || state.assessment.originId !== trigger.assessmentRunId) {
@@ -82,7 +81,14 @@ export async function runNextTask(stop?: AbortSignal) {
     const observed = await connect(ctx);
     if (run.stage !== "publishing") {
       stopBefore(stop, "workspace acquisition");
-      if (observed) await assertRepairCurrent(ctx, observed);
+      const trigger = parseTriggerInput(task.input);
+      if (trigger.kind === "pr_conflicts" && trigger.githubCi && !trigger.manual
+        && (trigger.headSha !== observed?.pullRequest?.head.sha || trigger.mainSha !== observed?.mainSha)) {
+        const skipped = finishRun(run.id, { status: "completed" });
+        operation.complete({ skipped: "CI branch refresh was queued for an older PR revision" });
+        return skipped;
+      }
+      if (observed) await assertRepairCurrent(trigger, observed);
       if (ctx.manifest.mode === "review") await reviewRun(ctx, observed);
       else await changeRun(ctx, observed!);
       stopBefore(stop, "publication");

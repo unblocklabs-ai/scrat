@@ -20,6 +20,7 @@ const permissions = {
   contents_read: { contents: "read", metadata: "read" },
   contents_write: { contents: "write", metadata: "read" },
   checks: { checks: "read", metadata: "read" },
+  pr_checks: { pull_requests: "read", contents: "read", checks: "read", metadata: "read" },
   deployments: { deployments: "write", metadata: "read" },
 } as const;
 let authenticate: ReturnType<typeof createAppAuth> | undefined;
@@ -111,7 +112,41 @@ function pullRequestView(item: GithubPullRequest): GithubPullRequest {
   return { ...issueView(item), head: {
     sha: item.head.sha, ref: item.head.ref,
     repo: item.head.repo ? { full_name: item.head.repo.full_name } : null,
-  }, base: { ref: item.base.ref } };
+  }, base: { ref: item.base.ref, sha: item.base.sha }, mergeable_state: item.mergeable_state, merge_commit_sha: item.merge_commit_sha };
+}
+
+type CheckContext = { isRequired: boolean } & (
+  | { __typename: "CheckRun"; status: string; conclusion: string | null }
+  | { __typename: "StatusContext"; state: string }
+);
+type CheckRollup = { repository: { object: { statusCheckRollup: { contexts: {
+  nodes: (CheckContext | null)[] | null; pageInfo: { hasNextPage: boolean; endCursor: string | null };
+} } | null } | null } | null };
+
+const checkRollupQuery = `query($owner: String!, $repo: String!, $number: Int!, $oid: GitObjectID!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    object(oid: $oid) {
+      ... on Commit {
+        statusCheckRollup {
+          contexts(first: 100, after: $after) {
+            nodes {
+              __typename
+              ... on CheckRun { isRequired(pullRequestNumber: $number) status conclusion }
+              ... on StatusContext { isRequired(pullRequestNumber: $number) state }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+function requiredCheckFailed(check: CheckContext | null) {
+  if (!check?.isRequired) return false;
+  return check.__typename === "CheckRun"
+    ? check.status === "COMPLETED" && (check.conclusion === "FAILURE" || check.conclusion === "TIMED_OUT" || check.conclusion === "STARTUP_FAILURE")
+    : check.state === "ERROR" || check.state === "FAILURE";
 }
 
 export async function mapConcurrent<T>(items: readonly T[], run: (item: T, index: number) => Promise<void>, stop: () => boolean = () => false) {
@@ -229,6 +264,29 @@ export class GitHubRepository {
     const { github, owner, repo } = await githubForRepository(this.repository, "checks");
     const runs = await github.paginate(github.rest.checks.listForRef, { owner, repo, ref: sha, per_page: 100 });
     return runs.flatMap((run) => run.conclusion ? [{ name: run.name, conclusion: run.conclusion }] : []);
+  }
+
+  async prCiBlocker(pr: GithubPullRequest, baseSha: string) {
+    if (pr.mergeable_state === "behind") return "behind" as const;
+    if (!pr.mergeable_state || pr.mergeable_state === "unknown") return;
+    const mergeSha = pr.base.sha === baseSha ? pr.merge_commit_sha : undefined;
+    const { github, owner, repo } = await githubForRepository(this.repository, "pr_checks");
+    const checksFor = async (oid: string): Promise<"failed" | "clear" | undefined> => {
+      let after: string | null = null, hasChecks = false;
+      do {
+        const response: CheckRollup = await github.graphql(checkRollupQuery, { owner, repo, number: pr.number, oid, after });
+        const page = response.repository?.object?.statusCheckRollup?.contexts;
+        if (!page) break;
+        const checks = page.nodes ?? [];
+        if (checks.some(requiredCheckFailed)) return "failed";
+        hasChecks ||= checks.some((check) => check !== null);
+        after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+      } while (after);
+      return hasChecks ? "clear" : undefined;
+    };
+    // GitHub can still report a test merge from an older base. Only use checks for the current revision.
+    const mergeChecks = mergeSha ? await checksFor(mergeSha) : undefined;
+    if ((mergeChecks ?? await checksFor(pr.head.sha)) === "failed") return "failed" as const;
   }
 
   async searchIssues(query: string) {

@@ -1,28 +1,51 @@
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, count, desc, eq, isNotNull, isNull, lte, notExists, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNotNull, isNull, lte, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import { manifestOf, manifests } from "./actions.ts";
 import { config, isActionEnabled } from "./config.ts";
 import { findItem, sameRepository } from "./repository.ts";
 import { db } from "./db.ts";
-import { describeError, type ErrorDetails, errorCode, errorMessage, transientInferenceCode } from "./errors.ts";
+import { CompetingImplementation, competingImplementationCode, describeError, type ErrorDetails, errorCode, errorMessage, ImplementationEnded, transientInferenceCode } from "./errors.ts";
+import type { GitHubRepository } from "./github.ts";
+import type { IssueImplementation } from "./github-types.ts";
+import { botSlug } from "./identity.ts";
 import { recordEvent, type JournalEvent } from "./events.ts";
 import { withOperationSync } from "./logging.ts";
 import { entryStage, hasPublicationSnapshot, hasReviewCheckpoint, hasValidationCheckpoint, InterruptedError, workerStoppedMessage } from "./results.ts";
 import { getRun, getTask, latestRunOfTask } from "./run-history.ts";
 import { asItem } from "./items.ts";
 import { categoriesFor, itemLabelKey } from "./item-labels.ts";
-import { items, runs, type Run, subjects, tasks, type Task, type Subject } from "./schema.ts";
+import { items, runs, type Run, subjects, tasks, type Task, type Subject, workspaces } from "./schema.ts";
 import { isBaseOnly, isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
 import { signalWork } from "./work-signal.ts";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
-const queuedTaskOf = (transaction: Pick<typeof db, "select">, subjectId: string, action: string) =>
-  transaction.select().from(tasks).where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action), eq(tasks.status, "queued"))).get();
+const pendingTask = inArray(tasks.status, ["queued", "blocked"]);
+const pendingTaskOf = (transaction: Pick<typeof db, "select">, subjectId: string, action: string) =>
+  transaction.select().from(tasks).where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action), pendingTask)).get();
 
-export function latestTask(subjectId: string, action: string) {
-  return db.select().from(tasks).where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action)))
+const isPending = (task: Task | undefined): task is Task & { status: "queued" | "blocked" } =>
+  task?.status === "queued" || task?.status === "blocked";
+
+function sameOpening(task: Task, facts: IssueImplementation) {
+  return task.issueOpening === null
+    ? !facts.reopenedAt || Date.parse(facts.reopenedAt) <= Date.parse(task.createdAt)
+    : task.issueOpening === facts.opening;
+}
+
+export async function assertCurrentImplementation(github: GitHubRepository, task: Task, issue: number, base: string, branch?: string, checkCompetition = true) {
+  const facts = await github.issueImplementation(issue, base, branch, task.createdAt);
+  if (!facts.open || !sameOpening(task, facts)) throw new ImplementationEnded(facts.open ? "GitHub issue reopened" : "GitHub issue closed");
+  if (task.issueOpening === null) {
+    db.update(tasks).set({ issueOpening: facts.opening }).where(eq(tasks.id, task.id)).run();
+    task.issueOpening = facts.opening;
+  }
+  if (checkCompetition && facts.competingPullRequest !== undefined) throw new CompetingImplementation(facts.competingPullRequest);
+}
+
+export function latestTask(subjectId: string, action: string, database: Pick<typeof db, "select"> = db) {
+  return database.select().from(tasks).where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action)))
     .orderBy(desc(tasks.createdAt), desc(tasks.id)).limit(1).get();
 }
 
@@ -39,10 +62,19 @@ function checkClaimable({ task, subject }: { task: Task; subject: Subject }, dat
   return { ok: true as const, previousRun, trigger };
 }
 
+function sameRunInput(previous: Run, task: Task) {
+  // For issue implementation, manual intent changes admission, not the evaluated work.
+  return isDeepStrictEqual(previous.input, task.input)
+    || isManual(task.input) && manifestOf(task.action).publish.includes("pull_request")
+      && isDeepStrictEqual({ ...previous.input, manual: true }, task.input);
+}
+
 function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run | undefined; trigger: TriggerInput }) {
-  const retry = previousRun?.error && isDeepStrictEqual(previousRun.input, task.input) ? previousRun : undefined;
+  const retry = previousRun?.error && sameRunInput(previousRun, task) ? previousRun : undefined;
   const action = manifestOf(task.action);
-  const validationOnly = task.retryMode === "validation";
+  const resumingDeferred = task.lastCompetingPullRequest !== null;
+  const validationOnly = task.retryMode === "validation"
+    || retry?.error?.code === competingImplementationCode && hasValidationCheckpoint(retry);
   const publicationResume = !validationOnly && hasPublicationSnapshot(retry) ? retry : undefined;
   const interrupted = retry?.error?.name === "InterruptedError";
   const review = action.mode === "review";
@@ -54,28 +86,32 @@ function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run |
   const settings = pinned ?? action;
   const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? (isBaseOnly(trigger) ? action.reviewers.slice(0, 1) : action.reviewers);
   const { provider, model, thinkingLevel } = !resume && reviewers.length === 1 ? reviewers[0] : settings;
-  return { prior, resume, publicationResume, review, reviewers, skill: settings.skill, provider, model, thinkingLevel, resumeReason, stage: entryStage(retry, task.retryMode, reviewResume) };
+  return { prior, resume, publicationResume, review, reviewers, skill: settings.skill, provider, model, thinkingLevel, resumeReason, resumingDeferred,
+    stage: entryStage(retry, validationOnly ? "validation" : "repair", reviewResume) };
 }
 
 export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | "action" | "priority" | "reason"> & { input: TriggerInput }) {
   return withOperationSync("task.enqueue", { subjectId: task.subjectId, action: task.action }, (operation) => {
     manifestOf(task.action);
     const queued = db.transaction((transaction) => {
-      const previous = queuedTaskOf(transaction, task.subjectId, task.action);
+      const previous = pendingTaskOf(transaction, task.subjectId, task.action);
+      if (previous?.status === "blocked" && !isManual(task.input)) return previous;
       const input = isManual(task.input) && previous ? { ...previous.input, manual: true }
         : previous && isManual(previous.input) ? { ...task.input, manual: true } : task.input;
-      const queuedTask = transaction.insert(tasks).values({ ...task, input, priority: task.priority ?? config.actions[task.action].priority }).onConflictDoUpdate({
-        target: [tasks.subjectId, tasks.action],
-        targetWhere: sql`${tasks.status} = 'queued'`,
-        set: {
-          priority: task.priority ?? tasks.priority,
-          reason: task.reason,
-          input,
-          retryMode: "repair",
-          retryCount: null,
-          availableAt: null,
-        },
-      }).returning().get()!;
+      const queuedTask = previous?.status === "blocked"
+        ? transaction.update(tasks).set({ input, priority: task.priority ?? previous.priority }).where(eq(tasks.id, previous.id)).returning().get()!
+        : transaction.insert(tasks).values({ ...task, input, priority: task.priority ?? config.actions[task.action].priority }).onConflictDoUpdate({
+          target: [tasks.subjectId, tasks.action],
+          targetWhere: sql`${tasks.status} in ('queued', 'blocked')`,
+          set: {
+            priority: task.priority ?? tasks.priority,
+            reason: task.reason,
+            input,
+            retryMode: "repair",
+            retryCount: null,
+            availableAt: null,
+          },
+        }).returning().get()!;
       const references = { subjectId: queuedTask.subjectId, taskId: queuedTask.id, operationId: operation.operationId };
       recordEvent(previous ? {
         ...references,
@@ -147,7 +183,19 @@ export function claimTask() {
       recordEvent({ subjectId: next.task.subjectId, taskId: next.task.id, type: "task.rejected", data: { action: next.task.action, reason: claimable.reason } }, transaction);
     }
     if (!next || !claimable?.ok) return;
-    const { prior, resume, publicationResume, review, reviewers, skill, provider, model, thinkingLevel, resumeReason, stage } = planRunStart(next.task, claimable);
+    const { prior, resume, publicationResume, review, reviewers, skill, provider, model, thinkingLevel, resumeReason, stage, resumingDeferred } = planRunStart(next.task, claimable);
+    // A newly selected opening does not inherit the previous opening's checkout.
+    if (!claimable.previousRun && claimable.trigger.kind === "label" && claimable.trigger.freshOpening && next.subject.workspaceId) {
+      const oldId = next.subject.workspaceId;
+      transaction.update(subjects).set({ workspaceId: null }).where(eq(subjects.id, next.subject.id)).run();
+      next.subject.workspaceId = null;
+      if (!transaction.select({ id: subjects.id }).from(subjects).where(eq(subjects.workspaceId, oldId)).get()) {
+        const retained = transaction.update(workspaces).set({ retainedAt: new Date().toISOString() })
+          .where(and(eq(workspaces.id, oldId), isNull(workspaces.removedAt), isNull(workspaces.retainedAt))).returning().get();
+        if (retained) recordEvent({ subjectId: next.subject.id, taskId: next.task.id, type: "workspace.retained",
+          data: { workspaceId: oldId, path: retained.path, reason: "GitHub issue reopened" } }, transaction);
+      }
+    }
     const task = transaction.update(tasks).set({ status: "running" }).where(eq(tasks.id, next.task.id)).returning().get()!;
     const run = transaction.insert(runs).values({
       taskId: task.id,
@@ -158,12 +206,12 @@ export function claimTask() {
       skill,
       provider, model, thinkingLevel, reviewers,
       workspaceId: resume?.workspaceId ?? (review ? null : next.subject.workspaceId),
+      publication: publicationResume ? { ...publicationResume.publication, status: "pending" } : { status: "pending" },
       stage,
       ...(resume ? {
         context: resume.context, result: resume.result, mainSha: resume.mainSha, headSha: resume.headSha,
         piSessionId: resume.piSessionId, piSessionFile: resume.piSessionFile,
         agentCheckpoint: resume.agentCheckpoint,
-        publication: publicationResume ? { ...resume.publication, status: "pending" } : { status: "pending" },
         verification: publicationResume?.verification,
       } : {}),
       startedAt: new Date().toISOString(),
@@ -176,7 +224,7 @@ export function claimTask() {
     } }, transaction);
     if (resume) recordEvent({ subjectId: task.subjectId, taskId: task.id, runId: run.id, type: "run.resumed", data: { stage: run.stage, fromRunId: resume.id, reason: resumeReason } }, transaction);
     const item = transaction.select().from(items).where(eq(items.id, task.subjectId)).get();
-    return { task, subject: next.subject, item: item && asItem(item, next.subject), run };
+    return { task, subject: next.subject, item: item && asItem(item, next.subject), run, resumingDeferred };
   }, { behavior: "immediate" });
 }
 
@@ -193,12 +241,12 @@ export function retryTask(taskId: string, mode: Task["retryMode"] = "repair") {
       }
       const failed = transaction.select().from(tasks).where(and(eq(tasks.id, taskId), eq(tasks.status, "failed"))).get();
       if (!failed) throw new Error(`Task is not failed: ${taskId}`);
-      const queued = queuedTaskOf(transaction, failed.subjectId, failed.action);
+      const queued = pendingTaskOf(transaction, failed.subjectId, failed.action);
       if (queued) throw new Error(`A queued task already exists for this subject/action: ${queued.id}`);
       if (mode === "validation") {
         const previous = latestRunOfTask(taskId, transaction);
         if (modeOf(failed.action) !== "change" || !hasValidationCheckpoint(previous)
-          || !isDeepStrictEqual(previous.input, failed.input)) {
+          || !sameRunInput(previous, failed)) {
           throw new Error("Validation-only retry requires an unchanged task input and a complete agent checkpoint from a failed validation; use normal retry to repair");
         }
       }
@@ -223,14 +271,78 @@ function closeRun(transaction: Transaction, runId: string, error: ErrorDetails |
   return run;
 }
 
-export function finishRun(runId: string, outcome: { status: "completed" } | { status: "failed"; error: unknown }) {
-  const error = outcome.status === "failed" ? describeError(outcome.error) : null;
+export function finishRun(runId: string, outcome: { status: "completed" } | { status: "failed" | "cancelled"; error: unknown }) {
+  const error = outcome.status === "completed" ? null : describeError(outcome.error);
   const finished = db.transaction((transaction) => closeRun(transaction, runId, error, (run) => ({
-    set: { status: outcome.status, ...outcome.status === "completed" ? { retryCount: null, availableAt: null } : {} },
-    event: error ? { type: "run.failed", data: { stage: run.stage, error } } : { type: "run.completed", data: { stage: run.stage } },
+    set: { status: outcome.status, lastCompetingPullRequest: null, ...outcome.status === "completed" ? { retryCount: null, availableAt: null } : {} },
+    event: outcome.status === "cancelled" ? cancelled(getTask(run.taskId, transaction)!, error!.message)
+      : error ? { type: "run.failed", data: { stage: run.stage, error } } : { type: "run.completed", data: { stage: run.stage } },
   })), { behavior: "immediate" });
   signalWork();
   return finished;
+}
+
+const blockedBy = (lastCompetingPullRequest: number) => ({ status: "blocked" as const, lastCompetingPullRequest });
+const cancelled = (task: Task, reason: string) => ({ type: "task.cancelled" as const, data: { action: task.action, reason } });
+
+export function deferImplementation(runId: string, error: CompetingImplementation) {
+  const finished = db.transaction((transaction) => closeRun(transaction, runId, describeError(error), (run) => {
+    const task = getTask(run.taskId, transaction)!;
+    const subject = transaction.select().from(subjects).where(eq(subjects.id, task.subjectId)).get();
+    if (subject?.state !== "open" || pendingTaskOf(transaction, task.subjectId, task.action)) {
+      return { set: { status: "cancelled", lastCompetingPullRequest: null }, event: cancelled(task, "Implementation closed or superseded") };
+    }
+    return {
+      set: { ...blockedBy(error.pullRequestNumber), retryMode: "repair", retryCount: null, availableAt: null },
+      event: { type: "run.deferred", data: { stage: run.stage, competingPullRequest: error.pullRequestNumber } },
+    };
+  }), { behavior: "immediate" });
+  signalWork();
+  return finished;
+}
+
+export function reconcileIssueImplementation({ subjectId, action, observedTask, observedAt, facts, input, selected, newlySelected }: {
+  subjectId: string; action: string; observedTask?: Task; observedAt: string; facts: IssueImplementation;
+  input: Extract<TriggerInput, { kind: "label" }>; selected: boolean; newlySelected: boolean;
+}) {
+  const queued = db.transaction((transaction) => {
+    const latest = latestTask(subjectId, action, transaction);
+    const subject = transaction.select().from(subjects).where(eq(subjects.id, subjectId)).get();
+    if (subject?.state !== "open" || latest?.id !== observedTask?.id || latest?.status !== observedTask?.status
+      || latest?.issueOpening !== observedTask?.issueOpening || latest?.lastCompetingPullRequest !== observedTask?.lastCompetingPullRequest) return false;
+    const newOpening = latest !== undefined && !sameOpening(latest, facts);
+    const competitor = facts.competingPullRequest;
+    const set = competitor === undefined ? { status: "queued" as const } : blockedBy(competitor);
+    if (isPending(latest)) {
+      if (!facts.open || newOpening) {
+        transaction.update(tasks).set({ status: "cancelled", lastCompetingPullRequest: null }).where(eq(tasks.id, latest.id)).run();
+        recordEvent({ subjectId, taskId: latest.id, ...cancelled(latest, facts.open ? "GitHub issue reopened" : "GitHub issue closed") }, transaction);
+      } else {
+        if (latest.status === set.status && (competitor === undefined || latest.lastCompetingPullRequest === competitor)
+          && latest.issueOpening !== null) return false;
+        transaction.update(tasks).set({ ...set, issueOpening: facts.opening }).where(eq(tasks.id, latest.id)).run();
+        if (competitor !== undefined && latest.status === "queued") {
+          recordEvent({ subjectId, taskId: latest.id, type: "task.blocked", data: { action, competingPullRequest: competitor } }, transaction);
+        }
+        if (competitor === undefined && latest.status === "blocked") {
+          recordEvent({ subjectId, taskId: latest.id, type: "task.resumed", data: { action } }, transaction);
+          return true;
+        }
+        return false;
+      }
+    }
+    if (!selected || !facts.open || !newOpening && (subject.workspaceId
+      || latest && latest.status !== "cancelled" && !newlySelected)) return false;
+    const task = transaction.insert(tasks).values({ ...set, subjectId, action, createdAt: observedAt,
+      input: newOpening ? { ...input, freshOpening: true } : input, issueOpening: facts.opening,
+      priority: config.actions[action].priority, reason: newOpening ? "Selected GitHub issue reopened" : `Issue has the ${botSlug} label`,
+    }).returning().get()!;
+    recordEvent({ subjectId, taskId: task.id, type: "task.enqueued", data: { action, priority: task.priority, reason: task.reason } }, transaction);
+    if (competitor !== undefined) recordEvent({ subjectId, taskId: task.id, type: "task.blocked", data: { action, competingPullRequest: competitor } }, transaction);
+    return competitor === undefined;
+  }, { behavior: "immediate" });
+  if (queued) signalWork();
+  return queued;
 }
 
 export function retryTransientFailure(runId: string, error: unknown) {
@@ -246,13 +358,13 @@ export function interruptRun(runId: string, error: unknown = new InterruptedErro
   const details = describeError(error);
   const interrupted = db.transaction((transaction) => closeRun(transaction, runId, details, (run) => {
     const own = getTask(run.taskId, transaction)!;
-    const superseded = queuedTaskOf(transaction, own.subjectId, own.action);
+    const superseded = pendingTaskOf(transaction, own.subjectId, own.action);
     const retryMode = hasValidationCheckpoint(run) ? "validation" : "repair";
     const attempt = (own.retryCount ?? 0) + 1;
     const delaySeconds = retry && Math.min(retry.maxDelaySeconds, retry.initialDelaySeconds * 2 ** (attempt - 1) * (1 + config.harness.retryJitter * Math.random()));
     const nextAttemptAt = delaySeconds === undefined ? undefined : new Date(Date.now() + delaySeconds * 1000).toISOString();
     return {
-      set: superseded ? { status: "failed" } : { status: "queued", retryMode, ...nextAttemptAt ? { retryCount: attempt, availableAt: nextAttemptAt } : {} },
+      set: superseded ? { status: "failed", lastCompetingPullRequest: null } : { status: "queued", retryMode, ...nextAttemptAt ? { retryCount: attempt, availableAt: nextAttemptAt } : {} },
       event: superseded ? { type: "run.failed", data: { stage: run.stage, error: details } }
         : { type: "run.requeued", data: { stage: run.stage, retryMode, ...nextAttemptAt ? { attempt, nextAttemptAt } : {} } },
     };
@@ -261,10 +373,10 @@ export function interruptRun(runId: string, error: unknown = new InterruptedErro
   return interrupted;
 }
 
-export function cancelQueuedTasks(subjectId: string, reason: string, action?: Task["action"], keepManual = false) {
+export function cancelPendingTasks(subjectId: string, reason: string, action?: Task["action"], keepManual = false) {
   return db.transaction((transaction) => {
-    const cancelled = transaction.update(tasks).set({ status: "cancelled" }).where(and(
-      eq(tasks.subjectId, subjectId), eq(tasks.status, "queued"), action ? eq(tasks.action, action) : undefined,
+    const cancelled = transaction.update(tasks).set({ status: "cancelled", lastCompetingPullRequest: null }).where(and(
+      eq(tasks.subjectId, subjectId), pendingTask, action ? eq(tasks.action, action) : undefined,
       keepManual ? sql`coalesce(json_extract(${tasks.input}, '$.manual'), 0) != 1` : undefined,
     )).returning().all();
     for (const task of cancelled) {

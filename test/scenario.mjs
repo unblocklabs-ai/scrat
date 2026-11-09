@@ -305,7 +305,7 @@ const staleBranch = async (variant) => {
   const needs = (name) => writeFileSync(`require-${name}`, "");
   const prItem = (n) => all(s.items).find((i) => i.kind === "pr" && i.payload.number === n);
   const queuedFor = (n) => all(s.tasks).filter((t) => t.subjectId === prItem(n).id && t.status === "queued").map((t) => t.action).sort();
-  const drainExcept = (n) => { for (const item of all(s.items)) if (item.id !== prItem(n).id) tasks.cancelQueuedTasks(item.id, "Isolate"); };
+  const drainExcept = (n) => { for (const item of all(s.items)) if (item.id !== prItem(n).id) tasks.cancelPendingTasks(item.id, "Isolate"); };
   const parents = (cwd, rev) => git(cwd, "show", "-s", "--format=%P", rev).split(" ");
   const checkout = f.config.github.repositoryPath;
   const mainHead = () => git(resolve("seed"), "rev-parse", "main");
@@ -369,7 +369,7 @@ const staleBranch = async (variant) => {
     await implement(1); await route(); drainExcept(201);
     const pr = f.prs[0];
     needs("needed.txt"); changeMain("needed.txt", "ok\n");
-    tasks.cancelQueuedTasks(prItem(201).id, "Fresh start"); await route();
+    tasks.cancelPendingTasks(prItem(201).id, "Fresh start"); await route();
     assert.deepEqual(queuedFor(201), ["review_pr"], "a clean, behind branch is not updated before anything fails");
     const calls = f.requests.length, staleHead = remoteGit("rev-parse", pr.head.ref);
     const failed = await run();
@@ -1067,7 +1067,7 @@ export const scenarios = {
     const claim = tasks.claimTask(); assert.equal(claim.task.subjectId, "issue-1");
     tasks.finishRun(claim.run.id, { status: "failed", error: new Error("Interrupted before inference") });
     f.addIssue(3); await route(); assert.ok(isQueued("issue-3")); assert.ok(!isQueued("issue-1"));
-    for (const id of ["issue-2", "issue-3"]) tasks.cancelQueuedTasks(id, "Isolate manual review attempt");
+    for (const id of ["issue-2", "issue-3"]) tasks.cancelPendingTasks(id, "Isolate manual review attempt");
     f.enqueue(1); f.reset(1, "incomplete"); const failed = await run();
     assert.equal(failed.error.code, "AGENT_INCOMPLETE");
     assert.equal(f.row(s.tasks, failed.taskId).input.triggerKey, undefined);
@@ -1095,7 +1095,7 @@ export const scenarios = {
     const implemented = await implement(2); const head = f.prs[0].head.sha;
     changeMain("src/app.ts", "export const value = 99;\n"); await route();
     const prItem = all(s.items).find((i) => i.kind === "pr");
-    tasks.cancelQueuedTasks(prItem.id, "Exercise conflict postcondition directly", "review_pr");
+    tasks.cancelPendingTasks(prItem.id, "Exercise conflict postcondition directly", "review_pr");
     f.reset(202, "no-change"); const unresolved = await run();
     assert.match(unresolved.error.message, /still conflicts/); assert.equal(f.prs[0].head.sha, head);
     calls = f.requests.length; tasks.retryTask(unresolved.taskId, "validation");
@@ -1223,7 +1223,7 @@ export const scenarios = {
     assert.deepEqual(f.prs[0].labels, [], "No historical grade may replace a stale newer grade");
     assert.equal(f.comments.get(201)[0].body, report);
     assert.ok(all(s.tasks).some((t) => t.subjectId === itemId && t.action === "review_pr" && t.status === "queued"));
-    tasks.cancelQueuedTasks(itemId, "Exercise an explicitly requested old publication retry", "review_pr");
+    tasks.cancelPendingTasks(itemId, "Exercise an explicitly requested old publication retry", "review_pr");
     tasks.retryTask(older.taskId); const stale = await run();
     assert.match(stale.error.message, /fresh review/);
     assert.equal(f.requests.length, calls); assert.deepEqual(f.prs[0].labels, []);
@@ -1773,7 +1773,146 @@ export const scenarios = {
     assert.deepEqual(f.writes.slice(written), [], "An unchanged follow-up makes no GitHub write");
     assert.equal(unchanged.publication.commentId, revised.publication.commentId); assert.equal(unchanged.publication.status, "published");
   } },
-  ambiguous_pr: { title: "a lost PR response is reconciled without another PR, inference or revalidation, resuming at the publishing stage", configure: [configureValidation], run: async () => {
+  refresh_publication: { title: "stale workflow content is revalidated before a new PR and after a push race on an existing PR", configure: [configureValidation], seed: () => {
+    mkdirSync("seed/.github/workflows", { recursive: true }); writeFileSync("seed/.github/workflows/ci.yml", "name: old\n");
+    writeFileSync("seed/.gitignore", "/local-recovery.txt\n");
+  }, run: async () => {
+    const remote = resolve("remote.git"), workflow = ".github/workflows/ci.yml";
+    const advance = (name) => { f.onModel = () => { f.onModel = undefined; changeMain(workflow, `name: ${name}\n`); }; };
+    const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
+    const cleanup = () => execFileSync(process.execPath, [resolve("app/src/cleanup.ts")], { stdio: "pipe" });
+    advance("new"); f.addIssue(1, ["scrat"]); f.enqueue(1, "implement"); f.faults.pr.add(1);
+    const failed = await run();
+    assert.ok(failed.error); assert.equal(f.prs.length, 1);
+    const original = all(s.workspaces).find((w) => w.id !== failed.workspaceId);
+    assert.ok(original); const originalHead = git(original.path, "rev-parse", "HEAD");
+    cleanup();
+    assert.ok(existsSync(original.path), "An incomplete publication must keep the original checkout");
+    const localNote = resolve(original.path, "local-note.txt");
+    writeFileSync(localNote, "unpublished local work\n");
+    const ignoredNote = resolve(original.path, "local-recovery.txt");
+    writeFileSync(ignoredNote, "unpublished ignored work\n");
+    writeFileSync(resolve(original.path, "src/app.ts"), "unpublished stashed work\n");
+    git(original.path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "stash", "push");
+    const stash = git(original.path, "rev-parse", "refs/stash");
+    tasks.retryTask(failed.taskId); const first = await success();
+    assert.ok(existsSync(localNote), "A successful publication must not remove a modified predecessor");
+    unlinkSync(localNote);
+    cleanup(); cleanup();
+    assert.ok(f.row(s.workspaces, original.id).retainedAt, "The predecessor is explicitly retained after publication");
+    assert.equal(readFileSync(ignoredNote, "utf8"), "unpublished ignored work\n");
+    assert.equal(git(original.path, "rev-parse", "refs/stash"), stash);
+    assert.equal(git(original.repositoryPath, "rev-parse", `refs/scrat/workspaces/${original.id}`), originalHead);
+    const head = first.publication.publishedCommitSha;
+    assert.equal(git(remote, "show", `${head}:${workflow}`), "name: new");
+    assert.equal(git(remote, "show", `${head}:src/app.ts`), "export const value = 11;");
+    assert.equal(git(remote, "rev-parse", `${head}^`), git(remote, "rev-parse", "main"));
+    assert.equal(first.verification.headSha, head); assert.equal(validations(), 2);
+    assert.equal(f.requests.length, 2, "replay and validation do not ask the agent to rewrite the patch");
+
+    const pr = all(s.items).find((item) => item.kind === "pr");
+    tasks.enqueueTask({ subjectId: pr.id, action: "address_pr_feedback", reason: "Change existing branch", input: { source: "github_items", kind: "manual" } });
+    branchOff("next-main", workflow, "name: newer\n");
+    const next = git(remote, "rev-parse", "next-main");
+    writeFileSync(resolve(remote, "hooks/pre-receive"), `#!/bin/sh
+if test "$(git rev-parse refs/heads/main)" != '${next}'; then
+  unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_QUARANTINE_PATH
+  git update-ref refs/heads/main '${next}' || exit 2
+  echo 'refusing to allow a GitHub App to create or update workflow .github/workflows/ci.yml without \`workflows\` permission' >&2
+  exit 1
+fi
+`, { mode: 0o755 });
+    const second = await success();
+    const updated = second.publication.publishedCommitSha;
+    assert.equal(git(remote, "show", `${updated}:${workflow}`), "name: newer");
+    assert.equal(git(remote, "show", `${updated}:src/app.ts`), "export const value = 211;");
+    git(remote, "merge-base", "--is-ancestor", head, updated);
+    assert.equal(second.verification.headSha, updated); assert.equal(validations(), 4);
+    assert.equal(f.requests.length, 4); assert.equal(f.prs.length, 1);
+    assert.ok(f.row(s.workspaces, first.workspaceId).retainedAt, "A clean predecessor is also retained after publication");
+    assert.ok(![...f.tokens.values()].some(({ workflows }) => workflows), "inherited workflow content does not require workflow write access");
+  } },
+  workflow_push: { title: "an intentional workflow change uses a workflow-capable Git push token", run: async () => {
+    writeFileSync("remote.git/hooks/pre-receive", '#!/bin/sh\nprintf "%s\\n" "$GIT_CONFIG_VALUE_0" > ../push-auth\n', { mode: 0o755 });
+    f.script = [{ name: "bash", args: { command: "mkdir -p .github/workflows && printf 'name: agent-ci\\n' > .github/workflows/ci.yml" } }];
+    const published = await implement(1);
+    assert.equal(git(resolve("remote.git"), "show", `${published.publication.publishedCommitSha}:.github/workflows/ci.yml`), "name: agent-ci");
+    const credential = Buffer.from(readFileSync("push-auth", "utf8").trim().split(" ").at(-1), "base64").toString("utf8").split(":").at(-1);
+    assert.equal(f.tokens.get(credential)?.workflows, "write");
+  } },
+  competing_implementation: { title: "a GitHub-linked PR defers implementation and closing it unmerged resumes the same task", configure: [configureValidation, (config) => { config.actions.review_pr.enabled = false; }], run: async () => {
+    branchOff("human-fix", "src/app.ts", "export const value = 42;\n");
+    f.onModel = () => { f.onModel = undefined; f.addPr(301, "human-fix", "human", { linkedIssues: [1] }); };
+    const remote = resolve("remote.git"), before = git(remote, "for-each-ref", "refs/heads");
+    f.addIssue(1, ["scrat"]); await route();
+    const skipped = await run();
+    assert.equal(f.prs.length, 1); assert.equal(git(remote, "for-each-ref", "refs/heads"), before);
+    assert.equal(f.row(s.tasks, skipped.taskId).status, "blocked"); assert.ok(!existsSync("validations.log"));
+    const attempts = () => all(s.runs).filter((r) => r.taskId === skipped.taskId);
+    const calls = f.requests.length;
+    const [manual] = tasks.enqueueManualTasks("implement", ["1"]);
+    assert.equal(manual.taskId, skipped.taskId);
+    f.issues.get(1).labels = [];
+    await route();
+    assert.equal(f.row(s.tasks, skipped.taskId).status, "blocked", "Removing the label does not cancel an explicit manual request");
+    f.prs[0].state = "closed"; await route(); await route();
+    assert.equal(f.row(s.tasks, skipped.taskId).status, "queued");
+    const resumed = await success();
+    assert.equal(resumed.taskId, skipped.taskId); assert.equal(attempts().length, 2);
+    assert.equal(resumed.inferenceFromRunId, skipped.id); assert.equal(f.requests.length, calls);
+    assert.equal(resumed.publication.pullRequestNumber, 201);
+
+    f.addIssue(2, ["scrat"]); f.enqueue(2, "implement");
+    f.addPr(302, "human-fix", "human", { linkedIssues: [2], state: "closed", mergedAt: "2000-01-01T00:00:00Z" });
+    f.addPr(303, "human-fix", "human", { linkedIssues: [2], state: "closed" });
+    f.addPr(304, "human-fix", "human", { linkedIssues: [2] });
+    const blocked = await run();
+    assert.equal(f.row(s.tasks, blocked.taskId).status, "blocked");
+    assert.equal(blocked.workspaceId, null, "An already linked PR on a later page blocks before allocation");
+    assert.equal(f.requests.length, calls);
+    const other = f.prs.find((pr) => pr.number === 304);
+    other.linkedIssues = []; await route();
+    f.onModel = () => { f.onModel = undefined; other.linkedIssues = [2]; };
+    const checkpoint = await run();
+    assert.equal(checkpoint.taskId, blocked.taskId); assert.ok(checkpoint.agentCheckpoint);
+    f.issues.get(2).body = "Requirements changed while blocked";
+    other.linkedIssues = []; await route();
+    const beforeRepair = f.requests.length;
+    const repaired = await success();
+    assert.equal(repaired.taskId, blocked.taskId); assert.equal(repaired.workspaceId, checkpoint.workspaceId);
+    assert.equal(repaired.inferenceFromRunId, null); assert.ok(f.requests.length > beforeRepair);
+    assert.equal(repaired.context.item.body, f.issues.get(2).body);
+
+    f.addIssue(3, ["scrat"]); f.enqueue(3, "implement");
+    f.onModel = () => { f.onModel = undefined; f.addPr(305, "human-fix", "human", { linkedIssues: [3], state: "closed", mergedAt: new Date().toISOString() }); };
+    const mergeRace = await run();
+    assert.equal(f.row(s.tasks, mergeRace.taskId).status, "blocked", "A PR merged during the first attempt still blocks while the issue is open");
+    assert.ok(!f.prs.some((pr) => pr.number === 203));
+    await route();
+    assert.equal(f.row(s.tasks, mergeRace.taskId).status, "blocked");
+
+    const reopened = f.issues.get(3);
+    // The issue closes and reopens entirely between two polls.
+    reopened.reopened = { id: "reopen-3", createdAt: new Date(Date.now() + 1000).toISOString() };
+    await route(); await route();
+    const reopenedTasks = all(s.tasks).filter((t) => t.subjectId === "issue-3" && t.action === "implement");
+    assert.equal(reopenedTasks.length, 2, "A confirmed reopening selects exactly one new implementation");
+    assert.equal(f.row(s.tasks, mergeRace.taskId).status, "cancelled");
+    f.reset(3, "normal");
+    const published = await success();
+    assert.notEqual(published.taskId, mergeRace.taskId); assert.equal(published.inferenceFromRunId, null);
+    assert.notEqual(published.workspaceId, mergeRace.workspaceId);
+    assert.equal(published.publication.pullRequestNumber, 203);
+
+    f.addIssue(4, ["scrat"]); const queued = f.enqueue(4, "implement");
+    f.addPr(306, "human-fix", "human", { linkedIssues: [4] }); await route();
+    assert.equal(f.row(s.tasks, queued.id).status, "blocked");
+    f.issues.get(4).state = "closed"; await route();
+    assert.equal(f.row(s.tasks, queued.id).status, "cancelled", "An observed close ends the blocked task");
+  } },
+  ambiguous_pr: { title: "partial publication resumes safely after a lost PR response or a competing PR after push", configure: [configureValidation, (config) => { config.actions.review_pr.enabled = false; }], seed: () => {
+    mkdirSync("seed/.github/workflows", { recursive: true }); writeFileSync("seed/.github/workflows/ci.yml", "name: old\n");
+  }, run: async () => {
     const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
     f.addIssue(1); f.enqueue(1, "implement"); f.faults.pr.add(1);
     const failed = await run(); assert.ok(failed.error); assert.equal(f.prs.length, 1); const calls = f.requests.length;
@@ -1783,6 +1922,103 @@ export const scenarios = {
     tasks.retryTask(failed.taskId); const completed = await success();
     assert.equal(completed.publication.pullRequestNumber, 201); assert.equal(f.prs.length, 1); assert.equal(f.requests.length, calls);
     assert.equal(validations(), 1); assert.equal(completed.inferenceFromRunId, failed.id);
+
+    const remote = resolve("remote.git"), workflow = ".github/workflows/ci.yml";
+    branchOff("human-fix", "notes.md", "Competing work\n");
+    f.addIssue(2, ["scrat"]); f.enqueue(2, "implement");
+    const fetch = globalThis.fetch;
+    let linked;
+    globalThis.fetch = (input, init) => {
+      if (!linked && String(input) === "https://api.github.com/graphql") {
+        const body = JSON.parse(init.body), { number } = body.variables ?? body;
+        const workspace = f.row(s.workspaces, f.row(s.subjects, "issue-2").workspaceId);
+        if (number === 2 && workspace && git(remote, "for-each-ref", `refs/heads/${workspace.branch}`)) {
+          f.addPr(301, "human-fix", "human", { linkedIssues: [2] });
+          linked = f.prs.at(-1);
+        }
+      }
+      return fetch(input, init);
+    };
+    let deferred;
+    try { deferred = await run(); }
+    finally { globalThis.fetch = fetch; }
+    const pushed = deferred.publication.publishedCommitSha;
+    assert.ok(pushed && linked); assert.equal(f.row(s.tasks, deferred.taskId).status, "blocked");
+    assert.ok(!f.prs.some((pr) => pr.number === 202));
+    linked.state = "closed"; changeMain(workflow, "name: new\n"); await route();
+    f.reset(2, "normal");
+    f.script = [{ name: "write", args: { path: "src/app.ts", content: "export const value = 123;\n" } }];
+    const repaired = await success(), published = repaired.publication.publishedCommitSha;
+    assert.equal(repaired.taskId, deferred.taskId); assert.equal(repaired.publication.pullRequestNumber, 202);
+    git(remote, "merge-base", "--is-ancestor", pushed, published);
+    assert.equal(git(remote, "show", `${published}:${workflow}`), "name: new");
+    assert.equal(git(remote, "show", `${published}:src/app.ts`), "export const value = 123;");
+
+    // The Git write succeeds, but the SQLite transaction recording it does not.
+    const losePushReceipt = async () => {
+      db.$client.exec(`CREATE TRIGGER reject_push_receipt BEFORE UPDATE OF publication ON runs
+        WHEN json_extract(NEW.publication, '$.publishedCommitSha') IS NOT NULL
+        BEGIN SELECT RAISE(ABORT, 'fixture lost push receipt'); END`);
+      try { return await run(); }
+      finally { db.$client.exec("DROP TRIGGER reject_push_receipt"); }
+    };
+    f.script = undefined;
+    f.addIssue(3, ["scrat"]); await route();
+    const retryable = await losePushReceipt();
+    const priorBranch = f.row(s.workspaces, retryable.workspaceId).branch;
+    const priorPush = git(remote, "rev-parse", priorBranch);
+    assert.ok(retryable.error); assert.equal(retryable.publication.publishedCommitSha, undefined);
+    assert.equal(priorPush, retryable.verification.headSha);
+    tasks.retryTask(retryable.taskId);
+    f.addPr(302, "human-fix", "human", { linkedIssues: [3] }); await route();
+    assert.equal(f.row(s.tasks, retryable.taskId).status, "blocked");
+    const beforeRetry = f.requests.length;
+    f.issues.get(3).body = "Requirements changed while sync blocked the retry";
+    changeMain(workflow, "name: newer\n");
+    f.prs.at(-1).state = "closed"; await route(); await route();
+    f.reset(3, "normal");
+    f.script = [{ name: "write", args: { path: "src/app.ts", content: "export const value = 321;\n" } }];
+    const retried = await success();
+    assert.equal(retried.taskId, retryable.taskId); assert.equal(retried.publication.pullRequestNumber, 203);
+    assert.ok(f.requests.length > beforeRetry);
+    git(remote, "merge-base", "--is-ancestor", priorPush, retried.publication.publishedCommitSha);
+    assert.equal(git(remote, "show", `${retried.publication.publishedCommitSha}:${workflow}`), "name: newer");
+    assert.equal(git(remote, "show", `${retried.publication.publishedCommitSha}:src/app.ts`), "export const value = 321;");
+
+    f.script = undefined;
+    f.addIssue(4, ["scrat"]); f.enqueue(4, "implement");
+    const lostPush = await losePushReceipt();
+    assert.ok(lostPush.error); assert.equal(lostPush.publication.publishedCommitSha, undefined);
+    const workspace = f.row(s.workspaces, lostPush.workspaceId), branch = `refs/heads/${workspace.branch}`;
+    const written = git(remote, "rev-parse", branch);
+    assert.equal(written, lostPush.verification.headSha);
+    const unexpected = pushFile(workspace.branch, "notes.md", "Unvalidated update after Scrat pushed\n");
+    const beforeRecovery = f.requests.length;
+    tasks.retryTask(lostPush.taskId); const rejected = await run();
+    assert.match(rejected.error.message, /Remote branch changed before/);
+    assert.equal(git(remote, "rev-parse", branch), unexpected);
+    git(remote, "update-ref", branch, written, unexpected);
+    tasks.retryTask(lostPush.taskId); const recovered = await success();
+    assert.equal(recovered.publication.publishedCommitSha, written);
+    assert.equal(recovered.publication.pullRequestNumber, 204); assert.equal(f.requests.length, beforeRecovery);
+
+    f.addIssue(5, ["scrat"]); f.enqueue(5, "implement");
+    const githubFetch = globalThis.fetch;
+    let changedHead;
+    globalThis.fetch = (input, init) => {
+      if (!changedHead && String(input).endsWith("/pulls") && init?.method === "POST") {
+        changedHead = pushFile(JSON.parse(init.body).head, "notes.md", "Unvalidated update during PR creation\n");
+      }
+      return githubFetch(input, init);
+    };
+    let mismatched;
+    try { mismatched = await run(); }
+    finally { globalThis.fetch = githubFetch; }
+    assert.equal(f.prs.find((pr) => pr.number === 205).head.sha, changedHead);
+    assert.match(mismatched.error?.message, /PR head differs from the validated commit/);
+    assert.equal(mismatched.publication.pullRequestNumber, undefined);
+    tasks.retryTask(mismatched.taskId);
+    assert.match((await run()).error?.message, /PR head differs from the validated commit/);
   } },
   freshness: { title: "requirements changed during inference cannot receive an approval label", run: async () => {
     f.addIssue(1); await route(); f.reset(1, "ready");
@@ -2041,8 +2277,19 @@ export const scenarios = {
     for (const r of await both(1)) assert.equal(r.error, null, JSON.stringify(r.error));
     const serial = intervals(0); assert.equal(serial.length, 2); assert.ok(serial[0].e <= serial[1].s, "one slot serializes validations");
     config.harness.maxConcurrentValidations = 2;
+    const validate = config.workspace.validate;
+    script(config, "validate", `
+      import { appendFileSync, statSync } from "node:fs";
+      const arrivals = ${JSON.stringify(resolve("validation-arrivals"))};
+      appendFileSync(arrivals, ".");
+      const deadline = Date.now() + 15_000;
+      while (statSync(arrivals).size < 2) {
+        if (Date.now() >= deadline) throw new Error("Second validation never reached the available slot");
+        await new Promise((done) => setTimeout(done, 20));
+      }
+    `, "validate-overlap");
     for (const r of await both(3)) assert.equal(r.error, null, JSON.stringify(r.error));
-    const parallel = intervals(2); assert.equal(parallel.length, 2); assert.ok(parallel[1].s < parallel[0].e, "two slots overlap validations");
+    config.workspace.validate = validate;
     config.harness.maxConcurrentValidations = 1; writeFileSync("slot-fail", "");
     f.addIssue(5, ["scrat"]); f.enqueue(5, "implement"); assert.equal((await run()).error.exitCode, 7);
     unlinkSync("slot-fail"); f.addIssue(6, ["scrat"]); f.enqueue(6, "implement");
@@ -2076,11 +2323,18 @@ export const scenarios = {
     const pr = all(s.items).find((i) => i.kind === "pr"); assert.equal(f.row(s.subjects, pr.id).workspaceId, null);
     assert.ok(all(s.tasks).some((t) => t.subjectId === pr.id && t.status === "queued"));
   } },
-  existing_pr: { title: "existing implementation PRs suppress duplicate implementation tasks", run: async () => {
+  existing_pr: { title: "an existing implementation PR blocks the first selection through merge closure lag", run: async () => {
     await implement(1); f.addIssue(2, ["scrat"]); f.prs[0].body += "\nFixes #2";
-    f.enqueue(2, "implement"); await route();
-    assert.ok(!all(s.tasks).some((t) => t.subjectId === "issue-2" && t.status === "queued"));
+    await route();
+    const attempts = () => all(s.tasks).filter((t) => t.subjectId === "issue-2" && t.action === "implement");
+    assert.deepEqual(attempts().map((t) => t.status), ["blocked"]);
+    const [blocked] = attempts();
     assert.ok(all(s.tasks).some((t) => t.action === "review_pr" && t.status === "queued"));
+    f.prs[0].state = "closed"; f.prs[0].mergedAt = new Date().toISOString();
+    await route();
+    assert.deepEqual(attempts().map((t) => [t.id, t.status]), [[blocked.id, "blocked"]]);
+    assert.equal(await f.runNextTask(), undefined);
+    assert.equal(f.prs.length, 1);
   } },
   trigger_inputs: { title: "every trigger input shape parses to one typed member, a kind-less input is rejected, unknown shapes are rejected clearly and a malformed queued row is rejected at claim", run: async () => {
     const { parseTriggerInput } = await f.app("triggers.ts");
@@ -2207,7 +2461,7 @@ export const scenarios = {
     const stop = new AbortController(); stop.abort(); assert.ok((await f.runNextTask(stop.signal)).error);
     execFileSync(process.execPath, [resolve("app/src/cleanup.ts")], { stdio: "pipe" });
     assert.equal(f.row(s.workspaces, implemented.workspaceId).removedAt, null, "cleanup keeps a PR workspace that a stopped review never used");
-    tasks.cancelQueuedTasks(pr.id, "Isolate the comment-only implementation");
+    tasks.cancelPendingTasks(pr.id, "Isolate the comment-only implementation");
     f.addIssue(3, ["scrat"]); f.reset(3, "no-change"); f.faults.cleanup.add(3); f.enqueue(3, "implement");
     const commented = await success(), kept = f.row(s.workspaces, commented.workspaceId);
     assert.equal(commented.publication.status, "published"); assert.equal(f.comments.get(3).length, 1);
@@ -2392,7 +2646,7 @@ export const scenarios = {
     assert.equal((await review(205, "grade-C")).result.grade, "C"); await route();
     assert.ok(all(s.tasks).some((t) => t.subjectId === prItem(205).id && t.action === "address_pr_feedback" && t.status === "queued"));
     assert.equal(repairs(205).length, 0, "Pending human feedback goes first");
-    tasks.cancelQueuedTasks(prItem(205).id, "Drain"); await implement(6); await review(206, "grade-C"); await route(); assert.equal(repairs(206)[0].status, "queued");
+    tasks.cancelPendingTasks(prItem(205).id, "Drain"); await implement(6); await review(206, "grade-C"); await route(); assert.equal(repairs(206)[0].status, "queued");
     f.comments.set(206, [humanComment(206, 9200, "Please rename it", "2026-10-19T01:00:00Z")]);
     await route(); assert.equal(repairs(206)[0].status, "cancelled", "Human feedback arriving later cancels the queued repair");
     for (const pr of f.prs) pr.state = "closed";
@@ -2413,7 +2667,7 @@ export const scenarios = {
     assert.equal(f.row(s.tasks, repair8.id).status, "failed");
     await implement(10); const graded10 = await review(210, "grade-C"); await route();
     assert.equal(repairs(210)[0].status, "queued"); assert.equal(count(210), 0, "A queued repair spends no cap slot until it runs");
-    tasks.cancelQueuedTasks(prItem(210).id, "Human feedback", "address_review"); assert.equal(repairs(210)[0].status, "cancelled");
+    tasks.cancelPendingTasks(prItem(210).id, "Human feedback", "address_review"); assert.equal(repairs(210)[0].status, "cancelled");
     await route(); const requeued10 = repairs(210).find((t) => t.status === "queued");
     assert.equal(repairs(210).length, 2); assert.equal(requeued10.input.assessmentRunId, graded10.id);
     assert.equal(count(210), 0, "Re-queuing the same assessment after a cancel spends no cap slot");
@@ -2627,7 +2881,7 @@ export const scenarios = {
   pr_head_routing: { title: "routing sees the API head of a PR whose refs/pull head is frozen behind it, so a conflict only the newer head has queues an update", run: async () => {
     await implement(1);
     const remote = resolve("remote.git"), branch = f.prs[0].head.ref, item = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 201);
-    tasks.cancelQueuedTasks(item.id, "Isolate"); await route(); tasks.cancelQueuedTasks(item.id, "Isolate");
+    tasks.cancelPendingTasks(item.id, "Isolate"); await route(); tasks.cancelPendingTasks(item.id, "Isolate");
     f.frozen.add(201);
     git(".", "clone", "-b", branch, remote, "pr-edit");
     writeFileSync("pr-edit/src/conflict.ts", "export const conflict = 'pr';\n");
@@ -2640,7 +2894,7 @@ export const scenarios = {
   behind_unpublished: { title: "a retained workspace holding a commit the shared repository has never seen is merged with a behind main in code, without the agent", run: async () => {
     const first = await implement(1), remote = resolve("remote.git"), workspace = f.row(s.workspaces, first.workspaceId);
     const item = all(s.items).find((i) => i.kind === "pr" && i.payload.number === 201);
-    tasks.cancelQueuedTasks(item.id, "Isolate");
+    tasks.cancelPendingTasks(item.id, "Isolate");
     writeFileSync(resolve(workspace.path, "src/local.ts"), "export const local = 1;\n");
     git(workspace.path, "add", "."); commit(workspace.path, "Unpublished work");
     const local = git(workspace.path, "rev-parse", "HEAD");
@@ -2666,7 +2920,7 @@ export const scenarios = {
     const publish = async (name) => {
       writeFileSync(resolve(row().path, name), name + "\n"); git(row().path, "add", "."); commit(row().path, name);
       const sha = git(row().path, "rev-parse", "HEAD");
-      await pushWorkspace(row(), remote, sha, { ...process.env });
+      await pushWorkspace(row(), remote, sha, git(remote, "rev-parse", row().branch), { ...process.env });
       assert.equal(git(remote, "rev-parse", row().branch), sha);
       return sha;
     };
@@ -2685,12 +2939,12 @@ export const scenarios = {
     await publish("two.txt");
     assert.deepEqual(header(), []);
     git(remote, "merge-base", "--is-ancestor", local, row().branch);
-    const published2 = git(row().path, "rev-parse", "HEAD");
-    git(".", "clone", "-b", row().branch, remote, "pr-ahead");
-    writeFileSync("pr-ahead/ahead.txt", "ahead\n"); git(resolve("pr-ahead"), "add", "."); commit(resolve("pr-ahead"), "Ahead"); git(resolve("pr-ahead"), "push", "origin", row().branch);
-    git(row().path, "repack", "-a", "-d", "-q"); fs.rmSync(resolve(row().path, ".git/objects/info/alternates"));
-    const { branchContainsCommit } = await f.app("git.ts");
-    assert.equal(await branchContainsCommit(row(), remote, row().branch, published2, { ...process.env }), true);
+    const observed = git(remote, "rev-parse", row().branch), rewind = git(remote, "rev-parse", "main");
+    writeFileSync(resolve(row().path, "next.txt"), "next\n"); git(row().path, "add", "."); commit(row().path, "Next");
+    const next = git(row().path, "rev-parse", "HEAD"), branch = `refs/heads/${row().branch}`;
+    git(remote, "update-ref", branch, rewind, observed);
+    await assert.rejects(pushWorkspace(row(), remote, next, observed, { ...process.env }), /stale info/);
+    assert.equal(git(remote, "rev-parse", branch), rewind, "A push cannot undo an intervening rewind");
     const tree = git(shared, "rev-parse", "HEAD^{tree}"), head = git(shared, "rev-parse", "HEAD");
     const orphan = () => git(shared, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", tree, "-p", head, "-m", "orphan " + Math.random());
     const [kept, lost] = [orphan(), orphan()];

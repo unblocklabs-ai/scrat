@@ -1,14 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { eq } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "./db.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
-import { changedPaths, commitOf, git, headOf, hasPendingMerge, identity, mergeHeadOf } from "./git.ts";
+import { changedPaths, commitOf, git, headOf, hasPendingMerge, identity, isAncestor, mergeHeadOf } from "./git.ts";
 import { botSlug } from "./identity.ts";
 import { withOperation } from "./logging.ts";
-import { runs, workspaces, type Run, type Workspace } from "./schema.ts";
-import { ifMissing } from "./errors.ts";
+import { runs, subjects, workspaces, type Run, type Workspace } from "./schema.ts";
+import { errorMessage, ifMissing, WorkflowPushRejected } from "./errors.ts";
 import { SecretLeakError } from "./results.ts";
 import { containsSecret } from "./secrets.ts";
 import { sandboxHome, workspaceRoot } from "./sandbox.ts";
@@ -32,6 +32,11 @@ export async function validateWorkspace(workspace: Workspace) {
   if (!(await lstat(resolve(path, ".git"))).isDirectory() || path !== top || await realpath(common) !== resolve(path, ".git") || branch !== workspace.branch) throw new Error("Workspace Git identity changed");
 }
 
+export async function workspaceMatchesCommit({ path }: Workspace, commitSha: string) {
+  return await headOf(path) === commitSha && !await hasPendingMerge(path)
+    && !await git(path, ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"]);
+}
+
 export async function stageTree(path: string) {
   await git(path, ["add", "--all"]);
   return git(path, ["write-tree"]);
@@ -46,14 +51,12 @@ export async function checkpointWorkspace(workspace: Workspace) {
   };
 }
 
-export async function validateCheckpoint(workspace: Workspace, checkpoint: NonNullable<Run["agentCheckpoint"]>) {
+export async function checkpointMatches(workspace: Workspace, checkpoint: NonNullable<Run["agentCheckpoint"]>) {
   const headSha = await headOf(workspace.path);
   const mergeHead = await mergeHeadOf(workspace.path);
   const changed = await git(workspace.path, ["diff", "--name-only", "-z", checkpoint.treeSha, "--"]);
   const untracked = await git(workspace.path, ["ls-files", "--others", "--exclude-standard", "-z"]);
-  if (headSha !== checkpoint.headSha || mergeHead !== checkpoint.mergeHead || changed || untracked) {
-    throw new Error("Validation checkpoint source changed; use normal retry to repair the current workspace");
-  }
+  return headSha === checkpoint.headSha && mergeHead === checkpoint.mergeHead && !changed && !untracked;
 }
 
 export async function assertNoCommittedSecrets(workspace: Workspace, base: string, tree: string) {
@@ -106,6 +109,47 @@ export async function createWorkspace(
   });
 }
 
+export function expectedBranchHead(workspace: Workspace, observedPrHead?: string) {
+  // Older runs already have commit receipts, even before workspaces tracked their branch tip.
+  return observedPrHead ?? workspace.pushedHeadSha ?? db.select({ publication: runs.publication }).from(runs)
+    .where(and(eq(runs.workspaceId, workspace.id), sql`json_extract(${runs.publication}, '$.publishedCommitSha') is not null`))
+    .orderBy(desc(runs.sequence)).limit(1).get()?.publication.publishedCommitSha;
+}
+
+type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+function replacementWasPublished(transaction: Transaction, replacement: Workspace["replacement"]) {
+  // Another base move can replace the replacement before anything is published.
+  while (replacement) {
+    const receipt = transaction.select({ id: runs.id }).from(runs).where(and(
+      eq(runs.workspaceId, replacement.workspaceId), eq(runs.taskId, replacement.taskId),
+      sql`json_extract(${runs.publication}, '$.status') = 'published'
+        and json_extract(${runs.publication}, '$.publishedCommitSha') = json_extract(${runs.publication}, '$.commitSha')`,
+    )).get();
+    if (receipt) return true;
+    replacement = transaction.select({ replacement: workspaces.replacement }).from(workspaces)
+      .where(eq(workspaces.id, replacement.workspaceId)).get()?.replacement ?? null;
+  }
+  return false;
+}
+
+export function retainReplacedWorkspaces(taskId?: string) {
+  db.transaction((transaction) => {
+    const candidates = transaction.select().from(workspaces)
+      .where(and(isNull(workspaces.removedAt), isNull(workspaces.retainedAt), isNotNull(workspaces.replacement),
+        taskId ? sql`json_extract(${workspaces.replacement}, '$.taskId') = ${taskId}` : undefined)).all();
+    for (const workspace of candidates) {
+      const { id, path, replacement } = workspace;
+      if (transaction.select({ id: subjects.id }).from(subjects).where(eq(subjects.workspaceId, id)).get()
+        || transaction.select({ id: runs.id }).from(runs).where(and(eq(runs.workspaceId, id), isNull(runs.finishedAt))).get()
+        || !replacementWasPublished(transaction, replacement)) continue;
+      transaction.update(workspaces).set({ retainedAt: new Date().toISOString() }).where(eq(workspaces.id, id)).run();
+      recordEvent({ taskId: replacement?.taskId, type: "workspace.retained",
+        data: { workspaceId: id, path, reason: "Replacement publication confirmed" } }, transaction);
+    }
+  }, { behavior: "immediate" });
+}
+
 export async function removeWorkspace(workspaceId: string, references: EventReferences = {}) {
   return withOperation("workspace.remove", { ...references, workspaceId }, async (operation) => {
     operation.stage("lookup");
@@ -116,16 +160,20 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
       return workspace;
     }
     const { repositoryPath, branch } = workspace;
+    if (workspace.replacement || workspace.retainedAt) {
+      operation.complete({ retained: true, path: workspace.path });
+      return workspace;
+    }
     const path = await ifMissing(realpath(workspace.path), workspace.path);
     operation.stage("remove_workspace");
     const present = await ifMissing(lstat(path).then(() => true), false);
     if (present) {
+      if (path !== resolve(workspaceRoot(), workspace.id)) throw new Error("Refusing cleanup outside the owned workspace root");
       await validateWorkspace(workspace);
       const head = await headOf(path);
       const published = db.select().from(runs).where(eq(runs.workspaceId, workspace.id)).all()
         .some((run) => run.publication.publishedCommitSha === head);
       if (head !== workspace.baseSha && !published) throw new Error("Workspace has unpublished commits; retain it for recovery");
-      if (path !== resolve(workspaceRoot(), workspace.id)) throw new Error("Refusing cleanup outside the owned workspace root");
       await rm(path, { recursive: true });
       const home = sandboxHome(workspace.id);
       const stats = await ifMissing(lstat(home), undefined);
@@ -163,7 +211,8 @@ export async function commitWorkspace(workspace: Workspace, message: string, aut
   return headOf(workspace.path);
 }
 
-export async function pushWorkspace(workspace: Workspace, remote: string, commitSha: string, env: NodeJS.ProcessEnv, references: EventReferences = {}) {
+export async function importWorkspaceCommit(workspace: Workspace, commitSha: string) {
+  if (await commitOf(workspace.repositoryPath, commitSha)) return;
   const bundle = resolve(workspace.path, ".scrat/publish.bundle");
   const directory = dirname(bundle);
   const existing = await ifMissing(lstat(directory), undefined);
@@ -180,8 +229,19 @@ export async function pushWorkspace(workspace: Workspace, remote: string, commit
   }
   if (!(await lstat(bundle)).isFile() || await realpath(bundle) !== bundle) throw new Error("Publication bundle is not an owned regular file");
   await git(workspace.repositoryPath, ["fetch", "--no-tags", "--", bundle, tip]);
+}
+
+export async function pushWorkspace(workspace: Workspace, remote: string, commitSha: string, expected: string | undefined, env: NodeJS.ProcessEnv, references: EventReferences = {}) {
+  await importWorkspaceCommit(workspace, commitSha);
+  if (expected && !await isAncestor(workspace.repositoryPath, expected, commitSha)) throw new Error("Refusing to rewrite remote branch history");
   await pinWorkspaceBase(workspace, commitSha);
-  await git(workspace.repositoryPath, ["push", "--", remote, `${commitSha}:refs/heads/${workspace.branch}`], env);
+  const ref = `refs/heads/${workspace.branch}`;
+  // The ancestry check forbids a force-update. The lease also refuses a concurrent rewind, creation, or deletion.
+  try { await git(workspace.repositoryPath, ["push", `--force-with-lease=${ref}:${expected ?? ""}`, "--", remote, `${commitSha}:${ref}`], env); }
+  catch (error) {
+    if (/refusing to allow .* to create or update workflow .* without [`']workflows?[`'] (?:permission|scope)/i.test(errorMessage(error))) throw new WorkflowPushRejected(error);
+    throw error;
+  }
   recordEvent({ ...references, type: "workspace.pushed", data: { workspaceId: workspace.id, commitSha } });
   return commitSha;
 }

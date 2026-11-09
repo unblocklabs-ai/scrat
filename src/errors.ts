@@ -27,6 +27,23 @@ export function redactSecrets(value: string) {
 
 export const transientInferenceCode = "TRANSIENT_INFERENCE";
 export const branchConflictCode = "BRANCH_CONFLICT";
+export const competingImplementationCode = "COMPETING_IMPLEMENTATION";
+export class ImplementationEnded extends Error {}
+
+export class CompetingImplementation extends Error {
+  readonly code = competingImplementationCode;
+  readonly pullRequestNumber: number;
+  constructor(pullRequestNumber: number) {
+    super(`Implementation deferred for linked PR #${pullRequestNumber}`);
+    this.pullRequestNumber = pullRequestNumber;
+  }
+}
+
+export class WorkflowPushRejected extends Error {
+  constructor(cause: unknown) {
+    super("GitHub rejected the push because the credential cannot write workflow files", { cause });
+  }
+}
 
 export function errorCode(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;

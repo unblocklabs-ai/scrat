@@ -6,7 +6,7 @@ import { config } from "./config.ts";
 import { listRunDatabases, removeRunDatabase } from "./databases.ts";
 import { getRun } from "./run-history.ts";
 import { runs, tasks, workspaces } from "./schema.ts";
-import { removeWorkspace } from "./workspaces.ts";
+import { removeWorkspace, retainReplacedWorkspaces } from "./workspaces.ts";
 import { runCommand } from "./cli.ts";
 
 await runCommand("Cleanup command failed", async () => {
@@ -16,8 +16,9 @@ await runCommand("Cleanup command failed", async () => {
     .where(and(isNotNull(runs.finishedAt), isNull(workspaces.removedAt), inArray(tasks.action, manifests.filter((manifest) => manifest.mode === "review").map((manifest) => manifest.name)),
       notExists(db.select({ id: active.id }).from(active).where(and(eq(active.workspaceId, workspaces.id), isNull(active.finishedAt)))),
     )).all();
-  for (const { workspace } of pending) {
-    try { await removeWorkspace(workspace.id); }
+  retainReplacedWorkspaces();
+  for (const { workspace: { id } } of pending) {
+    try { await removeWorkspace(id); }
     catch { process.exitCode = 1; }
   }
   for (const runId of config.workspace.database ? await listRunDatabases() : []) {

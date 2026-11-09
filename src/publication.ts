@@ -31,7 +31,7 @@ export async function publishRun(github: GitHubRepository, subject: Subject, tas
   }
   if (manifest.mode === "change") {
     const workspace = run.workspaceId ? getWorkspace(run.workspaceId) : undefined;
-    if (!workspace || workspace.removedAt) throw new Error("Publication workspace is no longer active");
+    if (!workspace || workspace.removedAt || workspace.replacement || workspace.retainedAt) throw new Error("Publication workspace is no longer active");
     const commitSha = run.publication.commitSha;
     if (!commitSha) throw new Error("Run has no validated commit to publish");
     return applyEffects(manifest.publish, { ...effectContext, workspace, commitSha });

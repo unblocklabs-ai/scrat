@@ -4,18 +4,20 @@ import { config } from "./config.ts";
 import type { Manifest } from "./manifests.ts";
 import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
-import { createRunDatabase } from "./databases.ts";
+import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
-import { describeError, type ErrorDetails, errorExitCode } from "./errors.ts";
+import { CompetingImplementation, describeError, type ErrorDetails, errorExitCode } from "./errors.ts";
 import { bestEffort } from "./logging.ts";
-import { conventionalTitle, git, headOf, hasPendingMerge, mergeBase, prepareTarget, shortSha } from "./git.ts";
+import { conventionalTitle, git, headOf, hasPendingMerge, mergeBase, prepareTarget, remoteBranchHead, shortSha } from "./git.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { executePi } from "./pi.ts";
+import { remoteUrl } from "./repository.ts";
 import { getRun, inferenceRunOf, latestSessionRun, updateRun } from "./run-history.ts";
 import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint, InterruptedError } from "./results.ts";
 import { subjects, workspaces, type Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
-import { assertNoCommittedSecrets, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, pinWorkspaceBase, stageTree, validateCheckpoint, validateWorkspace } from "./workspaces.ts";
+import { assertCurrentImplementation } from "./tasks.ts";
+import { assertNoCommittedSecrets, checkpointMatches, checkpointWorkspace, commitWorkspace, createWorkspace, expectedBranchHead, getWorkspace, pinWorkspaceBase, stageTree, validateWorkspace, workspaceMatchesCommit } from "./workspaces.ts";
 import { botAuthor, type Ctx, type DatabaseConfig, type Environment, itemRevisions, type Observed, prepareWorkspace, runAgent, stopBefore } from "./run-context.ts";
 
 type Acceptance = NonNullable<Manifest["acceptance"]>;
@@ -40,12 +42,10 @@ function validationMessage(error: CheckFailure, round: number) {
 
 const unresolvedConflict = "PR still conflicts with its base branch after resolution";
 
-async function runChecks({ run, references, stop }: Ctx, p: Change) {
-  const { workspace, commandEnvironment } = p;
-  updateRun(run.id, { agentCheckpoint: await checkpointWorkspace(workspace) });
-  await asCheckFailure(() => prepareWorkspace(workspace, commandEnvironment, references, p.databaseConfig));
+async function checkWorkspace({ references, stop }: Ctx, { workspace, commandEnvironment, databaseConfig }: Pick<Change, "workspace" | "commandEnvironment" | "databaseConfig">, saveCheckpoint?: (checkpoint: Awaited<ReturnType<typeof checkpointWorkspace>>) => void) {
+  await asCheckFailure(() => prepareWorkspace(workspace, commandEnvironment, references, databaseConfig));
   const checkpoint = await checkpointWorkspace(workspace);
-  updateRun(run.id, { agentCheckpoint: checkpoint });
+  saveCheckpoint?.(checkpoint);
   const validationTree = checkpoint.treeSha;
   stopBefore(stop, "validation commands");
   const commands = await asCheckFailure(() => withValidationSlot(() => runCommands(config.workspace.validate, workspace.path, commandEnvironment, references, "validate"), references, stop)
@@ -57,7 +57,8 @@ async function runChecks({ run, references, stop }: Ctx, p: Change) {
 async function validateAndCommit(ctx: Ctx, p: Change, kind: Acceptance) {
   const { run, manifest, references } = ctx;
   const { workspace } = p;
-  const { commands, validationTree } = await runChecks(ctx, p);
+  updateRun(run.id, { agentCheckpoint: await checkpointWorkspace(workspace) });
+  const { commands, validationTree } = await checkWorkspace(ctx, p, (agentCheckpoint) => { updateRun(run.id, { agentCheckpoint }); });
   await assertNoCommittedSecrets(workspace, p.validationOnly ? run.headSha ?? p.mainSha : p.startHeadSha, validationTree);
   const message = manifest.commitPrefix ? `${manifest.commitPrefix}: ${p.title}` : conventionalTitle(p.title);
   const commitSha = await commitWorkspace(workspace, message, botAuthor(), references);
@@ -86,10 +87,43 @@ async function targetOf(p: Change, headSha = p.headSha) {
   return p.target;
 }
 
-async function acquireChangeWorkspace(ctx: Ctx, observed: Observed) {
+function restartDeferredChange({ run, operation }: Ctx, reason: string) {
+  const reset = {
+    stage: "preparing" as const, inferenceFromRunId: null, context: null, result: null,
+    mainSha: null, headSha: null, agentCheckpoint: null, verification: null,
+    piSessionId: null, piSessionFile: null, publication: { status: "pending" as const },
+  };
+  updateRun(run.id, reset);
+  Object.assign(run, reset);
+  operation.log.info({ event: "run.deferred_snapshot_stale", reason }, "Repairing retained work against the current issue");
+}
+
+export async function restartStaleDeferredPublication(ctx: Ctx, { github, item, observation, mainSha }: Observed) {
+  const { run } = ctx;
+  if (run.stage !== "publishing" || run.publication.pullRequestNumber) return;
+  const workspace = item.workspaceId === run.workspaceId && run.workspaceId ? getWorkspace(run.workspaceId) : undefined;
+  if (!workspace || workspace.removedAt) throw new Error("Publication workspace is no longer attached to this issue");
+  await validateWorkspace(workspace);
+  const { commitSha } = run.publication;
+  if ((await freshness(savedEvaluation(run), { ...observation, mainSha }, "exact")).kind === "stale"
+    || !commitSha || !await workspaceMatchesCommit(workspace, commitSha)) {
+    // Reconcile an ambiguous push before discarding the only snapshot that identifies its validated commit.
+    if (!run.publication.commentOnly && commitSha && run.verification?.headSha === commitSha) {
+      const expected = expectedBranchHead(workspace, run.context?.headSha);
+      const actual = await remoteBranchHead(workspace.repositoryPath, remoteUrl(github.repository), workspace.branch, await github.getGitEnvironment());
+      if (actual !== expected) {
+        if (actual !== commitSha) throw new Error("Remote branch changed before deferred repair; original work was retained");
+        db.update(workspaces).set({ pushedHeadSha: commitSha }).where(eq(workspaces.id, workspace.id)).run();
+      }
+    }
+    restartDeferredChange(ctx, "Publication snapshot changed");
+  }
+}
+
+async function acquireChangeWorkspace(ctx: Ctx, observed: Observed, resumedDeferred: boolean) {
   const { repository, context, pullRequest, item, observation } = observed;
   const { run, references, repositoryPath } = ctx;
-  const validationOnly = run.stage === "validating";
+  let validationOnly = run.stage === "validating";
   const { mainSha, headSha: preparedHead } = await itemRevisions(observed);
   let workspace = item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
   if (workspace?.removedAt) throw new Error(`Workspace was removed: ${workspace.id}`);
@@ -99,11 +133,15 @@ async function acquireChangeWorkspace(ctx: Ctx, observed: Observed) {
   }
   if (validationOnly) {
     if (!hasValidationCheckpoint(run)) throw new Error("No complete agent checkpoint to resume; use normal retry to repair");
-    if (!workspace || workspace.id !== run.workspaceId) throw new Error("Validation checkpoint workspace is no longer attached to this item");
-    if ((await freshness(savedEvaluation(run), { ...observation, mainSha }, "exact")).kind === "stale") {
-      throw new Error("Validation checkpoint context or base changed; use normal retry to repair against current requirements");
+    const problem = !workspace || workspace.id !== run.workspaceId ? "Validation checkpoint workspace is no longer attached to this item"
+      : (await freshness(savedEvaluation(run), { ...observation, mainSha }, "exact")).kind === "stale"
+        ? "Validation checkpoint context or base changed"
+        : !await checkpointMatches(workspace, run.agentCheckpoint) ? "Validation checkpoint source changed" : undefined;
+    if (problem) {
+      if (!resumedDeferred) throw new Error(`${problem}; use normal retry to repair the current workspace`);
+      restartDeferredChange(ctx, problem);
+      validationOnly = false;
     }
-    await validateCheckpoint(workspace, run.agentCheckpoint);
   }
   if (!workspace) {
     if (pullRequest && pullRequest.head.repo?.full_name !== repository) {
@@ -212,6 +250,18 @@ async function provisionDatabase({ run, references, cleanup }: Ctx) {
   return { databaseConfig, database, environment };
 }
 
+export async function validateRefreshedChange(ctx: Ctx, workspace: Workspace, base: string, head: string) {
+  stopBefore(ctx.stop, "publication recovery validation");
+  if (ctx.cleanup.databaseRequested) await removeRunDatabase(ctx.run.id, ctx.references);
+  const { databaseConfig, environment } = await provisionDatabase(ctx);
+  const { commands, validationTree } = await checkWorkspace(ctx, { workspace, commandEnvironment: { ...childEnvironment(), ...environment }, databaseConfig });
+  if (await git(workspace.path, ["rev-parse", `${head}^{tree}`]) !== validationTree || await headOf(workspace.path) !== head) {
+    throw new Error("The refreshed commit differs from the validated tree; original work was retained");
+  }
+  await assertNoCommittedSecrets(workspace, base, validationTree);
+  return { headSha: head, commands };
+}
+
 async function agentStage(ctx: Ctx, observed: Observed, p: Change, acceptance: Acceptance, { diffPaths, diffBaseSha }: Awaited<ReturnType<typeof readDiffScope>>) {
   const { task, run, stop } = ctx;
   const { workspace, mainSha, environment, database } = p;
@@ -235,10 +285,11 @@ async function agentStage(ctx: Ctx, observed: Observed, p: Change, acceptance: A
   updateRun(run.id, { result: p.result, stage: "validating" });
 }
 
-export async function changeRun(ctx: Ctx, observed: Observed) {
-  const { run, manifest } = ctx;
+export async function changeRun(ctx: Ctx, observed: Observed, resumingDeferred: boolean) {
+  const { task, run, manifest } = ctx;
   const acceptance = manifest.acceptance!;
-  const acquired = await acquireChangeWorkspace(ctx, observed);
+  const { item, github, observation } = observed;
+  const acquired = await acquireChangeWorkspace(ctx, observed, resumingDeferred);
   const { workspace, validationOnly, mainSha, startHeadSha } = acquired;
   if (!validationOnly) updateRun(run.id, { workspaceId: workspace.id, mainSha, headSha: startHeadSha });
   const { databaseConfig, database, environment } = await provisionDatabase(ctx);
@@ -250,6 +301,19 @@ export async function changeRun(ctx: Ctx, observed: Observed) {
   };
   const scope = await readDiffScope(workspace.path, mainSha, p.preparedHead, Boolean(observed.pullRequest));
   if (validationOnly) p.agentInput = { contextDir: contextDirOf(inferenceRunOf(run).id), revisions: { head: p.headSha, base: scope.diffBaseSha, main: mainSha } };
-  else await agentStage(ctx, observed, p, acceptance, scope);
+  else {
+    await agentStage(ctx, observed, p, acceptance, scope);
+    try {
+      if (item.kind === "issue" && manifest.publish.includes("pull_request")) {
+        await assertCurrentImplementation(github, task, item.payload.number, observation.baseBranch, workspace.branch);
+      }
+    }
+    catch (error) {
+      if (error instanceof CompetingImplementation && p.result?.outcome === "complete") {
+        updateRun(run.id, { agentCheckpoint: await checkpointWorkspace(workspace) });
+      }
+      throw error;
+    }
+  }
   await validateStage(ctx, p, acceptance);
 }

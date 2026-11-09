@@ -57,6 +57,7 @@ export async function fixture(scenario, spec) {
   const verdicts = {}, modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), checkRuns = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [], deployments = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set(), permissions: new Set(), commitComment: new Set() };
   const checkRollups = new Map();
+  const graphqlRate = { ...rate };
   const tokens = new Map(patMode ? [[pat, { issues: "write", pull_requests: "write", contents: "write" }]] : []);
   const transient = { failures: 0, seen: new Map() };
   let onModel, script, nextCommentId = 1000, nextIssueNumber = 500;
@@ -363,15 +364,16 @@ export async function fixture(scenario, spec) {
     const credential = bearer(options);
     const call = { method, path: path + url.search, token: credential }; calls.push(call);
     const reply = (data, status = 200, extra = {}) => {
-      const text = JSON.stringify(data), headers = { "content-type": "application/json", "x-ratelimit-limit": String(rate.limit), "x-ratelimit-reset": String(rate.reset), "x-ratelimit-resource": "core", ...extra };
+      const resource = path === "/graphql" ? "graphql" : "core", budget = resource === "graphql" ? graphqlRate : rate;
+      const text = JSON.stringify(data), headers = { "content-type": "application/json", "x-ratelimit-limit": String(budget.limit), "x-ratelimit-reset": String(budget.reset), "x-ratelimit-resource": resource, ...extra };
       if (method === "GET" && status === 200) {
         headers.etag = `"${createHash("sha1").update(url.pathname + url.search + text).digest("hex")}"`;
         if (new Headers(options.headers).get("if-none-match") === headers.etag) {
-          call.status = 304; return new Response(null, { status: 304, headers: { ...headers, "x-ratelimit-remaining": String(rate.remaining) } });
+          call.status = 304; return new Response(null, { status: 304, headers: { ...headers, "x-ratelimit-remaining": String(budget.remaining) } });
         }
       }
-      call.status = status; if (!path.endsWith("/access_tokens")) rate.remaining--;
-      return new Response(text, { status, headers: { ...headers, "x-ratelimit-remaining": String(rate.remaining) } });
+      call.status = status; if (!path.endsWith("/access_tokens")) budget.remaining--;
+      return new Response(text, { status, headers: { ...headers, "x-ratelimit-remaining": String(budget.remaining) } });
     };
     const can = (permission) => tokens.get(credential)?.[permission] === "write";
     const lostResponse = (set, key, message, ok, status = 201) => set.delete(key) ? reply({ message }, 502) : reply(ok, status);
@@ -386,6 +388,24 @@ export async function fixture(scenario, spec) {
     if (path === "/graphql" && method === "POST") {
       const { owner, repo, number, oid, after } = body.variables ?? body;
       const scopes = tokens.get(credential);
+      if (body.query.includes("closedByPullRequestsReferences")) {
+        if (!patMode && (scopes?.issues !== "read" || scopes?.pull_requests !== "read")) {
+          return reply({ message: "Resource not accessible by integration" }, 403);
+        }
+        const links = prs.filter((pr) => (pr.state === "open" || body.query.includes("includeClosedPrs: true"))
+          && (pr.linkedIssues?.includes(number) || [...pr.body.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#(\d+)\b/gi)]
+            .some((match) => Number(match[1]) === number)));
+        const start = Number(after ?? 0), end = start + 2;
+        const nodes = links.slice(start, end).map((pr) => ({
+          number: pr.number, state: pr.mergedAt ? "MERGED" : pr.state.toUpperCase(), mergedAt: pr.mergedAt ?? null,
+          repository: { nameWithOwner: pr.base.repo.full_name }, baseRefName: pr.base.ref,
+          headRepository: pr.head.repo && { nameWithOwner: pr.head.repo.full_name }, headRefName: pr.head.ref,
+        }));
+        const issue = issues.get(number);
+        return reply({ data: { repository: { issue: issue
+          ? { state: issue.state.toUpperCase(), timelineItems: { nodes: issue.reopened ? [issue.reopened] : [] },
+            closedByPullRequestsReferences: { nodes, pageInfo: { hasNextPage: links.length > end, endCursor: String(end) } } } : null } } });
+      }
       if (owner !== "fixture" || repo !== "project" || !prs.some((pr) => pr.number === number)
         || !["pull_requests", "contents", "checks"].every((scope) => scopes?.[scope] === "read")) {
         return reply({ message: "Resource not accessible by integration" }, 403);
@@ -498,7 +518,7 @@ export async function fixture(scenario, spec) {
   const addPr = (number, branch, login, extra = {}) => { prs.push(githubItem("pr", number, { title: "PR " + number, body: "", user: { login }, head: { ref: branch, sha: git(resolve("remote.git"), "rev-parse", branch), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } }, ...extra })); };
   const botComments = (number) => (comments.get(number) ?? []).filter((c) => c.user.login !== "human");
   const written = (type, predicate = () => true) => writes.filter((write) => write.type === type && predicate(write));
-  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, loggie, cloudflare, pat, user, githubApp, modes, verdicts, requests, calls, slack, rate, issues, prs, comments, reviews, writes, deployments, checkRuns, checkRollups, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
+  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, loggie, cloudflare, pat, user, githubApp, modes, verdicts, requests, calls, tokens, slack, rate, issues, prs, comments, reviews, writes, deployments, checkRuns, checkRollups, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
     set onModel(value) { onModel = value; },
     set script(value) { script = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },

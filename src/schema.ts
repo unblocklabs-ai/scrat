@@ -37,7 +37,7 @@ export const tasks = sqliteTable("tasks", {
   retryCount: integer("retry_count"),
   availableAt: text("available_at"),
   issueOpening: text("issue_opening"),
-  competingPullRequest: integer("competing_pull_request"),
+  lastCompetingPullRequest: integer("competing_pull_request"), // Retained through requeue and worker interruptions.
   status: text("status", {
     enum: ["queued", "blocked", "running", "completed", "failed", "cancelled"],
   }).notNull().default("queued"),

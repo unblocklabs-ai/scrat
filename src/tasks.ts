@@ -65,8 +65,9 @@ function checkClaimable({ task, subject }: { task: Task; subject: Subject }, dat
 function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run | undefined; trigger: TriggerInput }) {
   const retry = previousRun?.error && isDeepStrictEqual(previousRun.input, task.input) ? previousRun : undefined;
   const action = manifestOf(task.action);
-  const resumingDeferred = retry?.error?.code === competingImplementationCode;
-  const validationOnly = task.retryMode === "validation" || resumingDeferred && hasValidationCheckpoint(retry);
+  const resumingDeferred = task.lastCompetingPullRequest !== null;
+  const validationOnly = task.retryMode === "validation"
+    || retry?.error?.code === competingImplementationCode && hasValidationCheckpoint(retry);
   const publicationResume = !validationOnly && hasPublicationSnapshot(retry) ? retry : undefined;
   const interrupted = retry?.error?.name === "InterruptedError";
   const review = action.mode === "review";
@@ -264,7 +265,7 @@ function closeRun(transaction: Transaction, runId: string, error: ErrorDetails |
 export function finishRun(runId: string, outcome: { status: "completed" } | { status: "failed" | "cancelled"; error: unknown }) {
   const error = outcome.status === "completed" ? null : describeError(outcome.error);
   const finished = db.transaction((transaction) => closeRun(transaction, runId, error, (run) => ({
-    set: { status: outcome.status, ...outcome.status === "completed" ? { retryCount: null, availableAt: null } : {} },
+    set: { status: outcome.status, lastCompetingPullRequest: null, ...outcome.status === "completed" ? { retryCount: null, availableAt: null } : {} },
     event: outcome.status === "cancelled" ? cancelled(getTask(run.taskId, transaction)!, error!.message)
       : error ? { type: "run.failed", data: { stage: run.stage, error } } : { type: "run.completed", data: { stage: run.stage } },
   })), { behavior: "immediate" });
@@ -272,7 +273,7 @@ export function finishRun(runId: string, outcome: { status: "completed" } | { st
   return finished;
 }
 
-const blockedBy = (competingPullRequest: number) => ({ status: "blocked" as const, competingPullRequest });
+const blockedBy = (lastCompetingPullRequest: number) => ({ status: "blocked" as const, lastCompetingPullRequest });
 const cancelled = (task: Task, reason: string) => ({ type: "task.cancelled" as const, data: { action: task.action, reason } });
 
 export function deferImplementation(runId: string, error: CompetingImplementation) {
@@ -280,7 +281,7 @@ export function deferImplementation(runId: string, error: CompetingImplementatio
     const task = getTask(run.taskId, transaction)!;
     const subject = transaction.select().from(subjects).where(eq(subjects.id, task.subjectId)).get();
     if (subject?.state !== "open" || pendingTaskOf(transaction, task.subjectId, task.action)) {
-      return { set: { status: "cancelled" }, event: cancelled(task, "Implementation closed or superseded") };
+      return { set: { status: "cancelled", lastCompetingPullRequest: null }, event: cancelled(task, "Implementation closed or superseded") };
     }
     return {
       set: { ...blockedBy(error.pullRequestNumber), retryMode: "repair", retryCount: null, availableAt: null },
@@ -299,16 +300,17 @@ export function reconcileIssueImplementation({ subjectId, action, observedTask, 
     const latest = latestTask(subjectId, action, transaction);
     const subject = transaction.select().from(subjects).where(eq(subjects.id, subjectId)).get();
     if (subject?.state !== "open" || latest?.id !== observedTask?.id || latest?.status !== observedTask?.status
-      || latest?.issueOpening !== observedTask?.issueOpening || latest?.competingPullRequest !== observedTask?.competingPullRequest) return false;
+      || latest?.issueOpening !== observedTask?.issueOpening || latest?.lastCompetingPullRequest !== observedTask?.lastCompetingPullRequest) return false;
     const newOpening = latest !== undefined && !sameOpening(latest, facts);
     const competitor = facts.competingPullRequest;
-    const set = competitor === undefined ? { status: "queued" as const, competingPullRequest: null } : blockedBy(competitor);
+    const set = competitor === undefined ? { status: "queued" as const } : blockedBy(competitor);
     if (isPending(latest)) {
       if (!facts.open || newOpening) {
-        transaction.update(tasks).set({ status: "cancelled", competingPullRequest: null }).where(eq(tasks.id, latest.id)).run();
+        transaction.update(tasks).set({ status: "cancelled", lastCompetingPullRequest: null }).where(eq(tasks.id, latest.id)).run();
         recordEvent({ subjectId, taskId: latest.id, ...cancelled(latest, facts.open ? "GitHub issue reopened" : "GitHub issue closed") }, transaction);
       } else {
-        if (latest.status === set.status && latest.competingPullRequest === set.competingPullRequest && latest.issueOpening !== null) return false;
+        if (latest.status === set.status && (competitor === undefined || latest.lastCompetingPullRequest === competitor)
+          && latest.issueOpening !== null) return false;
         transaction.update(tasks).set({ ...set, issueOpening: facts.opening }).where(eq(tasks.id, latest.id)).run();
         if (competitor !== undefined && latest.status === "queued") {
           recordEvent({ subjectId, taskId: latest.id, type: "task.blocked", data: { action, competingPullRequest: competitor } }, transaction);
@@ -353,7 +355,7 @@ export function interruptRun(runId: string, error: unknown = new InterruptedErro
     const delaySeconds = retry && Math.min(retry.maxDelaySeconds, retry.initialDelaySeconds * 2 ** (attempt - 1) * (1 + config.harness.retryJitter * Math.random()));
     const nextAttemptAt = delaySeconds === undefined ? undefined : new Date(Date.now() + delaySeconds * 1000).toISOString();
     return {
-      set: superseded ? { status: "failed" } : { status: "queued", retryMode, ...nextAttemptAt ? { retryCount: attempt, availableAt: nextAttemptAt } : {} },
+      set: superseded ? { status: "failed", lastCompetingPullRequest: null } : { status: "queued", retryMode, ...nextAttemptAt ? { retryCount: attempt, availableAt: nextAttemptAt } : {} },
       event: superseded ? { type: "run.failed", data: { stage: run.stage, error: details } }
         : { type: "run.requeued", data: { stage: run.stage, retryMode, ...nextAttemptAt ? { attempt, nextAttemptAt } : {} } },
     };
@@ -364,7 +366,7 @@ export function interruptRun(runId: string, error: unknown = new InterruptedErro
 
 export function cancelPendingTasks(subjectId: string, reason: string, action?: Task["action"], keepManual = false) {
   return db.transaction((transaction) => {
-    const cancelled = transaction.update(tasks).set({ status: "cancelled", competingPullRequest: null }).where(and(
+    const cancelled = transaction.update(tasks).set({ status: "cancelled", lastCompetingPullRequest: null }).where(and(
       eq(tasks.subjectId, subjectId), pendingTask, action ? eq(tasks.action, action) : undefined,
       keepManual ? sql`coalesce(json_extract(${tasks.input}, '$.manual'), 0) != 1` : undefined,
     )).returning().all();

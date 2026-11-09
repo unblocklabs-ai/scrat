@@ -1965,12 +1965,20 @@ fi
     f.addPr(302, "human-fix", "human", { linkedIssues: [3] }); await route();
     assert.equal(f.row(s.tasks, retryable.taskId).status, "blocked");
     const beforeRetry = f.requests.length;
+    f.issues.get(3).body = "Requirements changed while sync blocked the retry";
+    changeMain(workflow, "name: newer\n");
     f.prs.at(-1).state = "closed"; await route(); await route();
+    f.reset(3, "normal");
+    f.script = [{ name: "write", args: { path: "src/app.ts", content: "export const value = 321;\n" } }];
     const retried = await success();
     assert.equal(retried.taskId, retryable.taskId); assert.equal(retried.publication.pullRequestNumber, 203);
-    assert.equal(f.requests.length, beforeRetry);
+    assert.ok(f.requests.length > beforeRetry);
+    git(remote, "merge-base", "--is-ancestor", retryable.publication.publishedCommitSha, retried.publication.publishedCommitSha);
+    assert.equal(git(remote, "show", `${retried.publication.publishedCommitSha}:${workflow}`), "name: newer");
+    assert.equal(git(remote, "show", `${retried.publication.publishedCommitSha}:src/app.ts`), "export const value = 321;");
 
     // The Git write succeeds, but the SQLite transaction recording it does not.
+    f.script = undefined;
     f.addIssue(4, ["scrat"]); f.enqueue(4, "implement");
     db.$client.exec(`CREATE TRIGGER reject_push_receipt BEFORE UPDATE OF publication ON runs
       WHEN json_extract(NEW.publication, '$.publishedCommitSha') IS NOT NULL
@@ -1991,6 +1999,23 @@ fi
     tasks.retryTask(lostPush.taskId); const recovered = await success();
     assert.equal(recovered.publication.publishedCommitSha, written);
     assert.equal(recovered.publication.pullRequestNumber, 204); assert.equal(f.requests.length, beforeRecovery);
+
+    f.addIssue(5, ["scrat"]); f.enqueue(5, "implement");
+    let changedHead;
+    globalThis.fetch = (input, init) => {
+      if (!changedHead && String(input).endsWith("/pulls") && init?.method === "POST") {
+        changedHead = pushFile(JSON.parse(init.body).head, "notes.md", "Unvalidated update during PR creation\n");
+      }
+      return githubFetch(input, init);
+    };
+    let mismatched;
+    try { mismatched = await run(); }
+    finally { globalThis.fetch = githubFetch; }
+    assert.equal(f.prs.find((pr) => pr.number === 205).head.sha, changedHead);
+    assert.match(mismatched.error?.message, /PR head differs from the validated commit/);
+    assert.equal(mismatched.publication.pullRequestNumber, undefined);
+    tasks.retryTask(mismatched.taskId);
+    assert.match((await run()).error?.message, /PR head differs from the validated commit/);
   } },
   freshness: { title: "requirements changed during inference cannot receive an approval label", run: async () => {
     f.addIssue(1); await route(); f.reset(1, "ready");
@@ -2885,7 +2910,7 @@ fi
     const publish = async (name) => {
       writeFileSync(resolve(row().path, name), name + "\n"); git(row().path, "add", "."); commit(row().path, name);
       const sha = git(row().path, "rev-parse", "HEAD");
-      await pushWorkspace(row(), remote, sha, { ...process.env });
+      await pushWorkspace(row(), remote, sha, git(remote, "rev-parse", row().branch), { ...process.env });
       assert.equal(git(remote, "rev-parse", row().branch), sha);
       return sha;
     };
@@ -2904,6 +2929,12 @@ fi
     await publish("two.txt");
     assert.deepEqual(header(), []);
     git(remote, "merge-base", "--is-ancestor", local, row().branch);
+    const observed = git(remote, "rev-parse", row().branch), rewind = git(remote, "rev-parse", "main");
+    writeFileSync(resolve(row().path, "next.txt"), "next\n"); git(row().path, "add", "."); commit(row().path, "Next");
+    const next = git(row().path, "rev-parse", "HEAD"), branch = `refs/heads/${row().branch}`;
+    git(remote, "update-ref", branch, rewind, observed);
+    await assert.rejects(pushWorkspace(row(), remote, next, observed, { ...process.env }), /stale info/);
+    assert.equal(git(remote, "rev-parse", branch), rewind, "A push cannot undo an intervening rewind");
     const tree = git(shared, "rev-parse", "HEAD^{tree}"), head = git(shared, "rev-parse", "HEAD");
     const orphan = () => git(shared, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", tree, "-p", head, "-m", "orphan " + Math.random());
     const [kept, lost] = [orphan(), orphan()];

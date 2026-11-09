@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "./db.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
-import { changedPaths, commitOf, git, headOf, hasPendingMerge, identity, mergeHeadOf } from "./git.ts";
+import { changedPaths, commitOf, git, headOf, hasPendingMerge, identity, isAncestor, mergeHeadOf } from "./git.ts";
 import { botSlug } from "./identity.ts";
 import { withOperation } from "./logging.ts";
 import { runs, subjects, workspaces, type Run, type Workspace } from "./schema.ts";
@@ -231,10 +231,13 @@ export async function importWorkspaceCommit(workspace: Workspace, commitSha: str
   await git(workspace.repositoryPath, ["fetch", "--no-tags", "--", bundle, tip]);
 }
 
-export async function pushWorkspace(workspace: Workspace, remote: string, commitSha: string, env: NodeJS.ProcessEnv, references: EventReferences = {}) {
+export async function pushWorkspace(workspace: Workspace, remote: string, commitSha: string, expected: string | undefined, env: NodeJS.ProcessEnv, references: EventReferences = {}) {
   await importWorkspaceCommit(workspace, commitSha);
+  if (expected && !await isAncestor(workspace.repositoryPath, expected, commitSha)) throw new Error("Refusing to rewrite remote branch history");
   await pinWorkspaceBase(workspace, commitSha);
-  try { await git(workspace.repositoryPath, ["push", "--", remote, `${commitSha}:refs/heads/${workspace.branch}`], env); }
+  const ref = `refs/heads/${workspace.branch}`;
+  // The ancestry check forbids a force-update. The lease also refuses a concurrent rewind, creation, or deletion.
+  try { await git(workspace.repositoryPath, ["push", `--force-with-lease=${ref}:${expected ?? ""}`, "--", remote, `${commitSha}:${ref}`], env); }
   catch (error) {
     if (/refusing to allow .* to create or update workflow .* without [`']workflows?[`'] (?:permission|scope)/i.test(errorMessage(error))) throw new WorkflowPushRejected(error);
     throw error;

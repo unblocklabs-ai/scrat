@@ -85,7 +85,7 @@ const push = {
       if (actual !== expected) throw new Error("Remote branch changed before push; original work was retained");
       const workflows = run.mainSha && await changesWorkflows(workspace.path, commitSha, run.mainSha, expected);
       const env = await github.getGitEnvironment(workflows ? "workflows" : true);
-      await pushWorkspace(workspace, remote, commitSha, env, references);
+      await pushWorkspace(workspace, remote, commitSha, expected, env, references);
     }
     db.transaction((transaction) => {
       transaction.update(workspaces).set({ pushedHeadSha: commitSha }).where(eq(workspaces.id, workspace.id)).run();
@@ -103,16 +103,17 @@ const pullRequest = {
     let pr = await github.findPullRequest(workspace.branch, evaluated.baseBranch);
     if (pr?.state === "closed") throw new Error("The workspace PR was already closed");
     if (!pr) {
+      await assertCurrentImplementation(github, task, evaluated.item.number, evaluated.baseBranch, workspace.branch);
       const remote = remoteUrl(github.repository);
       if (await remoteBranchHead(workspace.repositoryPath, remote, workspace.branch, await github.getGitEnvironment()) !== commitSha) {
         throw new Error("Remote branch changed before PR creation; original work was retained");
       }
-      await assertCurrentImplementation(github, task, evaluated.item.number, evaluated.baseBranch, workspace.branch);
       pr = await github.createPullRequest({
         title: conventionalTitle(evaluated.item.title), body: `${result.text}\n\n${validationLine(run)}Closes #${evaluated.item.number}\n\n${taskMarker(task.id)}`,
         head: workspace.branch, base: evaluated.baseBranch,
       }, references);
     }
+    if (pr.head.sha !== commitSha) throw new Error(`PR head differs from the validated commit (#${pr.number}); original work was retained`);
     const publishedPr = pr;
     db.transaction((transaction) => {
       const created = upsertItem({ externalId: publishedPr.node_id, kind: "pr", payload: publishedPr }, transaction);

@@ -14,12 +14,14 @@ export type JournalEvent = (
   | { type: "run.resumed"; data: { stage: string; fromRunId: string; reason: "drain" | "crash" | "retry" } }
   | { type: "run.reviewers_reused"; data: { fromRunId: string } }
   | { type: "run.completed"; data: { stage: string } }
+  | { type: "run.deferred"; data: { stage: string; competingPullRequest: number } }
   | { type: "run.interrupting"; data: { stage: string; reason: string } }
   | { type: "run.requeued"; data: { stage: string; retryMode: "repair" | "validation"; attempt?: number; nextAttemptAt?: string } }
   | { type: "run.failed"; data: { stage: string; error: ErrorDetails } }
   | { type: "task.cancelled"; data: { action: TaskDetails["action"]; reason: string } }
   | { type: "task.rejected"; data: { action: string; reason: string } }
   | { type: "task.retried"; data: { action: TaskDetails["action"]; mode: "repair" | "validation" } }
+  | { type: "task.resumed"; data: { action: TaskDetails["action"]; fromRunId: string } }
   | { type: "workspace.committed" | "workspace.pushed"; data: { workspaceId: string; commitSha: string } }
   | { type: "workspace.publication_refreshed"; data: { originalWorkspaceId: string; workspaceId: string; originalCommitSha: string; commitSha: string; base: string } }
   | { type: "task.enqueued"; data: TaskDetails }

@@ -7,7 +7,6 @@ import { labelName } from "./labels.ts";
 import { logger, withOperation } from "./logging.ts";
 import { endsWithMarker, fingerprintMarker, inlineCommentId, issueCommentId, reviewCommentId, withMarker } from "./markers.ts";
 import type { GithubComment, GithubContext, GithubIssue, GithubItem, GithubPullRequest } from "./github-types.ts";
-import { closingIssueNumbers } from "./github-context.ts";
 import { CompetingImplementation, errorStatus } from "./errors.ts";
 import { fetchPullRequestHead as fetchHead, fetchRepository } from "./git.ts";
 import { assertConfiguredRepository, remoteUrl, sameRepository } from "./repository.ts";
@@ -268,13 +267,44 @@ export class GitHubRepository {
     return found ? pullRequestView(found) : undefined;
   }
 
-  async assertNoCompetingImplementation(issue: number, ownBranch: string) {
+  async competingImplementation(issue: number, base: string, ownBranch?: string, mergedSince?: string) {
     const { github, owner, repo } = await this.read();
-    for await (const { data } of github.paginate.iterator(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 })) {
-      const competing = data.find((pr) => !(sameRepository(pr.head.repo?.full_name ?? "", this.repository) && pr.head.ref === ownBranch)
-        && closingIssueNumbers(pr.body).includes(issue));
-      if (competing) throw new CompetingImplementation(competing.number);
-    }
+    type LinkedPullRequest = {
+      number: number; state: "OPEN" | "CLOSED" | "MERGED"; mergedAt: string | null; repository: { nameWithOwner: string };
+      baseRefName: string; headRepository: { nameWithOwner: string } | null; headRefName: string;
+    };
+    type IssueLinks = { repository: { issue: { closedByPullRequestsReferences: {
+      nodes: (LinkedPullRequest | null)[]; pageInfo: { hasNextPage: boolean; endCursor: string | null };
+    } } | null } | null };
+    // GitHub reports merge times to the second. Older merged links can belong to a prior opening of the issue.
+    const earliestMerge = mergedSince ? Math.floor(Date.parse(mergedSince) / 1000) * 1000 : Infinity;
+    let after: string | null = null;
+    do {
+      const response: IssueLinks = await github.graphql(`query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+        repository(owner: $owner, name: $repo) {
+          issue(number: $number) {
+            closedByPullRequestsReferences(first: 100, after: $after, includeClosedPrs: true) {
+              nodes { number state mergedAt repository { nameWithOwner } baseRefName headRepository { nameWithOwner } headRefName }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        }
+      }`, { owner, repo, number: issue, after });
+      const page = response.repository?.issue?.closedByPullRequestsReferences;
+      if (!page) throw new Error(`Cannot read linked PRs for ${this.repository}#${issue}`);
+      const competing = page.nodes.find((pr) => pr && (pr.state === "OPEN"
+        || pr.state === "MERGED" && pr.mergedAt && Date.parse(pr.mergedAt) >= earliestMerge)
+        && sameRepository(pr.repository.nameWithOwner, this.repository) && pr.baseRefName === base
+        && !(pr.headRefName === ownBranch && sameRepository(pr.headRepository?.nameWithOwner ?? "", this.repository)));
+      if (competing) return competing.number;
+      after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+      if (page.pageInfo.hasNextPage && !after) throw new Error("GitHub returned an incomplete linked PR page");
+    } while (after);
+  }
+
+  async assertNoCompetingImplementation(issue: number, base: string, ownBranch?: string, mergedSince?: string) {
+    const competing = await this.competingImplementation(issue, base, ownBranch, mergedSince);
+    if (competing !== undefined) throw new CompetingImplementation(competing);
   }
 
   async checkRunConclusions(sha: string) {

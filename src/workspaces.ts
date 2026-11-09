@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { eq } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "./db.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
 import { changedPaths, commitOf, git, headOf, hasPendingMerge, identity, mergeHeadOf } from "./git.ts";
 import { botSlug } from "./identity.ts";
 import { withOperation } from "./logging.ts";
-import { runs, workspaces, type Run, type Workspace } from "./schema.ts";
+import { runs, subjects, workspaces, type Run, type Workspace } from "./schema.ts";
 import { errorMessage, ifMissing, WorkflowPushRejected } from "./errors.ts";
 import { SecretLeakError } from "./results.ts";
 import { containsSecret } from "./secrets.ts";
@@ -32,6 +32,11 @@ export async function validateWorkspace(workspace: Workspace) {
   if (!(await lstat(resolve(path, ".git"))).isDirectory() || path !== top || await realpath(common) !== resolve(path, ".git") || branch !== workspace.branch) throw new Error("Workspace Git identity changed");
 }
 
+export async function workspaceMatchesCommit({ path }: Workspace, commitSha: string) {
+  return await headOf(path) === commitSha && !await hasPendingMerge(path)
+    && !await git(path, ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"]);
+}
+
 export async function stageTree(path: string) {
   await git(path, ["add", "--all"]);
   return git(path, ["write-tree"]);
@@ -46,14 +51,12 @@ export async function checkpointWorkspace(workspace: Workspace) {
   };
 }
 
-export async function validateCheckpoint(workspace: Workspace, checkpoint: NonNullable<Run["agentCheckpoint"]>) {
+export async function checkpointMatches(workspace: Workspace, checkpoint: NonNullable<Run["agentCheckpoint"]>) {
   const headSha = await headOf(workspace.path);
   const mergeHead = await mergeHeadOf(workspace.path);
   const changed = await git(workspace.path, ["diff", "--name-only", "-z", checkpoint.treeSha, "--"]);
   const untracked = await git(workspace.path, ["ls-files", "--others", "--exclude-standard", "-z"]);
-  if (headSha !== checkpoint.headSha || mergeHead !== checkpoint.mergeHead || changed || untracked) {
-    throw new Error("Validation checkpoint source changed; use normal retry to repair the current workspace");
-  }
+  return headSha === checkpoint.headSha && mergeHead === checkpoint.mergeHead && !changed && !untracked;
 }
 
 export async function assertNoCommittedSecrets(workspace: Workspace, base: string, tree: string) {
@@ -106,6 +109,31 @@ export async function createWorkspace(
   });
 }
 
+export function replacedWorkspaces(taskId?: string) {
+  return db.select({ id: workspaces.id }).from(workspaces)
+    .where(and(isNull(workspaces.removedAt), isNotNull(workspaces.replacement),
+      taskId ? sql`json_extract(${workspaces.replacement}, '$.taskId') = ${taskId}` : undefined)).all();
+}
+
+function replacementWasPublished(replacement: Workspace["replacement"]) {
+  // Another base move can replace the replacement before anything is published.
+  while (replacement) {
+    const receipt = db.select({ id: runs.id }).from(runs).where(and(
+      eq(runs.workspaceId, replacement.workspaceId), eq(runs.taskId, replacement.taskId),
+      sql`json_extract(${runs.publication}, '$.status') = 'published'
+        and json_extract(${runs.publication}, '$.publishedCommitSha') = json_extract(${runs.publication}, '$.commitSha')`,
+    )).get();
+    if (receipt) return true;
+    replacement = getWorkspace(replacement.workspaceId)?.replacement ?? null;
+  }
+  return false;
+}
+
+function workspaceInUse(workspaceId: string) {
+  return db.select({ id: subjects.id }).from(subjects).where(eq(subjects.workspaceId, workspaceId)).get()
+    || db.select({ id: runs.id }).from(runs).where(and(eq(runs.workspaceId, workspaceId), isNull(runs.finishedAt))).get();
+}
+
 export async function removeWorkspace(workspaceId: string, references: EventReferences = {}) {
   return withOperation("workspace.remove", { ...references, workspaceId }, async (operation) => {
     operation.stage("lookup");
@@ -115,18 +143,43 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
       operation.complete({ alreadyRemoved: true });
       return workspace;
     }
-    const { repositoryPath, branch } = workspace;
+    const { repositoryPath, branch, replacement } = workspace;
+    if (replacement && (!replacementWasPublished(replacement) || workspaceInUse(workspaceId))) {
+      operation.complete({ retained: "Replacement publication not confirmed or checkout still in use" });
+      return workspace;
+    }
     const path = await ifMissing(realpath(workspace.path), workspace.path);
     operation.stage("remove_workspace");
     const present = await ifMissing(lstat(path).then(() => true), false);
     if (present) {
-      await validateWorkspace(workspace);
-      const head = await headOf(path);
-      const published = db.select().from(runs).where(eq(runs.workspaceId, workspace.id)).all()
-        .some((run) => run.publication.publishedCommitSha === head);
-      if (head !== workspace.baseSha && !published) throw new Error("Workspace has unpublished commits; retain it for recovery");
       if (path !== resolve(workspaceRoot(), workspace.id)) throw new Error("Refusing cleanup outside the owned workspace root");
+      await validateWorkspace(workspace);
+      if (replacement) {
+        if (!await workspaceMatchesCommit(workspace, replacement.originalHead)) throw new Error("Replaced checkout has changed; retain it for recovery");
+      } else {
+        const head = await headOf(path);
+        const published = db.select().from(runs).where(eq(runs.workspaceId, workspace.id)).all()
+          .some((run) => run.publication.publishedCommitSha === head);
+        if (head !== workspace.baseSha && !published) throw new Error("Workspace has unpublished commits; retain it for recovery");
+      }
+    }
+    if (replacement) {
+      const recoveryRef = `refs/scrat/recovery/${workspaceId}`;
+      const archived = await commitOf(repositoryPath, recoveryRef);
+      if (archived !== replacement.originalHead) {
+        if (archived) throw new Error("Recovery ref does not match the replaced checkout");
+        // Refresh pinned this exact commit in the source repository before adopting the replacement.
+        await git(repositoryPath, ["update-ref", recoveryRef, replacement.originalHead, ""]);
+      }
+      if (workspaceInUse(workspaceId)) {
+        operation.complete({ retained: "Replaced checkout is still in use" });
+        return workspace;
+      }
+    }
+    if (present) {
       await rm(path, { recursive: true });
+    }
+    if (present || replacement) {
       const home = sandboxHome(workspace.id);
       const stats = await ifMissing(lstat(home), undefined);
       if (stats?.isDirectory() && !stats.isSymbolicLink()) await rm(home, { recursive: true });

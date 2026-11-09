@@ -27,11 +27,13 @@ export function redactSecrets(value: string) {
 
 export const transientInferenceCode = "TRANSIENT_INFERENCE";
 export const branchConflictCode = "BRANCH_CONFLICT";
+export const competingImplementationCode = "COMPETING_IMPLEMENTATION";
 
 export class CompetingImplementation extends Error {
+  readonly code = competingImplementationCode;
   readonly pullRequestNumber: number;
   constructor(pullRequestNumber: number) {
-    super(`PR #${pullRequestNumber} already implements this issue`);
+    super(`Implementation deferred for linked PR #${pullRequestNumber}`);
     this.pullRequestNumber = pullRequestNumber;
   }
 }

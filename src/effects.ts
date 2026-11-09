@@ -95,7 +95,7 @@ const pullRequest = {
     let pr = await github.findPullRequest(workspace.branch, evaluated.baseBranch);
     if (pr?.state === "closed") throw new Error("The workspace PR was already closed");
     if (!pr) {
-      await github.assertNoCompetingImplementation(evaluated.item.number, workspace.branch);
+      await github.assertNoCompetingImplementation(evaluated.item.number, evaluated.baseBranch, workspace.branch);
       pr = await github.createPullRequest({
         title: conventionalTitle(evaluated.item.title), body: `${result.text}\n\n${validationLine(run)}Closes #${evaluated.item.number}\n\n${taskMarker(task.id)}`,
         head: workspace.branch, base: evaluated.baseBranch,

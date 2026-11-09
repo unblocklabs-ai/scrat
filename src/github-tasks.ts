@@ -15,9 +15,9 @@ import { prepareTarget } from "./git.ts";
 import { rateLimitLow, rateLimitState } from "./github-http.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
-import { closingIssueNumbers } from "./github-context.ts";
+import { competingImplementationCode } from "./errors.ts";
 import { items, runs, subjects } from "./schema.ts";
-import { cancelQueuedTasks, enqueueTask, latestTask } from "./tasks.ts";
+import { cancelQueuedTasks, enqueueTask, latestTask, resumeDeferredImplementation } from "./tasks.ts";
 import { parseTriggerInput } from "./triggers.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { bestEffort } from "./logging.ts";
@@ -206,8 +206,6 @@ async function routeObserved(ctx: SyncContext, item: Item, context: GithubContex
 export async function routeGithubTasks(github: GitHubRepository, current: Item[], previous: Map<string, Item>, log: Logger) {
   const ctx: SyncContext = { github, log };
   const defaultBaseSha = await github.fetchBranch(config.github.baseBranch);
-  const implemented = new Set(current.filter((item) => item.kind === "pr" && item.state === "open")
-    .flatMap((item) => closingIssueNumbers(item.payload.body)));
   let queued = 0, deferred = 0;
   const offset = current.length ? syncRound++ % current.length : 0;
   const ordered = [...current.slice(offset), ...current.slice(0, offset)];
@@ -230,11 +228,27 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
     if (item.kind === "issue") {
       const previousItem = previous.get(item.externalId);
       const labelAction = routeFor(issueSignal(item, "label"));
-      const plan = planIssueTasks({
-        labelAction, reviewAction: routeFor(issueSignal(item, "item_changed")), labelled: hasScratLabel(item), implemented: implemented.has(item.payload.number), workspaceId: item.workspaceId,
+      const latest = latestOf(item.id, labelAction);
+      const attempt = latest?.status === "cancelled" || latest?.status === "queued" ? latestRunOfTask(latest.id) : undefined;
+      const waiting = attempt?.error?.code === competingImplementationCode ? attempt : undefined;
+      const facts = {
+        labelAction, reviewAction: routeFor(issueSignal(item, "item_changed")), labelled: hasScratLabel(item), workspaceId: item.workspaceId,
         previouslyLabelled: previousItem ? hasScratLabel(previousItem) : undefined,
-        latest: latestOf(item.id, labelAction), updatedAt: item.payload.updated_at, mainSha: defaultBaseSha,
-      });
+        latest, updatedAt: item.payload.updated_at, mainSha: defaultBaseSha,
+      };
+      let plan = planIssueTasks({ ...facts, implemented: false });
+      if (!plan.review && labelAction && (waiting || latest?.status === "queued" || plan.decisions.some((decision) => decision.type === "enqueue"))) {
+        const own = item.workspaceId ? getWorkspace(item.workspaceId)?.branch : undefined;
+        if (rateLimitLow()) { deferred++; return; }
+        const competing = await github.competingImplementation(item.payload.number, config.github.baseBranch, own, waiting?.startedAt ?? undefined);
+        if (waiting && latest && competing === undefined) {
+          if (latest.status === "cancelled" && resumeDeferredImplementation(latest, waiting)) queued++;
+          // Do not coalesce a requeued attempt into a new trigger and discard its checkpoint.
+          plan.decisions = plan.decisions.filter((decision) => decision.type !== "enqueue");
+        } else if (competing !== undefined) {
+          plan = planIssueTasks({ ...facts, implemented: true });
+        }
+      }
       queued += applyDecisions(item.id, plan.decisions);
       if (!plan.review) return;
       const context = issueContexts.get(item.id);

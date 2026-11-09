@@ -1779,7 +1779,22 @@ export const scenarios = {
     const remote = resolve("remote.git"), workflow = ".github/workflows/ci.yml";
     const advance = (name) => { f.onModel = () => { f.onModel = undefined; changeMain(workflow, `name: ${name}\n`); }; };
     const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
-    advance("new"); const first = await implement(1);
+    const cleanup = () => execFileSync(process.execPath, [resolve("app/src/cleanup.ts")], { stdio: "pipe" });
+    advance("new"); f.addIssue(1, ["scrat"]); f.enqueue(1, "implement"); f.faults.pr.add(1);
+    const failed = await run();
+    assert.ok(failed.error); assert.equal(f.prs.length, 1);
+    const original = all(s.workspaces).find((w) => w.id !== failed.workspaceId);
+    assert.ok(original); const originalHead = git(original.path, "rev-parse", "HEAD");
+    cleanup();
+    assert.ok(existsSync(original.path), "An incomplete publication must keep the original checkout");
+    const localNote = resolve(original.path, "local-note.txt");
+    git(original.path, "config", "status.showUntrackedFiles", "no");
+    writeFileSync(localNote, "unpublished local work\n");
+    tasks.retryTask(failed.taskId); const first = await success();
+    assert.ok(existsSync(localNote), "A successful publication must not remove a modified predecessor");
+    unlinkSync(localNote); cleanup(); cleanup();
+    assert.ok(!existsSync(original.path), "Cleanup retries a confirmed replacement after the original is clean");
+    assert.equal(git(original.repositoryPath, "rev-parse", `refs/scrat/recovery/${original.id}`), originalHead);
     const head = first.publication.publishedCommitSha;
     assert.equal(git(remote, "show", `${head}:${workflow}`), "name: new");
     assert.equal(git(remote, "show", `${head}:src/app.ts`), "export const value = 11;");
@@ -1806,6 +1821,7 @@ fi
     git(remote, "merge-base", "--is-ancestor", head, updated);
     assert.equal(second.verification.headSha, updated); assert.equal(validations(), 4);
     assert.equal(f.requests.length, 4); assert.equal(f.prs.length, 1);
+    assert.ok(!existsSync(f.row(s.workspaces, first.workspaceId).path), "A clean predecessor is retired after publication");
     assert.ok(![...f.tokens.values()].some(({ workflows }) => workflows), "inherited workflow content does not require workflow write access");
   } },
   workflow_push: { title: "an intentional workflow change uses a workflow-capable Git push token", run: async () => {
@@ -1816,13 +1832,47 @@ fi
     const credential = Buffer.from(readFileSync("push-auth", "utf8").trim().split(" ").at(-1), "base64").toString("utf8").split(":").at(-1);
     assert.equal(f.tokens.get(credential)?.workflows, "write");
   } },
-  competing_implementation: { title: "a human PR opened during implementation prevents validation and duplicate publication", configure: [configureValidation], run: async () => {
+  competing_implementation: { title: "a GitHub-linked PR defers implementation and closing it unmerged resumes the same task", configure: [configureValidation, (config) => { config.actions.review_pr.enabled = false; }], run: async () => {
     branchOff("human-fix", "src/app.ts", "export const value = 42;\n");
-    f.onModel = () => { f.onModel = undefined; f.addPr(301, "human-fix", "human", { body: "Closes #1" }); };
+    f.onModel = () => { f.onModel = undefined; f.addPr(301, "human-fix", "human", { linkedIssues: [1] }); };
     const remote = resolve("remote.git"), before = git(remote, "for-each-ref", "refs/heads");
-    const skipped = await implement(1);
+    f.addIssue(1, ["scrat"]); f.enqueue(1, "implement");
+    const skipped = await run();
     assert.equal(f.prs.length, 1); assert.equal(git(remote, "for-each-ref", "refs/heads"), before);
-    assert.equal(skipped.publication.status, "not_needed"); assert.ok(!existsSync("validations.log"));
+    assert.equal(f.row(s.tasks, skipped.taskId).status, "cancelled"); assert.ok(!existsSync("validations.log"));
+    const attempts = () => all(s.runs).filter((r) => r.taskId === skipped.taskId);
+    const calls = f.requests.length;
+    await route();
+    assert.equal(f.row(s.tasks, skipped.taskId).status, "cancelled");
+    f.prs[0].state = "closed"; f.prs[0].mergedAt = new Date().toISOString(); await route();
+    assert.equal(f.row(s.tasks, skipped.taskId).status, "cancelled", "A merged PR still covers an issue that has not closed yet");
+    delete f.prs[0].mergedAt; await route(); await route();
+    assert.equal(f.row(s.tasks, skipped.taskId).status, "queued");
+    const resumed = await success();
+    assert.equal(resumed.taskId, skipped.taskId); assert.equal(attempts().length, 2);
+    assert.equal(resumed.inferenceFromRunId, skipped.id); assert.equal(f.requests.length, calls);
+    assert.equal(resumed.publication.pullRequestNumber, 201);
+
+    f.addIssue(2, ["scrat"]); f.enqueue(2, "implement");
+    f.addPr(302, "human-fix", "human", { linkedIssues: [2], state: "closed", mergedAt: "2000-01-01T00:00:00Z" });
+    f.addPr(303, "human-fix", "human", { linkedIssues: [2], state: "closed" });
+    f.addPr(304, "human-fix", "human", { linkedIssues: [2] });
+    const blocked = await run();
+    assert.equal(f.row(s.tasks, blocked.taskId).status, "cancelled");
+    assert.equal(blocked.workspaceId, null, "An already linked PR on a later page blocks before allocation");
+    assert.equal(f.requests.length, calls);
+    const other = f.prs.find((pr) => pr.number === 304);
+    other.linkedIssues = []; await route();
+    f.onModel = () => { f.onModel = undefined; other.linkedIssues = [2]; };
+    const checkpoint = await run();
+    assert.equal(checkpoint.taskId, blocked.taskId); assert.ok(checkpoint.agentCheckpoint);
+    f.issues.get(2).body = "Requirements changed while blocked";
+    other.linkedIssues = []; await route();
+    const beforeRepair = f.requests.length;
+    const repaired = await success();
+    assert.equal(repaired.taskId, blocked.taskId); assert.equal(repaired.workspaceId, checkpoint.workspaceId);
+    assert.equal(repaired.inferenceFromRunId, null); assert.ok(f.requests.length > beforeRepair);
+    assert.equal(repaired.context.item.body, f.issues.get(2).body);
   } },
   ambiguous_pr: { title: "a lost PR response is reconciled without another PR, inference or revalidation, resuming at the publishing stage", configure: [configureValidation], run: async () => {
     const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
@@ -2092,8 +2142,19 @@ fi
     for (const r of await both(1)) assert.equal(r.error, null, JSON.stringify(r.error));
     const serial = intervals(0); assert.equal(serial.length, 2); assert.ok(serial[0].e <= serial[1].s, "one slot serializes validations");
     config.harness.maxConcurrentValidations = 2;
+    const validate = config.workspace.validate;
+    script(config, "validate", `
+      import { appendFileSync, statSync } from "node:fs";
+      const arrivals = ${JSON.stringify(resolve("validation-arrivals"))};
+      appendFileSync(arrivals, ".");
+      const deadline = Date.now() + 15_000;
+      while (statSync(arrivals).size < 2) {
+        if (Date.now() >= deadline) throw new Error("Second validation never reached the available slot");
+        await new Promise((done) => setTimeout(done, 20));
+      }
+    `, "validate-overlap");
     for (const r of await both(3)) assert.equal(r.error, null, JSON.stringify(r.error));
-    const parallel = intervals(2); assert.equal(parallel.length, 2); assert.ok(parallel[1].s < parallel[0].e, "two slots overlap validations");
+    config.workspace.validate = validate;
     config.harness.maxConcurrentValidations = 1; writeFileSync("slot-fail", "");
     f.addIssue(5, ["scrat"]); f.enqueue(5, "implement"); assert.equal((await run()).error.exitCode, 7);
     unlinkSync("slot-fail"); f.addIssue(6, ["scrat"]); f.enqueue(6, "implement");

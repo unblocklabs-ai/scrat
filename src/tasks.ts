@@ -5,7 +5,7 @@ import { manifestOf, manifests } from "./actions.ts";
 import { config, isActionEnabled } from "./config.ts";
 import { findItem, sameRepository } from "./repository.ts";
 import { db } from "./db.ts";
-import { describeError, type ErrorDetails, errorCode, errorMessage, transientInferenceCode } from "./errors.ts";
+import { type CompetingImplementation, competingImplementationCode, describeError, type ErrorDetails, errorCode, errorMessage, transientInferenceCode } from "./errors.ts";
 import { recordEvent, type JournalEvent } from "./events.ts";
 import { withOperationSync } from "./logging.ts";
 import { entryStage, hasPublicationSnapshot, hasReviewCheckpoint, hasValidationCheckpoint, InterruptedError, workerStoppedMessage } from "./results.ts";
@@ -21,8 +21,8 @@ type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 const queuedTaskOf = (transaction: Pick<typeof db, "select">, subjectId: string, action: string) =>
   transaction.select().from(tasks).where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action), eq(tasks.status, "queued"))).get();
 
-export function latestTask(subjectId: string, action: string) {
-  return db.select().from(tasks).where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action)))
+export function latestTask(subjectId: string, action: string, database: Pick<typeof db, "select"> = db) {
+  return database.select().from(tasks).where(and(eq(tasks.subjectId, subjectId), eq(tasks.action, action)))
     .orderBy(desc(tasks.createdAt), desc(tasks.id)).limit(1).get();
 }
 
@@ -42,7 +42,8 @@ function checkClaimable({ task, subject }: { task: Task; subject: Subject }, dat
 function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run | undefined; trigger: TriggerInput }) {
   const retry = previousRun?.error && isDeepStrictEqual(previousRun.input, task.input) ? previousRun : undefined;
   const action = manifestOf(task.action);
-  const validationOnly = task.retryMode === "validation";
+  const deferredSince = retry?.error?.code === competingImplementationCode ? retry.startedAt ?? undefined : undefined;
+  const validationOnly = task.retryMode === "validation" || deferredSince !== undefined && hasValidationCheckpoint(retry);
   const publicationResume = !validationOnly && hasPublicationSnapshot(retry) ? retry : undefined;
   const interrupted = retry?.error?.name === "InterruptedError";
   const review = action.mode === "review";
@@ -54,7 +55,8 @@ function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run |
   const settings = pinned ?? action;
   const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? (isBaseOnly(trigger) ? action.reviewers.slice(0, 1) : action.reviewers);
   const { provider, model, thinkingLevel } = !resume && reviewers.length === 1 ? reviewers[0] : settings;
-  return { prior, resume, publicationResume, review, reviewers, skill: settings.skill, provider, model, thinkingLevel, resumeReason, stage: entryStage(retry, task.retryMode, reviewResume) };
+  return { prior, resume, publicationResume, review, reviewers, skill: settings.skill, provider, model, thinkingLevel, resumeReason, deferredSince,
+    stage: entryStage(retry, validationOnly ? "validation" : "repair", reviewResume) };
 }
 
 export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | "action" | "priority" | "reason"> & { input: TriggerInput }) {
@@ -147,7 +149,7 @@ export function claimTask() {
       recordEvent({ subjectId: next.task.subjectId, taskId: next.task.id, type: "task.rejected", data: { action: next.task.action, reason: claimable.reason } }, transaction);
     }
     if (!next || !claimable?.ok) return;
-    const { prior, resume, publicationResume, review, reviewers, skill, provider, model, thinkingLevel, resumeReason, stage } = planRunStart(next.task, claimable);
+    const { prior, resume, publicationResume, review, reviewers, skill, provider, model, thinkingLevel, resumeReason, stage, deferredSince } = planRunStart(next.task, claimable);
     const task = transaction.update(tasks).set({ status: "running" }).where(eq(tasks.id, next.task.id)).returning().get()!;
     const run = transaction.insert(runs).values({
       taskId: task.id,
@@ -176,7 +178,7 @@ export function claimTask() {
     } }, transaction);
     if (resume) recordEvent({ subjectId: task.subjectId, taskId: task.id, runId: run.id, type: "run.resumed", data: { stage: run.stage, fromRunId: resume.id, reason: resumeReason } }, transaction);
     const item = transaction.select().from(items).where(eq(items.id, task.subjectId)).get();
-    return { task, subject: next.subject, item: item && asItem(item, next.subject), run };
+    return { task, subject: next.subject, item: item && asItem(item, next.subject), run, deferredSince };
   }, { behavior: "immediate" });
 }
 
@@ -231,6 +233,29 @@ export function finishRun(runId: string, outcome: { status: "completed" } | { st
   })), { behavior: "immediate" });
   signalWork();
   return finished;
+}
+
+export function deferImplementation(runId: string, error: CompetingImplementation) {
+  const finished = db.transaction((transaction) => closeRun(transaction, runId, describeError(error), (run) => ({
+    set: { status: "cancelled", retryMode: "repair", retryCount: null, availableAt: null },
+    event: { type: "run.deferred", data: { stage: run.stage, competingPullRequest: error.pullRequestNumber } },
+  })), { behavior: "immediate" });
+  signalWork();
+  return finished;
+}
+
+export function resumeDeferredImplementation(task: Task, attempt: Run) {
+  const resumed = db.transaction((transaction) => {
+    const latest = latestTask(task.subjectId, task.action, transaction);
+    if (latest?.id !== task.id || latest.status !== "cancelled" || queuedTaskOf(transaction, task.subjectId, task.action)
+      || latestRunOfTask(task.id, transaction)?.id !== attempt.id
+      || attempt.error?.code !== competingImplementationCode) return false;
+    transaction.update(tasks).set({ status: "queued" }).where(eq(tasks.id, task.id)).run();
+    recordEvent({ subjectId: task.subjectId, taskId: task.id, type: "task.resumed", data: { action: task.action, fromRunId: attempt.id } }, transaction);
+    return true;
+  }, { behavior: "immediate" });
+  if (resumed) signalWork();
+  return resumed;
 }
 
 export function retryTransientFailure(runId: string, error: unknown) {

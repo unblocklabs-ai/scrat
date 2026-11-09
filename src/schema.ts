@@ -55,6 +55,7 @@ export const workspaces = sqliteTable("workspaces", {
   path: text("path").notNull().unique(),
   baseRef: text("base_ref").notNull(),
   baseSha: text("base_sha").notNull(),
+  replacement: text("replacement", { mode: "json" }).$type<{ workspaceId: string; taskId: string; originalHead: string }>(),
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
   removedAt: text("removed_at"),
 });

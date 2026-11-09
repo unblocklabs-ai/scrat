@@ -386,6 +386,22 @@ export async function fixture(scenario, spec) {
     if (path === "/graphql" && method === "POST") {
       const { owner, repo, number, oid, after } = body.variables ?? body;
       const scopes = tokens.get(credential);
+      if (body.query.includes("closedByPullRequestsReferences")) {
+        if (!patMode && (scopes?.issues !== "read" || scopes?.pull_requests !== "read")) {
+          return reply({ message: "Resource not accessible by integration" }, 403);
+        }
+        const links = prs.filter((pr) => (pr.state === "open" || body.query.includes("includeClosedPrs: true"))
+          && (pr.linkedIssues?.includes(number) || [...pr.body.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#(\d+)\b/gi)]
+            .some((match) => Number(match[1]) === number)));
+        const start = Number(after ?? 0), end = start + 2;
+        const nodes = links.slice(start, end).map((pr) => ({
+          number: pr.number, state: pr.mergedAt ? "MERGED" : pr.state.toUpperCase(), mergedAt: pr.mergedAt ?? null,
+          repository: { nameWithOwner: pr.base.repo.full_name }, baseRefName: pr.base.ref,
+          headRepository: pr.head.repo && { nameWithOwner: pr.head.repo.full_name }, headRefName: pr.head.ref,
+        }));
+        return reply({ data: { repository: { issue: issues.has(number)
+          ? { closedByPullRequestsReferences: { nodes, pageInfo: { hasNextPage: links.length > end, endCursor: String(end) } } } : null } } });
+      }
       if (owner !== "fixture" || repo !== "project" || !prs.some((pr) => pr.number === number)
         || !["pull_requests", "contents", "checks"].every((scope) => scopes?.[scope] === "read")) {
         return reply({ message: "Resource not accessible by integration" }, 403);

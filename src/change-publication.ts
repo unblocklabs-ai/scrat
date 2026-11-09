@@ -2,15 +2,15 @@ import { eq } from "drizzle-orm";
 import { db } from "./db.ts";
 import { errorExitCode } from "./errors.ts";
 import { recordEvent } from "./events.ts";
-import { branchContainsCommit, git, headOf, identity, isAncestor, remoteBranchHead, workflowPaths } from "./git.ts";
+import { branchContainsCommit, git, identity, isAncestor, remoteBranchHead, workflowPaths } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import { bestEffort } from "./logging.ts";
 import { remoteUrl } from "./repository.ts";
 import { validateRefreshedChange } from "./run-change.ts";
 import { botAuthor, type Ctx, stopBefore } from "./run-context.ts";
 import { getRun, updateRun } from "./run-history.ts";
-import { type Run, subjects } from "./schema.ts";
-import { createWorkspace, getWorkspace, importWorkspaceCommit, pinWorkspaceBase, removeWorkspace, validateWorkspace } from "./workspaces.ts";
+import { type Run, subjects, workspaces } from "./schema.ts";
+import { createWorkspace, getWorkspace, importWorkspaceCommit, pinWorkspaceBase, removeWorkspace, validateWorkspace, workspaceMatchesCommit } from "./workspaces.ts";
 
 export async function refreshChangePublication(ctx: Ctx, github: GitHubRepository, run: Run) {
   const { mainSha, context, publication, verification } = run;
@@ -34,7 +34,7 @@ export async function refreshChangePublication(ctx: Ctx, github: GitHubRepositor
     throw new Error("Remote branch changed before publication recovery; original work was retained");
   }
   await validateWorkspace(workspace);
-  if (await headOf(path) !== commitSha || await git(path, ["status", "--porcelain"])) {
+  if (!await workspaceMatchesCommit(workspace, commitSha)) {
     throw new Error("Workspace changed before publication recovery; original work was retained");
   }
   if (!await isAncestor(path, mainSha, base) || (expected && !await isAncestor(path, expected, commitSha))) {
@@ -67,6 +67,8 @@ export async function refreshChangePublication(ctx: Ctx, github: GitHubRepositor
       throw new Error("Base workflows changed again during publication recovery; retry publication against the new base");
     }
     const updated = db.transaction((transaction) => {
+      transaction.update(workspaces).set({ replacement: { workspaceId: candidate.id, taskId: run.taskId, originalHead: commitSha } })
+        .where(eq(workspaces.id, workspace.id)).run();
       transaction.update(subjects).set({ workspaceId: candidate.id }).where(eq(subjects.workspaceId, workspace.id)).run();
       updateRun(run.id, { workspaceId: candidate.id, mainSha: base, headSha: refreshed, verification: checks,
         publication: { ...publication, commitSha: refreshed } }, transaction);

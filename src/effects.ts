@@ -4,7 +4,7 @@ import { postReply, reactToRoot, verdictReaction } from "./commit-review.ts";
 import { upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
-import { branchContainsCommit, conventionalTitle, git, shortSha, workflowPaths } from "./git.ts";
+import { conventionalTitle, git, remoteBranchHead, shortSha, workflowPaths } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { isBotLogin } from "./config.ts";
@@ -19,8 +19,9 @@ import { observe } from "./observation.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
 import { remoteUrl } from "./repository.ts";
 import { assertPublishable } from "./secrets.ts";
-import { subjects, type Run, type Task, type Subject } from "./schema.ts";
-import { getWorkspace, pushWorkspace } from "./workspaces.ts";
+import { subjects, workspaces, type Run, type Task, type Subject } from "./schema.ts";
+import { assertCurrentImplementation } from "./tasks.ts";
+import { expectedBranchHead, getWorkspace, pushWorkspace } from "./workspaces.ts";
 
 type Receipts = Run["publication"];
 export type Evaluated = Run & { result: NonNullable<Run["result"]>; context: NonNullable<Run["context"]> };
@@ -77,12 +78,19 @@ const push = {
     const { github, references, run } = context;
     const { workspace, commitSha } = changed(context);
     const remote = remoteUrl(github.repository);
-    if (!await branchContainsCommit(workspace, remote, workspace.branch, commitSha, await github.getGitEnvironment())) {
-      const workflows = run.mainSha && await changesWorkflows(workspace.path, commitSha, run.mainSha, run.context.headSha ?? run.publication.previousPushSha);
+    const readEnv = await github.getGitEnvironment();
+    const expected = expectedBranchHead(workspace, run.context.headSha);
+    const actual = await remoteBranchHead(workspace.repositoryPath, remote, workspace.branch, readEnv);
+    if (actual !== commitSha) {
+      if (actual !== expected) throw new Error("Remote branch changed before push; original work was retained");
+      const workflows = run.mainSha && await changesWorkflows(workspace.path, commitSha, run.mainSha, expected);
       const env = await github.getGitEnvironment(workflows ? "workflows" : true);
       await pushWorkspace(workspace, remote, commitSha, env, references);
     }
-    context.saveReceipt({ publishedCommitSha: commitSha });
+    db.transaction((transaction) => {
+      transaction.update(workspaces).set({ pushedHeadSha: commitSha }).where(eq(workspaces.id, workspace.id)).run();
+      context.saveReceipt({ publishedCommitSha: commitSha }, transaction);
+    });
   },
 } satisfies Effect;
 
@@ -90,12 +98,16 @@ const pullRequest = {
   receipted: (publication) => Boolean(publication.pullRequestNumber),
   async apply(context) {
     const { github, task, run, references } = context;
-    const { workspace } = changed(context);
+    const { workspace, commitSha } = changed(context);
     const { context: evaluated, result } = run;
     let pr = await github.findPullRequest(workspace.branch, evaluated.baseBranch);
     if (pr?.state === "closed") throw new Error("The workspace PR was already closed");
     if (!pr) {
-      await github.assertNoCompetingImplementation(evaluated.item.number, evaluated.baseBranch, workspace.branch, task.createdAt);
+      const remote = remoteUrl(github.repository);
+      if (await remoteBranchHead(workspace.repositoryPath, remote, workspace.branch, await github.getGitEnvironment()) !== commitSha) {
+        throw new Error("Remote branch changed before PR creation; original work was retained");
+      }
+      await assertCurrentImplementation(github, task, evaluated.item.number, evaluated.baseBranch, workspace.branch);
       pr = await github.createPullRequest({
         title: conventionalTitle(evaluated.item.title), body: `${result.text}\n\n${validationLine(run)}Closes #${evaluated.item.number}\n\n${taskMarker(task.id)}`,
         head: workspace.branch, base: evaluated.baseBranch,

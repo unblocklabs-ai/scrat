@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "./db.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
-import { changedPaths, commitOf, git, headOf, hasPendingMerge, identity, isAncestor, mergeHeadOf } from "./git.ts";
+import { changedPaths, commitOf, git, headOf, hasPendingMerge, identity, mergeHeadOf } from "./git.ts";
 import { botSlug } from "./identity.ts";
 import { withOperation } from "./logging.ts";
 import { runs, subjects, workspaces, type Run, type Workspace } from "./schema.ts";
@@ -109,48 +109,45 @@ export async function createWorkspace(
   });
 }
 
-export function replacedWorkspaces(taskId?: string) {
-  return db.select({ id: workspaces.id }).from(workspaces)
-    .where(and(isNull(workspaces.removedAt), isNotNull(workspaces.replacement),
-      taskId ? sql`json_extract(${workspaces.replacement}, '$.taskId') = ${taskId}` : undefined)).all();
+export function expectedBranchHead(workspace: Workspace, observedPrHead?: string) {
+  // Older runs already have commit receipts, even before workspaces tracked their branch tip.
+  return observedPrHead ?? workspace.pushedHeadSha ?? db.select({ publication: runs.publication }).from(runs)
+    .where(and(eq(runs.workspaceId, workspace.id), sql`json_extract(${runs.publication}, '$.publishedCommitSha') is not null`))
+    .orderBy(desc(runs.sequence)).limit(1).get()?.publication.publishedCommitSha;
 }
 
-function replacementWasPublished(replacement: Workspace["replacement"]) {
+type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+function replacementWasPublished(transaction: Transaction, replacement: Workspace["replacement"]) {
   // Another base move can replace the replacement before anything is published.
   while (replacement) {
-    const receipt = db.select({ id: runs.id }).from(runs).where(and(
+    const receipt = transaction.select({ id: runs.id }).from(runs).where(and(
       eq(runs.workspaceId, replacement.workspaceId), eq(runs.taskId, replacement.taskId),
       sql`json_extract(${runs.publication}, '$.status') = 'published'
         and json_extract(${runs.publication}, '$.publishedCommitSha') = json_extract(${runs.publication}, '$.commitSha')`,
     )).get();
     if (receipt) return true;
-    replacement = getWorkspace(replacement.workspaceId)?.replacement ?? null;
+    replacement = transaction.select({ replacement: workspaces.replacement }).from(workspaces)
+      .where(eq(workspaces.id, replacement.workspaceId)).get()?.replacement ?? null;
   }
   return false;
 }
 
-function workspaceInUse(workspaceId: string) {
-  return db.select({ id: subjects.id }).from(subjects).where(eq(subjects.workspaceId, workspaceId)).get()
-    || db.select({ id: runs.id }).from(runs).where(and(eq(runs.workspaceId, workspaceId), isNull(runs.finishedAt))).get();
-}
-
-async function hasUnarchivedRefs({ path, repositoryPath, branch }: Workspace, commitSha: string) {
-  const refList = ["for-each-ref", "--format=%(objectname) %(refname)"];
-  const extra = (await git(path, refList)).split("\n").filter((line) => line && line !== `${commitSha} refs/heads/${branch}`);
-  // A stash ref can have a whole stack of unpublished entries in its reflog.
-  if (extra.some((line) => line.endsWith(" refs/stash"))) return true;
-  if (!extra.length) return false;
-  const shared = (await git(repositoryPath, refList)).split("\n");
-  const sharedRefs = new Set(shared), sharedTips = new Set(shared.map((line) => line.split(" ", 1)[0]));
-  for (const line of extra) {
-    if (sharedRefs.has(line)) continue;
-    const [tip, ref] = line.split(" ") as [string, string];
-    const tracking = ref.startsWith("refs/remotes/");
-    if (tracking && sharedTips.has(tip)) continue;
-    if ((tracking || ref.startsWith("refs/heads/")) && await isAncestor(path, tip, commitSha)) continue;
-    return true;
-  }
-  return false;
+export function retainReplacedWorkspaces(taskId?: string) {
+  db.transaction((transaction) => {
+    const candidates = transaction.select().from(workspaces)
+      .where(and(isNull(workspaces.removedAt), isNull(workspaces.retainedAt), isNotNull(workspaces.replacement),
+        taskId ? sql`json_extract(${workspaces.replacement}, '$.taskId') = ${taskId}` : undefined)).all();
+    for (const workspace of candidates) {
+      const { id, path, replacement } = workspace;
+      if (transaction.select({ id: subjects.id }).from(subjects).where(eq(subjects.workspaceId, id)).get()
+        || transaction.select({ id: runs.id }).from(runs).where(and(eq(runs.workspaceId, id), isNull(runs.finishedAt))).get()
+        || !replacementWasPublished(transaction, replacement)) continue;
+      transaction.update(workspaces).set({ retainedAt: new Date().toISOString() }).where(eq(workspaces.id, id)).run();
+      recordEvent({ taskId: replacement?.taskId, type: "workspace.retained",
+        data: { workspaceId: id, path, reason: "Replacement publication confirmed" } }, transaction);
+    }
+  }, { behavior: "immediate" });
 }
 
 export async function removeWorkspace(workspaceId: string, references: EventReferences = {}) {
@@ -162,9 +159,9 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
       operation.complete({ alreadyRemoved: true });
       return workspace;
     }
-    const { repositoryPath, branch, replacement } = workspace;
-    if (replacement && (!replacementWasPublished(replacement) || workspaceInUse(workspaceId))) {
-      operation.complete({ retained: "Replacement publication not confirmed or checkout still in use" });
+    const { repositoryPath, branch } = workspace;
+    if (workspace.replacement || workspace.retainedAt) {
+      operation.complete({ retained: true, path: workspace.path });
       return workspace;
     }
     const path = await ifMissing(realpath(workspace.path), workspace.path);
@@ -173,33 +170,11 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
     if (present) {
       if (path !== resolve(workspaceRoot(), workspace.id)) throw new Error("Refusing cleanup outside the owned workspace root");
       await validateWorkspace(workspace);
-      if (replacement) {
-        if (!await workspaceMatchesCommit(workspace, replacement.originalHead)) throw new Error("Replaced checkout has changed; retain it for recovery");
-        if (await hasUnarchivedRefs(workspace, replacement.originalHead)) throw new Error("Replaced checkout has local refs not preserved by recovery; retain it");
-      } else {
-        const head = await headOf(path);
-        const published = db.select().from(runs).where(eq(runs.workspaceId, workspace.id)).all()
-          .some((run) => run.publication.publishedCommitSha === head);
-        if (head !== workspace.baseSha && !published) throw new Error("Workspace has unpublished commits; retain it for recovery");
-      }
-    }
-    if (replacement) {
-      const recoveryRef = `refs/scrat/recovery/${workspaceId}`;
-      const archived = await commitOf(repositoryPath, recoveryRef);
-      if (archived !== replacement.originalHead) {
-        if (archived) throw new Error("Recovery ref does not match the replaced checkout");
-        // Refresh pinned this exact commit in the source repository before adopting the replacement.
-        await git(repositoryPath, ["update-ref", recoveryRef, replacement.originalHead, ""]);
-      }
-      if (workspaceInUse(workspaceId)) {
-        operation.complete({ retained: "Replaced checkout is still in use" });
-        return workspace;
-      }
-    }
-    if (present) {
+      const head = await headOf(path);
+      const published = db.select().from(runs).where(eq(runs.workspaceId, workspace.id)).all()
+        .some((run) => run.publication.publishedCommitSha === head);
+      if (head !== workspace.baseSha && !published) throw new Error("Workspace has unpublished commits; retain it for recovery");
       await rm(path, { recursive: true });
-    }
-    if (present || replacement) {
       const home = sandboxHome(workspace.id);
       const stats = await ifMissing(lstat(home), undefined);
       if (stats?.isDirectory() && !stats.isSymbolicLink()) await rm(home, { recursive: true });

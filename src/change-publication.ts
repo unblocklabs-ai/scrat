@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { db } from "./db.ts";
 import { errorExitCode } from "./errors.ts";
 import { recordEvent } from "./events.ts";
-import { branchContainsCommit, git, identity, isAncestor, remoteBranchHead, workflowPaths } from "./git.ts";
+import { git, identity, isAncestor, remoteBranchHead, workflowPaths } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import { bestEffort } from "./logging.ts";
 import { remoteUrl } from "./repository.ts";
@@ -10,7 +10,7 @@ import { validateRefreshedChange } from "./run-change.ts";
 import { botAuthor, type Ctx, stopBefore } from "./run-context.ts";
 import { getRun, updateRun } from "./run-history.ts";
 import { type Run, subjects, workspaces } from "./schema.ts";
-import { createWorkspace, getWorkspace, importWorkspaceCommit, pinWorkspaceBase, removeWorkspace, validateWorkspace, workspaceMatchesCommit } from "./workspaces.ts";
+import { createWorkspace, expectedBranchHead, getWorkspace, importWorkspaceCommit, pinWorkspaceBase, removeWorkspace, validateWorkspace, workspaceMatchesCommit } from "./workspaces.ts";
 
 export async function refreshChangePublication(ctx: Ctx, github: GitHubRepository, run: Run) {
   const { mainSha, context, publication, verification } = run;
@@ -19,18 +19,19 @@ export async function refreshChangePublication(ctx: Ctx, github: GitHubRepositor
     || !mainSha || !context || !commitSha || verification?.headSha !== commitSha) return;
 
   const workspace = run.workspaceId ? getWorkspace(run.workspaceId) : undefined;
-  if (!workspace || workspace.removedAt) return;
+  if (!workspace || workspace.removedAt || workspace.replacement || workspace.retainedAt) return;
   const { repositoryPath, branch, path } = workspace;
   const base = await github.fetchBranch(context.baseBranch);
   const common = await git(path, ["merge-base", base, commitSha]);
   if (!(await workflowPaths(path, common, base)).length) return;
 
   const remote = remoteUrl(github.repository), env = await github.getGitEnvironment();
-  const expected = context.headSha ?? publication.previousPushSha;
+  const expected = expectedBranchHead(workspace, context.headSha);
   const remoteHead = () => remoteBranchHead(repositoryPath, remote, branch, env);
-  if (await remoteHead() !== expected) {
+  const actual = await remoteHead();
+  if (actual !== expected) {
     // A push can succeed before its receipt is saved. Reconcile it; do not replace it.
-    if (await branchContainsCommit(workspace, remote, branch, commitSha, env)) return;
+    if (actual === commitSha) return;
     throw new Error("Remote branch changed before publication recovery; original work was retained");
   }
   await validateWorkspace(workspace);
@@ -67,6 +68,7 @@ export async function refreshChangePublication(ctx: Ctx, github: GitHubRepositor
       throw new Error("Base workflows changed again during publication recovery; retry publication against the new base");
     }
     const updated = db.transaction((transaction) => {
+      if (expected) transaction.update(workspaces).set({ pushedHeadSha: expected }).where(eq(workspaces.id, candidate.id)).run();
       transaction.update(workspaces).set({ replacement: { workspaceId: candidate.id, taskId: run.taskId, originalHead: commitSha } })
         .where(eq(workspaces.id, workspace.id)).run();
       transaction.update(subjects).set({ workspaceId: candidate.id }).where(eq(subjects.workspaceId, workspace.id)).run();

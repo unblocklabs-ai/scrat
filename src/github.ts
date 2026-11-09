@@ -6,8 +6,8 @@ import { recordEvent, type EventReferences, type JournalEvent } from "./events.t
 import { labelName } from "./labels.ts";
 import { logger, withOperation } from "./logging.ts";
 import { endsWithMarker, fingerprintMarker, inlineCommentId, issueCommentId, reviewCommentId, withMarker } from "./markers.ts";
-import type { GithubComment, GithubContext, GithubIssue, GithubItem, GithubPullRequest } from "./github-types.ts";
-import { CompetingImplementation, errorStatus } from "./errors.ts";
+import type { GithubComment, GithubContext, GithubIssue, GithubItem, GithubPullRequest, IssueImplementation } from "./github-types.ts";
+import { errorStatus } from "./errors.ts";
 import { fetchPullRequestHead as fetchHead, fetchRepository } from "./git.ts";
 import { assertConfiguredRepository, remoteUrl, sameRepository } from "./repository.ts";
 import { conditionalFetch, rateLimitLow } from "./github-http.ts";
@@ -15,6 +15,7 @@ import { assertPublishable, basicCredential, childEnvironment } from "./secrets.
 
 const permissions = {
   read: { issues: "read", pull_requests: "read", metadata: "read" },
+  issue_links: { issues: "read", pull_requests: "read", metadata: "read" },
   write: { issues: "write", pull_requests: "write", metadata: "read" },
   pull_request: { pull_requests: "write", contents: "read", metadata: "read" },
   contents_read: { contents: "read", metadata: "read" },
@@ -89,7 +90,8 @@ async function githubForRepository(repository: string, access: keyof typeof perm
   const github = new Octokit({
     auth: token,
     log: logger.child({ component: "octokit", repository, access }),
-    ...(access !== "read" ? noRetry : { request: { fetch: conditionalFetch } }),
+    ...(access !== "read" ? noRetry : {}),
+    ...(access === "read" || access === "issue_links" ? { request: { fetch: conditionalFetch } } : {}),
   });
   const entry = { token, github, invalid: false };
   github.hook.error("request", (error) => {
@@ -267,22 +269,28 @@ export class GitHubRepository {
     return found ? pullRequestView(found) : undefined;
   }
 
-  async competingImplementation(issue: number, base: string, ownBranch?: string, mergedSince?: string) {
-    const { github, owner, repo } = await this.read();
+  async issueImplementation(issue: number, base: string, ownBranch?: string, mergedSince?: string): Promise<IssueImplementation> {
+    // This query is read-only; Octokit's write throttle serializes all GraphQL POSTs at one per second.
+    const { github, owner, repo } = await githubForRepository(this.repository, "issue_links");
     type LinkedPullRequest = {
       number: number; state: "OPEN" | "CLOSED" | "MERGED"; mergedAt: string | null; repository: { nameWithOwner: string };
       baseRefName: string; headRepository: { nameWithOwner: string } | null; headRefName: string;
     };
-    type IssueLinks = { repository: { issue: { closedByPullRequestsReferences: {
+    type IssueLinks = { repository: { issue: { state: "OPEN" | "CLOSED"; timelineItems: {
+      nodes: ({ id: string; createdAt: string } | null)[];
+    }; closedByPullRequestsReferences: {
       nodes: (LinkedPullRequest | null)[]; pageInfo: { hasNextPage: boolean; endCursor: string | null };
     } } | null } | null };
     // GitHub reports merge times to the second. Older merged links can belong to a prior opening of the issue.
-    const earliestMerge = mergedSince ? Math.floor(Date.parse(mergedSince) / 1000) * 1000 : Infinity;
+    const earliestMerge = mergedSince ? Math.floor(Date.parse(mergedSince) / 1000) * 1000 : -Infinity;
     let after: string | null = null;
+    let facts: IssueImplementation | undefined;
     do {
       const response: IssueLinks = await github.graphql(`query($owner: String!, $repo: String!, $number: Int!, $after: String) {
         repository(owner: $owner, name: $repo) {
           issue(number: $number) {
+            state
+            timelineItems(last: 1, itemTypes: [REOPENED_EVENT]) { nodes { ... on ReopenedEvent { id createdAt } } }
             closedByPullRequestsReferences(first: 100, after: $after, includeClosedPrs: true) {
               nodes { number state mergedAt repository { nameWithOwner } baseRefName headRepository { nameWithOwner } headRefName }
               pageInfo { hasNextPage endCursor }
@@ -290,21 +298,24 @@ export class GitHubRepository {
           }
         }
       }`, { owner, repo, number: issue, after });
-      const page = response.repository?.issue?.closedByPullRequestsReferences;
-      if (!page) throw new Error(`Cannot read linked PRs for ${this.repository}#${issue}`);
+      const item = response.repository?.issue;
+      if (!item) throw new Error(`Cannot read linked PRs for ${this.repository}#${issue}`);
+      const reopen = item.timelineItems.nodes[0];
+      const opening = reopen?.id ?? "initial";
+      if (facts && facts.opening !== opening) throw new Error("GitHub issue reopened while reading linked PRs");
+      facts = { open: item.state === "OPEN", opening, reopenedAt: reopen?.createdAt };
+      if (!facts.open) return facts;
+      const page = item.closedByPullRequestsReferences;
       const competing = page.nodes.find((pr) => pr && (pr.state === "OPEN"
-        || pr.state === "MERGED" && pr.mergedAt && Date.parse(pr.mergedAt) >= earliestMerge)
+        || pr.state === "MERGED" && pr.mergedAt && (mergedSince || reopen)
+          && Date.parse(pr.mergedAt) >= earliestMerge && (!reopen || Date.parse(pr.mergedAt) > Date.parse(reopen.createdAt)))
         && sameRepository(pr.repository.nameWithOwner, this.repository) && pr.baseRefName === base
         && !(pr.headRefName === ownBranch && sameRepository(pr.headRepository?.nameWithOwner ?? "", this.repository)));
-      if (competing) return competing.number;
+      if (competing) return { ...facts, competingPullRequest: competing.number };
       after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
       if (page.pageInfo.hasNextPage && !after) throw new Error("GitHub returned an incomplete linked PR page");
     } while (after);
-  }
-
-  async assertNoCompetingImplementation(issue: number, base: string, ownBranch: string | undefined, mergedSince: string) {
-    const competing = await this.competingImplementation(issue, base, ownBranch, mergedSince);
-    if (competing !== undefined) throw new CompetingImplementation(competing);
+    return facts;
   }
 
   async checkRunConclusions(sha: string) {

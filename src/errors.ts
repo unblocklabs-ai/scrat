@@ -28,6 +28,7 @@ export function redactSecrets(value: string) {
 export const transientInferenceCode = "TRANSIENT_INFERENCE";
 export const branchConflictCode = "BRANCH_CONFLICT";
 export const competingImplementationCode = "COMPETING_IMPLEMENTATION";
+export class ImplementationEnded extends Error {}
 
 export class CompetingImplementation extends Error {
   readonly code = competingImplementationCode;

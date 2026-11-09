@@ -1,7 +1,7 @@
 import { manifestOf } from "./actions.ts";
 import { refreshChangePublication } from "./change-publication.ts";
 import { getRepositoryPath } from "./config.ts";
-import { branchConflictCode, CompetingImplementation, WorkflowPushRejected } from "./errors.ts";
+import { branchConflictCode, CompetingImplementation, ImplementationEnded, WorkflowPushRejected } from "./errors.ts";
 import { removeRunDatabase } from "./databases.ts";
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
@@ -13,20 +13,23 @@ import { getRun } from "./run-history.ts";
 import { publishRun } from "./publication.ts";
 import { InterruptedError } from "./results.ts";
 import { recordEvent } from "./events.ts";
-import { claimTask, deferImplementation, finishRun, interruptRun, retryTransientFailure } from "./tasks.ts";
+import { assertCurrentImplementation, claimTask, deferImplementation, finishRun, interruptRun, retryTransientFailure } from "./tasks.ts";
 import { parseTriggerInput, type TriggerInput } from "./triggers.ts";
-import { getWorkspace, removeWorkspace, replacedWorkspaces } from "./workspaces.ts";
+import { getWorkspace, removeWorkspace, retainReplacedWorkspaces } from "./workspaces.ts";
 import { changeRun, restartStaleDeferredPublication } from "./run-change.ts";
 import { reviewRun } from "./run-review.ts";
 import { type Ctx, type Observed, stopBefore } from "./run-context.ts";
 import type { Run } from "./schema.ts";
 
-async function connect({ subject, item }: Ctx): Promise<Observed | undefined> {
+async function connect({ subject, item, manifest }: Ctx): Promise<Observed | undefined> {
   if (!item) return;
   const { repository } = subject;
   const github = new GitHubRepository(repository);
   const context = await github.fetchItemContext(item.kind, item.payload.number);
-  if (context.item.state !== "open") throw new Error("GitHub item is no longer open");
+  if (context.item.state !== "open") {
+    if (item.kind === "issue" && manifest.publish.includes("pull_request")) throw new ImplementationEnded("GitHub issue closed");
+    throw new Error("GitHub item is no longer open");
+  }
   const pullRequest = "head" in context.item ? context.item : undefined;
   const observation = observe(context);
   const mainSha = await github.fetchBranch(observation.baseBranch);
@@ -45,7 +48,11 @@ async function checkPublicationContext({ run, task, manifest }: Ctx, observed: O
   const { github, context, item, observation, mainSha } = observed;
   const review = manifest.mode === "review";
   const publicationContext = refetch ? await github.fetchItemContext(observation.kind, item.payload.number) : context;
-  if (publicationContext.item.state !== "open") throw new Error("GitHub item is no longer open");
+  const implementation = item.kind === "issue" && manifest.publish.includes("pull_request");
+  if (publicationContext.item.state !== "open") {
+    if (implementation) throw new ImplementationEnded("GitHub issue closed");
+    throw new Error("GitHub item is no longer open");
+  }
   let headOverride: string | undefined;
   if (!review && "head" in publicationContext.item && evaluatedRun.context?.headSha) {
     const { sha } = publicationContext.item.head;
@@ -63,9 +70,11 @@ async function checkPublicationContext({ run, task, manifest }: Ctx, observed: O
       ? "GitHub task context changed; enqueue a fresh task instead of retrying publication"
       : "Reviewed code changed; enqueue a fresh review instead of retrying publication");
   }
-  if (item.kind === "issue" && manifest.publish.includes("pull_request") && !evaluatedRun.publication.commentOnly && !evaluatedRun.publication.publishedCommitSha) {
+  if (implementation) {
     const workspace = evaluatedRun.workspaceId ? getWorkspace(evaluatedRun.workspaceId) : undefined;
-    if (workspace) await github.assertNoCompetingImplementation(item.payload.number, current.baseBranch, workspace.branch, task.createdAt);
+    // After a push, the PR effect first reconciles our own PR before checking for competitors.
+    const { publishedCommitSha, commentOnly } = evaluatedRun.publication;
+    await assertCurrentImplementation(github, task, item.payload.number, current.baseBranch, workspace?.branch, !publishedCommitSha && !commentOnly);
   }
   return publicationContext;
 }
@@ -110,6 +119,10 @@ export async function runNextTask(stop?: AbortSignal) {
   try {
     const observed = await connect(ctx);
     if (observed && resumingDeferred) await restartStaleDeferredPublication(ctx, observed);
+    if (observed && item?.kind === "issue" && ctx.manifest.publish.includes("pull_request") && run.stage !== "publishing") {
+      const branch = item.workspaceId ? getWorkspace(item.workspaceId)?.branch : undefined;
+      await assertCurrentImplementation(observed.github, task, item.payload.number, observed.observation.baseBranch, branch);
+    }
     if (run.stage !== "publishing") {
       stopBefore(stop, "workspace acquisition");
       const trigger = parseTriggerInput(task.input);
@@ -127,15 +140,16 @@ export async function runNextTask(stop?: AbortSignal) {
     await publishStage(ctx, observed);
     const finished = finishRun(run.id, { status: "completed" });
     if (finished.publication.status === "published" && finished.publication.publishedCommitSha) {
-      await bestEffort(operation.log, "run.cleanup_pending", references, async () => {
-        for (const { id } of replacedWorkspaces(task.id)) {
-          await bestEffort(operation.log, "run.cleanup_pending", { workspaceId: id }, () => removeWorkspace(id, references));
-        }
-      });
+      await bestEffort(operation.log, "run.retention_pending", references, async () => retainReplacedWorkspaces(task.id));
     }
     operation.complete({ heapUsedMb: heapUsed() });
     return finished;
   } catch (error) {
+    if (error instanceof ImplementationEnded) {
+      const ended = finishRun(run.id, { status: "cancelled", error });
+      operation.complete({ cancelled: error.message });
+      return ended;
+    }
     if (error instanceof CompetingImplementation) {
       const deferred = deferImplementation(run.id, error);
       operation.complete({ deferred: error.message, competingPullRequest: error.pullRequestNumber });

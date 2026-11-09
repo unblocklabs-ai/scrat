@@ -19,11 +19,13 @@ export type JournalEvent = (
   | { type: "run.requeued"; data: { stage: string; retryMode: "repair" | "validation"; attempt?: number; nextAttemptAt?: string } }
   | { type: "run.failed"; data: { stage: string; error: ErrorDetails } }
   | { type: "task.cancelled"; data: { action: TaskDetails["action"]; reason: string } }
+  | { type: "task.blocked"; data: { action: TaskDetails["action"]; competingPullRequest: number } }
   | { type: "task.rejected"; data: { action: string; reason: string } }
   | { type: "task.retried"; data: { action: TaskDetails["action"]; mode: "repair" | "validation" } }
-  | { type: "task.resumed"; data: { action: TaskDetails["action"]; fromRunId: string } }
+  | { type: "task.resumed"; data: { action: TaskDetails["action"] } }
   | { type: "workspace.committed" | "workspace.pushed"; data: { workspaceId: string; commitSha: string } }
   | { type: "workspace.publication_refreshed"; data: { originalWorkspaceId: string; workspaceId: string; originalCommitSha: string; commitSha: string; base: string } }
+  | { type: "workspace.retained"; data: { workspaceId: string; path: string; reason: string } }
   | { type: "task.enqueued"; data: TaskDetails }
   | { type: "task.coalesced"; data: {
       action: TaskDetails["action"];

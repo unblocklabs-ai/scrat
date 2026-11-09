@@ -15,16 +15,15 @@ import { prepareTarget } from "./git.ts";
 import { rateLimitLow, rateLimitState } from "./github-http.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
-import { competingImplementationCode } from "./errors.ts";
 import { items, runs, subjects } from "./schema.ts";
-import { cancelQueuedTasks, enqueueTask, latestTask, resumeDeferredImplementation } from "./tasks.ts";
-import { parseTriggerInput } from "./triggers.ts";
+import { cancelPendingTasks, enqueueTask, latestTask, reconcileIssueImplementation } from "./tasks.ts";
+import { isManual, parseTriggerInput } from "./triggers.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 import { bestEffort } from "./logging.ts";
 import { reconcileObserved, serializePr, type ResolvedReview } from "./pr-review-publication.ts";
 import { latestCompletedRun, latestFinishedRun, latestRunOfTask, runHistory } from "./run-history.ts";
 import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
-import { planIssueTasks, planKeyedTask, planPrMaintenance, planReview, planSelfRepair, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
+import { planKeyedTask, planPrMaintenance, planReview, planSelfRepair, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
 
 type SyncContext = {
   github: GitHubRepository; log: Logger;
@@ -43,7 +42,7 @@ function hasScratLabel(item: Item) {
 function applyDecisions(subjectId: string, decisions: RoutingDecision[]) {
   let queued = 0;
   for (const decision of decisions) {
-    if (decision.type === "cancel") cancelQueuedTasks(subjectId, decision.reason, decision.action, true);
+    if (decision.type === "cancel") cancelPendingTasks(subjectId, decision.reason, decision.action, true);
     else { enqueueTask({ subjectId, action: decision.action, reason: decision.reason, input: decision.input }); queued++; }
   }
   return queued;
@@ -53,7 +52,7 @@ let syncRound = 0;
 const limitLogged = new Set<string>();
 
 async function cleanupClosedItem({ github, log }: SyncContext, item: Item) {
-  cancelQueuedTasks(item.id, "GitHub item closed");
+  cancelPendingTasks(item.id, "GitHub item closed");
   if (item.kind === "pr" && config.storefront.enabled) {
     const { deletePreview } = await import("./storefront.ts");
     await bestEffort(log, "storefront.delete_failed", { subjectId: item.id }, () => deletePreview(github, item.id, item.payload));
@@ -63,7 +62,7 @@ async function cleanupClosedItem({ github, log }: SyncContext, item: Item) {
   const workspace = getWorkspace(item.workspaceId);
   if (active || !workspace || workspace.removedAt) return;
   const related = db.select().from(subjects).where(eq(subjects.workspaceId, workspace.id)).all();
-  for (const linked of related) cancelQueuedTasks(linked.id, "PR merged or closed");
+  for (const linked of related) cancelPendingTasks(linked.id, "PR merged or closed");
   try { await removeWorkspace(workspace.id, { subjectId: item.id }); }
   catch { }
 }
@@ -121,7 +120,7 @@ function routeItemLabels(item: Item) {
     const settings = manifestOf(action);
     const categories = settings.enabled === false ? [] : categoriesFor(settings, item.kind);
     if (!categories.length) {
-      cancelQueuedTasks(item.id, "Item labeling disabled for this kind", action);
+      cancelPendingTasks(item.id, "Item labeling disabled for this kind", action);
       continue;
     }
     const triggerKey = itemLabelKey(item.payload, categories);
@@ -228,29 +227,22 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
     if (item.kind === "issue") {
       const previousItem = previous.get(item.externalId);
       const labelAction = routeFor(issueSignal(item, "label"));
+      const selected = hasScratLabel(item);
       const latest = latestOf(item.id, labelAction);
-      const attempt = latest?.status === "cancelled" || latest?.status === "queued" ? latestRunOfTask(latest.id) : undefined;
-      const waiting = attempt?.error?.code === competingImplementationCode ? attempt : undefined;
-      const facts = {
-        labelAction, reviewAction: routeFor(issueSignal(item, "item_changed")), labelled: hasScratLabel(item), workspaceId: item.workspaceId,
-        previouslyLabelled: previousItem ? hasScratLabel(previousItem) : undefined,
-        latest, updatedAt: item.payload.updated_at, mainSha: defaultBaseSha,
-      };
-      let plan = planIssueTasks({ ...facts, implemented: false });
-      if (!plan.review && labelAction && (waiting || latest?.status === "queued" || plan.decisions.some((decision) => decision.type === "enqueue"))) {
+      if (labelAction && (selected || latest?.status === "blocked" && isManual(latest.input))) {
+        const reviewAction = routeFor(issueSignal(item, "item_changed"));
+        if (selected && reviewAction) cancelPendingTasks(item.id, "Issue selected for implementation", reviewAction, true);
         const own = item.workspaceId ? getWorkspace(item.workspaceId)?.branch : undefined;
-        if (rateLimitLow()) { deferred++; return; }
-        const competing = await github.competingImplementation(item.payload.number, config.github.baseBranch, own, latest?.createdAt);
-        if (waiting && latest && competing === undefined) {
-          if (latest.status === "cancelled" && resumeDeferredImplementation(latest, waiting)) queued++;
-          // Do not coalesce a requeued attempt into a new trigger and discard its checkpoint.
-          plan.decisions = plan.decisions.filter((decision) => decision.type !== "enqueue");
-        } else if (competing !== undefined) {
-          plan = planIssueTasks({ ...facts, implemented: true });
-        }
+        if (rateLimitLow() || rateLimitLow("graphql")) { deferred++; return; }
+        const facts = await github.issueImplementation(item.payload.number, config.github.baseBranch, own, latest?.createdAt);
+        const triggerKey = JSON.stringify({ labelledAt: item.payload.updated_at, mainSha: defaultBaseSha });
+        if (reconcileIssueImplementation({ subjectId: item.id, action: labelAction, observedTask: latest, facts,
+          input: { source: "github_items", kind: "label", triggerKey, mainSha: defaultBaseSha },
+          selected, newlySelected: previousItem !== undefined && !hasScratLabel(previousItem),
+        })) queued++;
+        if (selected) return;
       }
-      queued += applyDecisions(item.id, plan.decisions);
-      if (!plan.review) return;
+      if (labelAction) cancelPendingTasks(item.id, `${botSlug} label removed`, labelAction, true);
       const context = issueContexts.get(item.id);
       if (context) queued += await routeObserved(ctx, item, context, defaultBaseSha);
       else deferred++;
@@ -264,6 +256,6 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
   for (const item of ordered) {
     await bestEffort(log, "github.routing_failed", { subjectId: item.id }, () => routeItem(item));
   }
-  if (deferred) log.warn({ event: "github.sync_deferred", deferred, ...rateLimitState() }, "GitHub rate limit is low; deferred item reads to the next sync");
+  if (deferred) log.warn({ event: "github.sync_deferred", deferred, ...rateLimitState(), graphql: rateLimitState("graphql") }, "GitHub rate limit is low; deferred item reads to the next sync");
   return queued;
 }

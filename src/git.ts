@@ -143,21 +143,6 @@ export async function remoteBranchHead(repositoryPath: string, remote: string, b
   return advertised.split(/\s+/)[0] || undefined;
 }
 
-export async function branchContainsCommit(workspace: { path: string; repositoryPath: string }, remote: string, branch: string, commitSha: string, env = childEnvironment()) {
-  const { repositoryPath } = workspace;
-  const remoteSha = await remoteBranchHead(repositoryPath, remote, branch, env);
-  if (!remoteSha) return false;
-  if (remoteSha === commitSha) return true;
-  await git(repositoryPath, ["fetch", "--no-write-fetch-head", "--", remote, remoteSha], env);
-  let where = workspace.path;
-  if (!await commitOf(where, commitSha)) return false;
-  if (!await commitOf(where, remoteSha)) {
-    where = repositoryPath;
-    if (!await commitOf(where, commitSha)) return false;
-  }
-  return isAncestor(where, commitSha, remoteSha);
-}
-
 export async function isAncestor(repositoryPath: string, ancestor: string, descendant: string) {
   return !await exitsOne(git(repositoryPath, ["merge-base", "--is-ancestor", ancestor, descendant]));
 }

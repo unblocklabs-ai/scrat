@@ -234,9 +234,11 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
         if (selected && reviewAction) cancelPendingTasks(item.id, "Issue selected for implementation", reviewAction, true);
         const own = item.workspaceId ? getWorkspace(item.workspaceId)?.branch : undefined;
         if (rateLimitLow() || rateLimitLow("graphql")) { deferred++; return; }
-        const facts = await github.issueImplementation(item.payload.number, config.github.baseBranch, own, latest?.createdAt);
+        // Preserve the start of observation even if a linked PR merges before admission is committed.
+        const observedAt = new Date().toISOString();
+        const facts = await github.issueImplementation(item.payload.number, config.github.baseBranch, own, latest?.createdAt ?? observedAt);
         const triggerKey = JSON.stringify({ labelledAt: item.payload.updated_at, mainSha: defaultBaseSha });
-        if (reconcileIssueImplementation({ subjectId: item.id, action: labelAction, observedTask: latest, facts,
+        if (reconcileIssueImplementation({ subjectId: item.id, action: labelAction, observedTask: latest, observedAt, facts,
           input: { source: "github_items", kind: "label", triggerKey, mainSha: defaultBaseSha },
           selected, newlySelected: previousItem !== undefined && !hasScratLabel(previousItem),
         })) queued++;

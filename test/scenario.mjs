@@ -1844,14 +1844,17 @@ fi
     branchOff("human-fix", "src/app.ts", "export const value = 42;\n");
     f.onModel = () => { f.onModel = undefined; f.addPr(301, "human-fix", "human", { linkedIssues: [1] }); };
     const remote = resolve("remote.git"), before = git(remote, "for-each-ref", "refs/heads");
-    f.addIssue(1, ["scrat"]); f.enqueue(1, "implement");
+    f.addIssue(1, ["scrat"]); await route();
     const skipped = await run();
     assert.equal(f.prs.length, 1); assert.equal(git(remote, "for-each-ref", "refs/heads"), before);
     assert.equal(f.row(s.tasks, skipped.taskId).status, "blocked"); assert.ok(!existsSync("validations.log"));
     const attempts = () => all(s.runs).filter((r) => r.taskId === skipped.taskId);
     const calls = f.requests.length;
+    const [manual] = tasks.enqueueManualTasks("implement", ["1"]);
+    assert.equal(manual.taskId, skipped.taskId);
+    f.issues.get(1).labels = [];
     await route();
-    assert.equal(f.row(s.tasks, skipped.taskId).status, "blocked");
+    assert.equal(f.row(s.tasks, skipped.taskId).status, "blocked", "Removing the label does not cancel an explicit manual request");
     f.prs[0].state = "closed"; await route(); await route();
     assert.equal(f.row(s.tasks, skipped.taskId).status, "queued");
     const resumed = await success();
@@ -2320,11 +2323,18 @@ fi
     const pr = all(s.items).find((i) => i.kind === "pr"); assert.equal(f.row(s.subjects, pr.id).workspaceId, null);
     assert.ok(all(s.tasks).some((t) => t.subjectId === pr.id && t.status === "queued"));
   } },
-  existing_pr: { title: "existing implementation PRs suppress duplicate implementation tasks", run: async () => {
+  existing_pr: { title: "an existing implementation PR blocks the first selection through merge closure lag", run: async () => {
     await implement(1); f.addIssue(2, ["scrat"]); f.prs[0].body += "\nFixes #2";
-    f.enqueue(2, "implement"); await route();
-    assert.ok(!all(s.tasks).some((t) => t.subjectId === "issue-2" && t.status === "queued"));
+    await route();
+    const attempts = () => all(s.tasks).filter((t) => t.subjectId === "issue-2" && t.action === "implement");
+    assert.deepEqual(attempts().map((t) => t.status), ["blocked"]);
+    const [blocked] = attempts();
     assert.ok(all(s.tasks).some((t) => t.action === "review_pr" && t.status === "queued"));
+    f.prs[0].state = "closed"; f.prs[0].mergedAt = new Date().toISOString();
+    await route();
+    assert.deepEqual(attempts().map((t) => [t.id, t.status]), [[blocked.id, "blocked"]]);
+    assert.equal(await f.runNextTask(), undefined);
+    assert.equal(f.prs.length, 1);
   } },
   trigger_inputs: { title: "every trigger input shape parses to one typed member, a kind-less input is rejected, unknown shapes are rejected clearly and a malformed queued row is rejected at claim", run: async () => {
     const { parseTriggerInput } = await f.app("triggers.ts");

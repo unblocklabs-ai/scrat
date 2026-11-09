@@ -62,8 +62,15 @@ function checkClaimable({ task, subject }: { task: Task; subject: Subject }, dat
   return { ok: true as const, previousRun, trigger };
 }
 
+function sameRunInput(previous: Run, task: Task) {
+  // For issue implementation, manual intent changes admission, not the evaluated work.
+  return isDeepStrictEqual(previous.input, task.input)
+    || isManual(task.input) && manifestOf(task.action).publish.includes("pull_request")
+      && isDeepStrictEqual({ ...previous.input, manual: true }, task.input);
+}
+
 function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run | undefined; trigger: TriggerInput }) {
-  const retry = previousRun?.error && isDeepStrictEqual(previousRun.input, task.input) ? previousRun : undefined;
+  const retry = previousRun?.error && sameRunInput(previousRun, task) ? previousRun : undefined;
   const action = manifestOf(task.action);
   const resumingDeferred = task.lastCompetingPullRequest !== null;
   const validationOnly = task.retryMode === "validation"
@@ -88,21 +95,23 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | 
     manifestOf(task.action);
     const queued = db.transaction((transaction) => {
       const previous = pendingTaskOf(transaction, task.subjectId, task.action);
-      if (previous?.status === "blocked") return previous;
+      if (previous?.status === "blocked" && !isManual(task.input)) return previous;
       const input = isManual(task.input) && previous ? { ...previous.input, manual: true }
         : previous && isManual(previous.input) ? { ...task.input, manual: true } : task.input;
-      const queuedTask = transaction.insert(tasks).values({ ...task, input, priority: task.priority ?? config.actions[task.action].priority }).onConflictDoUpdate({
-        target: [tasks.subjectId, tasks.action],
-        targetWhere: sql`${tasks.status} in ('queued', 'blocked')`,
-        set: {
-          priority: task.priority ?? tasks.priority,
-          reason: task.reason,
-          input,
-          retryMode: "repair",
-          retryCount: null,
-          availableAt: null,
-        },
-      }).returning().get()!;
+      const queuedTask = previous?.status === "blocked"
+        ? transaction.update(tasks).set({ input, priority: task.priority ?? previous.priority }).where(eq(tasks.id, previous.id)).returning().get()!
+        : transaction.insert(tasks).values({ ...task, input, priority: task.priority ?? config.actions[task.action].priority }).onConflictDoUpdate({
+          target: [tasks.subjectId, tasks.action],
+          targetWhere: sql`${tasks.status} in ('queued', 'blocked')`,
+          set: {
+            priority: task.priority ?? tasks.priority,
+            reason: task.reason,
+            input,
+            retryMode: "repair",
+            retryCount: null,
+            availableAt: null,
+          },
+        }).returning().get()!;
       const references = { subjectId: queuedTask.subjectId, taskId: queuedTask.id, operationId: operation.operationId };
       recordEvent(previous ? {
         ...references,
@@ -237,7 +246,7 @@ export function retryTask(taskId: string, mode: Task["retryMode"] = "repair") {
       if (mode === "validation") {
         const previous = latestRunOfTask(taskId, transaction);
         if (modeOf(failed.action) !== "change" || !hasValidationCheckpoint(previous)
-          || !isDeepStrictEqual(previous.input, failed.input)) {
+          || !sameRunInput(previous, failed)) {
           throw new Error("Validation-only retry requires an unchanged task input and a complete agent checkpoint from a failed validation; use normal retry to repair");
         }
       }
@@ -292,8 +301,8 @@ export function deferImplementation(runId: string, error: CompetingImplementatio
   return finished;
 }
 
-export function reconcileIssueImplementation({ subjectId, action, observedTask, facts, input, selected, newlySelected }: {
-  subjectId: string; action: string; observedTask?: Task; facts: IssueImplementation;
+export function reconcileIssueImplementation({ subjectId, action, observedTask, observedAt, facts, input, selected, newlySelected }: {
+  subjectId: string; action: string; observedTask?: Task; observedAt: string; facts: IssueImplementation;
   input: Extract<TriggerInput, { kind: "label" }>; selected: boolean; newlySelected: boolean;
 }) {
   const queued = db.transaction((transaction) => {
@@ -322,9 +331,9 @@ export function reconcileIssueImplementation({ subjectId, action, observedTask, 
         return false;
       }
     }
-    if (!selected || !facts.open || !newOpening && (competitor !== undefined || subject.workspaceId
+    if (!selected || !facts.open || !newOpening && (subject.workspaceId
       || latest && latest.status !== "cancelled" && !newlySelected)) return false;
-    const task = transaction.insert(tasks).values({ ...set, subjectId, action,
+    const task = transaction.insert(tasks).values({ ...set, subjectId, action, createdAt: observedAt,
       input: newOpening ? { ...input, freshOpening: true } : input, issueOpening: facts.opening,
       priority: config.actions[action].priority, reason: newOpening ? "Selected GitHub issue reopened" : `Issue has the ${botSlug} label`,
     }).returning().get()!;

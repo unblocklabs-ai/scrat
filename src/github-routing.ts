@@ -36,17 +36,23 @@ export function planIssueTasks({ labelAction, reviewAction, labelled, implemente
   return { review: false, decisions };
 }
 
-export function planPrMaintenance({ conflictAction, feedbackAction, conflicts, stale, mainSha, headSha, pendingComments, conflictTask, feedbackTask }: {
+export function planPrMaintenance({ conflictAction, feedbackAction, conflicts, preparationFailed, ciBlocker, mainSha, headSha, pendingComments, conflictTask, feedbackTask }: {
   conflictAction: string | undefined; feedbackAction: string | undefined;
-  conflicts: boolean; stale: boolean; mainSha: string; headSha: string; pendingComments: string[];
+  conflicts: boolean; preparationFailed: boolean; ciBlocker: "behind" | "failed" | undefined;
+  mainSha: string; headSha: string; pendingComments: string[];
   conflictTask?: TaskFacts; feedbackTask?: TaskFacts;
 }): RoutingDecision[] {
   const decisions: RoutingDecision[] = [];
   if (conflictAction) {
-    decisions.push(...conflicts || stale
-      ? planKeyedTask(conflictTask, conflictAction, conflicts ? `${botName} PR conflicts with its base branch` : `${botName} PR is behind its base branch and could not be prepared`, {
+    const reason = conflicts ? "conflicts with its base branch"
+      : preparationFailed ? "is behind its base branch and could not be prepared"
+      : ciBlocker === "behind" ? "must be up to date to merge on GitHub"
+      : ciBlocker === "failed" ? "is behind its base branch and a required GitHub check failed" : undefined;
+    decisions.push(...reason
+      ? planKeyedTask(conflictTask, conflictAction, `${botName} PR ${reason}`, {
         source: "github_items", kind: "pr_conflicts", triggerKey: JSON.stringify({ mainSha, headSha }), mainSha, headSha,
-      }) : [{ type: "cancel", action: conflictAction, reason: "PR no longer conflicts" } as const]);
+        ...ciBlocker && { githubCi: true },
+      }) : [{ type: "cancel", action: conflictAction, reason: "PR no longer needs a branch refresh" } as const]);
   }
   if (feedbackAction) {
     const commentRevisions = [...pendingComments].sort();

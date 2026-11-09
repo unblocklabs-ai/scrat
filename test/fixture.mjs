@@ -56,6 +56,7 @@ export async function fixture(scenario, spec) {
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
   const verdicts = {}, modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), checkRuns = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [], deployments = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set(), permissions: new Set(), commitComment: new Set() };
+  const checkRollups = new Map();
   const tokens = new Map(patMode ? [[pat, { issues: "write", pull_requests: "write", contents: "write" }]] : []);
   const transient = { failures: 0, seen: new Map() };
   let onModel, script, nextCommentId = 1000, nextIssueNumber = 500;
@@ -382,6 +383,17 @@ export async function fixture(scenario, spec) {
       const token = "ghs_fixture_" + tokens.size; tokens.set(token, body.permissions);
       return reply({ token, expires_at: new Date(Date.now() + 3600000).toISOString() }, 201);
     }
+    if (path === "/graphql" && method === "POST") {
+      const { owner, repo, number, oid, after } = body.variables ?? body;
+      const scopes = tokens.get(credential);
+      if (owner !== "fixture" || repo !== "project" || !prs.some((pr) => pr.number === number)
+        || !["pull_requests", "contents", "checks"].every((scope) => scopes?.[scope] === "read")) {
+        return reply({ message: "Resource not accessible by integration" }, 403);
+      }
+      const checks = checkRollups.get(oid) ?? [], start = Number(after ?? 0), end = start + 100;
+      const contexts = { nodes: checks.slice(start, end), pageInfo: { hasNextPage: checks.length > end, endCursor: String(end) } };
+      return reply({ data: { repository: { object: { statusCheckRollup: checks.length ? { contexts } : null } } } });
+    }
     if (path.endsWith("/issues") && method === "POST") {
       if (!can("issues")) return reply({ message: "Resource not accessible by integration" }, 403);
       const number = ++nextIssueNumber;
@@ -393,7 +405,7 @@ export async function fixture(scenario, spec) {
     let match = path.match(/\/(issues|pulls)\/(\d+)$/);
     if (match && method === "GET") {
       const item = (match[1] === "issues" ? issues.get(Number(match[2])) : undefined) ?? prs.find((pr) => pr.number === Number(match[2]));
-      return item ? reply(item) : reply({ message: "Not Found" }, 404);
+      return item ? reply(match[1] === "pulls" ? { ...item, base: { sha: headOf(item.base.ref), ...item.base } } : item) : reply({ message: "Not Found" }, 404);
     }
     match = path.match(/\/pulls\/(\d+)\/reviews$/);
     if (match) return reply(reviews.get(Number(match[1])) ?? []);
@@ -486,7 +498,7 @@ export async function fixture(scenario, spec) {
   const addPr = (number, branch, login, extra = {}) => { prs.push(githubItem("pr", number, { title: "PR " + number, body: "", user: { login }, head: { ref: branch, sha: git(resolve("remote.git"), "rev-parse", branch), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } }, ...extra })); };
   const botComments = (number) => (comments.get(number) ?? []).filter((c) => c.user.login !== "human");
   const written = (type, predicate = () => true) => writes.filter((write) => write.type === type && predicate(write));
-  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, loggie, cloudflare, pat, user, githubApp, modes, verdicts, requests, calls, slack, rate, issues, prs, comments, reviews, writes, deployments, checkRuns, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
+  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, loggie, cloudflare, pat, user, githubApp, modes, verdicts, requests, calls, slack, rate, issues, prs, comments, reviews, writes, deployments, checkRuns, checkRollups, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
     set onModel(value) { onModel = value; },
     set script(value) { script = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },

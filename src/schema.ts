@@ -110,6 +110,7 @@ export const runs = sqliteTable("runs", {
     status: "pending" | "published" | "not_needed";
     commentId?: number;
     commitSha?: string;
+    previousPushSha?: string; // Known remote tip, not a push receipt for commitSha.
     commentOnly?: true;
     publishedCommitSha?: string;
     pullRequestNumber?: number;

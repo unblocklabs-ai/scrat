@@ -42,8 +42,8 @@ function checkClaimable({ task, subject }: { task: Task; subject: Subject }, dat
 function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run | undefined; trigger: TriggerInput }) {
   const retry = previousRun?.error && isDeepStrictEqual(previousRun.input, task.input) ? previousRun : undefined;
   const action = manifestOf(task.action);
-  const deferredSince = retry?.error?.code === competingImplementationCode ? retry.startedAt ?? undefined : undefined;
-  const validationOnly = task.retryMode === "validation" || deferredSince !== undefined && hasValidationCheckpoint(retry);
+  const resumingDeferred = retry?.error?.code === competingImplementationCode;
+  const validationOnly = task.retryMode === "validation" || resumingDeferred && hasValidationCheckpoint(retry);
   const publicationResume = !validationOnly && hasPublicationSnapshot(retry) ? retry : undefined;
   const interrupted = retry?.error?.name === "InterruptedError";
   const review = action.mode === "review";
@@ -55,7 +55,7 @@ function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run |
   const settings = pinned ?? action;
   const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? (isBaseOnly(trigger) ? action.reviewers.slice(0, 1) : action.reviewers);
   const { provider, model, thinkingLevel } = !resume && reviewers.length === 1 ? reviewers[0] : settings;
-  return { prior, resume, publicationResume, review, reviewers, skill: settings.skill, provider, model, thinkingLevel, resumeReason, deferredSince,
+  return { prior, resume, publicationResume, review, reviewers, skill: settings.skill, provider, model, thinkingLevel, resumeReason, resumingDeferred,
     stage: entryStage(retry, validationOnly ? "validation" : "repair", reviewResume) };
 }
 
@@ -149,7 +149,10 @@ export function claimTask() {
       recordEvent({ subjectId: next.task.subjectId, taskId: next.task.id, type: "task.rejected", data: { action: next.task.action, reason: claimable.reason } }, transaction);
     }
     if (!next || !claimable?.ok) return;
-    const { prior, resume, publicationResume, review, reviewers, skill, provider, model, thinkingLevel, resumeReason, stage, deferredSince } = planRunStart(next.task, claimable);
+    const { prior, resume, publicationResume, review, reviewers, skill, provider, model, thinkingLevel, resumeReason, stage, resumingDeferred } = planRunStart(next.task, claimable);
+    const previousRun = claimable.previousRun;
+    const previousPushSha = next.subject.workspaceId && previousRun?.workspaceId === next.subject.workspaceId
+      ? previousRun.publication.publishedCommitSha ?? previousRun.publication.previousPushSha : undefined;
     const task = transaction.update(tasks).set({ status: "running" }).where(eq(tasks.id, next.task.id)).returning().get()!;
     const run = transaction.insert(runs).values({
       taskId: task.id,
@@ -160,12 +163,12 @@ export function claimTask() {
       skill,
       provider, model, thinkingLevel, reviewers,
       workspaceId: resume?.workspaceId ?? (review ? null : next.subject.workspaceId),
+      publication: publicationResume ? { ...publicationResume.publication, status: "pending" } : { status: "pending", previousPushSha },
       stage,
       ...(resume ? {
         context: resume.context, result: resume.result, mainSha: resume.mainSha, headSha: resume.headSha,
         piSessionId: resume.piSessionId, piSessionFile: resume.piSessionFile,
         agentCheckpoint: resume.agentCheckpoint,
-        publication: publicationResume ? { ...resume.publication, status: "pending" } : { status: "pending" },
         verification: publicationResume?.verification,
       } : {}),
       startedAt: new Date().toISOString(),
@@ -178,7 +181,7 @@ export function claimTask() {
     } }, transaction);
     if (resume) recordEvent({ subjectId: task.subjectId, taskId: task.id, runId: run.id, type: "run.resumed", data: { stage: run.stage, fromRunId: resume.id, reason: resumeReason } }, transaction);
     const item = transaction.select().from(items).where(eq(items.id, task.subjectId)).get();
-    return { task, subject: next.subject, item: item && asItem(item, next.subject), run, deferredSince };
+    return { task, subject: next.subject, item: item && asItem(item, next.subject), run, resumingDeferred };
   }, { behavior: "immediate" });
 }
 

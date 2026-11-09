@@ -302,7 +302,7 @@ export class GitHubRepository {
     } while (after);
   }
 
-  async assertNoCompetingImplementation(issue: number, base: string, ownBranch?: string, mergedSince?: string) {
+  async assertNoCompetingImplementation(issue: number, base: string, ownBranch: string | undefined, mergedSince: string) {
     const competing = await this.competingImplementation(issue, base, ownBranch, mergedSince);
     if (competing !== undefined) throw new CompetingImplementation(competing);
   }

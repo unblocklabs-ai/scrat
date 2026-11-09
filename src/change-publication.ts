@@ -26,7 +26,7 @@ export async function refreshChangePublication(ctx: Ctx, github: GitHubRepositor
   if (!(await workflowPaths(path, common, base)).length) return;
 
   const remote = remoteUrl(github.repository), env = await github.getGitEnvironment();
-  const expected = context.headSha;
+  const expected = context.headSha ?? publication.previousPushSha;
   const remoteHead = () => remoteBranchHead(repositoryPath, remote, branch, env);
   if (await remoteHead() !== expected) {
     // A push can succeed before its receipt is saved. Reconcile it; do not replace it.

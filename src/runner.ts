@@ -41,7 +41,7 @@ async function assertRepairCurrent(trigger: TriggerInput, { item, observation, m
   }
 }
 
-async function checkPublicationContext({ run, manifest }: Ctx, observed: Observed, evaluatedRun: Run, refetch: boolean, mergedSince?: string) {
+async function checkPublicationContext({ run, task, manifest }: Ctx, observed: Observed, evaluatedRun: Run, refetch: boolean) {
   const { github, context, item, observation, mainSha } = observed;
   const review = manifest.mode === "review";
   const publicationContext = refetch ? await github.fetchItemContext(observation.kind, item.payload.number) : context;
@@ -65,22 +65,22 @@ async function checkPublicationContext({ run, manifest }: Ctx, observed: Observe
   }
   if (item.kind === "issue" && manifest.publish.includes("pull_request") && !evaluatedRun.publication.commentOnly && !evaluatedRun.publication.publishedCommitSha) {
     const workspace = evaluatedRun.workspaceId ? getWorkspace(evaluatedRun.workspaceId) : undefined;
-    if (workspace) await github.assertNoCompetingImplementation(item.payload.number, current.baseBranch, workspace.branch, mergedSince);
+    if (workspace) await github.assertNoCompetingImplementation(item.payload.number, current.baseBranch, workspace.branch, task.createdAt);
   }
   return publicationContext;
 }
 
-async function publishStage(ctx: Ctx, observed: Observed | undefined, mergedSince?: string) {
+async function publishStage(ctx: Ctx, observed: Observed | undefined) {
   const { task, run, subject, references, manifest } = ctx;
   const evaluated = getRun(run.id)!;
   if (!observed) return publishRun(new GitHubRepository(subject.repository), subject, task, evaluated, references);
   const { github } = observed;
-  const current = await checkPublicationContext(ctx, observed, evaluated, run.stage !== "publishing", mergedSince);
+  const current = await checkPublicationContext(ctx, observed, evaluated, run.stage !== "publishing");
   if (manifest.mode === "review") return publishRun(github, subject, task, evaluated, references, current);
 
   const publishRefreshed = async (candidate: Run) => {
     stopBefore(ctx.stop, "refreshed publication");
-    const latest = await checkPublicationContext(ctx, observed, candidate, true, mergedSince);
+    const latest = await checkPublicationContext(ctx, observed, candidate, true);
     await publishRun(github, subject, task, candidate, references, latest);
   };
   const candidate = await refreshChangePublication(ctx, github, evaluated);
@@ -90,7 +90,7 @@ async function publishStage(ctx: Ctx, observed: Observed | undefined, mergedSinc
   catch (error) {
     if (!(error instanceof WorkflowPushRejected)) throw error;
     // Main can move between preflight and push. Retry only if a refresh can address it.
-    await checkPublicationContext(ctx, observed, evaluated, true, mergedSince);
+    await checkPublicationContext(ctx, observed, evaluated, true);
     const refreshed = await refreshChangePublication(ctx, github, getRun(run.id)!);
     if (!refreshed) throw error;
     await publishRefreshed(refreshed);
@@ -102,14 +102,14 @@ const heapUsed = () => Math.round(process.memoryUsage().heapUsed / 1048576);
 export async function runNextTask(stop?: AbortSignal) {
   const claimed = claimTask();
   if (!claimed) return;
-  const { task, run, subject, item, deferredSince } = claimed;
+  const { task, run, subject, item, resumingDeferred } = claimed;
   const references = { subjectId: subject.id, taskId: task.id, runId: run.id };
   const operation = startOperation("run.execute", { ...references, action: task.action });
   const cleanup: Ctx["cleanup"] = { databaseRequested: false };
   const ctx: Ctx = { task, run, subject, item, references, operation, manifest: manifestOf(task.action), repositoryPath: getRepositoryPath(), stop, cleanup };
   try {
     const observed = await connect(ctx);
-    if (observed && deferredSince) await restartStaleDeferredPublication(ctx, observed);
+    if (observed && resumingDeferred) await restartStaleDeferredPublication(ctx, observed);
     if (run.stage !== "publishing") {
       stopBefore(stop, "workspace acquisition");
       const trigger = parseTriggerInput(task.input);
@@ -121,10 +121,10 @@ export async function runNextTask(stop?: AbortSignal) {
       }
       if (observed) await assertRepairCurrent(trigger, observed);
       if (ctx.manifest.mode === "review") await reviewRun(ctx, observed);
-      else await changeRun(ctx, observed!, deferredSince);
+      else await changeRun(ctx, observed!, resumingDeferred);
       stopBefore(stop, "publication");
     }
-    await publishStage(ctx, observed, deferredSince);
+    await publishStage(ctx, observed);
     const finished = finishRun(run.id, { status: "completed" });
     if (finished.publication.status === "published" && finished.publication.publishedCommitSha) {
       await bestEffort(operation.log, "run.cleanup_pending", references, async () => {

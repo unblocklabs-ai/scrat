@@ -1790,9 +1790,22 @@ export const scenarios = {
     const localNote = resolve(original.path, "local-note.txt");
     git(original.path, "config", "status.showUntrackedFiles", "no");
     writeFileSync(localNote, "unpublished local work\n");
+    writeFileSync(resolve(original.path, "src/app.ts"), "unpublished stashed work\n");
+    git(original.path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "stash", "push");
+    const stash = git(original.path, "rev-parse", "refs/stash");
     tasks.retryTask(failed.taskId); const first = await success();
     assert.ok(existsSync(localNote), "A successful publication must not remove a modified predecessor");
-    unlinkSync(localNote); cleanup(); cleanup();
+    unlinkSync(localNote);
+    spawnSync(process.execPath, [resolve("app/src/cleanup.ts")], { stdio: "pipe" });
+    assert.ok(existsSync(original.path), "A clean checkout with a local stash is not safe to remove");
+    assert.equal(git(original.path, "rev-parse", "refs/stash"), stash);
+    git(original.path, "branch", "local-work", stash);
+    git(original.path, "update-ref", "-d", "refs/stash", stash);
+    spawnSync(process.execPath, [resolve("app/src/cleanup.ts")], { stdio: "pipe" });
+    assert.ok(existsSync(original.path), "A clean checkout with unpublished work on another branch is not safe to remove");
+    assert.equal(git(original.path, "rev-parse", "refs/heads/local-work"), stash);
+    git(original.path, "update-ref", "-d", "refs/heads/local-work", stash);
+    cleanup(); cleanup();
     assert.ok(!existsSync(original.path), "Cleanup retries a confirmed replacement after the original is clean");
     assert.equal(git(original.repositoryPath, "rev-parse", `refs/scrat/recovery/${original.id}`), originalHead);
     const head = first.publication.publishedCommitSha;
@@ -1873,8 +1886,18 @@ fi
     assert.equal(repaired.taskId, blocked.taskId); assert.equal(repaired.workspaceId, checkpoint.workspaceId);
     assert.equal(repaired.inferenceFromRunId, null); assert.ok(f.requests.length > beforeRepair);
     assert.equal(repaired.context.item.body, f.issues.get(2).body);
+
+    f.addIssue(3, ["scrat"]); f.enqueue(3, "implement");
+    f.onModel = () => { f.onModel = undefined; f.addPr(305, "human-fix", "human", { linkedIssues: [3], state: "closed", mergedAt: new Date().toISOString() }); };
+    const mergeRace = await run();
+    assert.equal(f.row(s.tasks, mergeRace.taskId).status, "cancelled", "A PR merged during the first attempt still blocks while the issue is open");
+    assert.ok(!f.prs.some((pr) => pr.number === 203));
+    await route();
+    assert.equal(f.row(s.tasks, mergeRace.taskId).status, "cancelled");
   } },
-  ambiguous_pr: { title: "a lost PR response is reconciled without another PR, inference or revalidation, resuming at the publishing stage", configure: [configureValidation], run: async () => {
+  ambiguous_pr: { title: "partial publication resumes safely after a lost PR response or a competing PR after push", configure: [configureValidation, (config) => { config.actions.review_pr.enabled = false; }], seed: () => {
+    mkdirSync("seed/.github/workflows", { recursive: true }); writeFileSync("seed/.github/workflows/ci.yml", "name: old\n");
+  }, run: async () => {
     const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
     f.addIssue(1); f.enqueue(1, "implement"); f.faults.pr.add(1);
     const failed = await run(); assert.ok(failed.error); assert.equal(f.prs.length, 1); const calls = f.requests.length;
@@ -1884,6 +1907,37 @@ fi
     tasks.retryTask(failed.taskId); const completed = await success();
     assert.equal(completed.publication.pullRequestNumber, 201); assert.equal(f.prs.length, 1); assert.equal(f.requests.length, calls);
     assert.equal(validations(), 1); assert.equal(completed.inferenceFromRunId, failed.id);
+
+    const remote = resolve("remote.git"), workflow = ".github/workflows/ci.yml";
+    branchOff("human-fix", "notes.md", "Competing work\n");
+    f.addIssue(2, ["scrat"]); f.enqueue(2, "implement");
+    const fetch = globalThis.fetch;
+    let linked;
+    globalThis.fetch = (input, init) => {
+      if (!linked && String(input) === "https://api.github.com/graphql") {
+        const body = JSON.parse(init.body), { number } = body.variables ?? body;
+        const workspace = f.row(s.workspaces, f.row(s.subjects, "issue-2").workspaceId);
+        if (number === 2 && workspace && git(remote, "for-each-ref", `refs/heads/${workspace.branch}`)) {
+          f.addPr(301, "human-fix", "human", { linkedIssues: [2] });
+          linked = f.prs.at(-1);
+        }
+      }
+      return fetch(input, init);
+    };
+    let deferred;
+    try { deferred = await run(); }
+    finally { globalThis.fetch = fetch; }
+    const pushed = deferred.publication.publishedCommitSha;
+    assert.ok(pushed && linked); assert.equal(f.row(s.tasks, deferred.taskId).status, "cancelled");
+    assert.ok(!f.prs.some((pr) => pr.number === 202));
+    linked.state = "closed"; changeMain(workflow, "name: new\n"); await route();
+    f.reset(2, "normal");
+    f.script = [{ name: "write", args: { path: "src/app.ts", content: "export const value = 123;\n" } }];
+    const repaired = await success(), published = repaired.publication.publishedCommitSha;
+    assert.equal(repaired.taskId, deferred.taskId); assert.equal(repaired.publication.pullRequestNumber, 202);
+    git(remote, "merge-base", "--is-ancestor", pushed, published);
+    assert.equal(git(remote, "show", `${published}:${workflow}`), "name: new");
+    assert.equal(git(remote, "show", `${published}:src/app.ts`), "export const value = 123;");
   } },
   freshness: { title: "requirements changed during inference cannot receive an approval label", run: async () => {
     f.addIssue(1); await route(); f.reset(1, "ready");

@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "./db.ts";
 import { recordEvent, type EventReferences } from "./events.ts";
-import { changedPaths, commitOf, git, headOf, hasPendingMerge, identity, mergeHeadOf } from "./git.ts";
+import { changedPaths, commitOf, git, headOf, hasPendingMerge, identity, isAncestor, mergeHeadOf } from "./git.ts";
 import { botSlug } from "./identity.ts";
 import { withOperation } from "./logging.ts";
 import { runs, subjects, workspaces, type Run, type Workspace } from "./schema.ts";
@@ -134,6 +134,25 @@ function workspaceInUse(workspaceId: string) {
     || db.select({ id: runs.id }).from(runs).where(and(eq(runs.workspaceId, workspaceId), isNull(runs.finishedAt))).get();
 }
 
+async function hasUnarchivedRefs({ path, repositoryPath, branch }: Workspace, commitSha: string) {
+  const refList = ["for-each-ref", "--format=%(objectname) %(refname)"];
+  const extra = (await git(path, refList)).split("\n").filter((line) => line && line !== `${commitSha} refs/heads/${branch}`);
+  // A stash ref can have a whole stack of unpublished entries in its reflog.
+  if (extra.some((line) => line.endsWith(" refs/stash"))) return true;
+  if (!extra.length) return false;
+  const shared = (await git(repositoryPath, refList)).split("\n");
+  const sharedRefs = new Set(shared), sharedTips = new Set(shared.map((line) => line.split(" ", 1)[0]));
+  for (const line of extra) {
+    if (sharedRefs.has(line)) continue;
+    const [tip, ref] = line.split(" ") as [string, string];
+    const tracking = ref.startsWith("refs/remotes/");
+    if (tracking && sharedTips.has(tip)) continue;
+    if ((tracking || ref.startsWith("refs/heads/")) && await isAncestor(path, tip, commitSha)) continue;
+    return true;
+  }
+  return false;
+}
+
 export async function removeWorkspace(workspaceId: string, references: EventReferences = {}) {
   return withOperation("workspace.remove", { ...references, workspaceId }, async (operation) => {
     operation.stage("lookup");
@@ -156,6 +175,7 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
       await validateWorkspace(workspace);
       if (replacement) {
         if (!await workspaceMatchesCommit(workspace, replacement.originalHead)) throw new Error("Replaced checkout has changed; retain it for recovery");
+        if (await hasUnarchivedRefs(workspace, replacement.originalHead)) throw new Error("Replaced checkout has local refs not preserved by recovery; retain it");
       } else {
         const head = await headOf(path);
         const published = db.select().from(runs).where(eq(runs.workspaceId, workspace.id)).all()

@@ -66,7 +66,7 @@ async function validateAndCommit(ctx: Ctx, p: Change, kind: Acceptance) {
     if (conflicts) throw new Error(unresolvedConflict);
   }
   const commentOnly = kind === "nonempty_diff" && !await git(workspace.path, ["diff", "--name-only", `${p.mainSha}...HEAD`]);
-  updateRun(run.id, { headSha: commitSha, publication: { status: "pending", commitSha, ...commentOnly && { commentOnly } }, verification: { headSha: commitSha, commands }, stage: "publishing" });
+  updateRun(run.id, { headSha: commitSha, publication: { status: "pending", commitSha, previousPushSha: run.publication.previousPushSha, ...commentOnly && { commentOnly } }, verification: { headSha: commitSha, commands }, stage: "publishing" });
 }
 
 type Change = {
@@ -86,10 +86,11 @@ async function targetOf(p: Change, headSha = p.headSha) {
 }
 
 function restartDeferredChange({ run, operation }: Ctx, reason: string) {
+  const { publishedCommitSha, previousPushSha } = run.publication;
   const reset = {
     stage: "preparing" as const, inferenceFromRunId: null, context: null, result: null,
     mainSha: null, headSha: null, agentCheckpoint: null, verification: null,
-    piSessionId: null, piSessionFile: null, publication: { status: "pending" as const },
+    piSessionId: null, piSessionFile: null, publication: { status: "pending" as const, previousPushSha: publishedCommitSha ?? previousPushSha },
   };
   updateRun(run.id, reset);
   Object.assign(run, reset);
@@ -214,7 +215,7 @@ async function validateStage(ctx: Ctx, p: Change, acceptance: Acceptance) {
   const unchanged = acceptance === "complete" && !p.validated && !validationOnly
     && p.startHeadSha === p.preparedHead && !p.mergeInProgress && await headOf(workspace.path) === p.startHeadSha
     && !await git(workspace.path, ["status", "--porcelain"]);
-  if (unchanged) updateRun(run.id, { publication: { status: "pending", commitSha: p.startHeadSha }, stage: "publishing" });
+  if (unchanged) updateRun(run.id, { publication: { status: "pending", commitSha: p.startHeadSha, previousPushSha: run.publication.previousPushSha }, stage: "publishing" });
   else if (!p.validated) {
     for (let round = 1; ; round++) {
       try { await validateAndCommit(ctx, p, acceptance); break; }
@@ -274,15 +275,15 @@ async function agentStage(ctx: Ctx, observed: Observed, p: Change, acceptance: A
   updateRun(run.id, { result: p.result, stage: "validating" });
 }
 
-export async function changeRun(ctx: Ctx, observed: Observed, deferredSince?: string) {
-  const { run, manifest } = ctx;
+export async function changeRun(ctx: Ctx, observed: Observed, resumingDeferred: boolean) {
+  const { task, run, manifest } = ctx;
   const acceptance = manifest.acceptance!;
   const { item, github, observation } = observed;
   const checkCompeting = item.kind === "issue" && manifest.publish.includes("pull_request")
-    ? (branch?: string) => github.assertNoCompetingImplementation(item.payload.number, observation.baseBranch, branch, deferredSince)
+    ? (branch?: string) => github.assertNoCompetingImplementation(item.payload.number, observation.baseBranch, branch, task.createdAt)
     : undefined;
   await checkCompeting?.(item.workspaceId ? getWorkspace(item.workspaceId)?.branch : undefined);
-  const acquired = await acquireChangeWorkspace(ctx, observed, Boolean(deferredSince));
+  const acquired = await acquireChangeWorkspace(ctx, observed, resumingDeferred);
   const { workspace, validationOnly, mainSha, startHeadSha } = acquired;
   if (!validationOnly) updateRun(run.id, { workspaceId: workspace.id, mainSha, headSha: startHeadSha });
   const { databaseConfig, database, environment } = await provisionDatabase(ctx);

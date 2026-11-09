@@ -78,7 +78,7 @@ const push = {
     const { workspace, commitSha } = changed(context);
     const remote = remoteUrl(github.repository);
     if (!await branchContainsCommit(workspace, remote, workspace.branch, commitSha, await github.getGitEnvironment())) {
-      const workflows = run.mainSha && await changesWorkflows(workspace.path, commitSha, run.mainSha, run.context.headSha);
+      const workflows = run.mainSha && await changesWorkflows(workspace.path, commitSha, run.mainSha, run.context.headSha ?? run.publication.previousPushSha);
       const env = await github.getGitEnvironment(workflows ? "workflows" : true);
       await pushWorkspace(workspace, remote, commitSha, env, references);
     }
@@ -95,7 +95,7 @@ const pullRequest = {
     let pr = await github.findPullRequest(workspace.branch, evaluated.baseBranch);
     if (pr?.state === "closed") throw new Error("The workspace PR was already closed");
     if (!pr) {
-      await github.assertNoCompetingImplementation(evaluated.item.number, evaluated.baseBranch, workspace.branch);
+      await github.assertNoCompetingImplementation(evaluated.item.number, evaluated.baseBranch, workspace.branch, task.createdAt);
       pr = await github.createPullRequest({
         title: conventionalTitle(evaluated.item.title), body: `${result.text}\n\n${validationLine(run)}Closes #${evaluated.item.number}\n\n${taskMarker(task.id)}`,
         head: workspace.branch, base: evaluated.baseBranch,

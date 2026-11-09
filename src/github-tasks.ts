@@ -240,7 +240,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       if (!plan.review && labelAction && (waiting || latest?.status === "queued" || plan.decisions.some((decision) => decision.type === "enqueue"))) {
         const own = item.workspaceId ? getWorkspace(item.workspaceId)?.branch : undefined;
         if (rateLimitLow()) { deferred++; return; }
-        const competing = await github.competingImplementation(item.payload.number, config.github.baseBranch, own, waiting?.startedAt ?? undefined);
+        const competing = await github.competingImplementation(item.payload.number, config.github.baseBranch, own, latest?.createdAt);
         if (waiting && latest && competing === undefined) {
           if (latest.status === "cancelled" && resumeDeferredImplementation(latest, waiting)) queued++;
           // Do not coalesce a requeued attempt into a new trigger and discard its checkpoint.

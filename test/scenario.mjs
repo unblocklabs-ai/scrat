@@ -1951,16 +1951,21 @@ fi
     assert.equal(git(remote, "show", `${published}:${workflow}`), "name: new");
     assert.equal(git(remote, "show", `${published}:src/app.ts`), "export const value = 123;");
 
+    // The Git write succeeds, but the SQLite transaction recording it does not.
+    const losePushReceipt = async () => {
+      db.$client.exec(`CREATE TRIGGER reject_push_receipt BEFORE UPDATE OF publication ON runs
+        WHEN json_extract(NEW.publication, '$.publishedCommitSha') IS NOT NULL
+        BEGIN SELECT RAISE(ABORT, 'fixture lost push receipt'); END`);
+      try { return await run(); }
+      finally { db.$client.exec("DROP TRIGGER reject_push_receipt"); }
+    };
     f.script = undefined;
     f.addIssue(3, ["scrat"]); await route();
-    const githubFetch = globalThis.fetch;
-    globalThis.fetch = (input, init) => String(input).endsWith("/pulls") && init?.method === "POST"
-      ? Promise.resolve(new Response(JSON.stringify({ message: "Fixture PR create rejected" }), { status: 422, headers: { "content-type": "application/json" } }))
-      : githubFetch(input, init);
-    let retryable;
-    try { retryable = await run(); }
-    finally { globalThis.fetch = githubFetch; }
-    assert.ok(retryable.error && retryable.publication.publishedCommitSha);
+    const retryable = await losePushReceipt();
+    const priorBranch = f.row(s.workspaces, retryable.workspaceId).branch;
+    const priorPush = git(remote, "rev-parse", priorBranch);
+    assert.ok(retryable.error); assert.equal(retryable.publication.publishedCommitSha, undefined);
+    assert.equal(priorPush, retryable.verification.headSha);
     tasks.retryTask(retryable.taskId);
     f.addPr(302, "human-fix", "human", { linkedIssues: [3] }); await route();
     assert.equal(f.row(s.tasks, retryable.taskId).status, "blocked");
@@ -1973,19 +1978,13 @@ fi
     const retried = await success();
     assert.equal(retried.taskId, retryable.taskId); assert.equal(retried.publication.pullRequestNumber, 203);
     assert.ok(f.requests.length > beforeRetry);
-    git(remote, "merge-base", "--is-ancestor", retryable.publication.publishedCommitSha, retried.publication.publishedCommitSha);
+    git(remote, "merge-base", "--is-ancestor", priorPush, retried.publication.publishedCommitSha);
     assert.equal(git(remote, "show", `${retried.publication.publishedCommitSha}:${workflow}`), "name: newer");
     assert.equal(git(remote, "show", `${retried.publication.publishedCommitSha}:src/app.ts`), "export const value = 321;");
 
-    // The Git write succeeds, but the SQLite transaction recording it does not.
     f.script = undefined;
     f.addIssue(4, ["scrat"]); f.enqueue(4, "implement");
-    db.$client.exec(`CREATE TRIGGER reject_push_receipt BEFORE UPDATE OF publication ON runs
-      WHEN json_extract(NEW.publication, '$.publishedCommitSha') IS NOT NULL
-      BEGIN SELECT RAISE(ABORT, 'fixture lost push receipt'); END`);
-    let lostPush;
-    try { lostPush = await run(); }
-    finally { db.$client.exec("DROP TRIGGER reject_push_receipt"); }
+    const lostPush = await losePushReceipt();
     assert.ok(lostPush.error); assert.equal(lostPush.publication.publishedCommitSha, undefined);
     const workspace = f.row(s.workspaces, lostPush.workspaceId), branch = `refs/heads/${workspace.branch}`;
     const written = git(remote, "rev-parse", branch);
@@ -2001,6 +2000,7 @@ fi
     assert.equal(recovered.publication.pullRequestNumber, 204); assert.equal(f.requests.length, beforeRecovery);
 
     f.addIssue(5, ["scrat"]); f.enqueue(5, "implement");
+    const githubFetch = globalThis.fetch;
     let changedHead;
     globalThis.fetch = (input, init) => {
       if (!changedHead && String(input).endsWith("/pulls") && init?.method === "POST") {

@@ -8,15 +8,16 @@ import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
 import { CompetingImplementation, describeError, type ErrorDetails, errorExitCode } from "./errors.ts";
 import { bestEffort } from "./logging.ts";
-import { conventionalTitle, git, headOf, hasPendingMerge, mergeBase, prepareTarget, shortSha } from "./git.ts";
+import { conventionalTitle, git, headOf, hasPendingMerge, mergeBase, prepareTarget, remoteBranchHead, shortSha } from "./git.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { executePi } from "./pi.ts";
+import { remoteUrl } from "./repository.ts";
 import { getRun, inferenceRunOf, latestSessionRun, updateRun } from "./run-history.ts";
 import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint, InterruptedError } from "./results.ts";
 import { subjects, workspaces, type Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { assertCurrentImplementation } from "./tasks.ts";
-import { assertNoCommittedSecrets, checkpointMatches, checkpointWorkspace, commitWorkspace, createWorkspace, getWorkspace, pinWorkspaceBase, stageTree, validateWorkspace, workspaceMatchesCommit } from "./workspaces.ts";
+import { assertNoCommittedSecrets, checkpointMatches, checkpointWorkspace, commitWorkspace, createWorkspace, expectedBranchHead, getWorkspace, pinWorkspaceBase, stageTree, validateWorkspace, workspaceMatchesCommit } from "./workspaces.ts";
 import { botAuthor, type Ctx, type DatabaseConfig, type Environment, itemRevisions, type Observed, prepareWorkspace, runAgent, stopBefore } from "./run-context.ts";
 
 type Acceptance = NonNullable<Manifest["acceptance"]>;
@@ -97,7 +98,7 @@ function restartDeferredChange({ run, operation }: Ctx, reason: string) {
   operation.log.info({ event: "run.deferred_snapshot_stale", reason }, "Repairing retained work against the current issue");
 }
 
-export async function restartStaleDeferredPublication(ctx: Ctx, { item, observation, mainSha }: Observed) {
+export async function restartStaleDeferredPublication(ctx: Ctx, { github, item, observation, mainSha }: Observed) {
   const { run } = ctx;
   if (run.stage !== "publishing" || run.publication.pullRequestNumber) return;
   const workspace = item.workspaceId === run.workspaceId && run.workspaceId ? getWorkspace(run.workspaceId) : undefined;
@@ -106,6 +107,15 @@ export async function restartStaleDeferredPublication(ctx: Ctx, { item, observat
   const { commitSha } = run.publication;
   if ((await freshness(savedEvaluation(run), { ...observation, mainSha }, "exact")).kind === "stale"
     || !commitSha || !await workspaceMatchesCommit(workspace, commitSha)) {
+    // Reconcile an ambiguous push before discarding the only snapshot that identifies its validated commit.
+    if (!run.publication.commentOnly && commitSha && run.verification?.headSha === commitSha) {
+      const expected = expectedBranchHead(workspace, run.context?.headSha);
+      const actual = await remoteBranchHead(workspace.repositoryPath, remoteUrl(github.repository), workspace.branch, await github.getGitEnvironment());
+      if (actual !== expected) {
+        if (actual !== commitSha) throw new Error("Remote branch changed before deferred repair; original work was retained");
+        db.update(workspaces).set({ pushedHeadSha: commitSha }).where(eq(workspaces.id, workspace.id)).run();
+      }
+    }
     restartDeferredChange(ctx, "Publication snapshot changed");
   }
 }

@@ -256,8 +256,9 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
     queued += routeItemLabels(item);
     const workspace = item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
     if (workspace && (workspace.removedAt || workspace.retainedAt)) {
-      db.update(subjects).set({ workspaceId: null }).where(eq(subjects.id, item.id)).run();
-      item.workspaceId = null;
+      const detached = db.update(subjects).set({ workspaceId: null })
+        .where(and(eq(subjects.id, item.id), eq(subjects.workspaceId, workspace.id))).returning({ id: subjects.id }).get();
+      item.workspaceId = detached ? null : db.select({ workspaceId: subjects.workspaceId }).from(subjects).where(eq(subjects.id, item.id)).get()?.workspaceId ?? null;
     }
     await reconcileFailedLabels(ctx, item);
     if (item.kind === "issue") {

@@ -2119,13 +2119,19 @@ fi
       { name: "git", args: { operation: "diff_stat", from: "base", to: "main" } },
     ];
     const scoped = await success(); f.script = undefined;
-    assert.ok(!scoped.result.paths.includes("src") && !scoped.result.paths.includes("."), "directory log, dot log/show and base-drift diffs do not pollute scope");
+    assert.ok(!scoped.result.paths.includes("src") && !scoped.result.paths.includes(".") && !scoped.result.paths.includes("notes.md"), "directory log, dot log/show and base-drift diffs do not pollute scope");
     db.update(s.runs).set({ result: { ...scoped.result, paths: ["src", ...scoped.result.paths] } }).where(eq(s.runs.id, scoped.id)).run();
     changeMain("src/unrelated.ts", "export const unrelated = 1;\n");
     await route();
     assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "legacy directory entries in persisted scope do not trigger unrelated re-reviews");
+    // PR-only directories (present in head, absent from base) are also stripped by union-tree canonicalization.
+    f.prs[0].head.sha = pushFile("feature", "pronly/extra.ts", "export const extra = 1;\n");
+    await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"));
+    f.script = [{ name: "git", args: { operation: "log", path: "pronly" } }];
+    const prDirScoped = await success(); f.script = undefined;
+    assert.ok(!prDirScoped.result.paths.includes("pronly"), "PR-only directory paths are stripped from git scope");
     // Legacy "." persisted on a previous review heals on re-review instead of sticking forever.
-    db.update(s.runs).set({ result: { ...scoped.result, paths: [".", ...scoped.result.paths] } }).where(eq(s.runs.id, scoped.id)).run();
+    db.update(s.runs).set({ result: { ...prDirScoped.result, paths: [".", ...prDirScoped.result.paths] } }).where(eq(s.runs.id, prDirScoped.id)).run();
     changeMain("notes.md", "heal dot\n");
     await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"));
     f.reset(1, "grep");
@@ -3006,18 +3012,41 @@ fi
     assert.notEqual(afterPending.workspaceId, pendingWorkspace.id);
     assert.ok(f.row(s.workspaces, pendingWorkspace.id).retainedAt, "stale pending-merge workspace is retained rather than overwritten");
 
-    // Fast-forwarding a PR workspace to a new remote head updates workspaces.baseSha so closing without new commits does not falsely retain it.
-    const ffWorkspace = f.row(s.workspaces, afterPending.workspaceId);
+    // Uncommitted edits on an older PR head are retained and replaced cleanly once remote advances, never committed onto the new head.
+    const dirtyWorkspace = f.row(s.workspaces, afterPending.workspaceId);
+    writeFileSync(resolve(dirtyWorkspace.path, "src/abandoned.ts"), "export const abandoned = 1;\n");
+    const afterDirtyHead = pushFile(f.prs[0].head.ref, "src/after-dirty.ts", "export const afterDirty = 1;\n");
+    f.prs[0].head.sha = afterDirtyHead;
+    changeMain("src/other3.ts", "export const other3 = 3;\n");
+    tasks.enqueueTask({ subjectId: item.id, action: "resolve_conflicts", reason: "Recover dirty workspace behind remote", input: { source: "github_items", kind: "manual", manual: true } });
+    const afterDirty = await success();
+    f.prs[0].head.sha = afterDirty.publication.publishedCommitSha;
+    assert.notEqual(afterDirty.workspaceId, dirtyWorkspace.id);
+    assert.ok(f.row(s.workspaces, dirtyWorkspace.id).retainedAt, "dirty workspace behind remote head is retained rather than fast-forwarded");
+    assert.equal(readFileSync(resolve(dirtyWorkspace.path, "src/abandoned.ts"), "utf8"), "export const abandoned = 1;\n");
+    assert.throws(() => git(remote, "cat-file", "-e", `${afterDirty.publication.publishedCommitSha}:src/abandoned.ts`), "abandoned uncommitted edits are never published");
+
+    // Fast-forwarding a PR workspace to a new remote head updates workspaces.baseSha so closing without new commits removes it cleanly instead of falsely retaining it.
+    const ffWorkspace = f.row(s.workspaces, afterDirty.workspaceId);
     const externalHead = pushFile(f.prs[0].head.ref, "src/external-ff.ts", "export const ext = 1;\n");
     f.prs[0].head.sha = externalHead;
-    changeMain("src/other3.ts", "export const other3 = 3;\n");
-    tasks.enqueueTask({ subjectId: item.id, action: "resolve_conflicts", reason: "Fast-forward PR workspace", input: { source: "github_items", kind: "manual", manual: true } });
-    const ffMerged = await success();
-    f.prs[0].head.sha = ffMerged.publication.publishedCommitSha;
+    f.reset(201, "normal"); f.script = ["Replied without code changes.\nSCRAT_STATUS: complete"];
+    tasks.enqueueTask({ subjectId: item.id, action: "address_pr_feedback", reason: "Comment-only after human push", input: { source: "github_items", kind: "manual", manual: true } });
+    await success(); f.script = undefined;
     assert.equal(f.row(s.workspaces, ffWorkspace.id).baseSha, externalHead, "PR fast-forward updates workspaces.baseSha");
+    f.prs[0].state = "closed";
+    await route();
+    assert.ok(f.row(s.workspaces, ffWorkspace.id).removedAt && !f.row(s.workspaces, ffWorkspace.id).retainedAt, "closing a fast-forwarded PR without unpublished commits removes the workspace cleanly");
+    f.prs[0].state = "open";
+    await route();
+    tasks.cancelPendingTasks(item.id, "Isolate");
 
     // Closing a PR whose workspace has unpublished commits marks it retained once instead of error-looping on every sync.
-    const activeWorkspace = f.row(s.workspaces, ffWorkspace.id);
+    changeMain("src/other4.ts", "export const other4 = 4;\n");
+    tasks.enqueueTask({ subjectId: item.id, action: "resolve_conflicts", reason: "Create fresh workspace before close", input: { source: "github_items", kind: "manual", manual: true } });
+    const beforeClose = await success();
+    f.prs[0].head.sha = beforeClose.publication.publishedCommitSha;
+    const activeWorkspace = f.row(s.workspaces, beforeClose.workspaceId);
     writeFileSync(resolve(activeWorkspace.path, "src/unpushed-on-close.ts"), "export const keep = 1;\n");
     git(activeWorkspace.path, "add", "."); commit(activeWorkspace.path, "Unpushed before close");
     f.prs[0].state = "closed";
@@ -3034,10 +3063,12 @@ fi
     f.prs[0].state = "open";
     await route();
     assert.equal(f.row(s.subjects, item.id).workspaceId, null, "reopened PR detaches retained workspace");
-    changeMain("src/other4.ts", "export const other4 = 4;\n");
+    tasks.cancelPendingTasks(item.id, "Isolate");
+    changeMain("src/other5.ts", "export const other5 = 5;\n");
     tasks.enqueueTask({ subjectId: item.id, action: "resolve_conflicts", reason: "Merge after reopen", input: { source: "github_items", kind: "manual", manual: true } });
     const reopened = await success();
     assert.notEqual(reopened.workspaceId, activeWorkspace.id);
+    assert.equal(f.row(s.subjects, item.id).workspaceId, reopened.workspaceId);
     assert.equal(readFileSync(resolve(activeWorkspace.path, "src/unpushed-on-close.ts"), "utf8"), "export const keep = 1;\n");
   } },
   workspace_layout: { title: "workspaces share objects that a shared-repository gc cannot remove, and publication bundles only the new commits with a full-bundle fallback", run: async () => {

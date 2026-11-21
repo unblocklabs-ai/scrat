@@ -6,7 +6,7 @@ import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
-import { CompetingImplementation, describeError, type ErrorDetails, errorExitCode, errorMessage } from "./errors.ts";
+import { CompetingImplementation, describeError, type ErrorDetails, errorExitCode } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { bestEffort } from "./logging.ts";
 import { conventionalTitle, git, headOf, hasPendingMerge, isAncestor, mergeBase, prepareTarget, remoteBranchHead, shortSha } from "./git.ts";
@@ -18,7 +18,7 @@ import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint
 import { subjects, workspaces, type Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { assertCurrentImplementation } from "./tasks.ts";
-import { assertNoCommittedSecrets, checkpointMatches, checkpointWorkspace, commitWorkspace, createWorkspace, expectedBranchHead, getWorkspace, pinWorkspaceBase, stageTree, validateWorkspace, workspaceMatchesCommit } from "./workspaces.ts";
+import { assertNoCommittedSecrets, checkpointMatches, checkpointWorkspace, commitWorkspace, createWorkspace, expectedBranchHead, getWorkspace, pinWorkspaceBase, removeWorkspace, stageTree, validateWorkspace, workspaceMatchesCommit } from "./workspaces.ts";
 import { botAuthor, type Ctx, type DatabaseConfig, type Environment, itemRevisions, type Observed, prepareWorkspace, runAgent, stopBefore } from "./run-context.ts";
 
 type Acceptance = NonNullable<Manifest["acceptance"]>;
@@ -129,10 +129,16 @@ async function acquireChangeWorkspace(ctx: Ctx, observed: Observed, resumedDefer
   let workspace = item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
   if (workspace?.removedAt) throw new Error(`Workspace was removed: ${workspace.id}`);
   if (workspace?.retainedAt) {
-    if (validationOnly || run.retryOfRunId) throw new Error(`Workspace was retained: ${workspace.id}`);
-    db.update(subjects).set({ workspaceId: null }).where(eq(subjects.id, item.id)).run();
-    item.workspaceId = null;
-    workspace = undefined;
+    if (run.retryOfRunId) throw new Error(`Workspace was retained: ${workspace.id}`);
+    if (validationOnly) {
+      if (!resumedDeferred) throw new Error("Validation checkpoint workspace was retained; use normal retry to repair");
+      restartDeferredChange(ctx, "Validation checkpoint workspace was retained");
+      validationOnly = false;
+    }
+    const detached = db.update(subjects).set({ workspaceId: null })
+      .where(and(eq(subjects.id, item.id), eq(subjects.workspaceId, workspace.id))).returning({ id: subjects.id }).get();
+    item.workspaceId = detached ? null : db.select({ workspaceId: subjects.workspaceId }).from(subjects).where(eq(subjects.id, item.id)).get()?.workspaceId ?? null;
+    workspace = item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
   }
   if (workspace) {
     await validateWorkspace(workspace);
@@ -162,39 +168,46 @@ async function acquireChangeWorkspace(ctx: Ctx, observed: Observed, resumedDefer
     if (pullRequest) {
       const replaceStaleWorkspace = async (reason: string, cause?: unknown) => {
         const previous = workspace!;
+        let fresh: Workspace;
         try {
-          workspace = await createWorkspace({ repositoryPath, baseRef: preparedHead, branch: pullRequest.head.ref }, references);
+          fresh = await createWorkspace({ repositoryPath, baseRef: preparedHead, branch: pullRequest.head.ref }, references);
         } catch (recoveryError) {
-          throw cause ? new Error(errorMessage(recoveryError), { cause }) : recoveryError;
+          if (cause && recoveryError instanceof Error && recoveryError.cause === undefined) recoveryError.cause = cause;
+          throw recoveryError;
         }
-        const fresh = workspace;
-        db.transaction((transaction) => {
-          const retained = transaction.update(workspaces).set({ retainedAt: new Date().toISOString() })
-            .where(and(eq(workspaces.id, previous.id), isNull(workspaces.removedAt), isNull(workspaces.retainedAt))).returning().get();
-          transaction.update(subjects).set({ workspaceId: fresh.id }).where(eq(subjects.workspaceId, previous.id)).run();
-          if (retained) recordEvent({ ...references, type: "workspace.retained",
-            data: { workspaceId: previous.id, path: retained.path, reason } }, transaction);
-        }, { behavior: "immediate" });
+        try {
+          db.transaction((transaction) => {
+            const retained = transaction.update(workspaces).set({ retainedAt: new Date().toISOString() })
+              .where(and(eq(workspaces.id, previous.id), isNull(workspaces.removedAt), isNull(workspaces.retainedAt))).returning().get();
+            transaction.update(subjects).set({ workspaceId: fresh.id }).where(eq(subjects.workspaceId, previous.id)).run();
+            if (retained) recordEvent({ ...references, type: "workspace.retained",
+              data: { workspaceId: previous.id, path: retained.path, reason } }, transaction);
+          }, { behavior: "immediate" });
+        } catch (error) {
+          await bestEffort(ctx.operation.log, "run.cleanup_pending", { workspaceId: fresh.id }, () => removeWorkspace(fresh.id, references));
+          throw error;
+        }
+        workspace = fresh;
         mergeInProgress = false;
       };
+      const currentHead = await headOf(workspace.path);
+      const remoteAheadOrDiverged = !run.retryOfRunId && !await isAncestor(workspace.path, preparedHead, currentHead);
       if (mergeInProgress) {
-        const currentHead = await headOf(workspace.path);
-        if (!run.retryOfRunId && !await isAncestor(workspace.path, preparedHead, currentHead)) {
+        if (remoteAheadOrDiverged) {
           await replaceStaleWorkspace("PR workspace diverged from remote head during pending merge");
         }
+      } else if (remoteAheadOrDiverged && Boolean(await git(workspace.path, ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"]))) {
+        await replaceStaleWorkspace("PR workspace had uncommitted changes behind remote head");
       } else {
         try {
           await git(workspace.path, ["merge", "--ff-only", preparedHead]);
+          await pinWorkspaceBase(workspace, preparedHead);
           if (await headOf(workspace.path) === preparedHead) {
-            await pinWorkspaceBase(workspace, preparedHead);
             db.update(workspaces).set({ baseSha: preparedHead }).where(eq(workspaces.id, workspace.id)).run();
             workspace.baseSha = preparedHead;
           }
         } catch (error) {
-          const currentHead = await headOf(workspace.path);
-          const diverged = !run.retryOfRunId
-            && !await isAncestor(workspace.path, preparedHead, currentHead)
-            && !await isAncestor(workspace.path, currentHead, preparedHead);
+          const diverged = remoteAheadOrDiverged && !await isAncestor(workspace.path, currentHead, preparedHead);
           if (!diverged) throw error;
           await replaceStaleWorkspace("PR workspace diverged from remote head", error);
         }

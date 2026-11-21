@@ -25,6 +25,7 @@ import { reconcileObserved, serializePr, type ResolvedReview } from "./pr-review
 import { latestCompletedRun, latestFinishedRun, latestRunOfTask, runHistory } from "./run-history.ts";
 import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
 import { planKeyedTask, planPrMaintenance, planReview, planSelfRepair, reviewTrigger, type RoutingDecision } from "./github-routing.ts";
+import { supersedeRunningReviews } from "./runner.ts";
 
 type SyncContext = {
   github: GitHubRepository; log: Logger;
@@ -55,6 +56,7 @@ const implementationUnchecked = new Set<string>();
 
 async function cleanupClosedItem({ github, log }: SyncContext, item: Item) {
   cancelPendingTasks(item.id, "GitHub item closed");
+  supersedeRunningReviews(item.id, "GitHub item closed");
   if (item.kind === "pr" && config.storefront.enabled) {
     const { deletePreview } = await import("./storefront.ts");
     await bestEffort(log, "storefront.delete_failed", { subjectId: item.id }, () => deletePreview(github, item.id, item.payload));
@@ -173,6 +175,10 @@ async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObse
   const attempt = reviews.find(({ task }) => task.id === latest?.id)?.run;
   const state = await resolvePrReview(reviews, observation, mainSha);
   let added = applyDecisions(item.id, planReview({ kind: "pr", action, state, latest, attempt, revision: observation.revision, mainSha, conflictPending }));
+  if (conflictPending) supersedeRunningReviews(item.id, "PR branch refresh is pending", { action, keepManual: true });
+  else if (state.kind === "blocked") supersedeRunningReviews(item.id, "PR conflicts with its base branch; waiting for a new head", { action, keepManual: true });
+  else if (state.kind === "current") supersedeRunningReviews(item.id, "No observed relevant changes since the authoritative review", { action, keepManual: true });
+  else supersedeRunningReviews(item.id, "Newer PR revision observed", { action, keepManual: true, unlessRevision: observation.revision });
   const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
   const repairAction = routes.repairFor(state.kind === "current" ? state.assessment.result.grade : undefined);
   const limit = repairAction === undefined ? undefined : manifestOf(repairAction).maxSelfRepairs;
@@ -268,7 +274,10 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       const latest = latestOf(item.id, labelAction);
       if (labelAction && (selected || latest?.status === "blocked" && isManual(latest.input))) {
         const reviewAction = routeFor(issueSignal(item, "item_changed"));
-        if (selected && reviewAction) cancelPendingTasks(item.id, "Issue selected for implementation", reviewAction, true);
+        if (selected && reviewAction) {
+          cancelPendingTasks(item.id, "Issue selected for implementation", reviewAction, true);
+          supersedeRunningReviews(item.id, "Issue selected for implementation", { action: reviewAction, keepManual: true });
+        }
         const newlySelected = previousItem !== undefined && !hasScratLabel(previousItem);
         const settled = latest && latest.status !== "queued" && latest.status !== "blocked" && latest.status !== "cancelled";
         if (selected && settled && !newlySelected && !implementationUnchecked.has(item.id)

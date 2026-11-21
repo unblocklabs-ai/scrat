@@ -1,4 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
 import { evaluateContext, readDiffScope } from "./agent-input.ts";
 import { commitInput, describeCommit } from "./commit-review.ts";
 import { describeWindow } from "./window-review.ts";
@@ -9,9 +8,9 @@ import { bestEffort } from "./logging.ts";
 import { createMergeCommit, gitList, prepareTarget } from "./git.ts";
 import { currentPrReview } from "./pr-assessment.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
-import { getRun, latestCompletedRun, updateRun } from "./run-history.ts";
+import { getRun, latestCompletedRun, latestPriorRunOfTask, updateRun } from "./run-history.ts";
 import { type AgentResult, assertComplete, hasReviewCheckpoint } from "./results.ts";
-import type { Run, Workspace } from "./schema.ts";
+import type { Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { isBaseOnly, parseTriggerInput } from "./triggers.ts";
 import { createWorkspace, removeWorkspace } from "./workspaces.ts";
@@ -40,11 +39,21 @@ async function settleReviewPlan(ctx: Ctx, { item, observation, mainSha }: Observ
 }
 
 function reuseReviewers(ctx: Ctx, mainSha: string, headSha: string, revision: string) {
-  const { run, references } = ctx, prior = run.retryOfRunId ? getRun(run.retryOfRunId) : undefined;
-  const models = ({ reviewers }: Run) => reviewers.map(({ provider, model }) => `${provider}/${model}`);
-  if (!prior || run.reviewers.length < 2 || prior.mainSha !== mainSha || prior.headSha !== headSha || prior.context?.revision !== revision
-    || !isDeepStrictEqual(models(prior), models(run)) || prior.reviewers.some(({ result }) => result?.outcome !== "complete")) return;
-  updateRun(run.id, { reviewers: prior.reviewers });
+  const { run, references } = ctx;
+  const prior = run.retryOfRunId ? getRun(run.retryOfRunId) : latestPriorRunOfTask(run.taskId, run.id);
+  if (!prior?.error || run.reviewers.length < 2 || prior.mainSha !== mainSha || prior.headSha !== headSha
+    || prior.context?.revision !== revision || prior.reviewers.length !== run.reviewers.length) return;
+  let reused = 0;
+  const merged = run.reviewers.map((reviewer, index) => {
+    const saved = prior.reviewers[index];
+    if (saved?.provider === reviewer.provider && saved.model === reviewer.model && saved.result?.outcome === "complete") {
+      reused++;
+      return saved;
+    }
+    return reviewer;
+  });
+  if (!reused) return;
+  updateRun(run.id, { reviewers: merged });
   ctx.run = getRun(run.id)!;
   recordEvent({ ...references, type: "run.reviewers_reused", data: { fromRunId: prior.id } });
 }

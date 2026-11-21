@@ -1,7 +1,7 @@
 import { manifestOf } from "./actions.ts";
 import { refreshChangePublication } from "./change-publication.ts";
 import { getRepositoryPath } from "./config.ts";
-import { branchConflictCode, CompetingImplementation, ImplementationEnded, WorkflowPushRejected } from "./errors.ts";
+import { branchConflictCode, CompetingImplementation, ImplementationEnded, SupersededError, WorkflowPushRejected } from "./errors.ts";
 import { removeRunDatabase } from "./databases.ts";
 import { GitHubRepository } from "./github.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
@@ -14,7 +14,7 @@ import { publishRun } from "./publication.ts";
 import { InterruptedError } from "./results.ts";
 import { recordEvent } from "./events.ts";
 import { assertCurrentImplementation, claimTask, deferImplementation, finishRun, interruptRun, retryTransientFailure } from "./tasks.ts";
-import { parseTriggerInput, type TriggerInput } from "./triggers.ts";
+import { isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
 import { getWorkspace, removeWorkspace, retainReplacedWorkspaces } from "./workspaces.ts";
 import { changeRun, restartStaleDeferredPublication } from "./run-change.ts";
 import { reviewRun } from "./run-review.ts";
@@ -108,24 +108,67 @@ async function publishStage(ctx: Ctx, observed: Observed | undefined) {
 
 const heapUsed = () => Math.round(process.memoryUsage().heapUsed / 1048576);
 
+type ActiveRun = {
+  subjectId: string;
+  action: string;
+  mode: ReturnType<typeof manifestOf>["mode"];
+  manual: boolean;
+  revision?: string;
+  supersede: (reason: string) => void;
+};
+const activeRuns = new Map<string, ActiveRun>();
+
+export function supersedeRunningReviews(
+  subjectId: string,
+  reason: string,
+  options?: { action?: string; keepManual?: boolean; unlessRevision?: string },
+) {
+  let count = 0;
+  for (const active of activeRuns.values()) {
+    if (active.subjectId !== subjectId || active.mode !== "review") continue;
+    if (options?.action && active.action !== options.action) continue;
+    if (options?.keepManual && active.manual) continue;
+    if (options?.unlessRevision && active.revision === options.unlessRevision) continue;
+    active.supersede(reason);
+    count++;
+  }
+  return count;
+}
+
 export async function runNextTask(stop?: AbortSignal) {
   const claimed = claimTask();
   if (!claimed) return;
   const { task, run, subject, item, resumingDeferred } = claimed;
+  const manifest = manifestOf(task.action);
+  const trigger = parseTriggerInput(task.input);
+  const superseder = new AbortController();
+  const runStop = stop ? AbortSignal.any([stop, superseder.signal]) : superseder.signal;
+  const active: ActiveRun = {
+    subjectId: subject.id,
+    action: task.action,
+    mode: manifest.mode,
+    manual: isManual(trigger),
+    revision: trigger.kind === "item_changed" ? trigger.revision : undefined,
+    supersede(reason) {
+      if (superseder.signal.aborted || getRun(run.id)?.stage === "publishing") return;
+      superseder.abort(new SupersededError(reason));
+    },
+  };
+  activeRuns.set(run.id, active);
   const references = { subjectId: subject.id, taskId: task.id, runId: run.id };
   const operation = startOperation("run.execute", { ...references, action: task.action });
   const cleanup: Ctx["cleanup"] = { databaseRequested: false };
-  const ctx: Ctx = { task, run, subject, item, references, operation, manifest: manifestOf(task.action), repositoryPath: getRepositoryPath(), stop, cleanup };
+  const ctx: Ctx = { task, run, subject, item, references, operation, manifest, repositoryPath: getRepositoryPath(), stop: runStop, cleanup };
   try {
     const observed = await connect(ctx);
+    if (observed) active.revision = observed.observation.revision;
     if (observed && resumingDeferred) await restartStaleDeferredPublication(ctx, observed);
     if (observed && item?.kind === "issue" && ctx.manifest.publish.includes("pull_request") && run.stage !== "publishing") {
       const branch = item.workspaceId ? getWorkspace(item.workspaceId)?.branch : undefined;
       await assertCurrentImplementation(observed.github, task, item.payload.number, observed.observation.baseBranch, branch);
     }
     if (run.stage !== "publishing") {
-      stopBefore(stop, "workspace acquisition");
-      const trigger = parseTriggerInput(task.input);
+      stopBefore(runStop, "workspace acquisition");
       if (trigger.kind === "pr_conflicts" && trigger.githubCi && !trigger.manual
         && (trigger.headSha !== observed?.pullRequest?.head.sha || trigger.mainSha !== observed?.mainSha)) {
         const skipped = finishRun(run.id, { status: "completed" });
@@ -135,7 +178,7 @@ export async function runNextTask(stop?: AbortSignal) {
       if (observed) await assertRepairCurrent(trigger, observed);
       if (ctx.manifest.mode === "review") await reviewRun(ctx, observed);
       else await changeRun(ctx, observed!, resumingDeferred);
-      stopBefore(stop, "publication");
+      stopBefore(runStop, "publication");
     }
     await publishStage(ctx, observed);
     const finished = finishRun(run.id, { status: "completed" });
@@ -145,7 +188,7 @@ export async function runNextTask(stop?: AbortSignal) {
     operation.complete({ heapUsedMb: heapUsed() });
     return finished;
   } catch (error) {
-    if (error instanceof ImplementationEnded) {
+    if (error instanceof ImplementationEnded || error instanceof SupersededError) {
       const ended = finishRun(run.id, { status: "cancelled", error });
       operation.complete({ cancelled: error.message });
       return ended;
@@ -173,6 +216,7 @@ export async function runNextTask(stop?: AbortSignal) {
     }
     return failed;
   } finally {
+    activeRuns.delete(run.id);
     if (cleanup.databaseRequested) await bestEffort(operation.log, "run.cleanup_pending", { resource: "database" }, () => removeRunDatabase(run.id, references));
     if (cleanup.reviewWorkspace) await bestEffort(operation.log, "run.cleanup_pending", { workspaceId: cleanup.reviewWorkspace.id }, () => removeWorkspace(cleanup.reviewWorkspace!.id, references));
   }

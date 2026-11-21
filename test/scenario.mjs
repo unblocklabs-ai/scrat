@@ -1591,6 +1591,14 @@ export const scenarios = {
     assert.equal(f.row(s.tasks, mixed.taskId).status, "failed");
     await implement(4); await route(); f.reset(204, "reviewer-failure");
     const permanent = await run(); assert.ok(permanent.error); assert.equal(f.row(s.tasks, permanent.taskId).status, "failed");
+    assert.equal(permanent.reviewers[0].result?.outcome, "complete"); assert.equal(permanent.reviewers[1].result, undefined);
+    // Partial reviewer reuse: retrying after 1 of 2 reviewers completed reruns only the failed reviewer and consolidation.
+    const beforePartial = f.requests.length;
+    f.reset(204, "normal"); tasks.retryTask(permanent.taskId);
+    const partial = await success();
+    const partialModels = f.requests.slice(beforePartial).filter((r) => !r.consolidating).map((r) => r.request.model);
+    assert.ok(partialModels.length > 0 && partialModels.every((model) => model === partial.reviewers[1].model), `only the incomplete reviewer reruns: ${partialModels}`);
+    assert.ok(all(s.events).some((event) => event.type === "run.reviewers_reused" && event.runId === partial.id && event.data.fromRunId === permanent.id));
     await implement(5); await route(); f.transient.failures = 100; f.reset(205, "transient");
     const closing = await run(); assert.equal(f.row(s.tasks, closing.taskId).status, "queued");
     f.prs.find((pr) => pr.number === 205).state = "closed"; await route();
@@ -1601,6 +1609,47 @@ export const scenarios = {
     const consolidated = await success(); assert.deepEqual(consolidated.reviewers, dropped.reviewers);
     assert.ok(f.requests.slice(requested).length && f.requests.slice(requested).every((request) => request.consolidating), "the retry reruns only the consolidation");
     assert.ok(all(s.events).some((event) => event.type === "run.reviewers_reused" && event.runId === consolidated.id && event.data.fromRunId === dropped.id));
+    // Interrupted panel review (retryOfRunId=null after crash/drain) also reuses completed reviewers on the same revision.
+    await implement(7); await route();
+    const pr7 = f.prs.find((pr) => pr.number === 207);
+    const interruptedClaim = tasks.claimTask();
+    db.update(s.runs).set({
+      stage: "agent", mainSha: git(resolve("remote.git"), "rev-parse", "main"), headSha: pr7.head.sha,
+      context: { revision: (await f.app("observation.ts")).observe(await (new (await f.app("github.ts")).GitHubRepository(f.config.github.repository)).fetchItemContext("pr", 207)).revision, baseBranch: "main", commentRevisions: [], headSha: pr7.head.sha },
+      reviewers: [partial.reviewers[0], interruptedClaim.run.reviewers[1]],
+    }).where(eq(s.runs.id, interruptedClaim.run.id)).run();
+    tasks.interruptRun(interruptedClaim.run.id);
+    const beforeInterruptedReuse = f.requests.length;
+    f.reset(207, "normal");
+    const resumedPanel = await success();
+    assert.equal(resumedPanel.retryOfRunId, null);
+    const resumedModels = f.requests.slice(beforeInterruptedReuse).filter((r) => !r.consolidating).map((r) => r.request.model);
+    assert.ok(resumedModels.length > 0 && resumedModels.every((model) => model === resumedPanel.reviewers[1].model), "interrupted panel review reuses completed reviewer without retryOfRunId");
+    assert.ok(all(s.events).some((event) => event.type === "run.reviewers_reused" && event.runId === resumedPanel.id && event.data.fromRunId === interruptedClaim.run.id));
+    // Active in-flight PR review supersession: a new PR head aborts the running review immediately without a failure notice, while an unrelated main push does not.
+    pr7.head.sha = pushFile(pr7.head.ref, "src/supersede-1.ts", "export const s = 1;\n");
+    await route();
+    f.reset(207, "stall");
+    let triggered = false;
+    f.onModel = (context) => {
+      if (triggered || context.item?.number !== 207) return;
+      triggered = true;
+      void (async () => {
+        changeMain("notes.md", "unrelated main move during active review\n");
+        await route();
+        assert.equal(f.row(s.tasks, all(s.tasks).find((t) => t.status === "running").id).status, "running", "unrelated main push does not supersede an in-flight PR review");
+        pr7.head.sha = pushFile(pr7.head.ref, "src/supersede-2.ts", "export const s = 2;\n");
+        await route();
+      })();
+    };
+    const commentsBeforeSupersede = f.written("comment", (w) => w.number === 207).length;
+    const superseded = await run(); f.onModel = undefined;
+    assert.equal(superseded.error?.code, "RUN_SUPERSEDED");
+    assert.equal(f.row(s.tasks, superseded.taskId).status, "cancelled");
+    assert.equal(f.written("comment", (w) => w.number === 207).length, commentsBeforeSupersede, "superseded review posts no failure notice");
+    f.reset(207, "normal");
+    const latestReview = await success();
+    assert.equal(latestReview.headSha, pr7.head.sha, "newly queued review for the latest PR head completes cleanly");
   } },
   footer: { title: "quoted control markers stay report text and cannot supply a PR grade or issue approval", run: async () => {
     await implement(1); f.reset(201, "quoted-grade"); await route();
@@ -4250,7 +4299,7 @@ fi
     mkdirSync("ctx");
     const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
     const fake = () => {
-      const state = { closed: false, contexts: 0, launches: 0, handler: undefined, contextOptions: undefined, visited: [], typed: [], viewport: undefined, html: "<html></html>", timeouts: [], navigations: [], popups: [], listeners: [] };
+      const state = { closed: false, contexts: 0, launches: 0, handler: undefined, contextOptions: undefined, visited: [], visitViewports: [], typed: [], viewport: undefined, html: "<html></html>", timeouts: [], navigations: [], popups: [], listeners: [] };
       let current = "about:blank";
       const page = {
         async request(url, navigation, headers = { accept: "*/*" }) {
@@ -4259,7 +4308,7 @@ fi
             abort: async (code) => { outcome = { aborted: code }; }, continue: async (options) => { outcome = { continued: options?.headers ?? {} }; } });
           return outcome;
         },
-        async goto(url, options) { if (options) state.navigations.push(options.timeout); const outcome = await page.request(url, true); if (outcome.aborted) throw new Error("net::ERR_BLOCKED_BY_CLIENT"); state.visited.push(url); current = url; return { status: () => 200 }; },
+        async goto(url, options) { if (options) state.navigations.push(options.timeout); const outcome = await page.request(url, true); if (outcome.aborted) throw new Error("net::ERR_BLOCKED_BY_CLIENT"); state.visited.push(url); state.visitViewports.push(state.viewport ?? state.contextOptions?.viewport); current = url; return { status: () => 200 }; },
         title: async () => "Shop", url: () => current, innerText: async () => "Cart total 5. token " + secret,
         screenshot: async ({ path, fullPage, timeout }) => { state.timeouts.push(timeout); writeFileSync(path, `png ${state.viewport?.width ?? "default"} ${fullPage ?? false}`); },
         innerHTML: async (_selector, { timeout }) => { state.timeouts.push(timeout); return state.html; }, waitForLoadState: async () => {},
@@ -4384,6 +4433,23 @@ fi
     assert.deepEqual({ closed: unrestricted.state.closed, contexts: unrestricted.state.contexts }, { closed: false, contexts: 1 });
     await act(unrestricted, { action: "goto", url: "https://anywhere.example.net/q" });
     assert.deepEqual({ launches: unrestricted.state.launches, contexts: unrestricted.state.contexts, viewport: unrestricted.state.contextOptions.viewport }, { launches: 1, contexts: 2, viewport: { width: 390, height: 844 } }, "a reset opens a fresh context in the same browser at the viewport last set");
+    // Issue #223: viewport passed to goto applies before loading (both fresh context and existing session) and persists to screenshot().
+    const preSized = make();
+    await act(preSized, { action: "goto", url: "https://shop.example.test/m", viewport: "mobile" });
+    assert.deepEqual(preSized.state.contextOptions.viewport, { width: 390, height: 844 }, "first goto with viewport opens context at that size");
+    assert.deepEqual(preSized.state.visitViewports, [{ width: 390, height: 844 }]);
+    await assert.rejects(act(preSized, { action: "goto", url: "https://evil.example.net/", viewport: "desktop" }), /Refused/);
+    const inheritedMobile = JSON.parse(textOf(await act(preSized, { action: "screenshot", fullPage: true })));
+    assert.equal(inheritedMobile.viewport, "mobile", "screenshot inherits viewport set by goto and refused goto does not mutate it");
+    assert.equal(inheritedMobile.path, resolve("ctx/screenshot-mobile-1.png"));
+    await act(preSized, { action: "goto", url: "https://shop.example.test/d", viewport: "desktop" });
+    assert.deepEqual(preSized.state.visitViewports.at(-1), { width: 1280, height: 800 }, "goto on existing session resizes before loading");
+    const inheritedDesktop = JSON.parse(textOf(await act(preSized, { action: "screenshot" })));
+    assert.equal(inheritedDesktop.viewport, "desktop");
+    await act(preSized, { action: "reset" });
+    await act(preSized, { action: "goto", url: "https://shop.example.test/m2", viewport: "mobile" });
+    assert.deepEqual(preSized.state.contextOptions.viewport, { width: 390, height: 844 }, "goto with viewport after reset opens fresh context at that size");
+    await preSized.close();
     const named = make({ prefix: "reviewer-2" });
     assert.equal(JSON.parse(textOf(await act(named, { action: "screenshot" }))).path, resolve("ctx/screenshot-reviewer-2-current-1.png"), "each reviewer's screenshots are named apart");
     assert.equal(JSON.parse(readFileSync(resolve("ctx/screenshots.jsonl"), "utf8").trim().split("\n").at(-1)).path, resolve("ctx/screenshot-reviewer-2-current-1.png"), "the screenshot record carries the reviewer's file name");

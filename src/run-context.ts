@@ -8,6 +8,7 @@ import type { GithubContext, GithubPullRequest } from "./github-types.ts";
 import type { ItemObservation } from "./observation.ts";
 import { executePi } from "./pi.ts";
 import { reviewPullRequest } from "./pr-review.ts";
+import { SupersededError } from "./errors.ts";
 import { InterruptedError } from "./results.ts";
 import type { Item } from "./items.ts";
 import type { Run, Task, Subject, Workspace } from "./schema.ts";
@@ -24,7 +25,9 @@ export async function prepareWorkspace(workspace: Workspace, environment: Enviro
 }
 
 export function stopBefore(stop: AbortSignal | undefined, next: string) {
-  if (stop?.aborted) throw new InterruptedError(`Worker is stopping; run left at the stage boundary before ${next}`);
+  if (!stop?.aborted) return;
+  if (stop.reason instanceof SupersededError) throw stop.reason;
+  throw new InterruptedError(`Worker is stopping; run left at the stage boundary before ${next}`);
 }
 
 export type Ctx = {

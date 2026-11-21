@@ -1,6 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { describeError, errorCode, transientInferenceCode } from "./errors.ts";
+import { describeError, errorCode, SupersededError, transientInferenceCode } from "./errors.ts";
 import { InterruptedError } from "./results.ts";
 import { executePi, type PiOptions, saveReviewer } from "./pi.ts";
 
@@ -18,13 +18,15 @@ export async function reviewPullRequest(options: PiOptions & { contextDir: strin
       if (panel && result.outcome !== "complete") throw new Error(`Reviewer returned ${result.outcome}: ${result.text}`);
       return result;
     } catch (error) {
-      saveReviewer(run.id, index, { error: describeError(error) });
+      if (!(error instanceof SupersededError)) saveReviewer(run.id, index, { error: describeError(error) });
       throw error;
     }
   };
   if (!panel) return review(0, reviewContext, requireGrade);
   const settled = await Promise.allSettled(run.reviewers.map(async ({ provider, model, thinkingLevel }, index) => ({ provider, model, thinkingLevel, result: await review(index, `Review independently. Do not speculate about or wait for another reviewer.\n\n${reviewContext}`) })));
   const failed = settled.find((entry) => entry.status === "rejected");
+  const superseded = settled.find((entry) => entry.status === "rejected" && entry.reason instanceof SupersededError);
+  if (superseded?.status === "rejected") throw superseded.reason;
   const interrupted = settled.find((entry) => entry.status === "rejected" && entry.reason instanceof InterruptedError);
   if (interrupted?.status === "rejected") throw interrupted.reason;
   if (failed?.status === "rejected") {

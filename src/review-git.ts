@@ -1,5 +1,6 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { posix } from "node:path";
+import type { Logger } from "pino";
 import { Type } from "typebox";
 import { config } from "./config.ts";
 import { blobSize, commitOf, gitPage, type GitPage } from "./git.ts";
@@ -13,7 +14,7 @@ export function pageText(page: GitPage, offset: number, size = page.total) {
   return page.text + note;
 }
 
-export function createReviewGitTool(cwd: string, revisions: Record<string, string>, touched: Set<string>) {
+export function createReviewGitTool(cwd: string, revisions: Record<string, string>, touched: Set<string>, log?: Logger) {
   const names = Object.keys(revisions);
   const accepted = `a 7-40 character lowercase hex commit SHA or one of: ${names.join(", ")}`;
   async function resolveRevision(value: string | undefined, parameter: string, operation: string) {
@@ -67,25 +68,31 @@ export function createReviewGitTool(cwd: string, revisions: Record<string, strin
         const range = [await resolveRevision(from, "from", operation), await resolveRevision(to, "to", operation)];
         const options = ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"];
         page = await gitPage(cwd, [...options, ...(operation === "diff_stat" ? ["--stat=240,200"] : []), ...range, ...(path ? ["--", path] : [])], offset, limit);
-        // Inspecting base-branch drift between previousMain and main must not pull unrelated main files into review scope.
-        const baseDrift = Boolean(revisions.previousMain && revisions.main)
-          && range.every((sha) => sha === revisions.previousMain || sha === revisions.main);
+        // Inspecting base-branch drift must not pull unrelated main files into review scope.
+        const baseDrift = Boolean(revisions.main) && (
+          Boolean(revisions.previousMain) && range.every((sha) => sha === revisions.previousMain || sha === revisions.main)
+          || Boolean(revisions.base && revisions.head !== revisions.main)
+            && range.every((sha) => sha === revisions.base || sha === revisions.previousMain || sha === revisions.main)
+        );
         if (!baseDrift) {
           const names = await gitPage(cwd, [...options, "--name-only", "-z", ...range, ...(path ? ["--", path] : [])], 0, config.tools.git.maxScopeBytes);
           const entries = names.text.split("\0");
-          if (names.more) entries.pop();
+          if (names.more) {
+            entries.pop();
+            log?.warn({ event: "review_git.scope_truncated", operation, from, to, path, maxScopeBytes: config.tools.git.maxScopeBytes }, "Git diff scope exceeded maxScopeBytes; remaining paths omitted");
+          }
           scope.push(...entries.filter(Boolean));
         }
       } else if (operation === "log") {
         const end = await resolveRevision(revision ?? "head", "revision", operation);
         page = await gitPage(cwd, ["--literal-pathspecs", "log", "--no-color", "--no-decorate", `--max-count=${config.tools.git.maxCommits}`,
           "--format=%H %cs %an: %s", end, ...(path ? ["--", path] : [])], offset, limit);
-        if (path) scope.push(path);
+        if (path && path !== ".") scope.push(path);
       } else {
         const object = `${await resolveRevision(revision, "revision", operation)}:${path}`;
         page = await gitPage(cwd, ["show", object], offset, limit);
         if (page.more) size = await blobSize(cwd, object);
-        if (path) scope.push(path);
+        if (path && path !== ".") scope.push(path);
       }
       for (const entry of scope) touched.add(entry);
       if (operation !== "show" && !page.more) page = { ...page, text: page.text.trimEnd() };

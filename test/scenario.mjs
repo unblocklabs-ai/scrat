@@ -753,6 +753,11 @@ export const scenarios = {
     f.prs[0].head.sha = merged201.publication.publishedCommitSha;
     live.actions.resolve_conflicts.enabled = false;
     await route(); assert.equal(queued().length, 0, "pure base-branch conflict merges do not requeue classification");
+    // AI-assisted conflict merges (which invoke Pi and may edit PR code) do requeue classification.
+    db.update(s.runs).set({ piSessionId: "pi-session-conflict" }).where(eq(s.runs.id, merged201.id)).run();
+    await route(); assert.equal(queued().length, 1, "agent-assisted conflict merges requeue classification");
+    db.update(s.runs).set({ piSessionId: null }).where(eq(s.runs.id, merged201.id)).run();
+    tasks.cancelPendingTasks(pr201.id, "Reset", "label_items");
     touchPr(201); await route(); await route(); assert.equal(queued().length, 1, "new commits coalesce into one task");
     const invalid = selections([{ category: "risk", name: "not-configured" }]);
     await classify(201, [invalid, low]);
@@ -2106,13 +2111,36 @@ fi
     f.reset(1, "grep"); await success();
     changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "2.0.0", unrelated: "2.0.0" } }));
     await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"), "Inspected dependency changes must trigger review");
-    f.script = [{ name: "git", args: { operation: "log", path: "src" } }, { name: "git", args: { operation: "diff_stat", from: "previousMain", to: "main" } }];
+    f.script = [
+      { name: "git", args: { operation: "log", path: "src" } },
+      { name: "git", args: { operation: "log", path: "." } },
+      { name: "git", args: { operation: "show", revision: "head", path: "." } },
+      { name: "git", args: { operation: "diff_stat", from: "previousMain", to: "main" } },
+      { name: "git", args: { operation: "diff_stat", from: "base", to: "main" } },
+    ];
     const scoped = await success(); f.script = undefined;
-    assert.ok(!scoped.result.paths.includes("src") && !scoped.result.paths.includes("."), "directory log and previousMain..main diff do not pollute scope");
+    assert.ok(!scoped.result.paths.includes("src") && !scoped.result.paths.includes("."), "directory log, dot log/show and base-drift diffs do not pollute scope");
     db.update(s.runs).set({ result: { ...scoped.result, paths: ["src", ...scoped.result.paths] } }).where(eq(s.runs.id, scoped.id)).run();
     changeMain("src/unrelated.ts", "export const unrelated = 1;\n");
     await route();
     assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "legacy directory entries in persisted scope do not trigger unrelated re-reviews");
+    // Legacy "." persisted on a previous review heals on re-review instead of sticking forever.
+    db.update(s.runs).set({ result: { ...scoped.result, paths: [".", ...scoped.result.paths] } }).where(eq(s.runs.id, scoped.id)).run();
+    changeMain("notes.md", "heal dot\n");
+    await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"));
+    f.reset(1, "grep");
+    const healed = await success();
+    assert.ok(!healed.result.paths.includes("."), "retainedScope strips legacy '.' once concrete paths are recorded");
+    // Issue review (no baseSha) also strips directory and '.' paths from git tool calls.
+    f.addIssue(2); await route();
+    f.script = [
+      { name: "read", args: { path: "src/app.ts" } },
+      { name: "git", args: { operation: "log", path: "src" } },
+      { name: "git", args: { operation: "log", path: "." } },
+    ];
+    const issueReviewed = await success(); f.script = undefined;
+    assert.ok(issueReviewed.result.paths.includes("src/app.ts"));
+    assert.ok(!issueReviewed.result.paths.includes("src") && !issueReviewed.result.paths.includes("."), "review_issue strips directory and '.' paths from git scope");
   } },
   lockfile_impact: { title: "the pure lockfile differ separates inspected-package, alias, importer and unknown-shape changes from unrelated ones without a repository", run: async () => {
     const { lockfileChanged, affectsPaths } = await f.app("lockfile-impact.ts");
@@ -2952,7 +2980,7 @@ fi
     git(remote, "merge-base", "--is-ancestor", local, head);
     git(remote, "merge-base", "--is-ancestor", git(resolve("seed"), "rev-parse", "main"), head);
 
-    // A diverged retained workspace is marked retained and replaced by a fresh workspace on a new PR task.
+    // A diverged retained workspace is marked retained and replaced by a fresh workspace on a new PR task, repointing linked subjects too.
     writeFileSync(resolve(workspace.path, "src/diverged.ts"), "export const diverged = 1;\n");
     git(workspace.path, "add", "."); commit(workspace.path, "Unpushed local commit");
     const remoteUpdate = pushFile(f.prs[0].head.ref, "src/remote-only.ts", "export const remoteOnly = 1;\n");
@@ -2961,11 +2989,35 @@ fi
     tasks.enqueueTask({ subjectId: item.id, action: "resolve_conflicts", reason: "Recover diverged PR workspace", input: { source: "github_items", kind: "manual", manual: true } });
     const recovered = await success();
     assert.notEqual(recovered.workspaceId, workspace.id);
+    assert.equal(f.row(s.subjects, "issue-1").workspaceId, recovered.workspaceId, "linked issue subject is repointed along with the PR subject");
     assert.ok(f.row(s.workspaces, workspace.id).retainedAt, "diverged workspace is retained rather than deleted");
     assert.equal(readFileSync(resolve(workspace.path, "src/diverged.ts"), "utf8"), "export const diverged = 1;\n");
 
+    // A pending merge on an older PR head is retained and replaced cleanly once remote moves ahead.
+    const pendingWorkspace = f.row(s.workspaces, recovered.workspaceId);
+    changeMain("src/other-pending.ts", "export const pending = 1;\n");
+    const pendingMain = git(remote, "rev-parse", "main");
+    git(pendingWorkspace.path, "fetch", "--no-tags", "--", remote, pendingMain);
+    git(pendingWorkspace.path, "merge", "--no-commit", "--no-ff", pendingMain);
+    const humanResolved = pushFile(f.prs[0].head.ref, "src/human-resolved.ts", "export const human = 1;\n");
+    f.prs[0].head.sha = humanResolved;
+    tasks.enqueueTask({ subjectId: item.id, action: "resolve_conflicts", reason: "Recover pending merge behind remote", input: { source: "github_items", kind: "manual", manual: true } });
+    const afterPending = await success();
+    assert.notEqual(afterPending.workspaceId, pendingWorkspace.id);
+    assert.ok(f.row(s.workspaces, pendingWorkspace.id).retainedAt, "stale pending-merge workspace is retained rather than overwritten");
+
+    // Fast-forwarding a PR workspace to a new remote head updates workspaces.baseSha so closing without new commits does not falsely retain it.
+    const ffWorkspace = f.row(s.workspaces, afterPending.workspaceId);
+    const externalHead = pushFile(f.prs[0].head.ref, "src/external-ff.ts", "export const ext = 1;\n");
+    f.prs[0].head.sha = externalHead;
+    changeMain("src/other3.ts", "export const other3 = 3;\n");
+    tasks.enqueueTask({ subjectId: item.id, action: "resolve_conflicts", reason: "Fast-forward PR workspace", input: { source: "github_items", kind: "manual", manual: true } });
+    const ffMerged = await success();
+    f.prs[0].head.sha = ffMerged.publication.publishedCommitSha;
+    assert.equal(f.row(s.workspaces, ffWorkspace.id).baseSha, externalHead, "PR fast-forward updates workspaces.baseSha");
+
     // Closing a PR whose workspace has unpublished commits marks it retained once instead of error-looping on every sync.
-    const activeWorkspace = f.row(s.workspaces, recovered.workspaceId);
+    const activeWorkspace = f.row(s.workspaces, ffWorkspace.id);
     writeFileSync(resolve(activeWorkspace.path, "src/unpushed-on-close.ts"), "export const keep = 1;\n");
     git(activeWorkspace.path, "add", "."); commit(activeWorkspace.path, "Unpushed before close");
     f.prs[0].state = "closed";
@@ -2977,6 +3029,16 @@ fi
     try { await route(); } finally { restoreLogs(); }
     assert.equal(retainedEvents(), 1);
     assert.ok(!lines.some((line) => line.operation === "workspace.remove" && line.event === "operation.failed"), "subsequent syncs do not retry removing retained workspaces");
+
+    // Reopening a closed PR whose workspace was retained detaches the retained workspace and publishes from a fresh checkout.
+    f.prs[0].state = "open";
+    await route();
+    assert.equal(f.row(s.subjects, item.id).workspaceId, null, "reopened PR detaches retained workspace");
+    changeMain("src/other4.ts", "export const other4 = 4;\n");
+    tasks.enqueueTask({ subjectId: item.id, action: "resolve_conflicts", reason: "Merge after reopen", input: { source: "github_items", kind: "manual", manual: true } });
+    const reopened = await success();
+    assert.notEqual(reopened.workspaceId, activeWorkspace.id);
+    assert.equal(readFileSync(resolve(activeWorkspace.path, "src/unpushed-on-close.ts"), "utf8"), "export const keep = 1;\n");
   } },
   workspace_layout: { title: "workspaces share objects that a shared-repository gc cannot remove, and publication bundles only the new commits with a full-bundle fallback", run: async () => {
     const first = await implement(1), shared = f.config.github.repositoryPath, remote = resolve("remote.git");

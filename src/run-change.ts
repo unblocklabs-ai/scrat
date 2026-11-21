@@ -6,7 +6,7 @@ import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
-import { CompetingImplementation, describeError, type ErrorDetails, errorExitCode } from "./errors.ts";
+import { CompetingImplementation, describeError, type ErrorDetails, errorExitCode, errorMessage } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { bestEffort } from "./logging.ts";
 import { conventionalTitle, git, headOf, hasPendingMerge, isAncestor, mergeBase, prepareTarget, remoteBranchHead, shortSha } from "./git.ts";
@@ -103,7 +103,7 @@ export async function restartStaleDeferredPublication(ctx: Ctx, { github, item, 
   const { run } = ctx;
   if (run.stage !== "publishing" || run.publication.pullRequestNumber) return;
   const workspace = item.workspaceId === run.workspaceId && run.workspaceId ? getWorkspace(run.workspaceId) : undefined;
-  if (!workspace || workspace.removedAt) throw new Error("Publication workspace is no longer attached to this issue");
+  if (!workspace || workspace.removedAt || workspace.retainedAt) throw new Error("Publication workspace is no longer attached to this issue");
   await validateWorkspace(workspace);
   const { commitSha } = run.publication;
   if ((await freshness(savedEvaluation(run), { ...observation, mainSha }, "exact")).kind === "stale"
@@ -128,6 +128,12 @@ async function acquireChangeWorkspace(ctx: Ctx, observed: Observed, resumedDefer
   const { mainSha, headSha: preparedHead } = await itemRevisions(observed);
   let workspace = item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
   if (workspace?.removedAt) throw new Error(`Workspace was removed: ${workspace.id}`);
+  if (workspace?.retainedAt) {
+    if (validationOnly || run.retryOfRunId) throw new Error(`Workspace was retained: ${workspace.id}`);
+    db.update(subjects).set({ workspaceId: null }).where(eq(subjects.id, item.id)).run();
+    item.workspaceId = null;
+    workspace = undefined;
+  }
   if (workspace) {
     await validateWorkspace(workspace);
     await git(workspace.path, ["fetch", "--no-tags", "--", `${repositoryPath}/.git`, preparedHead, mainSha]);
@@ -151,30 +157,49 @@ async function acquireChangeWorkspace(ctx: Ctx, observed: Observed, resumedDefer
     workspace = await createWorkspace({ repositoryPath, baseRef: preparedHead, branch: pullRequest?.head.ref }, references);
     db.update(subjects).set({ workspaceId: workspace.id }).where(eq(subjects.id, item.id)).run();
   }
-  const mergeInProgress = await hasPendingMerge(workspace.path);
-  if (!mergeInProgress && !validationOnly) {
+  let mergeInProgress = await hasPendingMerge(workspace.path);
+  if (!validationOnly) {
     if (pullRequest) {
-      try {
-        await git(workspace.path, ["merge", "--ff-only", preparedHead]);
-        await pinWorkspaceBase(workspace, preparedHead);
-      } catch (error) {
-        const currentHead = await headOf(workspace.path);
-        const diverged = !run.retryOfRunId
-          && !await isAncestor(workspace.path, preparedHead, currentHead)
-          && !await isAncestor(workspace.path, currentHead, preparedHead);
-        if (!diverged) throw error;
-        const previous = workspace;
-        workspace = await createWorkspace({ repositoryPath, baseRef: preparedHead, branch: pullRequest.head.ref }, references);
+      const replaceStaleWorkspace = async (reason: string, cause?: unknown) => {
+        const previous = workspace!;
+        try {
+          workspace = await createWorkspace({ repositoryPath, baseRef: preparedHead, branch: pullRequest.head.ref }, references);
+        } catch (recoveryError) {
+          throw cause ? new Error(errorMessage(recoveryError), { cause }) : recoveryError;
+        }
         const fresh = workspace;
         db.transaction((transaction) => {
           const retained = transaction.update(workspaces).set({ retainedAt: new Date().toISOString() })
             .where(and(eq(workspaces.id, previous.id), isNull(workspaces.removedAt), isNull(workspaces.retainedAt))).returning().get();
-          transaction.update(subjects).set({ workspaceId: fresh.id }).where(eq(subjects.id, item.id)).run();
+          transaction.update(subjects).set({ workspaceId: fresh.id }).where(eq(subjects.workspaceId, previous.id)).run();
           if (retained) recordEvent({ ...references, type: "workspace.retained",
-            data: { workspaceId: previous.id, path: retained.path, reason: "PR workspace diverged from remote head" } }, transaction);
+            data: { workspaceId: previous.id, path: retained.path, reason } }, transaction);
         }, { behavior: "immediate" });
+        mergeInProgress = false;
+      };
+      if (mergeInProgress) {
+        const currentHead = await headOf(workspace.path);
+        if (!run.retryOfRunId && !await isAncestor(workspace.path, preparedHead, currentHead)) {
+          await replaceStaleWorkspace("PR workspace diverged from remote head during pending merge");
+        }
+      } else {
+        try {
+          await git(workspace.path, ["merge", "--ff-only", preparedHead]);
+          if (await headOf(workspace.path) === preparedHead) {
+            await pinWorkspaceBase(workspace, preparedHead);
+            db.update(workspaces).set({ baseSha: preparedHead }).where(eq(workspaces.id, workspace.id)).run();
+            workspace.baseSha = preparedHead;
+          }
+        } catch (error) {
+          const currentHead = await headOf(workspace.path);
+          const diverged = !run.retryOfRunId
+            && !await isAncestor(workspace.path, preparedHead, currentHead)
+            && !await isAncestor(workspace.path, currentHead, preparedHead);
+          if (!diverged) throw error;
+          await replaceStaleWorkspace("PR workspace diverged from remote head", error);
+        }
       }
-    } else {
+    } else if (!mergeInProgress) {
       const current = workspace;
       await bestEffort(ctx.operation.log, "workspace.base_update_skipped", { workspaceId: current.id }, async () => {
         await git(current.path, ["merge", "--ff-only", preparedHead]);

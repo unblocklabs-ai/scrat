@@ -130,9 +130,9 @@ function conflictMergePreservesLabel(subjectId: string, pr: GithubPullRequest, l
     headSha: sql<string | null>`json_extract(${runs.context}, '$.headSha')`,
     publishedCommitSha: sql<string | null>`json_extract(${runs.publication}, '$.publishedCommitSha')`,
   }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.subjectId, subjectId), inArray(tasks.action, conflictActions), eq(tasks.status, "completed"), isNull(runs.error))).all();
+    .where(and(eq(tasks.subjectId, subjectId), inArray(tasks.action, conflictActions), eq(tasks.status, "completed"), isNull(runs.error), isNull(runs.piSessionId))).all();
   for (const { headSha, publishedCommitSha } of rows) {
-    if (publishedCommitSha && headSha) merges.set(publishedCommitSha, headSha);
+    if (publishedCommitSha && headSha && publishedCommitSha !== headSha) merges.set(publishedCommitSha, headSha);
   }
   let current: string | undefined = pr.head.sha;
   const visited = new Set<string>();
@@ -254,7 +254,8 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       return;
     }
     queued += routeItemLabels(item);
-    if (item.workspaceId && getWorkspace(item.workspaceId)?.removedAt) {
+    const workspace = item.workspaceId ? getWorkspace(item.workspaceId) : undefined;
+    if (workspace && (workspace.removedAt || workspace.retainedAt)) {
       db.update(subjects).set({ workspaceId: null }).where(eq(subjects.id, item.id)).run();
       item.workspaceId = null;
     }

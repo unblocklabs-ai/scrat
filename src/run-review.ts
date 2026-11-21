@@ -70,7 +70,10 @@ async function retainedScope({ run, task, repositoryPath }: Ctx, { item, observa
   const mainOnly = new Set(trigger.changedPaths);
   const mainTracked = await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", mainSha]);
   const headTracked = headSha !== mainSha ? await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", headSha]) : [];
-  const prior = canonicalReviewPaths(previous.result?.paths ?? [], headTracked.length ? [...mainTracked, ...headTracked] : mainTracked)
+  const previousMainTracked = previous.mainSha && previous.mainSha !== mainSha && previous.mainSha !== headSha
+    ? await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", previous.mainSha]).catch(() => []) : [];
+  const tracked = headTracked.length || previousMainTracked.length ? [...mainTracked, ...headTracked, ...previousMainTracked] : mainTracked;
+  const prior = canonicalReviewPaths(previous.result?.paths ?? [], tracked)
     .filter((path) => path !== ".");
   return [...new Set([...prior, ...diffPaths, ...paths.filter((path) => !mainOnly.has(path))])];
 }

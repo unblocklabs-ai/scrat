@@ -9,7 +9,7 @@ import { bestEffort, startOperation } from "./logging.ts";
 import { observe } from "./observation.ts";
 import { currentPrReview } from "./pr-assessment.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
-import { getRun } from "./run-history.ts";
+import { getRun, latestCompletedRun } from "./run-history.ts";
 import { publishRun } from "./publication.ts";
 import { InterruptedError } from "./results.ts";
 import { recordEvent } from "./events.ts";
@@ -173,6 +173,24 @@ export async function runNextTask(stop?: AbortSignal) {
         const skipped = finishRun(run.id, { status: "completed" });
         operation.complete({ skipped: "CI branch refresh was queued for an older PR revision" });
         return skipped;
+      }
+      if (observed && !run.retryOfRunId && !isManual(trigger) && run.stage === "preparing" && trigger.kind === "item_changed") {
+        let staleReason: string | undefined;
+        if (ctx.manifest.publish.includes("pr_assessment")) {
+          const state = await currentPrReview(item!.id, observed.observation, observed.mainSha);
+          if (state.kind === "current") staleReason = "No observed relevant changes since the authoritative review";
+          else if (state.kind === "blocked") staleReason = "PR conflicts with its base branch; waiting for a new head";
+        } else if (item?.kind === "issue" && ctx.manifest.mode === "review" && !ctx.manifest.publish.includes("item_labels")) {
+          const completed = latestCompletedRun(item.id, task.action);
+          if (completed && (await freshness(savedEvaluation(completed), { ...observed.observation, mainSha: observed.mainSha }, "relevant-paths")).kind === "current") {
+            staleReason = "No observed relevant changes since the last review";
+          }
+        }
+        if (staleReason) {
+          const skipped = finishRun(run.id, { status: "cancelled", error: new SupersededError(staleReason) });
+          operation.complete({ cancelled: staleReason });
+          return skipped;
+        }
       }
       if (observed) await assertRepairCurrent(trigger, observed);
       if (ctx.manifest.mode === "review") await reviewRun(ctx, observed);

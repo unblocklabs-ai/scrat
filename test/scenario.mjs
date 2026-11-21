@@ -1660,6 +1660,16 @@ export const scenarios = {
     f.reset(207, "normal");
     const latestReview = await success();
     assert.equal(latestReview.headSha, pr7.head.sha, "newly queued review for the latest PR head completes cleanly");
+    // Pre-inference freshness skip: an already-queued non-manual review whose PR is now current cancels immediately without calling the model.
+    const requestsBeforeSkip = f.requests.length;
+    tasks.enqueueTask({
+      subjectId: f.row(s.tasks, latestReview.taskId).subjectId, action: "review_pr", priority: 200, reason: "Queued before earlier run finished",
+      input: { source: "github_items", kind: "item_changed", triggerKey: "stale-queued", revision: "stale", mainSha: latestReview.mainSha, changedPaths: [] },
+    });
+    const skippedReview = await run();
+    assert.equal(f.requests.length, requestsBeforeSkip, "pre-inference freshness skip makes zero model requests");
+    assert.equal(skippedReview.error?.code, "RUN_SUPERSEDED");
+    assert.equal(f.row(s.tasks, skippedReview.taskId).status, "cancelled");
   } },
   footer: { title: "quoted control markers stay report text and cannot supply a PR grade or issue approval", run: async () => {
     await implement(1); f.reset(201, "quoted-grade"); await route();
@@ -2176,6 +2186,7 @@ fi
       { name: "git", args: { operation: "show", revision: "head", path: "." } },
       { name: "git", args: { operation: "diff_stat", from: "previousMain", to: "main" } },
       { name: "git", args: { operation: "diff_stat", from: "base", to: "main" } },
+      { name: "git", args: { operation: "diff_stat", from: "main", to: "head" } },
     ];
     const scoped = await success(); f.script = undefined;
     assert.ok(!scoped.result.paths.includes("src") && !scoped.result.paths.includes(".") && !scoped.result.paths.includes("notes.md"), "directory log, dot log/show and base-drift diffs do not pollute scope");
@@ -2183,12 +2194,25 @@ fi
     changeMain("src/unrelated.ts", "export const unrelated = 1;\n");
     await route();
     assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "legacy directory entries in persisted scope do not trigger unrelated re-reviews");
-    // PR-only directories (present in head, absent from base) are also stripped by union-tree canonicalization.
-    f.prs[0].head.sha = pushFile("feature", "pronly/extra.ts", "export const extra = 1;\n");
+    // PR-only directories (present in head, absent from base) and previousHead..head merge/rebase deltas do not pollute scope.
+    git(resolve("seed"), "checkout", "feature");
+    git(resolve("seed"), "merge", "--no-edit", "main");
+    mkdirSync(resolve("seed/pronly"), { recursive: true });
+    writeFileSync(resolve("seed/pronly/extra.ts"), "export const extra = 1;\n");
+    git(resolve("seed"), "add", "."); commit(resolve("seed"), "Merge main and add pronly");
+    git(resolve("seed"), "push", resolve("remote.git"), "feature");
+    f.prs[0].head.sha = git(resolve("remote.git"), "rev-parse", "feature");
+    git(resolve("seed"), "checkout", "main");
     await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"));
-    f.script = [{ name: "git", args: { operation: "log", path: "pronly" } }];
+    f.script = [
+      { name: "git", args: { operation: "log", path: "pronly" } },
+      { name: "git", args: { operation: "diff_stat", from: "previousHead", to: "head" } },
+      { name: "git", args: { operation: "diff", from: "previousHead", to: "head", path: "src/app.ts" } },
+    ];
     const prDirScoped = await success(); f.script = undefined;
     assert.ok(!prDirScoped.result.paths.includes("pronly"), "PR-only directory paths are stripped from git scope");
+    assert.ok(!prDirScoped.result.paths.includes("notes.md") && !prDirScoped.result.paths.includes("src/unrelated.ts"), "previousHead..head after merging main does not pull base files into scope");
+    assert.ok(prDirScoped.result.paths.includes("src/app.ts"), "targeted previousHead..head file diff still records the inspected file");
     // Legacy "." persisted on a previous review heals on re-review instead of sticking forever.
     db.update(s.runs).set({ result: { ...prDirScoped.result, paths: [".", ...prDirScoped.result.paths] } }).where(eq(s.runs.id, prDirScoped.id)).run();
     changeMain("notes.md", "heal dot\n");
@@ -4309,7 +4333,7 @@ fi
     mkdirSync("ctx");
     const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
     const fake = () => {
-      const state = { closed: false, contexts: 0, launches: 0, handler: undefined, contextOptions: undefined, visited: [], visitViewports: [], typed: [], viewport: undefined, html: "<html></html>", timeouts: [], navigations: [], popups: [], listeners: [] };
+      const state = { closed: false, contexts: 0, launches: 0, handler: undefined, contextOptions: undefined, visited: [], visitViewports: [], clicked: [], typed: [], viewport: undefined, html: "<html></html>", timeouts: [], navigations: [], popups: [], listeners: [] };
       let current = "about:blank";
       const page = {
         async request(url, navigation, headers = { accept: "*/*" }) {
@@ -4324,9 +4348,13 @@ fi
         innerHTML: async (_selector, { timeout }) => { state.timeouts.push(timeout); return state.html; }, waitForLoadState: async () => {},
         on: (_event, listener) => { state.listeners.push(listener); }, off: (_event, listener) => { state.listeners = state.listeners.filter((entry) => entry !== listener); },
         setViewportSize: async (size) => { state.viewport = size; },
-        locator: (selector) => ({ count: async () => selector === "#missing" ? 0 : 2 }),
+        locator: (selector) => ({
+          count: async () => selector === "#missing" ? 0 : selector === "#hidden-first >> visible=true" ? 1 : 2,
+          first: () => ({ isVisible: async () => selector !== "#hidden-first" }),
+        }),
         click: async (selector, { timeout }) => {
           state.timeouts.push(timeout);
+          state.clicked.push(selector);
           if (selector === "#boom") throw new Error("element detached");
           if (selector === "#covered") throw new Error("page.click: Timeout 12000ms exceeded.\nCall log:\n  - waiting for locator('#covered')\n    - <div class=\"octane-popup--mask\"></div> from <div class=\"octane-wrapper big\" id=\"w1\">…</div> subtree intercepts pointer events\n  - retrying click action\n    - <iframe id=\"PBarNextFrame\" src=\"https://x/y\" sandbox=\"allow-scripts\"></iframe> intercepts pointer events\n    - <div class=\"octane-popup--mask\"></div> from <div class=\"octane-wrapper big\" id=\"w1\">…</div> subtree intercepts pointer events");
           if (selector === "#popup") for (const listener of state.listeners) listener({ close: async () => { state.popups.push("closed"); } });
@@ -4463,6 +4491,8 @@ fi
     await act(preSized, { action: "goto", url: "https://shop.example.test/m2", viewport: "mobile" });
     assert.deepEqual(preSized.state.contextOptions.viewport, { width: 390, height: 844 }, "goto with viewport after reset opens fresh context at that size");
     assert.deepEqual(preSized.state.visitViewports.at(-1), { width: 390, height: 844 });
+    await act(preSized, { action: "click", selector: "#hidden-first" });
+    assert.equal(preSized.state.clicked.at(-1), "#hidden-first >> visible=true", "multi-match click prefers visible match when first DOM match is hidden");
     await preSized.close();
     const named = make({ prefix: "reviewer-2" });
     assert.equal(JSON.parse(textOf(await act(named, { action: "screenshot" }))).path, resolve("ctx/screenshot-reviewer-2-current-1.png"), "each reviewer's screenshots are named apart");

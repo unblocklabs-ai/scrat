@@ -1909,6 +1909,29 @@ fi
     assert.equal(f.row(s.tasks, queued.id).status, "blocked");
     f.issues.get(4).state = "closed"; await route();
     assert.equal(f.row(s.tasks, queued.id).status, "cancelled", "An observed close ends the blocked task");
+
+    const graphqlCalls = () => f.calls.filter((call) => call.path === "/graphql").length;
+    const beforeIdleSync = graphqlCalls();
+    await route();
+    assert.equal(graphqlCalls(), beforeIdleSync, "Steady-state sync skips GraphQL for unchanged settled issues");
+
+    // A settled issue reopened during a rate-limit deferral must still be checked on the next sync.
+    const savedRemaining = f.rate.remaining;
+    f.rate.remaining = 0;
+    reopened.updated_at = "2026-10-19T00:10:00Z";
+    reopened.reopened = { id: "reopen-3-again", createdAt: new Date(Date.now() + 2000).toISOString() };
+    await route();
+    assert.equal(all(s.tasks).filter((t) => t.subjectId === "issue-3" && t.action === "implement").length, 2);
+    f.rate.remaining = savedRemaining;
+    await route();
+    assert.equal(all(s.tasks).filter((t) => t.subjectId === "issue-3" && t.action === "implement").length, 3,
+      "A deferred settled-issue update is retried after rate limits recover");
+
+    f.addIssue(5, ["scrat"]);
+    f.addPr(307, "human-fix", "human", { linkedIssues: [5], state: "closed", mergedAt: "2026-10-19T00:05:00Z" });
+    await route();
+    const lagBlocked = all(s.tasks).find((t) => t.subjectId === "issue-5" && t.action === "implement");
+    assert.equal(lagBlocked?.status, "blocked", "A PR merged in the current opening blocks first selection through closure lag");
   } },
   ambiguous_pr: { title: "partial publication resumes safely after a lost PR response or a competing PR after push", configure: [configureValidation, (config) => { config.actions.review_pr.enabled = false; }], seed: () => {
     mkdirSync("seed/.github/workflows", { recursive: true }); writeFileSync("seed/.github/workflows/ci.yml", "name: old\n");

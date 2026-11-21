@@ -35,7 +35,7 @@ function sameOpening(task: Task, facts: IssueImplementation) {
 }
 
 export async function assertCurrentImplementation(github: GitHubRepository, task: Task, issue: number, base: string, branch?: string, checkCompetition = true) {
-  const facts = await github.issueImplementation(issue, base, branch, task.createdAt);
+  const facts = await github.issueImplementation(issue, base, branch);
   if (!facts.open || !sameOpening(task, facts)) throw new ImplementationEnded(facts.open ? "GitHub issue reopened" : "GitHub issue closed");
   if (task.issueOpening === null) {
     db.update(tasks).set({ issueOpening: facts.opening }).where(eq(tasks.id, task.id)).run();

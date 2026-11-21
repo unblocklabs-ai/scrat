@@ -269,27 +269,25 @@ export class GitHubRepository {
     return found ? pullRequestView(found) : undefined;
   }
 
-  async issueImplementation(issue: number, base: string, ownBranch?: string, mergedSince?: string): Promise<IssueImplementation> {
+  async issueImplementation(issue: number, base: string, ownBranch?: string): Promise<IssueImplementation> {
     // This query is read-only; Octokit's write throttle serializes all GraphQL POSTs at one per second.
     const { github, owner, repo } = await githubForRepository(this.repository, "issue_links");
     type LinkedPullRequest = {
       number: number; state: "OPEN" | "CLOSED" | "MERGED"; mergedAt: string | null; repository: { nameWithOwner: string };
       baseRefName: string; headRepository: { nameWithOwner: string } | null; headRefName: string;
     };
-    type IssueLinks = { repository: { issue: { state: "OPEN" | "CLOSED"; timelineItems: {
+    type IssueLinks = { repository: { issue: { state: "OPEN" | "CLOSED"; createdAt: string; timelineItems: {
       nodes: ({ id: string; createdAt: string } | null)[];
     }; closedByPullRequestsReferences: {
       nodes: (LinkedPullRequest | null)[]; pageInfo: { hasNextPage: boolean; endCursor: string | null };
     } } | null } | null };
-    // GitHub reports merge times to the second. Older merged links can belong to a prior opening of the issue.
-    const earliestMerge = mergedSince ? Math.floor(Date.parse(mergedSince) / 1000) * 1000 : -Infinity;
     let after: string | null = null;
     let facts: IssueImplementation | undefined;
     do {
       const response: IssueLinks = await github.graphql(`query($owner: String!, $repo: String!, $number: Int!, $after: String) {
         repository(owner: $owner, name: $repo) {
           issue(number: $number) {
-            state
+            state createdAt
             timelineItems(last: 1, itemTypes: [REOPENED_EVENT]) { nodes { ... on ReopenedEvent { id createdAt } } }
             closedByPullRequestsReferences(first: 100, after: $after, includeClosedPrs: true) {
               nodes { number state mergedAt repository { nameWithOwner } baseRefName headRepository { nameWithOwner } headRefName }
@@ -307,8 +305,9 @@ export class GitHubRepository {
       if (!facts.open) return facts;
       const page = item.closedByPullRequestsReferences;
       const competing = page.nodes.find((pr) => pr && (pr.state === "OPEN"
-        || pr.state === "MERGED" && pr.mergedAt && (mergedSince || reopen)
-          && Date.parse(pr.mergedAt) >= earliestMerge && (!reopen || Date.parse(pr.mergedAt) > Date.parse(reopen.createdAt)))
+        || pr.state === "MERGED" && pr.mergedAt && (reopen
+          ? Date.parse(pr.mergedAt) > Date.parse(reopen.createdAt)
+          : Date.parse(pr.mergedAt) >= Date.parse(item.createdAt)))
         && sameRepository(pr.repository.nameWithOwner, this.repository) && pr.baseRefName === base
         && !(pr.headRefName === ownBranch && sameRepository(pr.headRepository?.nameWithOwner ?? "", this.repository)));
       if (competing) return { ...facts, competingPullRequest: competing.number };

@@ -17,7 +17,7 @@ Scrat serves the single configured repository and clone: sync and fetch refuse a
 
 Implementations use private clones and branches; follow-ups reuse their workspace and Pi session. Checks must pass against the exact tree being committed before publication. Optional Docker PostgreSQL databases isolate mutating runs. PR closure triggers workspace cleanup; failed work is retained for recovery.
 
-A competing PR linked on GitHub to the same issue and targeting the same base blocks implementation. A PR merged since the task was queued still blocks while GitHub reports the issue open. If the issue remains open and selected, sync resumes the same task when the link stops blocking it. Scrat reuses a current checkpoint or repairs the retained work if the issue, base, or checkout changed. Closing the issue ends the task; a confirmed reopening of a still-selected issue starts a fresh task.
+A competing PR linked on GitHub to the same issue and targeting the same base blocks implementation. A PR merged in the current opening still blocks while GitHub reports the issue open. If the issue remains open and selected, sync resumes the same task when the link stops blocking it. Scrat reuses a current checkpoint or repairs the retained work if the issue, base, or checkout changed. Closing the issue ends the task; a confirmed reopening of a still-selected issue starts a fresh task.
 
 When Scrat validates a replacement checkout to recover from a stale base, it leaves the original checkout and its Git pin intact. Once publication is confirmed, it records the original's recovery path and marks it retained. `npm run cleanup` reconciles this record but does not delete the replaced checkout.
 

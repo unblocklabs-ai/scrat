@@ -403,7 +403,7 @@ export async function fixture(scenario, spec) {
         }));
         const issue = issues.get(number);
         return reply({ data: { repository: { issue: issue
-          ? { state: issue.state.toUpperCase(), timelineItems: { nodes: issue.reopened ? [issue.reopened] : [] },
+          ? { state: issue.state.toUpperCase(), createdAt: issue.created_at ?? "2026-10-19T00:00:00Z", timelineItems: { nodes: issue.reopened ? [issue.reopened] : [] },
             closedByPullRequestsReferences: { nodes, pageInfo: { hasNextPage: links.length > end, endCursor: String(end) } } } : null } } });
       }
       if (owner !== "fixture" || repo !== "project" || !prs.some((pr) => pr.number === number)

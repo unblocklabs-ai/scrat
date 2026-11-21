@@ -50,6 +50,7 @@ function applyDecisions(subjectId: string, decisions: RoutingDecision[]) {
 
 let syncRound = 0;
 const limitLogged = new Set<string>();
+const implementationUnchecked = new Set<string>();
 
 async function cleanupClosedItem({ github, log }: SyncContext, item: Item) {
   cancelPendingTasks(item.id, "GitHub item closed");
@@ -215,6 +216,7 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
   const issueContexts = new Map(reviewable.map((item, index) => [item.id, contexts[index]]));
   const routeItem = async (item: Item) => {
     if (item.state === "closed") {
+      implementationUnchecked.delete(item.id);
       await cleanupClosedItem(ctx, item);
       return;
     }
@@ -232,16 +234,21 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       if (labelAction && (selected || latest?.status === "blocked" && isManual(latest.input))) {
         const reviewAction = routeFor(issueSignal(item, "item_changed"));
         if (selected && reviewAction) cancelPendingTasks(item.id, "Issue selected for implementation", reviewAction, true);
+        const newlySelected = previousItem !== undefined && !hasScratLabel(previousItem);
+        const settled = latest && latest.status !== "queued" && latest.status !== "blocked" && latest.status !== "cancelled";
+        if (selected && settled && !newlySelected && !implementationUnchecked.has(item.id)
+          && previousItem?.state === "open" && previousItem.payload.updated_at === item.payload.updated_at) return;
+        implementationUnchecked.add(item.id);
         const own = item.workspaceId ? getWorkspace(item.workspaceId)?.branch : undefined;
         if (rateLimitLow() || rateLimitLow("graphql")) { deferred++; return; }
-        // Preserve the start of observation even if a linked PR merges before admission is committed.
         const observedAt = new Date().toISOString();
-        const facts = await github.issueImplementation(item.payload.number, config.github.baseBranch, own, latest?.createdAt ?? observedAt);
+        const facts = await github.issueImplementation(item.payload.number, config.github.baseBranch, own);
         const triggerKey = JSON.stringify({ labelledAt: item.payload.updated_at, mainSha: defaultBaseSha });
         if (reconcileIssueImplementation({ subjectId: item.id, action: labelAction, observedTask: latest, observedAt, facts,
           input: { source: "github_items", kind: "label", triggerKey, mainSha: defaultBaseSha },
-          selected, newlySelected: previousItem !== undefined && !hasScratLabel(previousItem),
+          selected, newlySelected,
         })) queued++;
+        implementationUnchecked.delete(item.id);
         if (selected) return;
       }
       if (labelAction) cancelPendingTasks(item.id, `${botSlug} label removed`, labelAction, true);

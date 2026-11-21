@@ -135,7 +135,7 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
   });
   const quiet = <T extends object>(tool: T) => ({ ...tool, renderCall: undefined, renderResult: undefined });
   const core = {
-    read: quiet(read), grep: quiet(grep), find: quiet(find), ls: quiet(ls), git: createReviewGitTool(cwd, revisions, gitPaths),
+    read: quiet(read), grep: quiet(grep), find: quiet(find), ls: quiet(ls), git: createReviewGitTool(cwd, revisions, gitPaths, log),
     read_base: readBase, bash: quiet(bash), edit: quiet(edit), write: quiet(write),
   } satisfies Record<Exclude<ToolName, ScopedToolName>, object>;
   const binding = (name?: string) => name === undefined ? undefined : config.bindings[name];

@@ -8,7 +8,7 @@ import { changedPaths, commitOf, git, headOf, hasPendingMerge, identity, isAnces
 import { botSlug } from "./identity.ts";
 import { withOperation } from "./logging.ts";
 import { runs, subjects, workspaces, type Run, type Workspace } from "./schema.ts";
-import { errorMessage, ifMissing, WorkflowPushRejected } from "./errors.ts";
+import { errorMessage, ifMissing, UnpublishedWorkspaceError, WorkflowPushRejected } from "./errors.ts";
 import { SecretLeakError } from "./results.ts";
 import { containsSecret } from "./secrets.ts";
 import { sandboxHome, workspaceRoot } from "./sandbox.ts";
@@ -150,6 +150,14 @@ export function retainReplacedWorkspaces(taskId?: string) {
   }, { behavior: "immediate" });
 }
 
+export function retainWorkspace(workspaceId: string, reason: string, references: EventReferences = {}) {
+  db.transaction((transaction) => {
+    const retained = transaction.update(workspaces).set({ retainedAt: new Date().toISOString() })
+      .where(and(eq(workspaces.id, workspaceId), isNull(workspaces.removedAt), isNull(workspaces.retainedAt))).returning().get();
+    if (retained) recordEvent({ ...references, type: "workspace.retained", data: { workspaceId, path: retained.path, reason } }, transaction);
+  }, { behavior: "immediate" });
+}
+
 export async function removeWorkspace(workspaceId: string, references: EventReferences = {}) {
   return withOperation("workspace.remove", { ...references, workspaceId }, async (operation) => {
     operation.stage("lookup");
@@ -173,7 +181,7 @@ export async function removeWorkspace(workspaceId: string, references: EventRefe
       const head = await headOf(path);
       const published = db.select().from(runs).where(eq(runs.workspaceId, workspace.id)).all()
         .some((run) => run.publication.publishedCommitSha === head);
-      if (head !== workspace.baseSha && !published) throw new Error("Workspace has unpublished commits; retain it for recovery");
+      if (head !== workspace.baseSha && !published) throw new UnpublishedWorkspaceError();
       await rm(path, { recursive: true });
       const home = sandboxHome(workspace.id);
       const stats = await ifMissing(lstat(home), undefined);

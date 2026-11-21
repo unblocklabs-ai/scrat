@@ -171,9 +171,10 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
         const tracked = await gitList(cwd, ["ls-files", "-z"]);
         const baseTracked = baseSha && (basePaths.size || gitPaths.size)
           ? await gitList(cwd, ["ls-tree", "-r", "--name-only", "-z", baseSha]) : [];
+        const gitTracked = baseTracked.length ? [...tracked, ...baseTracked] : tracked;
         return { ...result, paths: [...new Set([
           ...canonicalReviewPaths([...paths], tracked), ...canonicalReviewPaths([...basePaths], baseTracked),
-          ...canonicalReviewPaths([...gitPaths], tracked), ...canonicalReviewPaths([...gitPaths], baseTracked),
+          ...canonicalReviewPaths([...gitPaths], gitTracked),
         ])] };
       } catch (error) {
         if (!(error instanceof ResultFormatError) || corrections >= config.harness.corrections.format) throw error;

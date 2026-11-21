@@ -6,8 +6,9 @@ import { config, isBotLogin } from "./config.ts";
 import { branchConflictCode } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { bestEffort } from "./logging.ts";
-import { createMergeCommit, prepareTarget } from "./git.ts";
+import { createMergeCommit, gitList, prepareTarget } from "./git.ts";
 import { currentPrReview } from "./pr-assessment.ts";
+import { canonicalReviewPaths } from "./review-paths.ts";
 import { getRun, latestCompletedRun, updateRun } from "./run-history.ts";
 import { type AgentResult, assertComplete, hasReviewCheckpoint } from "./results.ts";
 import type { Run, Workspace } from "./schema.ts";
@@ -48,14 +49,19 @@ function reuseReviewers(ctx: Ctx, mainSha: string, headSha: string, revision: st
   recordEvent({ ...references, type: "run.reviewers_reused", data: { fromRunId: prior.id } });
 }
 
-async function retainedScope({ run, task }: Ctx, { item, observation, mainSha, pullRequest }: Observed, evaluated: ReturnType<typeof evaluateContext>, diffPaths: string[], paths: string[]) {
+async function retainedScope({ run, task, repositoryPath }: Ctx, { item, observation, mainSha, pullRequest }: Observed, evaluated: ReturnType<typeof evaluateContext>, headSha: string, diffPaths: string[], paths: string[]) {
   const trigger = parseTriggerInput(run.input);
-  if (trigger.kind !== "item_changed") return paths;
+  const current = [...new Set([...diffPaths, ...paths])];
+  if (trigger.kind !== "item_changed") return current;
   const state = pullRequest ? await currentPrReview(item.id, observation, mainSha) : undefined;
   const previous = state ? "assessment" in state ? state.assessment.run : undefined : latestCompletedRun(item.id, task.action);
-  if (!previous || previous.context?.revision !== evaluated.revision) return paths;
+  if (!previous || previous.context?.revision !== evaluated.revision) return current;
   const mainOnly = new Set(trigger.changedPaths);
-  return [...new Set([...previous.result?.paths ?? [], ...diffPaths, ...paths.filter((path) => !mainOnly.has(path))])];
+  const mainTracked = await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", mainSha]);
+  const headTracked = headSha !== mainSha ? await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", headSha]) : [];
+  const prior = canonicalReviewPaths(previous.result?.paths ?? [], headTracked.length ? [...mainTracked, ...headTracked] : mainTracked)
+    .filter((path) => path !== ".");
+  return [...new Set([...prior, ...diffPaths, ...paths.filter((path) => !mainOnly.has(path))])];
 }
 
 const itemScope = async ({ run, task, repositoryPath }: Ctx, observed: Observed) => {
@@ -134,7 +140,7 @@ export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
     panel: manifest.agent === "panel" ? { baseSha: review.diffBaseSha, requireGrade: !changeContext } : undefined,
     input: { workspace: review.workspace, evaluated, diffBaseSha: review.diffBaseSha, diffPaths, mainSha: review.mainSha, headSha: review.headSha, baseRef: review.mainSha, mergeInProgress: false, baseOnly },
   });
-  if (observed) result.paths = await retainedScope(ctx, observed, evaluated, diffPaths, result.paths);
+  if (observed) result.paths = await retainedScope(ctx, observed, evaluated, review.headSha, diffPaths, result.paths);
   updateRun(run.id, { result, stage: "validating" });
   assertComplete(result);
   await checkStorefront(ctx, mainSha, result, async () => ({ ...review, diffPaths, item: evaluated.item }));

@@ -32,3 +32,10 @@ export type GithubComment = {
 };
 
 export type GithubContext = { item: GithubItem; comments: GithubComment[] };
+
+export type IssueImplementation = {
+  open: boolean;
+  opening: string;
+  reopenedAt?: string;
+  competingPullRequest?: number;
+};

@@ -9,7 +9,7 @@ const itemChanged = items("item_changed", {
   triggerKey: text, revision: text, mainSha: text, changedPaths: Type.Optional(Type.Array(text)), baseOnly: Type.Optional(Type.Boolean()),
   previousMainSha: Type.Optional(Type.Union([text, Type.Null()])), previousHeadSha: Type.Optional(Type.Union([text, Type.Null()])),
 });
-const label = items("label", { triggerKey: text, mainSha: text });
+const label = items("label", { triggerKey: text, mainSha: text, freshOpening: Type.Optional(Type.Literal(true)) });
 const prConflicts = items("pr_conflicts", { triggerKey: text, mainSha: text, headSha: text, githubCi: Type.Optional(Type.Literal(true)) });
 const prFeedback = items("pr_feedback", { triggerKey: text, commentRevisions: Type.Array(text) });
 const lowGrade = items("low_grade", { triggerKey: text, assessmentRunId: text, grade: text });

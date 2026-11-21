@@ -25,7 +25,7 @@ export const findItem = (repository: string, target: string) =>
 export function closedItemsWithCleanup(repository: string) {
   const pullRequest = eq(items.kind, "pr");
   return itemRows(and(inRepository(repository), eq(subjects.state, "closed"), or(
-    exists(db.select({ id: tasks.id }).from(tasks).where(and(eq(tasks.subjectId, subjects.id), eq(tasks.status, "queued")))),
+    exists(db.select({ id: tasks.id }).from(tasks).where(and(eq(tasks.subjectId, subjects.id), inArray(tasks.status, ["queued", "blocked"])))),
     and(pullRequest, exists(db.select({ id: workspaces.id }).from(workspaces).where(and(eq(workspaces.id, subjects.workspaceId), isNull(workspaces.removedAt),
       notExists(db.select({ id: runs.id }).from(runs).where(and(eq(runs.workspaceId, workspaces.id), isNull(runs.finishedAt)))))))),
     config.storefront.enabled ? and(pullRequest, exists(db.select({ id: themePreviews.id }).from(themePreviews)

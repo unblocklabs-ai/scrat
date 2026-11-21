@@ -2,12 +2,19 @@ import { config } from "./config.ts";
 
 const etags = new Map<string, { etag: string; body: string; headers: [string, string][] }>();
 let cachedChars = 0;
-const rateLimit = { remaining: Infinity, limit: 5000, reset: 0 };
+const rateLimits = {
+  core: { remaining: Infinity, limit: 5000, reset: 0 },
+  graphql: { remaining: Infinity, limit: 5000, reset: 0 },
+};
 
-export function rateLimitLow() {
+export function rateLimitLow(resource: keyof typeof rateLimits = "core") {
+  const rateLimit = rateLimits[resource];
   return Date.now() < rateLimit.reset * 1000 && rateLimit.remaining < rateLimit.limit * config.github.rateLimitLowFraction;
 }
-export const rateLimitState = () => ({ remaining: rateLimit.remaining, limit: rateLimit.limit, resetsAt: new Date(rateLimit.reset * 1000).toISOString() });
+export function rateLimitState(resource: keyof typeof rateLimits = "core") {
+  const { remaining, limit, reset } = rateLimits[resource];
+  return { remaining, limit, resetsAt: new Date(reset * 1000).toISOString() };
+}
 
 function forget(key: string) {
   const old = etags.get(key);
@@ -20,8 +27,9 @@ export async function conditionalFetch(input: string | URL | Request, init: Requ
   if (key && hit) { etags.delete(key); etags.set(key, hit); }
   const response = await globalThis.fetch(input, hit
     ? { ...init, headers: { ...(init.headers as Record<string, string>), "if-none-match": hit.etag } } : init);
-  const resource = response.headers.get("x-ratelimit-resource");
-  if ((!resource || resource === "core") && response.headers.has("x-ratelimit-remaining")) {
+  const resource = response.headers.get("x-ratelimit-resource") ?? "core";
+  if ((resource === "core" || resource === "graphql") && response.headers.has("x-ratelimit-remaining")) {
+    const rateLimit = rateLimits[resource];
     Object.assign(rateLimit, {
       remaining: Number(response.headers.get("x-ratelimit-remaining")), reset: Number(response.headers.get("x-ratelimit-reset")),
       limit: Number(response.headers.get("x-ratelimit-limit")) || rateLimit.limit,

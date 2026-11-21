@@ -36,14 +36,16 @@ export const tasks = sqliteTable("tasks", {
   retryMode: text("retry_mode", { enum: ["repair", "validation"] }).notNull().default("repair"),
   retryCount: integer("retry_count"),
   availableAt: text("available_at"),
+  issueOpening: text("issue_opening"),
+  lastCompetingPullRequest: integer("competing_pull_request"), // Retained through requeue and worker interruptions.
   status: text("status", {
-    enum: ["queued", "running", "completed", "failed", "cancelled"],
+    enum: ["queued", "blocked", "running", "completed", "failed", "cancelled"],
   }).notNull().default("queued"),
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
 }, (table) => [
-  uniqueIndex("tasks_queued_subject_action_unique")
+  uniqueIndex("tasks_pending_subject_action_unique")
     .on(table.subjectId, table.action)
-    .where(sql`${table.status} = 'queued'`),
+    .where(sql`${table.status} in ('queued', 'blocked')`),
 ]);
 
 const runStages = ["preparing", "agent", "validating", "publishing"] as const;
@@ -55,6 +57,9 @@ export const workspaces = sqliteTable("workspaces", {
   path: text("path").notNull().unique(),
   baseRef: text("base_ref").notNull(),
   baseSha: text("base_sha").notNull(),
+  replacement: text("replacement", { mode: "json" }).$type<{ workspaceId: string; taskId: string; originalHead: string }>(),
+  pushedHeadSha: text("pushed_head_sha"),
+  retainedAt: text("retained_at"),
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
   removedAt: text("removed_at"),
 });

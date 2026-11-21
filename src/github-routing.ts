@@ -1,5 +1,5 @@
 import type { Freshness } from "./freshness.ts";
-import { botName, botSlug } from "./identity.ts";
+import { botName } from "./identity.ts";
 import type { PrReviewState } from "./pr-assessment.ts";
 import { type Run, type Task } from "./schema.ts";
 import { isManual, triggerKeyOf, type KeyedTriggerInput } from "./triggers.ts";
@@ -16,24 +16,6 @@ export type RoutingDecision =
 export function planKeyedTask(latest: TaskFacts | undefined, action: string, reason: string, input: KeyedTriggerInput, coveredKey = latest && triggerKeyOf(latest.input)): RoutingDecision[] {
   if (latest && latest.status !== "cancelled" && coveredKey === input.triggerKey) return [];
   return [{ type: "enqueue", action, reason, input }];
-}
-
-export function planIssueTasks({ labelAction, reviewAction, labelled, implemented, workspaceId, previouslyLabelled, latest, updatedAt, mainSha }: {
-  labelAction: string | undefined; reviewAction: string | undefined;
-  labelled: boolean; implemented: boolean; workspaceId: string | null; previouslyLabelled?: boolean;
-  latest?: TaskFacts; updatedAt: string; mainSha: string;
-}): { review: boolean; decisions: RoutingDecision[] } {
-  if (!labelled || !labelAction) {
-    return { review: true, decisions: labelAction ? [{ type: "cancel", action: labelAction, reason: `${botName} label removed` }] : [] };
-  }
-  const decisions: RoutingDecision[] = reviewAction ? [{ type: "cancel", action: reviewAction, reason: "Issue selected for implementation" }] : [];
-  if (implemented) decisions.push({ type: "cancel", action: labelAction, reason: "An open PR already implements this issue" });
-  else if (!workspaceId && (!latest || latest.status === "queued" || latest.status === "cancelled" || previouslyLabelled === false)) {
-    decisions.push(...planKeyedTask(latest, labelAction, `Issue has the ${botSlug} label`, {
-      source: "github_items", kind: "label", triggerKey: JSON.stringify({ labelledAt: updatedAt, mainSha }), mainSha,
-    }));
-  }
-  return { review: false, decisions };
 }
 
 export function planPrMaintenance({ conflictAction, feedbackAction, conflicts, preparationFailed, ciBlocker, mainSha, headSha, pendingComments, conflictTask, feedbackTask }: {

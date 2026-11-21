@@ -743,6 +743,16 @@ export const scenarios = {
     f.prs[0].labels.push({ name: "unrelated" });
     changeMain("unrelated.txt", "Base tip moved\n");
     await route(); assert.equal(queued().length, 0, "comments, labels and base-tip changes do not requeue");
+    live.actions.resolve_conflicts.enabled = true;
+    const savedPrepare = live.workspace.prepare;
+    live.workspace.prepare = [];
+    const pr201 = all(s.items).find((item) => item.kind === "pr" && item.payload.number === 201);
+    tasks.enqueueTask({ subjectId: pr201.id, action: "resolve_conflicts", reason: "Merge main", input: { source: "github_items", kind: "manual", manual: true } });
+    const merged201 = await success();
+    live.workspace.prepare = savedPrepare;
+    f.prs[0].head.sha = merged201.publication.publishedCommitSha;
+    live.actions.resolve_conflicts.enabled = false;
+    await route(); assert.equal(queued().length, 0, "pure base-branch conflict merges do not requeue classification");
     touchPr(201); await route(); await route(); assert.equal(queued().length, 1, "new commits coalesce into one task");
     const invalid = selections([{ category: "risk", name: "not-configured" }]);
     await classify(201, [invalid, low]);
@@ -803,7 +813,7 @@ export const scenarios = {
     await route(); assert.equal(queued().length, 1);
     await classify(201); await route(); assert.equal(queued().length, 0);
   } },
-  base_only_review: { title: "a re-review caused only by relevant main changes runs the primary reviewer alone with a graded assessment, while every other trigger keeps the panel and retries keep the right plan", run: async () => {
+  base_only_review: { title: "a re-review caused only by relevant main changes runs the primary reviewer alone with a graded assessment, while every other trigger keeps the panel and retries keep the right plan", configure: [(config) => { config.actions.resolve_conflicts.enabled = false; }], run: async () => {
     const [primary, secondary] = f.config.actions.review_pr.reviewers.map((reviewer) => reviewer.model);
     const sessions = (since) => {
       const seen = f.requests.slice(since).filter((r) => r.context.action === "review_pr");
@@ -895,14 +905,17 @@ export const scenarios = {
     assert.deepEqual(queued().map((t) => [t.subjectId, t.action]).sort(), [["issue-1", "implement"], ["issue-2", "review_issue"]]);
     branchOff("scrat/routing", "src/app.ts", "export const value = 2;\n");
     changeMain("src/app.ts", "export const value = 3;\n");
+    branchOff("scrat/clean", "src/clean.ts", "export const clean = 1;");
     f.addPr(201, "scrat/routing", f.config.github.botLogin, { node_id: "PR_routing", title: f.issues.get(1).title, body: "Closes #1" });
+    f.addPr(202, "scrat/clean", "human", { node_id: "PR_clean", title: "Clean PR", body: "" });
     const external = humanComment(201, 9001, "Please explain this change", "2026-10-19T01:00:00Z");
     f.comments.set(201, [external, { ...external, id: 9002, body: "My own review", user: { login: f.config.github.botLogin } }]);
     await route();
     assert.ok(!queued().some((t) => t.subjectId === "issue-1"));
-    const prTasks = () => queued().filter((t) => f.row(s.items, t.subjectId).kind === "pr");
-    assert.deepEqual(prTasks().map((t) => t.action).sort(), ["address_pr_feedback", "resolve_conflicts", "review_pr"]);
-    const conflict = prTasks().find((t) => t.action === "resolve_conflicts"), feedback = prTasks().find((t) => t.action === "address_pr_feedback");
+    const prTasks = (number = 201) => queued().filter((t) => { const item = f.row(s.items, t.subjectId); return item?.kind === "pr" && item.payload.number === number; });
+    assert.deepEqual(prTasks(201).map((t) => t.action).sort(), ["address_pr_feedback", "resolve_conflicts"], "pending conflict refresh suppresses PR review");
+    assert.deepEqual(prTasks(202).map((t) => t.action), ["review_pr"]);
+    const conflict = prTasks(201).find((t) => t.action === "resolve_conflicts"), feedback = prTasks(201).find((t) => t.action === "address_pr_feedback");
     assert.deepEqual(feedback.input.commentRevisions, ["issue:9001@2026-10-19T01:00:00Z"]);
     changeMain("src/app.ts", "export const value = 4;\n");
     external.updated_at = "2026-10-19T02:00:00Z"; await route();
@@ -912,7 +925,7 @@ export const scenarios = {
     assert.deepEqual(prTasks().find((t) => t.action === "address_pr_feedback").input.commentRevisions, ["issue:9001@2026-10-19T02:00:00Z"]);
     f.comments.set(201, [f.comments.get(201)[1]]); await route();
     assert.ok(!prTasks().some((t) => t.action === "address_pr_feedback"));
-    f.prs[0].state = "closed"; await route(); assert.equal(prTasks().length, 0);
+    f.prs[0].state = "closed"; f.prs[1].state = "closed"; await route(); assert.equal(prTasks(201).length + prTasks(202).length, 0);
     assert.equal(f.requests.length, 0, "Routing does not require agent inference");
   } },
   repository_sync: { title: "repository sync bounds reads, shares scoped authentication, refreshes expired tokens and keeps raw diagnostics", run: async () => {
@@ -1106,7 +1119,7 @@ export const scenarios = {
     assert.equal(replied.publication.publishedCommitSha, head); assert.equal(f.prs.length, 1);
     assert.equal(f.comments.get(202).length, 1); assert.equal(replied.workspaceId, implemented.workspaceId);
   } },
-  panel: { title: "Scrat-authored PR gets two independent Pi sessions and one consolidated comment", seed: seedIgnore, configure: [configurePanel], run: async () => {
+  panel: { title: "Scrat-authored PR gets two independent Pi sessions and one consolidated comment", seed: seedIgnore, configure: [configurePanel, (config) => { config.actions.resolve_conflicts.enabled = false; }], run: async () => {
     const implemented = await implement(1); f.prs[0].labels.push({ name: "human-label" }); await route();
     const review = await success();
     assert.equal(review.reviewers.length, 2);
@@ -1360,7 +1373,7 @@ export const scenarios = {
     assert.ok(older.sequence > implemented.sequence);
     const next = await feedback(); assert.equal(next.piSessionFile, realpathSync(copy)); assert.ok(next.sequence > older.sequence);
   } },
-  scope_snapshots: { title: "PR-only, renamed and deleted paths keep their identities across unrelated base changes", seed: seedScopeSnapshots, configure: [configureScopeSnapshots], run: async () => {
+  scope_snapshots: { title: "PR-only, renamed and deleted paths keep their identities across unrelated base changes", seed: seedScopeSnapshots, configure: [configureScopeSnapshots, (config) => { config.actions.resolve_conflicts.enabled = false; }], run: async () => {
     const implemented = await implement(1), workspace = f.row(s.workspaces, implemented.workspaceId);
     unlinkSync(workspace.path + "/src/deleted.ts");
     git(workspace.path, "mv", "src/renamed.ts", "src/moved.ts");
@@ -2093,6 +2106,13 @@ fi
     f.reset(1, "grep"); await success();
     changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "2.0.0", unrelated: "2.0.0" } }));
     await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"), "Inspected dependency changes must trigger review");
+    f.script = [{ name: "git", args: { operation: "log", path: "src" } }, { name: "git", args: { operation: "diff_stat", from: "previousMain", to: "main" } }];
+    const scoped = await success(); f.script = undefined;
+    assert.ok(!scoped.result.paths.includes("src") && !scoped.result.paths.includes("."), "directory log and previousMain..main diff do not pollute scope");
+    db.update(s.runs).set({ result: { ...scoped.result, paths: ["src", ...scoped.result.paths] } }).where(eq(s.runs.id, scoped.id)).run();
+    changeMain("src/unrelated.ts", "export const unrelated = 1;\n");
+    await route();
+    assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "legacy directory entries in persisted scope do not trigger unrelated re-reviews");
   } },
   lockfile_impact: { title: "the pure lockfile differ separates inspected-package, alias, importer and unknown-shape changes from unrelated ones without a repository", run: async () => {
     const { lockfileChanged, affectsPaths } = await f.app("lockfile-impact.ts");
@@ -2931,6 +2951,32 @@ fi
     assert.equal(merged.publication.publishedCommitSha, head);
     git(remote, "merge-base", "--is-ancestor", local, head);
     git(remote, "merge-base", "--is-ancestor", git(resolve("seed"), "rev-parse", "main"), head);
+
+    // A diverged retained workspace is marked retained and replaced by a fresh workspace on a new PR task.
+    writeFileSync(resolve(workspace.path, "src/diverged.ts"), "export const diverged = 1;\n");
+    git(workspace.path, "add", "."); commit(workspace.path, "Unpushed local commit");
+    const remoteUpdate = pushFile(f.prs[0].head.ref, "src/remote-only.ts", "export const remoteOnly = 1;\n");
+    f.prs[0].head.sha = remoteUpdate;
+    changeMain("src/other2.ts", "export const other2 = 2;\n");
+    tasks.enqueueTask({ subjectId: item.id, action: "resolve_conflicts", reason: "Recover diverged PR workspace", input: { source: "github_items", kind: "manual", manual: true } });
+    const recovered = await success();
+    assert.notEqual(recovered.workspaceId, workspace.id);
+    assert.ok(f.row(s.workspaces, workspace.id).retainedAt, "diverged workspace is retained rather than deleted");
+    assert.equal(readFileSync(resolve(workspace.path, "src/diverged.ts"), "utf8"), "export const diverged = 1;\n");
+
+    // Closing a PR whose workspace has unpublished commits marks it retained once instead of error-looping on every sync.
+    const activeWorkspace = f.row(s.workspaces, recovered.workspaceId);
+    writeFileSync(resolve(activeWorkspace.path, "src/unpushed-on-close.ts"), "export const keep = 1;\n");
+    git(activeWorkspace.path, "add", "."); commit(activeWorkspace.path, "Unpushed before close");
+    f.prs[0].state = "closed";
+    await route();
+    assert.ok(f.row(s.workspaces, activeWorkspace.id).retainedAt, "closed PR unpublished workspace is marked retained");
+    const retainedEvents = () => all(s.events).filter((e) => e.type === "workspace.retained" && e.data.workspaceId === activeWorkspace.id).length;
+    assert.equal(retainedEvents(), 1);
+    const lines = captureLogs();
+    try { await route(); } finally { restoreLogs(); }
+    assert.equal(retainedEvents(), 1);
+    assert.ok(!lines.some((line) => line.operation === "workspace.remove" && line.event === "operation.failed"), "subsequent syncs do not retry removing retained workspaces");
   } },
   workspace_layout: { title: "workspaces share objects that a shared-repository gc cannot remove, and publication bundles only the new commits with a full-bundle fallback", run: async () => {
     const first = await implement(1), shared = f.config.github.repositoryPath, remote = resolve("remote.git");
@@ -4890,7 +4936,7 @@ fi
     assert.ok(off.length && off.every((request) => request.context.item.number === 201 && request.context.files.storefront === undefined && JSON.stringify(names(request)) === panel), "a disabled storefront gives no browser");
     assert.equal(all(s.sourceCursors).filter((row) => row.action === "storefront_discover").length, 1);
   } },
-  storefront_review: { title: "a review of a Scrat PR whose preview matches the head gives every panel session the storefront section, the storefront browser and the preview, live and limits context; a confirmed regression caps the grade through the format correction and stays sticky, a missing line is corrected, unavailable keeps the grade, the line never reaches the comment, the consolidator sees each reviewer's result and its own line wins, and an unavailable preview, a human PR or a disabled storefront get neither section nor browser", seed: seedTheme, configure: [configureStorefront], run: async () => {
+  storefront_review: { title: "a review of a Scrat PR whose preview matches the head gives every panel session the storefront section, the storefront browser and the preview, live and limits context; a confirmed regression caps the grade through the format correction and stays sticky, a missing line is corrected, unavailable keeps the grade, the line never reaches the comment, the consolidator sees each reviewer's result and its own line wins, and an unavailable preview, a human PR or a disabled storefront get neither section nor browser", seed: seedTheme, configure: [configureStorefront, (config) => { config.actions.resolve_conflicts.enabled = false; }], run: async () => {
     const { config: live } = await f.app("config.ts"), { parseResult, storefrontProblem } = await f.app("results.ts");
     const parsed = (footer) => parseResult(`R.\n${footer}\nSCRAT_STATUS: complete`, [], { requireGrade: true });
     assert.throws(() => parsed("SCRAT_STOREFRONT: maybe\nSCRAT_GRADE: B"), /valid SCRAT_STOREFRONT: verified, regression, or unavailable/);

@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { contextDirOf, evaluateContext, readDiffScope } from "./agent-input.ts";
 import { config } from "./config.ts";
 import type { Manifest } from "./manifests.ts";
@@ -7,8 +7,9 @@ import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
 import { CompetingImplementation, describeError, type ErrorDetails, errorExitCode } from "./errors.ts";
+import { recordEvent } from "./events.ts";
 import { bestEffort } from "./logging.ts";
-import { conventionalTitle, git, headOf, hasPendingMerge, mergeBase, prepareTarget, remoteBranchHead, shortSha } from "./git.ts";
+import { conventionalTitle, git, headOf, hasPendingMerge, isAncestor, mergeBase, prepareTarget, remoteBranchHead, shortSha } from "./git.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { executePi } from "./pi.ts";
 import { remoteUrl } from "./repository.ts";
@@ -153,14 +154,33 @@ async function acquireChangeWorkspace(ctx: Ctx, observed: Observed, resumedDefer
   const mergeInProgress = await hasPendingMerge(workspace.path);
   if (!mergeInProgress && !validationOnly) {
     if (pullRequest) {
-      await git(workspace.path, ["merge", "--ff-only", preparedHead]);
-      await pinWorkspaceBase(workspace, preparedHead);
-    } else {
-      await bestEffort(ctx.operation.log, "workspace.base_update_skipped", { workspaceId: workspace.id }, async () => {
+      try {
         await git(workspace.path, ["merge", "--ff-only", preparedHead]);
-        if (await headOf(workspace.path) === preparedHead) {
-          await pinWorkspaceBase(workspace, preparedHead);
-          db.update(workspaces).set({ baseSha: preparedHead }).where(eq(workspaces.id, workspace.id)).run();
+        await pinWorkspaceBase(workspace, preparedHead);
+      } catch (error) {
+        const currentHead = await headOf(workspace.path);
+        const diverged = !run.retryOfRunId
+          && !await isAncestor(workspace.path, preparedHead, currentHead)
+          && !await isAncestor(workspace.path, currentHead, preparedHead);
+        if (!diverged) throw error;
+        const previous = workspace;
+        workspace = await createWorkspace({ repositoryPath, baseRef: preparedHead, branch: pullRequest.head.ref }, references);
+        const fresh = workspace;
+        db.transaction((transaction) => {
+          const retained = transaction.update(workspaces).set({ retainedAt: new Date().toISOString() })
+            .where(and(eq(workspaces.id, previous.id), isNull(workspaces.removedAt), isNull(workspaces.retainedAt))).returning().get();
+          transaction.update(subjects).set({ workspaceId: fresh.id }).where(eq(subjects.id, item.id)).run();
+          if (retained) recordEvent({ ...references, type: "workspace.retained",
+            data: { workspaceId: previous.id, path: retained.path, reason: "PR workspace diverged from remote head" } }, transaction);
+        }, { behavior: "immediate" });
+      }
+    } else {
+      const current = workspace;
+      await bestEffort(ctx.operation.log, "workspace.base_update_skipped", { workspaceId: current.id }, async () => {
+        await git(current.path, ["merge", "--ff-only", preparedHead]);
+        if (await headOf(current.path) === preparedHead) {
+          await pinWorkspaceBase(current, preparedHead);
+          db.update(workspaces).set({ baseSha: preparedHead }).where(eq(workspaces.id, current.id)).run();
         }
       });
     }

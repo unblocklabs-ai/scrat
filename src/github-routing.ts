@@ -46,13 +46,14 @@ export function planPrMaintenance({ conflictAction, feedbackAction, conflicts, p
   return decisions;
 }
 
-export function planSelfRepair({ repairAction, repairActions, state, feedbackTask, reviewTask, repairTask, count, limit }: {
+export function planSelfRepair({ repairAction, repairActions, state, feedbackTask, conflictTask, reviewTask, repairTask, count, limit }: {
   repairAction: string | undefined; repairActions: readonly string[]; state: PrReviewState;
-  feedbackTask?: TaskFacts; reviewTask?: TaskFacts; repairTask?: TaskFacts; count: number; limit: number | undefined;
+  feedbackTask?: TaskFacts; conflictTask?: TaskFacts; reviewTask?: TaskFacts; repairTask?: TaskFacts; count: number; limit: number | undefined;
 }): { decisions: RoutingDecision[]; limited: boolean } {
   const cancel: RoutingDecision[] = repairActions.map((action) => ({ type: "cancel", action, reason: "No current low-graded review to repair" }));
   const reviewActive = reviewTask?.status === "queued" || reviewTask?.status === "running";
-  if (!repairAction || state.kind !== "current" || feedbackTask?.status === "queued" || reviewActive) {
+  const conflictActive = conflictTask?.status === "queued" || conflictTask?.status === "running";
+  if (!repairAction || state.kind !== "current" || feedbackTask?.status === "queued" || reviewActive || conflictActive) {
     return { decisions: cancel, limited: false };
   }
   const { originId } = state.assessment, grade = state.assessment.result.grade;
@@ -73,12 +74,15 @@ export function reviewTrigger({ latest, attempt, revision, mainSha }: ReviewTrig
 }
 
 type ReviewFacts = ReviewTriggerFacts & { action: string } & (
-  | { kind: "pr"; state: PrReviewState }
+  | { kind: "pr"; state: PrReviewState; conflictPending?: boolean }
   | { kind: "issue"; completed?: PreviousReview; freshness?: Freshness }
 );
 
 export function planReview(facts: ReviewFacts): RoutingDecision[] {
   const { latest, revision, mainSha, action } = facts;
+  if (facts.kind === "pr" && facts.conflictPending) {
+    return [{ type: "cancel", action, reason: "PR branch refresh is pending" }];
+  }
   if (facts.kind === "pr" && facts.state.kind === "current") {
     return [{ type: "cancel", action, reason: "No observed relevant changes since the authoritative review" }];
   }

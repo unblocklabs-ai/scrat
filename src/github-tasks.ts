@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import { manifestOf, manifests, matchingActions, routeFor } from "./actions.ts";
 import { config, getRepositoryPath, isBotLogin } from "./config.ts";
@@ -11,14 +11,15 @@ import { categoriesFor, itemLabelKey } from "./item-labels.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { labelName, reconcileLabels } from "./labels.ts";
 import { db } from "./db.ts";
+import { UnpublishedWorkspaceError } from "./errors.ts";
 import { prepareTarget } from "./git.ts";
 import { rateLimitLow, rateLimitState } from "./github-http.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
-import { items, runs, subjects } from "./schema.ts";
+import { items, runs, subjects, tasks, type Run } from "./schema.ts";
 import { cancelPendingTasks, enqueueTask, latestTask, reconcileIssueImplementation } from "./tasks.ts";
 import { isManual, parseTriggerInput } from "./triggers.ts";
-import { getWorkspace, removeWorkspace } from "./workspaces.ts";
+import { getWorkspace, removeWorkspace, retainWorkspace } from "./workspaces.ts";
 import { bestEffort } from "./logging.ts";
 import { reconcileObserved, serializePr, type ResolvedReview } from "./pr-review-publication.ts";
 import { latestCompletedRun, latestFinishedRun, latestRunOfTask, runHistory } from "./run-history.ts";
@@ -61,11 +62,13 @@ async function cleanupClosedItem({ github, log }: SyncContext, item: Item) {
   if (item.kind !== "pr" || !item.workspaceId) return;
   const active = db.select().from(runs).where(and(eq(runs.workspaceId, item.workspaceId), isNull(runs.finishedAt))).get();
   const workspace = getWorkspace(item.workspaceId);
-  if (active || !workspace || workspace.removedAt) return;
+  if (active || !workspace || workspace.removedAt || workspace.retainedAt) return;
   const related = db.select().from(subjects).where(eq(subjects.workspaceId, workspace.id)).all();
   for (const linked of related) cancelPendingTasks(linked.id, "PR merged or closed");
   try { await removeWorkspace(workspace.id, { subjectId: item.id }); }
-  catch { }
+  catch (error) {
+    if (error instanceof UnpublishedWorkspaceError) retainWorkspace(workspace.id, error.message, { subjectId: item.id });
+  }
 }
 
 async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observation: ItemObservation, pr: GithubPullRequest, mainSha: string, routes: Routes): Promise<PrMaintenanceFacts> {
@@ -115,6 +118,31 @@ async function reconcileFailedLabels(ctx: SyncContext, item: Item) {
   }, { subjectId: item.id }));
 }
 
+function conflictMergePreservesLabel(subjectId: string, pr: GithubPullRequest, latestRun: Run, categories: ReturnType<typeof categoriesFor>) {
+  const previousHead = latestRun.context?.headSha;
+  if (!previousHead || !latestRun.context?.labeling?.key) return false;
+  if (pr.head.sha === previousHead) return false;
+  if (itemLabelKey({ ...pr, head: { ...pr.head, sha: previousHead } }, categories) !== latestRun.context.labeling.key) return false;
+  const conflictActions = manifests.filter((manifest) => manifest.trigger.kind === "pr_conflicts").map((manifest) => manifest.name);
+  if (!conflictActions.length) return false;
+  const merges = new Map<string, string>();
+  const rows = db.select({
+    headSha: sql<string | null>`json_extract(${runs.context}, '$.headSha')`,
+    publishedCommitSha: sql<string | null>`json_extract(${runs.publication}, '$.publishedCommitSha')`,
+  }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
+    .where(and(eq(tasks.subjectId, subjectId), inArray(tasks.action, conflictActions), eq(tasks.status, "completed"), isNull(runs.error))).all();
+  for (const { headSha, publishedCommitSha } of rows) {
+    if (publishedCommitSha && headSha) merges.set(publishedCommitSha, headSha);
+  }
+  let current: string | undefined = pr.head.sha;
+  const visited = new Set<string>();
+  while (current && current !== previousHead && !visited.has(current)) {
+    visited.add(current);
+    current = merges.get(current);
+  }
+  return current === previousHead;
+}
+
 function routeItemLabels(item: Item) {
   let queued = 0;
   for (const action of matchingActions(signalFor(item, item.payload.user?.login, "item_labels"))) {
@@ -126,7 +154,10 @@ function routeItemLabels(item: Item) {
     }
     const triggerKey = itemLabelKey(item.payload, categories);
     const latest = latestTask(item.id, action);
-    const evaluatedKey = latest && latest.status !== "queued" ? latestRunOfTask(latest.id)?.context?.labeling?.key : undefined;
+    const latestRun = latest && latest.status !== "queued" ? latestRunOfTask(latest.id) : undefined;
+    const evaluatedKey = latestRun?.context?.labeling?.key;
+    if ("head" in item.payload && latest?.status === "completed" && latestRun && !latestRun.error
+      && conflictMergePreservesLabel(item.id, item.payload, latestRun, categories)) continue;
     queued += applyDecisions(item.id, planKeyedTask(latest, action, latest ? "Item or label policy changed" : "Initial item labeling (backfill)", { source: "github_items", kind: "item_labels", triggerKey }, evaluatedKey));
   }
   return queued;
@@ -136,16 +167,18 @@ async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObse
   const action = routes.review;
   if (!action) return { added: 0 };
   const latest = latestTask(item.id, action);
+  const conflictTask = latestOf(item.id, routes.conflicts);
+  const conflictPending = conflictTask?.status === "queued" || conflictTask?.status === "running";
   const reviews = prReviewHistory(item.id);
   const attempt = reviews.find(({ task }) => task.id === latest?.id)?.run;
   const state = await resolvePrReview(reviews, observation, mainSha);
-  let added = applyDecisions(item.id, planReview({ kind: "pr", action, state, latest, attempt, revision: observation.revision, mainSha }));
+  let added = applyDecisions(item.id, planReview({ kind: "pr", action, state, latest, attempt, revision: observation.revision, mainSha, conflictPending }));
   const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
   const repairAction = routes.repairFor(state.kind === "current" ? state.assessment.result.grade : undefined);
   const limit = repairAction === undefined ? undefined : manifestOf(repairAction).maxSelfRepairs;
   const repair = planSelfRepair({
     repairAction, repairActions: routes.repairs, state, feedbackTask: latestOf(item.id, routes.feedback),
-    reviewTask: latest, repairTask: latestOf(item.id, repairAction), count, limit,
+    conflictTask, reviewTask: latest, repairTask: latestOf(item.id, repairAction), count, limit,
   });
   if (repair.limited && state.kind === "current" && !limitLogged.has(state.assessment.originId)) {
     limitLogged.add(state.assessment.originId);

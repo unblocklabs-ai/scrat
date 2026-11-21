@@ -45,6 +45,12 @@ export class WorkflowPushRejected extends Error {
   }
 }
 
+export class UnpublishedWorkspaceError extends Error {
+  constructor() {
+    super("Workspace has unpublished commits; retain it for recovery");
+  }
+}
+
 export function errorCode(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;
 }

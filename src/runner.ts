@@ -113,24 +113,23 @@ type ActiveRun = {
   action: string;
   mode: ReturnType<typeof manifestOf>["mode"];
   manual: boolean;
-  revision?: string;
-  supersede: (reason: string) => void;
+  target?: string;
+  supersede: (reason: string) => boolean;
 };
 const activeRuns = new Map<string, ActiveRun>();
 
 export function supersedeRunningReviews(
   subjectId: string,
   reason: string,
-  options?: { action?: string; keepManual?: boolean; unlessRevision?: string },
+  options?: { action?: string; keepManual?: boolean; unlessTarget?: string },
 ) {
   let count = 0;
   for (const active of activeRuns.values()) {
     if (active.subjectId !== subjectId || active.mode !== "review") continue;
     if (options?.action && active.action !== options.action) continue;
     if (options?.keepManual && active.manual) continue;
-    if (options?.unlessRevision && active.revision === options.unlessRevision) continue;
-    active.supersede(reason);
-    count++;
+    if (options?.unlessTarget && (!active.target || active.target === options.unlessTarget)) continue;
+    if (active.supersede(reason)) count++;
   }
   return count;
 }
@@ -148,10 +147,10 @@ export async function runNextTask(stop?: AbortSignal) {
     action: task.action,
     mode: manifest.mode,
     manual: isManual(trigger),
-    revision: trigger.kind === "item_changed" ? trigger.revision : undefined,
     supersede(reason) {
-      if (superseder.signal.aborted || getRun(run.id)?.stage === "publishing") return;
+      if (superseder.signal.aborted || getRun(run.id)?.stage === "publishing") return false;
       superseder.abort(new SupersededError(reason));
+      return true;
     },
   };
   activeRuns.set(run.id, active);
@@ -161,7 +160,7 @@ export async function runNextTask(stop?: AbortSignal) {
   const ctx: Ctx = { task, run, subject, item, references, operation, manifest, repositoryPath: getRepositoryPath(), stop: runStop, cleanup };
   try {
     const observed = await connect(ctx);
-    if (observed) active.revision = observed.observation.revision;
+    if (observed?.pullRequest) active.target = `${observed.pullRequest.head.sha}@${observed.observation.baseBranch}`;
     if (observed && resumingDeferred) await restartStaleDeferredPublication(ctx, observed);
     if (observed && item?.kind === "issue" && ctx.manifest.publish.includes("pull_request") && run.stage !== "publishing") {
       const branch = item.workspaceId ? getWorkspace(item.workspaceId)?.branch : undefined;
@@ -188,9 +187,12 @@ export async function runNextTask(stop?: AbortSignal) {
     operation.complete({ heapUsedMb: heapUsed() });
     return finished;
   } catch (error) {
-    if (error instanceof ImplementationEnded || error instanceof SupersededError) {
-      const ended = finishRun(run.id, { status: "cancelled", error });
-      operation.complete({ cancelled: error.message });
+    const cancelledError = error instanceof ImplementationEnded || error instanceof SupersededError ? error
+      : superseder.signal.aborted && superseder.signal.reason instanceof SupersededError && getRun(run.id)?.stage !== "publishing"
+        ? superseder.signal.reason : undefined;
+    if (cancelledError) {
+      const ended = finishRun(run.id, { status: "cancelled", error: cancelledError });
+      operation.complete({ cancelled: cancelledError.message });
       return ended;
     }
     if (error instanceof CompetingImplementation) {

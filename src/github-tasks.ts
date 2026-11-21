@@ -152,6 +152,7 @@ function routeItemLabels(item: Item) {
     const categories = settings.enabled === false ? [] : categoriesFor(settings, item.kind);
     if (!categories.length) {
       cancelPendingTasks(item.id, "Item labeling disabled for this kind", action);
+      supersedeRunningReviews(item.id, "Item labeling disabled for this kind", { action });
       continue;
     }
     const triggerKey = itemLabelKey(item.payload, categories);
@@ -178,7 +179,9 @@ async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObse
   if (conflictPending) supersedeRunningReviews(item.id, "PR branch refresh is pending", { action, keepManual: true });
   else if (state.kind === "blocked") supersedeRunningReviews(item.id, "PR conflicts with its base branch; waiting for a new head", { action, keepManual: true });
   else if (state.kind === "current") supersedeRunningReviews(item.id, "No observed relevant changes since the authoritative review", { action, keepManual: true });
-  else supersedeRunningReviews(item.id, "Newer PR revision observed", { action, keepManual: true, unlessRevision: observation.revision });
+  else if ("head" in observation.item) supersedeRunningReviews(item.id, "Newer PR head or base observed", {
+    action, keepManual: true, unlessTarget: `${observation.item.head.sha}@${observation.baseBranch}`,
+  });
   const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
   const repairAction = routes.repairFor(state.kind === "current" ? state.assessment.result.grade : undefined);
   const limit = repairAction === undefined ? undefined : manifestOf(repairAction).maxSelfRepairs;

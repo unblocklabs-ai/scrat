@@ -1626,25 +1626,29 @@ export const scenarios = {
     const resumedModels = f.requests.slice(beforeInterruptedReuse).filter((r) => !r.consolidating).map((r) => r.request.model);
     assert.ok(resumedModels.length > 0 && resumedModels.every((model) => model === resumedPanel.reviewers[1].model), "interrupted panel review reuses completed reviewer without retryOfRunId");
     assert.ok(all(s.events).some((event) => event.type === "run.reviewers_reused" && event.runId === resumedPanel.id && event.data.fromRunId === interruptedClaim.run.id));
-    // Active in-flight PR review supersession: a new PR head aborts the running review immediately without a failure notice, while an unrelated main push does not.
+    // Active in-flight PR review supersession: a new PR head aborts the running review immediately without a failure notice, while unrelated main pushes and comment-only edits do not.
     pr7.head.sha = pushFile(pr7.head.ref, "src/supersede-1.ts", "export const s = 1;\n");
     await route();
     f.reset(207, "stall");
-    let triggered = false;
+    let triggered = false, triggerPromise;
     f.onModel = (context) => {
       if (triggered || context.item?.number !== 207) return;
       triggered = true;
-      void (async () => {
+      triggerPromise = (async () => {
         changeMain("notes.md", "unrelated main move during active review\n");
         await route();
-        assert.equal(f.row(s.tasks, all(s.tasks).find((t) => t.status === "running").id).status, "running", "unrelated main push does not supersede an in-flight PR review");
+        f.comments.set(207, [...(f.comments.get(207) ?? []), humanComment(207, 9901, "Sticky CI status update", "2026-11-21T01:00:00Z")]);
+        await route();
         pr7.head.sha = pushFile(pr7.head.ref, "src/supersede-2.ts", "export const s = 2;\n");
         await route();
       })();
     };
     const commentsBeforeSupersede = f.written("comment", (w) => w.number === 207).length;
     const superseded = await run(); f.onModel = undefined;
+    await triggerPromise;
+    assert.equal(superseded.error?.name, "SupersededError");
     assert.equal(superseded.error?.code, "RUN_SUPERSEDED");
+    assert.equal(superseded.error?.message, "Newer PR head or base observed", "only the PR head change—not main drift or comments—superseded the review");
     assert.equal(f.row(s.tasks, superseded.taskId).status, "cancelled");
     assert.equal(f.written("comment", (w) => w.number === 207).length, commentsBeforeSupersede, "superseded review posts no failure notice");
     f.reset(207, "normal");
@@ -4326,7 +4330,7 @@ fi
         fill: async (selector, value) => { state.typed.push(["fill", selector, value]); },
         selectOption: async (selector, value) => { state.typed.push(["select", selector, value]); },
       };
-      const browser = { async newContext(options) { state.contextOptions = options; state.contexts++; return { route: async (_pattern, handler) => { state.handler = handler; }, newPage: async () => page, close: async () => {} }; }, close: async () => { state.closed = true; } };
+      const browser = { async newContext(options) { state.contextOptions = options; state.viewport = undefined; state.contexts++; return { route: async (_pattern, handler) => { state.handler = handler; }, newPage: async () => page, close: async () => {} }; }, close: async () => { state.closed = true; } };
       return { state, page, launch: async (args) => { state.args = args; state.launches++; return browser; } };
     };
     const warnings = [], settings = { navigationHosts: ["shop.example.test"], resourceHosts: ["cdn.example.test", "api.example.test"] };
@@ -4433,22 +4437,26 @@ fi
     assert.deepEqual({ closed: unrestricted.state.closed, contexts: unrestricted.state.contexts }, { closed: false, contexts: 1 });
     await act(unrestricted, { action: "goto", url: "https://anywhere.example.net/q" });
     assert.deepEqual({ launches: unrestricted.state.launches, contexts: unrestricted.state.contexts, viewport: unrestricted.state.contextOptions.viewport }, { launches: 1, contexts: 2, viewport: { width: 390, height: 844 } }, "a reset opens a fresh context in the same browser at the viewport last set");
-    // Issue #223: viewport passed to goto applies before loading (both fresh context and existing session) and persists to screenshot().
+    // Issue #223: viewport passed to goto applies before loading (both fresh context and existing session) and persists only to the immediate pre-interaction screenshot.
     const preSized = make();
     await act(preSized, { action: "goto", url: "https://shop.example.test/m", viewport: "mobile" });
     assert.deepEqual(preSized.state.contextOptions.viewport, { width: 390, height: 844 }, "first goto with viewport opens context at that size");
     assert.deepEqual(preSized.state.visitViewports, [{ width: 390, height: 844 }]);
     await assert.rejects(act(preSized, { action: "goto", url: "https://evil.example.net/", viewport: "desktop" }), /Refused/);
     const inheritedMobile = JSON.parse(textOf(await act(preSized, { action: "screenshot", fullPage: true })));
-    assert.equal(inheritedMobile.viewport, "mobile", "screenshot inherits viewport set by goto and refused goto does not mutate it");
+    assert.equal(inheritedMobile.viewport, "mobile", "first screenshot after goto inherits its viewport and refused goto does not mutate it");
     assert.equal(inheritedMobile.path, resolve("ctx/screenshot-mobile-1.png"));
+    const secondShot = JSON.parse(textOf(await act(preSized, { action: "screenshot" })));
+    assert.equal(secondShot.viewport, null, "later ad-hoc screenshots without viewport do not pollute named baselines");
     await act(preSized, { action: "goto", url: "https://shop.example.test/d", viewport: "desktop" });
     assert.deepEqual(preSized.state.visitViewports.at(-1), { width: 1280, height: 800 }, "goto on existing session resizes before loading");
-    const inheritedDesktop = JSON.parse(textOf(await act(preSized, { action: "screenshot" })));
-    assert.equal(inheritedDesktop.viewport, "desktop");
+    await act(preSized, { action: "click", selector: "#checkout" });
+    const postInteractionShot = JSON.parse(textOf(await act(preSized, { action: "screenshot" })));
+    assert.equal(postInteractionShot.viewport, null, "post-interaction screenshot without viewport stays null");
     await act(preSized, { action: "reset" });
     await act(preSized, { action: "goto", url: "https://shop.example.test/m2", viewport: "mobile" });
     assert.deepEqual(preSized.state.contextOptions.viewport, { width: 390, height: 844 }, "goto with viewport after reset opens fresh context at that size");
+    assert.deepEqual(preSized.state.visitViewports.at(-1), { width: 390, height: 844 });
     await preSized.close();
     const named = make({ prefix: "reviewer-2" });
     assert.equal(JSON.parse(textOf(await act(named, { action: "screenshot" }))).path, resolve("ctx/screenshot-reviewer-2-current-1.png"), "each reviewer's screenshots are named apart");

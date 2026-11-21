@@ -186,7 +186,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
 }) {
   const { navigationHosts } = settings, resourceHosts = settings.resourceHosts === "any" || navigationHosts === "any" ? "any" : [...settings.resourceHosts, ...navigationHosts], viewports: Record<string, { width: number; height: number }> = config.tools.browser.viewports, viewportNames = Object.keys(viewports);
   if (!Object.hasOwn(viewports, config.tools.browser.defaultViewport)) throw new Error(`tools.browser.defaultViewport must be one of: ${viewportNames.join(", ")}`);
-  let blockedNavigation: string | undefined, size = viewports[config.tools.browser.defaultViewport], activeViewport: string | null = null;
+  let blockedNavigation: string | undefined, size = viewports[config.tools.browser.defaultViewport], pendingGotoViewport: string | null = null;
   const secret = binding && bindingSecret(binding);
   let browser: BrowserLike | undefined, closed = false, release: (() => void) | undefined, session: { context: ContextLike; page: PageLike } | undefined, startedAt: number | undefined, halted: string | undefined, steps = 0, shots = 0;
   const answered = new Map<string, Promise<boolean>>();
@@ -289,20 +289,28 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
         if (action === "reset") {
           const dropped = session;
           session = undefined;
+          pendingGotoViewport = null;
           await dropped?.context.close().catch(() => undefined);
           operation.complete();
           return text(JSON.stringify({ reset: true }));
         }
         const target = action === "goto" ? allowedUrl(raw ?? "", navigationHosts) : undefined;
         if (target && navigationHosts === "any" && !await resolvesPublicly(target.hostname)) throw new Error(`Refused: ${target.hostname} does not resolve to a public address`);
-        const hadSession = session !== undefined;
-        if (target && viewport) {
-          size = viewports[viewport];
-          activeViewport = viewport;
+        const hadSession = session !== undefined, previousSize = size;
+        if (target && viewport && !hadSession) size = viewports[viewport];
+        let page: PageLike;
+        try { ({ page } = await open()); }
+        catch (error) {
+          if (target && viewport && !hadSession) size = previousSize;
+          throw error;
         }
-        const { page } = await open(), navigation = { timeout: config.tools.browser.navigationSeconds * 1000 }, timeout = { timeout: config.tools.browser.actionSeconds * 1000 };
+        const navigation = { timeout: config.tools.browser.navigationSeconds * 1000 }, timeout = { timeout: config.tools.browser.actionSeconds * 1000 };
         if (target) {
-          if (viewport && hadSession) await page.setViewportSize(size);
+          if (viewport && hadSession) {
+            await page.setViewportSize(viewports[viewport]);
+            size = viewports[viewport];
+          }
+          pendingGotoViewport = viewport ?? null;
           const response = await page.goto(target.href, { waitUntil: "load", ...navigation });
           operation.complete({ status: response?.status() });
           return text(JSON.stringify({ url: redactSecrets(page.url()), status: response?.status() ?? null, title: redactSecrets(await page.title()), ...await servedTheme(page, timeout) }), { host: target.hostname });
@@ -313,6 +321,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
           return text(content);
         }
         if (interaction && selector) {
+          pendingGotoViewport = null;
           const matched = await page.locator(selector).count(), before = page.url(), popups: unknown[] = [];
           const onPopup = (popup: { close(): Promise<void> }) => { popups.push(popup); void popup.close().catch(() => undefined); };
           blockedNavigation = undefined;
@@ -332,11 +341,11 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
         }
         if (!contextDir) throw new Error("Refused: no context directory is available for screenshots");
         if (viewport) {
+          await page.setViewportSize(viewports[viewport]);
           size = viewports[viewport];
-          activeViewport = viewport;
-          await page.setViewportSize(size);
         }
-        const shotViewport = viewport ?? activeViewport;
+        const shotViewport = viewport ?? pendingGotoViewport;
+        pendingGotoViewport = null;
         const path = join(contextDir, `screenshot-${prefix ? `${prefix}-` : ""}${shotViewport ?? "current"}-${++shots}.png`);
         await page.screenshot({ path, fullPage, ...timeout });
         operation.complete();

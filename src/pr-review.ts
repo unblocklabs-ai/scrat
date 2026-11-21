@@ -11,10 +11,11 @@ export async function reviewPullRequest(options: PiOptions & { contextDir: strin
   const panel = run.reviewers.length > 1;
   const review = async (index: number, context: string, requireGrade?: boolean) => {
     const reviewer = run.reviewers[index];
-    if (panel && reviewer.result?.outcome === "complete" && Boolean(reviewer.result.storefront) === Boolean(storefront)) return reviewer.result;
+    if (panel && !reviewer.error && reviewer.result?.outcome === "complete" && Boolean(reviewer.result.storefront) === Boolean(storefront)) return reviewer.result;
+    if (panel && (reviewer.result || reviewer.error)) saveReviewer(run.id, index, { result: undefined, error: undefined });
     try {
       const result = await executePi({ ...options, run: { ...run, ...reviewer }, log: log.child({ reviewer: index, model: reviewer.model }) }, { context, reviewerIndex: index, requireGrade });
-      saveReviewer(run.id, index, { result });
+      saveReviewer(run.id, index, { result, error: undefined });
       if (panel && result.outcome !== "complete") throw new Error(`Reviewer returned ${result.outcome}: ${result.text}`);
       return result;
     } catch (error) {

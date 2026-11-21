@@ -30,6 +30,11 @@ export const branchConflictCode = "BRANCH_CONFLICT";
 export const competingImplementationCode = "COMPETING_IMPLEMENTATION";
 export class ImplementationEnded extends Error {}
 
+export class SupersededError extends Error {
+  override readonly name = "SupersededError";
+  readonly code = "RUN_SUPERSEDED";
+}
+
 export class CompetingImplementation extends Error {
   readonly code = competingImplementationCode;
   readonly pullRequestNumber: number;

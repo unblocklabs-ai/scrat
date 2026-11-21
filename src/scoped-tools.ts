@@ -186,7 +186,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
 }) {
   const { navigationHosts } = settings, resourceHosts = settings.resourceHosts === "any" || navigationHosts === "any" ? "any" : [...settings.resourceHosts, ...navigationHosts], viewports: Record<string, { width: number; height: number }> = config.tools.browser.viewports, viewportNames = Object.keys(viewports);
   if (!Object.hasOwn(viewports, config.tools.browser.defaultViewport)) throw new Error(`tools.browser.defaultViewport must be one of: ${viewportNames.join(", ")}`);
-  let blockedNavigation: string | undefined, size = viewports[config.tools.browser.defaultViewport];
+  let blockedNavigation: string | undefined, size = viewports[config.tools.browser.defaultViewport], pendingGotoViewport: string | null = null;
   const secret = binding && bindingSecret(binding);
   let browser: BrowserLike | undefined, closed = false, release: (() => void) | undefined, session: { context: ContextLike; page: PageLike } | undefined, startedAt: number | undefined, halted: string | undefined, steps = 0, shots = 0;
   const answered = new Map<string, Promise<boolean>>();
@@ -260,7 +260,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
     description: [
       navigationHosts === "any" ? "Drive a headless browser on public https sites. IP addresses, local host names, explicit ports, URLs with credentials and names that resolve to private addresses are blocked."
         : `Drive a headless browser. Pages may be visited on: ${navigationHosts.join(", ")}. Other hosts, and page resources outside the allowlist, are blocked.`,
-      `action=goto: open \`url\` and return the final URL, status, title and the page's Shopify.theme id when it declares one. action=text: the visible text of the page (capped at ${config.tools.readBytes.default} characters).`,
+      `action=goto: open \`url\` (optionally with \`viewport\`, one of: ${viewportNames.join(", ")}, applied before the page loads and kept for later actions) and return the final URL, status, title and the page's Shopify.theme id when it declares one. action=text: the visible text of the page (capped at ${config.tools.readBytes.default} characters).`,
       `action=screenshot: save a PNG and return its path, the final URL and the page's Shopify.theme id when it declares one. \`viewport\` is one of: ${viewportNames.join(", ")}; \`fullPage\` captures the whole page.`,
       "action=reset: drop the page with its cookies and storage; the next action opens a fresh one in the same browser at the current viewport.",
       "action=click: click the element matching `selector`. action=fill: put `text` in the field matching `selector`. action=select: choose the option `text` in the select matching `selector`. They return the resulting URL, title and Shopify.theme id, plus how many elements `selector` matched before the action when the page did not navigate, `popupClosed: true` when a new window opened (it is closed), and `blocked: <url>` when a navigation was refused because its host is not allowed. The viewport stays as last set.",
@@ -289,15 +289,30 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
         if (action === "reset") {
           const dropped = session;
           session = undefined;
+          pendingGotoViewport = null;
           await dropped?.context.close().catch(() => undefined);
           operation.complete();
           return text(JSON.stringify({ reset: true }));
         }
         const target = action === "goto" ? allowedUrl(raw ?? "", navigationHosts) : undefined;
         if (target && navigationHosts === "any" && !await resolvesPublicly(target.hostname)) throw new Error(`Refused: ${target.hostname} does not resolve to a public address`);
-        const { page } = await open(), navigation = { timeout: config.tools.browser.navigationSeconds * 1000 }, timeout = { timeout: config.tools.browser.actionSeconds * 1000 };
+        const hadSession = session !== undefined, previousSize = size;
+        if (target && viewport && !hadSession) size = viewports[viewport];
+        let page: PageLike;
+        try { ({ page } = await open()); }
+        catch (error) {
+          if (target && viewport && !hadSession) size = previousSize;
+          throw error;
+        }
+        const navigation = { timeout: config.tools.browser.navigationSeconds * 1000 }, timeout = { timeout: config.tools.browser.actionSeconds * 1000 };
         if (target) {
+          if (viewport && hadSession) {
+            await page.setViewportSize(viewports[viewport]);
+            size = viewports[viewport];
+          }
+          pendingGotoViewport = null;
           const response = await page.goto(target.href, { waitUntil: "load", ...navigation });
+          pendingGotoViewport = viewport ?? null;
           operation.complete({ status: response?.status() });
           return text(JSON.stringify({ url: redactSecrets(page.url()), status: response?.status() ?? null, title: redactSecrets(await page.title()), ...await servedTheme(page, timeout) }), { host: target.hostname });
         }
@@ -307,6 +322,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
           return text(content);
         }
         if (interaction && selector) {
+          pendingGotoViewport = null;
           const matched = await page.locator(selector).count(), before = page.url(), popups: unknown[] = [];
           const onPopup = (popup: { close(): Promise<void> }) => { popups.push(popup); void popup.close().catch(() => undefined); };
           blockedNavigation = undefined;
@@ -326,13 +342,15 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
         }
         if (!contextDir) throw new Error("Refused: no context directory is available for screenshots");
         if (viewport) {
+          await page.setViewportSize(viewports[viewport]);
           size = viewports[viewport];
-          await page.setViewportSize(size);
         }
-        const path = join(contextDir, `screenshot-${prefix ? `${prefix}-` : ""}${viewport ?? "current"}-${++shots}.png`);
+        const shotViewport = viewport ?? pendingGotoViewport;
+        pendingGotoViewport = null;
+        const path = join(contextDir, `screenshot-${prefix ? `${prefix}-` : ""}${shotViewport ?? "current"}-${++shots}.png`);
         await page.screenshot({ path, fullPage, ...timeout });
         operation.complete();
-        const shot = { path, viewport: viewport ?? null, url: redactSecrets(page.url()) };
+        const shot = { path, viewport: shotViewport, url: redactSecrets(page.url()) };
         await appendFile(join(contextDir, "screenshots.jsonl"), JSON.stringify(shot) + "\n");
         return text(JSON.stringify({ ...shot, ...await servedTheme(page, timeout) }));
       });

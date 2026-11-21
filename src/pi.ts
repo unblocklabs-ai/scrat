@@ -15,7 +15,7 @@ import type { Manifest, ToolName } from "./manifests.ts";
 import { createAgentTools } from "./tools.ts";
 import type { BrowserScope } from "./scoped-tools.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
-import { redactSecrets, transientInferenceCode } from "./errors.ts";
+import { redactSecrets, SupersededError, transientInferenceCode } from "./errors.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 
 const withStorefront = (skill: string, shown: boolean) => skill.replace(/^\{\{#storefront\}\}\n([\s\S]*?)^\{\{\/storefront\}\}\n/gm, (_, body: string) => shown ? body : "");
@@ -127,14 +127,19 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
       }
     });
     const prompt = async (text: string) => {
+      if (stop?.aborted && stop.reason instanceof SupersededError) throw stop.reason;
       const started = performance.now();
-      let timedOut = false, drained = false, drainTimer: NodeJS.Timeout | undefined;
+      let timedOut = false, drained = false, superseded = false, drainTimer: NodeJS.Timeout | undefined;
       const timer = setTimeout(() => { timedOut = true; void session.abort(); }, config.harness.agentTimeoutSeconds * 1000);
-      const onStop = () => { drainTimer = setTimeout(() => { drained = true; void session.abort(); }, config.harness.drainTimeoutSeconds * 1000); };
+      const onStop = () => {
+        if (stop?.reason instanceof SupersededError) { superseded = true; void session.abort(); return; }
+        drainTimer = setTimeout(() => { drained = true; void session.abort(); }, config.harness.drainTimeoutSeconds * 1000);
+      };
       if (stop?.aborted) onStop(); else stop?.addEventListener("abort", onStop, { once: true });
       try { await session.prompt(text, { expandPromptTemplates: false }); }
-      catch (error) { if (!timedOut && !drained) throw error; }
+      catch (error) { if (!timedOut && !drained && !superseded) throw error; }
       finally { clearTimeout(timer); clearTimeout(drainTimer); stop?.removeEventListener("abort", onStop); }
+      if (superseded) throw stop!.reason;
       if (timedOut) throw Object.assign(new Error(`Agent turn exceeded ${config.harness.agentTimeoutSeconds} seconds and was aborted after ${Math.round((performance.now() - started) / 1000)} seconds`), { code: "AGENT_TIMEOUT" });
       if (drained) throw new InterruptedError(`Agent turn was still running ${config.harness.drainTimeoutSeconds} seconds after the worker was told to stop and was aborted`);
     };

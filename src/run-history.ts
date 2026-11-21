@@ -85,3 +85,8 @@ export const latestSessionRun = (workspaceId: string, excludeRunId: string) =>
   db.select().from(runs).where(and(
     eq(runs.workspaceId, workspaceId), ne(runs.id, excludeRunId), isNotNull(runs.piSessionFile),
   )).orderBy(desc(runs.sequence)).limit(1).get();
+
+export const latestPriorRunOfTask = (taskId: string, excludeRunId: string) =>
+  db.select().from(runs).where(and(
+    eq(runs.taskId, taskId), ne(runs.id, excludeRunId), isNotNull(runs.finishedAt),
+  )).orderBy(desc(runs.sequence)).limit(1).get();

@@ -1,4 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
 import { evaluateContext, readDiffScope } from "./agent-input.ts";
 import { commitInput, describeCommit } from "./commit-review.ts";
 import { describeWindow } from "./window-review.ts";
@@ -9,9 +8,9 @@ import { bestEffort } from "./logging.ts";
 import { createMergeCommit, gitList, prepareTarget } from "./git.ts";
 import { currentPrReview } from "./pr-assessment.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
-import { getRun, latestCompletedRun, updateRun } from "./run-history.ts";
+import { getRun, latestCompletedRun, latestPriorRunOfTask, updateRun } from "./run-history.ts";
 import { type AgentResult, assertComplete, hasReviewCheckpoint } from "./results.ts";
-import type { Run, Workspace } from "./schema.ts";
+import type { Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { isBaseOnly, parseTriggerInput } from "./triggers.ts";
 import { createWorkspace, removeWorkspace } from "./workspaces.ts";
@@ -39,14 +38,26 @@ async function settleReviewPlan(ctx: Ctx, { item, observation, mainSha }: Observ
   return false;
 }
 
-function reuseReviewers(ctx: Ctx, mainSha: string, headSha: string, revision: string) {
-  const { run, references } = ctx, prior = run.retryOfRunId ? getRun(run.retryOfRunId) : undefined;
-  const models = ({ reviewers }: Run) => reviewers.map(({ provider, model }) => `${provider}/${model}`);
-  if (!prior || run.reviewers.length < 2 || prior.mainSha !== mainSha || prior.headSha !== headSha || prior.context?.revision !== revision
-    || !isDeepStrictEqual(models(prior), models(run)) || prior.reviewers.some(({ result }) => result?.outcome !== "complete")) return;
-  updateRun(run.id, { reviewers: prior.reviewers });
+function reuseReviewers(ctx: Ctx, mainSha: string, headSha: string, revision: string, storefront: boolean) {
+  const { run, references } = ctx;
+  const prior = run.retryOfRunId ? getRun(run.retryOfRunId) : latestPriorRunOfTask(run.taskId, run.id);
+  if (!prior?.error || run.reviewers.length < 2 || prior.mainSha !== mainSha || prior.headSha !== headSha
+    || prior.context?.revision !== revision || prior.reviewers.length !== run.reviewers.length) return run;
+  let reused = 0;
+  const merged = run.reviewers.map((reviewer, index) => {
+    const saved = prior.reviewers[index];
+    if (saved?.provider === reviewer.provider && saved.model === reviewer.model && !saved.error
+      && saved.result?.outcome === "complete" && Boolean(saved.result.storefront) === storefront) {
+      reused++;
+      return { ...saved, error: undefined };
+    }
+    return reviewer;
+  });
+  if (!reused) return run;
+  updateRun(run.id, { reviewers: merged });
   ctx.run = getRun(run.id)!;
   recordEvent({ ...references, type: "run.reviewers_reused", data: { fromRunId: prior.id } });
+  return ctx.run;
 }
 
 async function retainedScope({ run, task, repositoryPath }: Ctx, { item, observation, mainSha, pullRequest }: Observed, evaluated: ReturnType<typeof evaluateContext>, headSha: string, diffPaths: string[], paths: string[]) {
@@ -102,6 +113,7 @@ async function checkStorefront(ctx: Ctx, mainSha: string, result: AgentResult, c
   const { id } = ctx.run;
   if (reviewsStorefront(ctx)) updateRun(id, { result: await (await import("./storefront-main.ts")).reviewStorefront(ctx, await change(), result) });
   else if (auditsStorefront(ctx)) updateRun(id, { result: await (await import("./storefront-main.ts")).auditStorefront(ctx, mainSha, result) });
+  stopBefore(ctx.stop, "publication");
   updateRun(id, { stage: "publishing" });
 }
 
@@ -133,11 +145,13 @@ export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   stopBefore(stop, "the agent");
   const changeContext = manifest.context === "change";
   const baseOnly = observed ? await settleReviewPlan(ctx, observed) : false;
-  if (manifest.agent === "panel") reuseReviewers(ctx, mainSha, headSha, evaluated.revision);
   updateRun(run.id, { stage: "agent" });
   const { result } = await runAgent(ctx, {
     environment, baseSha: changeContext ? review.diffBaseSha : undefined,
-    panel: manifest.agent === "panel" ? { baseSha: review.diffBaseSha, requireGrade: !changeContext } : undefined,
+    panel: manifest.agent === "panel" ? {
+      baseSha: review.diffBaseSha, requireGrade: !changeContext,
+      beforeReview: (storefront) => reuseReviewers(ctx, mainSha, headSha, evaluated.revision, storefront),
+    } : undefined,
     input: { workspace: review.workspace, evaluated, diffBaseSha: review.diffBaseSha, diffPaths, mainSha: review.mainSha, headSha: review.headSha, baseRef: review.mainSha, mergeInProgress: false, baseOnly },
   });
   if (observed) result.paths = await retainedScope(ctx, observed, evaluated, review.headSha, diffPaths, result.paths);

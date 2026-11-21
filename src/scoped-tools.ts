@@ -310,8 +310,9 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
             await page.setViewportSize(viewports[viewport]);
             size = viewports[viewport];
           }
-          pendingGotoViewport = viewport ?? null;
+          pendingGotoViewport = null;
           const response = await page.goto(target.href, { waitUntil: "load", ...navigation });
+          pendingGotoViewport = viewport ?? null;
           operation.complete({ status: response?.status() });
           return text(JSON.stringify({ url: redactSecrets(page.url()), status: response?.status() ?? null, title: redactSecrets(await page.title()), ...await servedTheme(page, timeout) }), { host: target.hostname });
         }

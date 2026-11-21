@@ -14,7 +14,7 @@ function selectAssessment(history: History) {
   let selected: (History[number] & { result: NonNullable<History[number]["run"]["result"]>; originSequence: number; originId: string }) | undefined;
   for (const entry of history) {
     const { run } = entry;
-    if (entry.task.status === "cancelled" || !hasPublicationSnapshot(run) || run.result.outcome !== "complete" || run.publication.status === "not_needed") continue;
+    if (run.error?.code === "RUN_SUPERSEDED" || !hasPublicationSnapshot(run) || run.result.outcome !== "complete" || run.publication.status === "not_needed") continue;
     let origin = entry;
     const visited = new Set<string>();
     while (origin.run.inferenceFromRunId || origin.run.retryOfRunId) {

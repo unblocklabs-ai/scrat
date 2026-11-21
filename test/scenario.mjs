@@ -1630,25 +1630,31 @@ export const scenarios = {
     pr7.head.sha = pushFile(pr7.head.ref, "src/supersede-1.ts", "export const s = 1;\n");
     await route();
     f.reset(207, "stall");
-    let triggered = false, triggerPromise;
+    let triggered = false, phase = "initial", settledPhase, triggerPromise;
     f.onModel = (context) => {
       if (triggered || context.item?.number !== 207) return;
       triggered = true;
       triggerPromise = (async () => {
+        phase = "main";
         changeMain("notes.md", "unrelated main move during active review\n");
         await route();
+        await new Promise((done) => setTimeout(done, 50));
+        phase = "comment";
         f.comments.set(207, [...(f.comments.get(207) ?? []), humanComment(207, 9901, "Sticky CI status update", "2026-11-21T01:00:00Z")]);
         await route();
+        await new Promise((done) => setTimeout(done, 50));
+        phase = "head";
         pr7.head.sha = pushFile(pr7.head.ref, "src/supersede-2.ts", "export const s = 2;\n");
         await route();
       })();
     };
     const commentsBeforeSupersede = f.written("comment", (w) => w.number === 207).length;
-    const superseded = await run(); f.onModel = undefined;
+    const superseded = await run().then((result) => { settledPhase = phase; return result; }); f.onModel = undefined;
     await triggerPromise;
+    assert.equal(settledPhase, "head", "only the PR head change—not main drift or comments—superseded the review");
     assert.equal(superseded.error?.name, "SupersededError");
     assert.equal(superseded.error?.code, "RUN_SUPERSEDED");
-    assert.equal(superseded.error?.message, "Newer PR head or base observed", "only the PR head change—not main drift or comments—superseded the review");
+    assert.equal(superseded.error?.message, "Newer PR head or base observed");
     assert.equal(f.row(s.tasks, superseded.taskId).status, "cancelled");
     assert.equal(f.written("comment", (w) => w.number === 207).length, commentsBeforeSupersede, "superseded review posts no failure notice");
     f.reset(207, "normal");

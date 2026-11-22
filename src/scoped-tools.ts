@@ -140,7 +140,7 @@ type PageLike = {
   on(event: "popup", listener: (popup: { close(): Promise<void> }) => void): unknown;
   off(event: "popup", listener: (popup: { close(): Promise<void> }) => void): unknown;
   setViewportSize(size: { width: number; height: number }): Promise<void>;
-  locator(selector: string): { count(): Promise<number> };
+  locator(selector: string): { count(): Promise<number>; first?(): { isVisible(): Promise<boolean> } };
   click(selector: string, options: { timeout: number }): Promise<void>;
   fill(selector: string, value: string, options: { timeout: number }): Promise<void>;
   selectOption(selector: string, value: string, options: { timeout: number }): Promise<unknown>;
@@ -323,14 +323,20 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
         }
         if (interaction && selector) {
           pendingGotoViewport = null;
-          const matched = await page.locator(selector).count(), before = page.url(), popups: unknown[] = [];
+          const locator = page.locator(selector);
+          const matched = await locator.count(), before = page.url(), popups: unknown[] = [];
+          let targetSelector = selector;
+          if (matched > 1 && !/(?:^|>>)\s*visible=/.test(selector) && locator.first && !await locator.first().isVisible().catch(() => true)) {
+            const visible = `${selector} >> visible=true`;
+            if (await page.locator(visible).count().catch(() => 0) > 0) targetSelector = visible;
+          }
           const onPopup = (popup: { close(): Promise<void> }) => { popups.push(popup); void popup.close().catch(() => undefined); };
           blockedNavigation = undefined;
           page.on("popup", onPopup);
           try {
-            if (action === "click") await page.click(selector, timeout);
-            else if (action === "fill") await page.fill(selector, value ?? "", timeout);
-            else await page.selectOption(selector, value ?? "", timeout);
+            if (action === "click") await page.click(targetSelector, timeout);
+            else if (action === "fill") await page.fill(targetSelector, value ?? "", timeout);
+            else await page.selectOption(targetSelector, value ?? "", timeout);
             await page.waitForLoadState("load", navigation);
           } catch (error) {
             const blockers = error instanceof Error && /Timeout/.test(error.message) ? [...new Set([...error.message.matchAll(/^\s*- (<[^>]*>).*?(?: from (<[^>]*>).*? subtree)? intercepts pointer events/gm)].map(([, inner, root]) => describeElement(root ?? inner)))] : [];
@@ -338,7 +344,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
             throw new Error(redactSecrets(`${action} on ${selector} was blocked after ${config.tools.browser.actionSeconds} s: ${blockers.join(", ")} intercepted pointer events. If one is an overlay such as a popup or consent banner, close it (its close button, Escape or a click outside) and retry; otherwise scroll or use another element.`));
           } finally { page.off("popup", onPopup); }
           operation.complete();
-          return text(JSON.stringify({ url: redactSecrets(page.url()), title: redactSecrets(await page.title()), ...await servedTheme(page, timeout), ...(page.url() === before && { matched }), ...(popups.length > 0 && { popupClosed: true }), ...(blockedNavigation !== undefined && { blocked: redactSecrets(blockedNavigation) }) }));
+          return text(JSON.stringify({ url: redactSecrets(page.url()), title: redactSecrets(await page.title()), ...await servedTheme(page, timeout), ...(page.url() === before && { matched }), ...(targetSelector !== selector && { visibleMatch: true }), ...(popups.length > 0 && { popupClosed: true }), ...(blockedNavigation !== undefined && { blocked: redactSecrets(blockedNavigation) }) }));
         }
         if (!contextDir) throw new Error("Refused: no context directory is available for screenshots");
         if (viewport) {

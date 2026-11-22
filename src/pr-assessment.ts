@@ -50,7 +50,7 @@ export type PrReviewState =
   | { kind: "blocked"; attempt: History[number] };
 
 export async function resolvePrReview(history: History, now: ItemObservation, mainSha: string): Promise<PrReviewState> {
-  const [latest] = history;
+  const latest = history.find(({ run }) => run.error?.code !== "RUN_SUPERSEDED");
   if (latest?.run.error?.code === branchConflictCode && "head" in now.item && latest.run.headSha === now.item.head.sha && latest.run.mainSha === mainSha && latest.run.context?.baseBranch === now.baseBranch) return { kind: "blocked", attempt: latest };
   const assessment = selectAssessment(history);
   if (!assessment) return { kind: "missing" };
@@ -59,4 +59,7 @@ export async function resolvePrReview(history: History, now: ItemObservation, ma
   return state.kind === "current" ? { kind: "current", assessment } : { kind: "stale", reason: state.reason, assessment, changedPaths: state.changedPaths };
 }
 
-export const currentPrReview = (subjectId: string, now: ItemObservation, mainSha: string) => resolvePrReview(prReviewHistory(subjectId), now, mainSha);
+export const currentPrReview = (subjectId: string, now: ItemObservation, mainSha: string, excludeRunId?: string) => {
+  const history = prReviewHistory(subjectId);
+  return resolvePrReview(excludeRunId ? history.filter(({ run }) => run.id !== excludeRunId) : history, now, mainSha);
+};

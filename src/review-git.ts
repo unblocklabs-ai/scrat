@@ -68,13 +68,21 @@ export function createReviewGitTool(cwd: string, revisions: Record<string, strin
         const range = [await resolveRevision(from, "from", operation), await resolveRevision(to, "to", operation)];
         const options = ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"];
         page = await gitPage(cwd, [...options, ...(operation === "diff_stat" ? ["--stat=240,200"] : []), ...range, ...(path ? ["--", path] : [])], offset, limit);
-        // Inspecting base-branch drift must not pull unrelated main files into review scope.
-        const baseDrift = Boolean(revisions.main) && (
+        // Inspecting base-branch drift or merged/rebased deltas must not pull unrelated main files into review scope.
+        const prReview = Boolean(revisions.base && revisions.head && (revisions.head !== revisions.main || revisions.previousHead));
+        const prDiff = Boolean(revisions.base && revisions.head) && range.every((sha) => sha === revisions.base || sha === revisions.head);
+        const pureBaseDrift = Boolean(revisions.main) && (
           Boolean(revisions.previousMain) && range.every((sha) => sha === revisions.previousMain || sha === revisions.main)
-          || Boolean(revisions.base && revisions.head !== revisions.main)
-            && range.every((sha) => sha === revisions.base || sha === revisions.previousMain || sha === revisions.main)
+          || prReview && !prDiff && range.every((sha) => sha === revisions.base || sha === revisions.previousMain || sha === revisions.main)
         );
-        if (!baseDrift) {
+        const mergedDelta = !pureBaseDrift && !prDiff && prReview && range.some((sha) =>
+          sha === revisions.previousHead || sha === revisions.previousMain || (sha === revisions.main && revisions.main !== revisions.base));
+        if (mergedDelta) {
+          if (path && path !== ".") {
+            const names = await gitPage(cwd, [...options, "--name-only", "-z", ...range, "--", path], 0, Buffer.byteLength(path) + 2);
+            if (!names.more && names.text === `${path}\0`) scope.push(path);
+          }
+        } else if (!pureBaseDrift) {
           const names = await gitPage(cwd, [...options, "--name-only", "-z", ...range, ...(path ? ["--", path] : [])], 0, config.tools.git.maxScopeBytes);
           const entries = names.text.split("\0");
           if (names.more) {

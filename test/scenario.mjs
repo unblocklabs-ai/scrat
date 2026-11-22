@@ -1680,6 +1680,7 @@ export const scenarios = {
     const manualReview = await success();
     assert.ok(f.requests.length > requestsBeforeManual, "manual PR review runs even when already current");
     // Blocked PR pre-inference skip: cancelling with RUN_SUPERSEDED keeps the blocked state intact on subsequent routing.
+    db.update(s.runs).set({ result: null }).where(eq(s.runs.id, latestReview.id)).run();
     db.update(s.runs).set({ result: null, error: { name: "Error", code: "BRANCH_CONFLICT", message: "PR conflicts with base" } }).where(eq(s.runs.id, manualReview.id)).run();
     const requestsBeforeBlocked = f.requests.length;
     tasks.enqueueTask({
@@ -4395,7 +4396,7 @@ fi
         locator: (selector) => ({
           count: async () => selector === "#missing" || selector === "#all-hidden >> visible=true" ? 0
             : selector.endsWith(" >> visible=true") ? 1 : 2,
-          first: () => ({ isVisible: async () => !["#hidden-first", "button[data-visible=true]", "#all-hidden"].includes(selector) }),
+          first: () => ({ isVisible: async () => !["#hidden-first", "#hidden-first >> visible=false", "button[data-visible=true]", "#all-hidden"].includes(selector) }),
         }),
         click: async (selector, { timeout }) => {
           state.timeouts.push(timeout);

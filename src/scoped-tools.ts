@@ -326,7 +326,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
           const locator = page.locator(selector);
           const matched = await locator.count(), before = page.url(), popups: unknown[] = [];
           let targetSelector = selector;
-          if (matched > 1 && !selector.includes("visible=") && locator.first && !await locator.first().isVisible().catch(() => true)) {
+          if (matched > 1 && !/(?:^|>>)\s*visible=/.test(selector) && locator.first && !await locator.first().isVisible().catch(() => true)) {
             const visible = `${selector} >> visible=true`;
             if (await page.locator(visible).count().catch(() => 0) > 0) targetSelector = visible;
           }
@@ -344,7 +344,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
             throw new Error(redactSecrets(`${action} on ${selector} was blocked after ${config.tools.browser.actionSeconds} s: ${blockers.join(", ")} intercepted pointer events. If one is an overlay such as a popup or consent banner, close it (its close button, Escape or a click outside) and retry; otherwise scroll or use another element.`));
           } finally { page.off("popup", onPopup); }
           operation.complete();
-          return text(JSON.stringify({ url: redactSecrets(page.url()), title: redactSecrets(await page.title()), ...await servedTheme(page, timeout), ...(page.url() === before && { matched }), ...(popups.length > 0 && { popupClosed: true }), ...(blockedNavigation !== undefined && { blocked: redactSecrets(blockedNavigation) }) }));
+          return text(JSON.stringify({ url: redactSecrets(page.url()), title: redactSecrets(await page.title()), ...await servedTheme(page, timeout), ...(page.url() === before && { matched }), ...(targetSelector !== selector && { visibleMatch: true }), ...(popups.length > 0 && { popupClosed: true }), ...(blockedNavigation !== undefined && { blocked: redactSecrets(blockedNavigation) }) }));
         }
         if (!contextDir) throw new Error("Refused: no context directory is available for screenshots");
         if (viewport) {

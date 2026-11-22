@@ -1661,15 +1661,38 @@ export const scenarios = {
     const latestReview = await success();
     assert.equal(latestReview.headSha, pr7.head.sha, "newly queued review for the latest PR head completes cleanly");
     // Pre-inference freshness skip: an already-queued non-manual review whose PR is now current cancels immediately without calling the model.
+    const pr7SubjectId = f.row(s.tasks, latestReview.taskId).subjectId;
     const requestsBeforeSkip = f.requests.length;
     tasks.enqueueTask({
-      subjectId: f.row(s.tasks, latestReview.taskId).subjectId, action: "review_pr", priority: 200, reason: "Queued before earlier run finished",
+      subjectId: pr7SubjectId, action: "review_pr", priority: 200, reason: "Queued before earlier run finished",
       input: { source: "github_items", kind: "item_changed", triggerKey: "stale-queued", revision: "stale", mainSha: latestReview.mainSha, changedPaths: [] },
     });
     const skippedReview = await run();
     assert.equal(f.requests.length, requestsBeforeSkip, "pre-inference freshness skip makes zero model requests");
     assert.equal(skippedReview.error?.code, "RUN_SUPERSEDED");
     assert.equal(f.row(s.tasks, skippedReview.taskId).status, "cancelled");
+    // Manual review of the same current PR is never skipped.
+    const requestsBeforeManual = f.requests.length;
+    tasks.enqueueTask({
+      subjectId: pr7SubjectId, action: "review_pr", priority: 200, reason: "Manual re-review",
+      input: { source: "github_items", kind: "item_changed", manual: true, triggerKey: "manual-current", revision: "stale", mainSha: latestReview.mainSha, changedPaths: [] },
+    });
+    const manualReview = await success();
+    assert.ok(f.requests.length > requestsBeforeManual, "manual PR review runs even when already current");
+    // Blocked PR pre-inference skip: cancelling with RUN_SUPERSEDED keeps the blocked state intact on subsequent routing.
+    db.update(s.runs).set({ result: null, error: { name: "Error", code: "BRANCH_CONFLICT", message: "PR conflicts with base" } }).where(eq(s.runs.id, manualReview.id)).run();
+    const requestsBeforeBlocked = f.requests.length;
+    tasks.enqueueTask({
+      subjectId: pr7SubjectId, action: "review_pr", priority: 200, reason: "Queued before conflict failure",
+      input: { source: "github_items", kind: "item_changed", triggerKey: "stale-blocked", revision: "stale", mainSha: manualReview.mainSha, changedPaths: [] },
+    });
+    const skippedBlocked = await run();
+    assert.equal(f.requests.length, requestsBeforeBlocked, "blocked PR pre-inference skip makes zero model requests");
+    assert.equal(skippedBlocked.error?.code, "RUN_SUPERSEDED");
+    assert.equal(skippedBlocked.error?.message, "PR conflicts with its base branch; waiting for a new head");
+    const queuedBeforeRoute = all(s.tasks).filter((t) => t.subjectId === pr7SubjectId && t.action === "review_pr" && t.status === "queued").length;
+    await route();
+    assert.equal(all(s.tasks).filter((t) => t.subjectId === pr7SubjectId && t.action === "review_pr" && t.status === "queued").length, queuedBeforeRoute, "RUN_SUPERSEDED skip does not mask BRANCH_CONFLICT on subsequent sync");
   } },
   footer: { title: "quoted control markers stay report text and cannot supply a PR grade or issue approval", run: async () => {
     await implement(1); f.reset(201, "quoted-grade"); await route();
@@ -2207,20 +2230,33 @@ fi
     f.script = [
       { name: "git", args: { operation: "log", path: "pronly" } },
       { name: "git", args: { operation: "diff_stat", from: "previousHead", to: "head" } },
+      { name: "git", args: { operation: "diff", from: "previousHead", to: "head", path: "pronly" } },
+      { name: "git", args: { operation: "diff", from: "previousHead", to: "head", path: "src/nonexistent.ts" } },
       { name: "git", args: { operation: "diff", from: "previousHead", to: "head", path: "src/app.ts" } },
+      { name: "git", args: { operation: "diff", from: "previousHead", to: "head", path: "notes.md" } },
+      { name: "git", args: { operation: "diff", from: "base", to: "head", path: "src/unrelated.ts" } },
     ];
     const prDirScoped = await success(); f.script = undefined;
     assert.ok(!prDirScoped.result.paths.includes("pronly"), "PR-only directory paths are stripped from git scope");
-    assert.ok(!prDirScoped.result.paths.includes("notes.md") && !prDirScoped.result.paths.includes("src/unrelated.ts"), "previousHead..head after merging main does not pull base files into scope");
-    assert.ok(prDirScoped.result.paths.includes("src/app.ts"), "targeted previousHead..head file diff still records the inspected file");
-    // Legacy "." persisted on a previous review heals on re-review instead of sticking forever.
-    db.update(s.runs).set({ result: { ...prDirScoped.result, paths: [".", ...prDirScoped.result.paths] } }).where(eq(s.runs.id, prDirScoped.id)).run();
-    changeMain("notes.md", "heal dot\n");
+    assert.ok(!prDirScoped.result.paths.includes("src/nonexistent.ts") && !prDirScoped.result.paths.includes("src/app.ts"), "nonexistent or unchanged targeted previousHead..head paths are not added to scope");
+    assert.ok(!prDirScoped.result.paths.includes("src/unrelated.ts"), "previousHead..head and unchanged base..head diffs do not pull unrelated base files into scope");
+    assert.ok(prDirScoped.result.paths.includes("notes.md"), "targeted previousHead..head diff on a file that actually changed records that file");
+    // Legacy "." and deleted-on-main directories persisted on a previous review heal on re-review instead of sticking forever.
+    mkdirSync(resolve("seed/obsolete"), { recursive: true });
+    writeFileSync(resolve("seed/obsolete/old.ts"), "export const old = 1;\n");
+    git(resolve("seed"), "add", "."); commit(resolve("seed"), "Add obsolete dir on main");
+    git(resolve("seed"), "push", resolve("remote.git"), "main");
+    const mainWithObsolete = git(resolve("remote.git"), "rev-parse", "main");
+    db.update(s.runs).set({ mainSha: mainWithObsolete, result: { ...prDirScoped.result, paths: [".", "obsolete", ...prDirScoped.result.paths] } }).where(eq(s.runs.id, prDirScoped.id)).run();
+    git(resolve("seed"), "rm", "-rf", "obsolete");
+    writeFileSync(resolve("seed/notes.md"), "heal dot and deleted dir\n");
+    git(resolve("seed"), "add", "."); commit(resolve("seed"), "Remove obsolete dir and touch notes");
+    git(resolve("seed"), "push", resolve("remote.git"), "main");
     await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"));
     f.reset(1, "grep");
     const healed = await success();
-    assert.ok(!healed.result.paths.includes("."), "retainedScope strips legacy '.' once concrete paths are recorded");
-    // Issue review (no baseSha) also strips directory and '.' paths from git tool calls.
+    assert.ok(!healed.result.paths.includes(".") && !healed.result.paths.includes("obsolete"), "retainedScope strips legacy '.' and directories deleted on main");
+    // Issue review (no baseSha) also strips directory and '.' paths from git tool calls, and skips stale queued re-reviews pre-inference.
     f.addIssue(2); await route();
     f.script = [
       { name: "read", args: { path: "src/app.ts" } },
@@ -2230,6 +2266,14 @@ fi
     const issueReviewed = await success(); f.script = undefined;
     assert.ok(issueReviewed.result.paths.includes("src/app.ts"));
     assert.ok(!issueReviewed.result.paths.includes("src") && !issueReviewed.result.paths.includes("."), "review_issue strips directory and '.' paths from git scope");
+    const requestsBeforeIssueSkip = f.requests.length;
+    tasks.enqueueTask({
+      subjectId: f.row(s.tasks, issueReviewed.taskId).subjectId, action: "review_issue", priority: 200, reason: "Queued before earlier issue review finished",
+      input: { source: "github_items", kind: "item_changed", triggerKey: "stale-issue-queued", revision: "stale", mainSha: issueReviewed.mainSha, changedPaths: [] },
+    });
+    const skippedIssue = await run();
+    assert.equal(f.requests.length, requestsBeforeIssueSkip, "review_issue pre-inference freshness skip makes zero model requests");
+    assert.equal(skippedIssue.error?.code, "RUN_SUPERSEDED");
   } },
   lockfile_impact: { title: "the pure lockfile differ separates inspected-package, alias, importer and unknown-shape changes from unrelated ones without a repository", run: async () => {
     const { lockfileChanged, affectsPaths } = await f.app("lockfile-impact.ts");
@@ -4349,8 +4393,9 @@ fi
         on: (_event, listener) => { state.listeners.push(listener); }, off: (_event, listener) => { state.listeners = state.listeners.filter((entry) => entry !== listener); },
         setViewportSize: async (size) => { state.viewport = size; },
         locator: (selector) => ({
-          count: async () => selector === "#missing" ? 0 : selector === "#hidden-first >> visible=true" ? 1 : 2,
-          first: () => ({ isVisible: async () => selector !== "#hidden-first" }),
+          count: async () => selector === "#missing" || selector === "#all-hidden >> visible=true" ? 0
+            : selector.endsWith(" >> visible=true") ? 1 : 2,
+          first: () => ({ isVisible: async () => !["#hidden-first", "button[data-visible=true]", "#all-hidden"].includes(selector) }),
         }),
         click: async (selector, { timeout }) => {
           state.timeouts.push(timeout);
@@ -4491,8 +4536,21 @@ fi
     await act(preSized, { action: "goto", url: "https://shop.example.test/m2", viewport: "mobile" });
     assert.deepEqual(preSized.state.contextOptions.viewport, { width: 390, height: 844 }, "goto with viewport after reset opens fresh context at that size");
     assert.deepEqual(preSized.state.visitViewports.at(-1), { width: 390, height: 844 });
-    await act(preSized, { action: "click", selector: "#hidden-first" });
+    const hiddenClick = JSON.parse(textOf(await act(preSized, { action: "click", selector: "#hidden-first" })));
     assert.equal(preSized.state.clicked.at(-1), "#hidden-first >> visible=true", "multi-match click prefers visible match when first DOM match is hidden");
+    assert.equal(hiddenClick.visibleMatch, true, "visible fallback is reported in the result");
+    const attrClick = JSON.parse(textOf(await act(preSized, { action: "click", selector: "button[data-visible=true]" })));
+    assert.equal(preSized.state.clicked.at(-1), "button[data-visible=true] >> visible=true", "attribute selectors containing visible= still use visible fallback");
+    assert.equal(attrClick.visibleMatch, true);
+    const allHiddenClick = JSON.parse(textOf(await act(preSized, { action: "click", selector: "#all-hidden" })));
+    assert.equal(preSized.state.clicked.at(-1), "#all-hidden", "when no match is currently visible, keep the original selector");
+    assert.equal(allHiddenClick.visibleMatch, undefined);
+    const explicitHidden = JSON.parse(textOf(await act(preSized, { action: "click", selector: "#hidden-first >> visible=false" })));
+    assert.equal(preSized.state.clicked.at(-1), "#hidden-first >> visible=false", "explicit Playwright visible= engine is preserved");
+    assert.equal(explicitHidden.visibleMatch, undefined);
+    const hiddenFill = JSON.parse(textOf(await act(preSized, { action: "fill", selector: "#hidden-first", text: "hi" })));
+    assert.deepEqual(preSized.state.typed.at(-1), ["fill", "#hidden-first >> visible=true", "hi"]);
+    assert.equal(hiddenFill.visibleMatch, true);
     await preSized.close();
     const named = make({ prefix: "reviewer-2" });
     assert.equal(JSON.parse(textOf(await act(named, { action: "screenshot" }))).path, resolve("ctx/screenshot-reviewer-2-current-1.png"), "each reviewer's screenshots are named apart");

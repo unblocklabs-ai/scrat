@@ -177,9 +177,15 @@ export async function runNextTask(stop?: AbortSignal) {
       if (observed && !run.retryOfRunId && !isManual(trigger) && run.stage === "preparing" && trigger.kind === "item_changed") {
         let staleReason: string | undefined;
         if (ctx.manifest.publish.includes("pr_assessment")) {
-          const state = await currentPrReview(item!.id, observed.observation, observed.mainSha);
-          if (state.kind === "current") staleReason = "No observed relevant changes since the authoritative review";
-          else if (state.kind === "blocked") staleReason = "PR conflicts with its base branch; waiting for a new head";
+          const state = await currentPrReview(item!.id, observed.observation, observed.mainSha, run.id);
+          if (state.kind === "current") {
+            if (state.assessment.run.publication.status === "pending") {
+              await bestEffort(operation.log, "pr.reconcile", references, () => reconcilePrReview(observed.github, item!.id, item!.payload.number, references));
+            }
+            staleReason = "No observed relevant changes since the authoritative review";
+          } else if (state.kind === "blocked") {
+            staleReason = "PR conflicts with its base branch; waiting for a new head";
+          }
         } else if (item?.kind === "issue" && ctx.manifest.mode === "review" && !ctx.manifest.publish.includes("item_labels")) {
           const completed = latestCompletedRun(item.id, task.action);
           if (completed && (await freshness(savedEvaluation(completed), { ...observed.observation, mainSha: observed.mainSha }, "relevant-paths")).kind === "current") {

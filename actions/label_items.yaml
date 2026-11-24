@@ -6,7 +6,7 @@ context: change
 files: []
 publish: [item_labels]
 skill: skills/label_items/SKILL.md
-model: { provider: codex-lb, model: gpt-6.1-terra, thinkingLevel: high }
+model: { provider: codex-lb, model: gpt-6.1-terra, thinkingLevel: low }
 priority: 0
 retry: { initialDelaySeconds: 60, maxDelaySeconds: 3600 }
 targets: [prs]

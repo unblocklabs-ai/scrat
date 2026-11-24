@@ -23,7 +23,7 @@ import { subjects, workspaces, type Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { assertCurrentImplementation } from "./tasks.ts";
 import { assertNoCommittedSecrets, checkpointMatches, checkpointWorkspace, commitWorkspace, createWorkspace, expectedBranchHead, getWorkspace, pinWorkspaceBase, removeWorkspace, stageTree, validateWorkspace, workspaceMatchesCommit } from "./workspaces.ts";
-import { botAuthor, type Ctx, type DatabaseConfig, type Environment, itemRevisions, type Observed, prepareWorkspace, runAgent, stopBefore } from "./run-context.ts";
+import { botAuthor, type Ctx, type DatabaseConfig, type Environment, itemRevisions, type Observed, prepareInputsSignature, prepareWorkspace, runAgent, stopBefore } from "./run-context.ts";
 
 type Acceptance = NonNullable<Manifest["acceptance"]>;
 
@@ -42,7 +42,7 @@ async function asCheckFailure<T>(fn: () => Promise<T>) {
 async function validationMessage(error: CheckFailure, round: number, runId: string, contextDir?: string, signal?: AbortSignal, log?: Logger) {
   const { message, exitCode, stdout, evidence } = describeError(error.cause);
   const command = message.split("\n")[0].replace(/^Command failed: /, "");
-  const full = evidence ? await readHeadAndTail(evidence, Math.min(config.harness.maxOutputBytes, 2 * 1024 * 1024)) : undefined;
+  const full = evidence ? await readHeadAndTail(evidence, Math.min(config.harness.maxOutputBytes, config.harness.distillReadBytes)) : undefined;
   const cleaned = redactSecrets(stripAnsi(full?.text ?? stdout ?? "")).trim();
   const artifactPath = contextDir && cleaned ? join(contextDir, `validation-${runId.slice(0, 8)}-round-${round}.log`) : undefined;
   let output = "";
@@ -90,8 +90,14 @@ async function validationMessage(error: CheckFailure, round: number, runId: stri
 
 const unresolvedConflict = "PR still conflicts with its base branch after resolution";
 
-async function checkWorkspace({ references, stop }: Ctx, { workspace, commandEnvironment, databaseConfig }: Pick<Change, "workspace" | "commandEnvironment" | "databaseConfig">, saveCheckpoint?: (checkpoint: Awaited<ReturnType<typeof checkpointWorkspace>>) => void) {
-  await asCheckFailure(() => prepareWorkspace(workspace, commandEnvironment, references, databaseConfig));
+async function checkWorkspace({ references, operation, stop }: Ctx, p: Pick<Change, "workspace" | "commandEnvironment" | "databaseConfig" | "preparedSignature">, saveCheckpoint?: (checkpoint: Awaited<ReturnType<typeof checkpointWorkspace>>) => void) {
+  const { workspace, commandEnvironment, databaseConfig } = p;
+  const currentSignature = p.preparedSignature ? await prepareInputsSignature(workspace.path) : undefined;
+  const skipPrepare = Boolean(p.preparedSignature && currentSignature && currentSignature === p.preparedSignature);
+  if (skipPrepare) operation.log.info({ event: "workspace.prepare_reused", workspaceId: workspace.id });
+  else p.preparedSignature = undefined;
+  await asCheckFailure(() => prepareWorkspace(workspace, commandEnvironment, references, databaseConfig, { skipPrepare }));
+  if (!skipPrepare) p.preparedSignature = await prepareInputsSignature(workspace.path);
   const checkpoint = await checkpointWorkspace(workspace);
   saveCheckpoint?.(checkpoint);
   const validationTree = checkpoint.treeSha;
@@ -122,6 +128,7 @@ async function validateAndCommit(ctx: Ctx, p: Change, kind: Acceptance) {
 type Change = {
   workspace: Workspace; validationOnly: boolean; mergeInProgress: boolean; mainSha: string;
   preparedHead: string; startHeadSha: string; headSha: string; title: string; deferred: boolean;
+  preparedSignature: string | undefined;
   target: Awaited<ReturnType<typeof prepareTarget>> | undefined;
   databaseConfig: DatabaseConfig | null | undefined;
   database: Awaited<ReturnType<typeof createRunDatabase>> | undefined;
@@ -301,12 +308,16 @@ async function mergeBehind(ctx: Ctx, observed: Observed, p: Change, diffPaths: s
 
 async function prepareChangeCommands({ references }: Ctx, observed: Observed, p: Change) {
   if (p.deferred) return false;
-  try { await prepareWorkspace(p.workspace, p.commandEnvironment, references, p.databaseConfig); return false; }
-  catch (error) {
+  let merged = false;
+  try {
+    await prepareWorkspace(p.workspace, p.commandEnvironment, references, p.databaseConfig);
+  } catch (error) {
     if (!observed.pullRequest || !await mergeBehindBase(p, observed, error)) throw error;
     await prepareWorkspace(p.workspace, p.commandEnvironment, references, p.databaseConfig);
-    return true;
+    merged = true;
   }
+  p.preparedSignature = await prepareInputsSignature(p.workspace.path);
+  return merged;
 }
 
 async function correctionRound({ run, operation, manifest, stop }: Ctx, p: Change, result: AgentResult, round: number, error: CheckFailure) {
@@ -359,7 +370,7 @@ export async function validateRefreshedChange(ctx: Ctx, workspace: Workspace, ba
   stopBefore(ctx.stop, "publication recovery validation");
   if (ctx.cleanup.databaseRequested) await removeRunDatabase(ctx.run.id, ctx.references);
   const { databaseConfig, environment } = await provisionDatabase(ctx);
-  const { commands, validationTree } = await checkWorkspace(ctx, { workspace, commandEnvironment: { ...childEnvironment(), ...environment }, databaseConfig });
+  const { commands, validationTree } = await checkWorkspace(ctx, { workspace, commandEnvironment: { ...childEnvironment(), ...environment }, databaseConfig, preparedSignature: undefined });
   if (await git(workspace.path, ["rev-parse", `${head}^{tree}`]) !== validationTree || await headOf(workspace.path) !== head) {
     throw new Error("The refreshed commit differs from the validated tree; original work was retained");
   }
@@ -379,7 +390,7 @@ async function agentStage(ctx: Ctx, observed: Observed, p: Change, acceptance: A
   stopBefore(stop, "the agent");
   updateRun(run.id, { stage: "agent" });
   const { result, contextDir, revisions } = await runAgent(ctx, {
-    environment, sessionFile: latestSessionRun(workspace.id, run.id)?.piSessionFile ?? undefined,
+    environment, sessionFile: latestSessionRun(workspace.id, run.taskId, run.id)?.piSessionFile ?? undefined,
     input: {
       workspace, evaluated, diffBaseSha: merged ? mainSha : diffBaseSha, diffPaths, mainSha, headSha: p.headSha, baseRef: mainSha, mergeInProgress: p.mergeInProgress, validationFailure: p.validationFailure,
       database: database ? { ...database, environment, schemaPrepared: !p.deferred, prepare: config.workspace.prepare, migrate: p.databaseConfig?.migrate } : undefined,
@@ -402,6 +413,7 @@ export async function changeRun(ctx: Ctx, observed: Observed, resumingDeferred: 
     ...acquired, headSha: startHeadSha, databaseConfig, database, environment,
     commandEnvironment: { ...childEnvironment(), ...environment }, result: run.result,
     validated: false, validationFailure: undefined, agentInput: undefined, target: undefined,
+    preparedSignature: undefined,
     deferred: acquired.mergeInProgress || Boolean(run.retryOfRunId) || acceptance === "conflict_free",
   };
   const scope = await readDiffScope(workspace.path, mainSha, p.preparedHead, Boolean(observed.pullRequest));

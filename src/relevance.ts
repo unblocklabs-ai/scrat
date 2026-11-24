@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { config } from "./config.ts";
+import { isObject } from "./config-merge.ts";
 import { changedPaths, git } from "./git.ts";
 import { affectsPaths, lockfileChanged } from "./lockfile-impact.ts";
 import { reviewScope } from "./review-paths.ts";
@@ -52,12 +53,17 @@ async function computeReview(repository: string, before: string, after: string, 
   try {
     if (paths.includes("package.json") && scope.includes("package.json")) {
       const manifests = await Promise.all([before, after].map(async (sha) => {
-        const manifest: { devDependencies?: Record<string, string>; [key: string]: unknown } = JSON.parse(await git(repository, ["show", `${sha}:package.json`]));
-        const { devDependencies = {}, ...rest } = manifest;
-        return { devDependencies, rest };
+        const manifest: Record<string, unknown> = JSON.parse(await git(repository, ["show", `${sha}:package.json`]));
+        if (!isObject(manifest)) throw new Error("Unrecognized package.json");
+        const { dependencies: deps = {}, devDependencies = {}, optionalDependencies = {}, ...rest } = manifest;
+        return { groups: [deps, devDependencies, optionalDependencies], rest };
       }));
       if (!isDeepStrictEqual(manifests[0].rest, manifests[1].rest)
-        || [...dependencies].some((name) => manifests[0].devDependencies[name] !== manifests[1].devDependencies[name])) return { paths, relevant: true };
+        || manifests[0].groups.some((prev, i) => {
+          const next = manifests[1].groups[i];
+          return !isObject(prev) || !isObject(next)
+            || [...dependencies].some((name) => !isDeepStrictEqual(prev[name], next[name]));
+        })) return { paths, relevant: true };
     }
     if (paths.includes("pnpm-lock.yaml") && (scope.includes("pnpm-lock.yaml") || dependencies.size)) {
       const contents = await Promise.all([before, after].map((sha) => git(repository, ["show", `${sha}:pnpm-lock.yaml`])));

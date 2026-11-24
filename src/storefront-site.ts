@@ -66,10 +66,27 @@ export const knownBreakages = (known: Alerts | undefined) => Object.entries(know
 export async function stageBaselines(contextDir: string, write: (key: string, name: string, content: string) => Promise<void>, state: string) {
   const baselines = await readState<Baselines>(join(state, "baselines/index.json"), {}) ?? {};
   if (!Object.keys(baselines).length) return;
-  await cp(statePath(state, "baselines"), join(contextDir, "baselines"), { recursive: true });
-  await write("baselines", "baselines.json", JSON.stringify(Object.fromEntries(Object.entries(baselines).map(([key, { url, devices }]) => [key, {
-    url, screenshots: Object.fromEntries(Object.entries(devices).map(([device, sha]) => [device, { path: join(contextDir, "baselines", key, `${device}.png`), sha }])),
-  }])), null, 2));
+  const baselinesDir = join(contextDir, "baselines");
+  await cp(statePath(state, "baselines"), baselinesDir, { recursive: true });
+  const pages = Object.fromEntries(Object.entries(baselines).map(([key, { url, devices }]) => {
+    const entries = Object.entries(devices);
+    const shas = new Set(entries.map(([, sha]) => sha));
+    if (shas.size === 1) {
+      const [onlySha] = shas;
+      return [key, {
+        url,
+        sha: shortSha(onlySha!),
+        devices: Object.fromEntries(entries.map(([device]) => [device, `${key}/${device}.png`])),
+      }];
+    }
+    return [key, {
+      url,
+      devices: Object.fromEntries(entries.map(([device, sha]) => [device, { file: `${key}/${device}.png`, sha: shortSha(sha) }])),
+    }];
+  }));
+  const pageLines = Object.entries(pages).map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`);
+  const serialized = `{\n  "baselinesDir": ${JSON.stringify(baselinesDir)},\n  "pages": {\n${pageLines.join(",\n")}\n  }\n}\n`;
+  await write("baselines", "baselines.json", serialized);
 }
 
 export async function storefrontContext(subjectId: string, headSha: string, source: TriggerInput["source"]) {

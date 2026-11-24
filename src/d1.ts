@@ -17,7 +17,17 @@ type D1Requester = (payload: { model: string; state: string; questions: Record<s
 type Chunk = { start: number; end: number; text: string };
 
 const ansiRe = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
+const highSeverityAnomalyRe = /\b(?:error|exception|traceback|failed|failure|fatal|panic|assert(?:ion)?error|segmentation fault|killed|oom|timeout|denied|refused|conflict)\b|FAIL\s|error\s+TS\d+:/i;
 const anomalyRe = /\b(?:error|exception|traceback|failed|failure|fatal|panic|assert(?:ion)?error|segmentation fault|killed|oom|timeout|denied|refused|conflict|warning)\b|FAIL\s/i;
+const vitestFailStartRe = /^\s*(?:FAIL\s+\S|❯\s+\S.*:\d+:\d+|AssertionError:\s)/;
+const tsErrorStartRe = /^\s*(?:[^\s(]+\(\d+,\d+\):\s*error\s+TS\d+:|[^\s:]+\.[cm]?[jt]sx?:\d+:\d+\s*-\s*error\s+TS\d+:)/;
+const eslintErrorLineRe = /^\s*\d+:\d+\s+error\s+\S/;
+const eslintFileHeaderRe = /^(?:\/|[A-Za-z0-9_.-]+\/)?[^\s/][^\s]*\.[A-Za-z0-9]{1,8}$/;
+const knipSectionStartRe = /^(?:Unused (?:files|exports|types|enum members|class members|dependencies|devDependencies|unlisted binaries)|Unlisted (?:dependencies|binaries)|Unresolved imports|Duplicate exports)\s*\(\d+\)/;
+const structuredFailureRe = new RegExp(
+  `${vitestFailStartRe.source}|${tsErrorStartRe.source}|${eslintErrorLineRe.source}|${knipSectionStartRe.source}`,
+  "m",
+);
 const structuralSplitRe = /(?=(?:^|\n)(?:<prompt-data>|<\/prompt-data>|#{1,4}\s+|===\s+|---\s*$|FAIL\s+))/gm;
 const paragraphSplitRe = /\n\s*\n/g;
 const b64JunkRe = /[A-Za-z0-9+/=_-]{180,}/g;
@@ -36,7 +46,8 @@ const gitReadSubcommands = new Set(["diff", "show", "status", "log", "ls-files",
 
 const nativeFetch = globalThis.fetch;
 let cachedDispatcher: { certPath: string | null; agent: Agent } | undefined;
-let d1RateLimitedUntil = 0;
+let d1CircuitOpenUntil = 0;
+let d1Consecutive429s = 0;
 
 function getDispatcher(certPath: string | null) {
   if (cachedDispatcher && cachedDispatcher.certPath === certPath) return cachedDispatcher.agent;
@@ -46,7 +57,7 @@ function getDispatcher(certPath: string | null) {
   return agent;
 }
 
-function trimUtf8End(buf: Buffer) {
+export function trimUtf8End(buf: Buffer) {
   if (!buf.length) return buf;
   let lead = buf.length - 1;
   const floor = Math.max(0, buf.length - 4);
@@ -272,8 +283,111 @@ function isCodeReadCommand(command: string) {
   return hasRead;
 }
 
+function extractStructuredFailures(text: string, maxBlocks = config.d1.failureBlocks.maxBlocks, contextLines = config.d1.failureBlocks.contextLines) {
+  if (!config.d1.failureBlocks.enabled || maxBlocks <= 0) return { blocks: [] as string[], total: 0 };
+  const lines = text.split("\n");
+  const blocks: string[] = [];
+  const seen = new Set<string>();
+  let total = 0;
+  const pushBlock = (blockLines: string[]) => {
+    const rendered = blockLines.join("\n").trimEnd();
+    if (!rendered || seen.has(rendered)) return;
+    seen.add(rendered);
+    total++;
+    if (blocks.length < maxBlocks) blocks.push(rendered);
+  };
+  let lastEslintHeader: string | undefined;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const trimmed = line.trim();
+    if (!trimmed) { lastEslintHeader = undefined; continue; }
+    if (!/^\s/.test(line) && eslintFileHeaderRe.test(trimmed)) { lastEslintHeader = trimmed; continue; }
+
+    if (knipSectionStartRe.test(trimmed)) {
+      const taken = [line];
+      let j = i + 1;
+      for (; j < lines.length && taken.length <= contextLines; j++) {
+        const next = lines[j]!;
+        if (!next.trim() || knipSectionStartRe.test(next.trim())) break;
+        taken.push(next);
+      }
+      pushBlock(taken);
+      i = j - 1;
+      continue;
+    }
+
+    if (tsErrorStartRe.test(line)) {
+      const taken = [line];
+      let j = i + 1;
+      for (; j < lines.length && taken.length <= contextLines; j++) {
+        const next = lines[j]!;
+        if (!next.trim() || tsErrorStartRe.test(next) || !/^\s+/.test(next)) break;
+        taken.push(next);
+      }
+      pushBlock(taken);
+      i = j - 1;
+      continue;
+    }
+
+    if (eslintErrorLineRe.test(line)) {
+      const taken = lastEslintHeader ? [lastEslintHeader, line] : [line];
+      let j = i + 1;
+      for (; j < lines.length && taken.length <= contextLines + 1; j++) {
+        const next = lines[j]!;
+        if (!next.trim() || (!eslintErrorLineRe.test(next) && !/^\s*\d+:\d+\s+warning\s+/.test(next))) break;
+        if (eslintErrorLineRe.test(next)) taken.push(next);
+      }
+      pushBlock(taken);
+      i = j - 1;
+      continue;
+    }
+
+    if (vitestFailStartRe.test(line)) {
+      const taken = [line];
+      let j = i + 1;
+      for (; j < lines.length && taken.length <= contextLines; j++) {
+        const next = lines[j]!;
+        const nt = next.trim();
+        if (!nt) {
+          // Allow one blank line inside a Vitest diff block if followed by Expected/Received/stack line
+          const peek = lines[j + 1]?.trim() ?? "";
+          if (/^(?:Expected|Received|[-+]|at\s+|❯\s+)/.test(peek)) { taken.push(next); continue; }
+          break;
+        }
+        if (/^✓\s|^Test Files\s|^⎯/.test(nt)) break;
+        if (vitestFailStartRe.test(next) && /^\s*FAIL\s+/.test(next)) break;
+        taken.push(next);
+      }
+      pushBlock(taken);
+      i = j - 1;
+    }
+  }
+  return { blocks, total };
+}
+
+function fitStructuredFailureBlock(blocks: string[], maxChars: number) {
+  const header = "## STRUCTURED FAILURES\n";
+  if (!blocks.length || maxChars < header.length + 24) return { text: "", kept: 0 };
+  const kept: string[] = [];
+  let used = header.length;
+  for (const block of blocks) {
+    const sep = kept.length ? 2 : 0;
+    if (used + sep + block.length <= maxChars) {
+      kept.push(block);
+      used += sep + block.length;
+    } else if (!kept.length) {
+      const avail = maxChars - header.length - 12;
+      if (avail >= 24) kept.push(`${block.slice(0, avail).trimEnd()}\n[trimmed]`);
+      break;
+    } else {
+      break;
+    }
+  }
+  return kept.length ? { text: `${header}${kept.join("\n\n")}`, kept: kept.length } : { text: "", kept: 0 };
+}
+
 function extractAnomalyLines(text: string, maxLines = 10) {
-  const hits: string[] = [], seen = new Set<string>();
+  const high: string[] = [], low: string[] = [], seen = new Set<string>();
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!.trim();
@@ -281,10 +395,15 @@ function extractAnomalyLines(text: string, maxLines = 10) {
     const key = line.slice(0, 80);
     if (seen.has(key)) continue;
     seen.add(key);
-    hits.push(`L${i + 1}: ${line.slice(0, 180)}`);
-    if (hits.length >= maxLines) break;
+    const entry = `L${i + 1}: ${line.slice(0, 180)}`;
+    if (highSeverityAnomalyRe.test(line)) {
+      high.push(entry);
+      if (high.length >= maxLines) break;
+    } else if (low.length < maxLines) {
+      low.push(entry);
+    }
   }
-  return hits;
+  return [...high, ...low].slice(0, maxLines);
 }
 
 function fitAnomalyBlock(anomalies: string[], maxChars: number) {
@@ -397,7 +516,9 @@ function preselectChunksByPriority(chunks: Chunk[], query: string, maxCandidates
     const low = ch.toLowerCase();
     let score = 0;
     for (const [term, weight] of terms) if (low.includes(term)) score += weight;
-    if (anomalyRe.test(ch)) score += 1.2;
+    if (structuredFailureRe.test(ch)) score += 4.0;
+    else if (highSeverityAnomalyRe.test(ch)) score += 2.0;
+    else if (anomalyRe.test(ch)) score += 1.2;
     score += Math.min(1.5, 0.35 * ((ch.match(numUnitRe) ?? []).length));
     if (structuralMarkers.some((marker) => ch.includes(marker))) score += 0.6;
     score += 0.25 * (index / Math.max(1, chunks.length - 1));
@@ -454,19 +575,27 @@ function retryAfterMs(header: string | null): number | undefined {
   return undefined;
 }
 
-function defaultRequester(): D1Requester | undefined {
+function defaultRequester(sharedDeadline?: number): D1Requester | undefined {
   const token = process.env[config.d1.tokenEnv]?.trim();
   const url = (process.env.D1_URL ?? config.d1.url).trim();
   if (!token || !url) return undefined;
   const certPath = process.env.D1_CERT_PATH ?? config.d1.certPath;
   const dispatcher = url.startsWith("https://") && certPath ? getDispatcher(certPath) : undefined;
   return async (payload, signal) => {
-    const deadline = Date.now() + config.d1.timeoutMs;
-    const maxAttempts = 3;
+    const deadline = sharedDeadline ?? (Date.now() + config.d1.timeoutMs);
+    const maxAttempts = 1 + config.d1.maxRetries;
     let lastError: Error | undefined;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 100) break;
+      const now = Date.now();
+      if (d1CircuitOpenUntil > 0) {
+        if (now < d1CircuitOpenUntil) {
+          throw new Error(`d1 circuit breaker open (${Math.ceil((d1CircuitOpenUntil - now) / 1000)}s remaining)`);
+        }
+        d1CircuitOpenUntil = 0;
+        d1Consecutive429s = 0;
+      }
+      const remaining = deadline - now;
+      if (remaining <= 0 || signal?.aborted) break;
       const timeout = AbortSignal.timeout(remaining);
       const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
       const init = {
@@ -479,28 +608,44 @@ function defaultRequester(): D1Requester | undefined {
       const response = globalThis.fetch === nativeFetch
         ? await undiciFetch(url, init)
         : await globalThis.fetch(url, init);
-      if (response.ok) return await response.json() as D1Response;
+      if (response.ok) {
+        d1Consecutive429s = 0;
+        d1CircuitOpenUntil = 0;
+        return await response.json() as D1Response;
+      }
       const status = response.status;
       const snippet = redactSecrets((await response.text().catch(() => "")).slice(0, 300));
       lastError = new Error(`d1 HTTP ${status}: ${snippet}`);
-      if (status === 429) d1RateLimitedUntil = Date.now() + 15_000;
+      if (status === 429) {
+        d1Consecutive429s++;
+        if (d1Consecutive429s >= config.d1.circuitBreakerThreshold) {
+          d1CircuitOpenUntil = Date.now() + config.d1.circuitBreakerCooldownMs;
+          throw lastError;
+        }
+      }
       const retryable = status === 429 || status === 502 || status === 503;
       if (!retryable || attempt === maxAttempts) throw lastError;
-      const baseWait = retryAfterMs(response.headers.get("retry-after")) ?? (attempt === 1 ? 350 : 850);
-      const waitMs = Math.min(baseWait + Math.floor(Math.random() * 250), Math.max(0, deadline - Date.now() - 400));
-      if (waitMs <= 0) throw lastError;
-      await delay(waitMs, undefined, { signal: combined });
+      const headerWait = retryAfterMs(response.headers.get("retry-after"));
+      const baseWait = headerWait ?? Math.round(config.d1.retryBaseDelayMs * Math.pow(2, attempt - 1));
+      const jitter = config.d1.retryJitterMs > 0 ? Math.floor(Math.random() * config.d1.retryJitterMs) : 0;
+      const budgetLeft = deadline - Date.now() - config.d1.retryReserveMs;
+      if (budgetLeft <= 0) throw lastError;
+      const waitMs = Math.min(baseWait + jitter, budgetLeft);
+      if (waitMs > 0) await delay(waitMs, undefined, { signal: combined });
     }
     throw lastError ?? new Error("d1 timeout exceeded");
   };
 }
 
-async function extractRelevantChunks({ text, query, instructionTemplate, maxTotalChars, maxChunks = 8, maxCandidateChunks = 16, targetChunkChars = 1000, maxChunkChars = 1800, threshold = config.d1.scoreThreshold, signal, requester = defaultRequester() }: {
+async function extractRelevantChunks({ text, query, instructionTemplate, maxTotalChars, maxChunks = 8, maxCandidateChunks = config.d1.maxCandidateChunks, targetChunkChars = 1000, maxChunkChars = 1800, threshold = config.d1.scoreThreshold, signal, requester }: {
   text: string; query: string; instructionTemplate: string; maxTotalChars: number;
   maxChunks?: number; maxCandidateChunks?: number; targetChunkChars?: number; maxChunkChars?: number;
   threshold?: number; signal?: AbortSignal; requester?: D1Requester;
 }) {
-  if (!text || !requester) return { usedD1: false, text: "", kept: 0, total: 0, d1Ms: 0 };
+  const started = performance.now();
+  const extractionDeadlineMs = Date.now() + config.d1.timeoutMs;
+  const effRequester = requester ?? defaultRequester(extractionDeadlineMs);
+  if (!text || !effRequester) return { usedD1: false, text: "", kept: 0, total: 0, d1Ms: 0 };
   const safeText = redactSecrets(text);
   const safeQuery = redactSecrets(query).trim();
   const chunks = chunkTextStructurally(safeText, targetChunkChars, maxChunkChars);
@@ -512,7 +657,9 @@ async function extractRelevantChunks({ text, query, instructionTemplate, maxTota
 
   const waves: Array<{ state: string; questions: Record<string, { type: "noul"; instructions: string }>; map: Map<string, number> }> = [];
   let lines: string[] = [], questions: Record<string, { type: "noul"; instructions: string }> = {}, map = new Map<string, number>(), curChars = 0;
-  const maxWaves = 3;
+  const maxWaves = config.d1.maxWaves;
+  const waveMaxChars = config.d1.waveMaxChars;
+  const waveMaxItems = config.d1.waveMaxItems;
   const flush = () => {
     if (!map.size) return;
     waves.push({ state: `QUERY:\n${qClean}\n\nITEMS:\n${lines.join("\n\n")}`, questions, map });
@@ -523,7 +670,7 @@ async function extractRelevantChunks({ text, query, instructionTemplate, maxTota
     if (!chunkText) continue;
     let idx = lines.length;
     let entry = `[${idx}] ${chunkText}`;
-    if (map.size && (curChars + entry.length > 10000 || idx >= 18)) {
+    if (map.size && (curChars + entry.length > waveMaxChars || idx >= waveMaxItems)) {
       flush();
       if (waves.length >= maxWaves) break;
       idx = 0;
@@ -538,19 +685,20 @@ async function extractRelevantChunks({ text, query, instructionTemplate, maxTota
   if (waves.length < maxWaves) flush();
   if (!waves.length) return { usedD1: false, text: "", kept: 0, total: chunks.length, d1Ms: 0 };
 
-  const started = performance.now();
-  // Limit concurrent wave bursts (1 during recent 429 cooldown, 2 otherwise) and retain partial wave scores if later waves fail.
-  const waveConcurrency = Date.now() < d1RateLimitedUntil ? 1 : 2;
+  const remainingMs = Math.max(1, extractionDeadlineMs - Date.now());
+  const extractionDeadline = AbortSignal.timeout(remainingMs);
+  const waveSignal = signal ? AbortSignal.any([signal, extractionDeadline]) : extractionDeadline;
+  const waveConcurrency = d1Consecutive429s > 0 ? 1 : config.d1.waveConcurrency;
   const answersList: Array<Record<string, { noul?: number; span?: number[] }> | undefined> = new Array(waves.length);
   let nextWave = 0;
   let firstError: unknown;
   const runWorker = async () => {
     while (nextWave < waves.length) {
-      if (signal?.aborted) break;
+      if (waveSignal.aborted) break;
       const idx = nextWave++;
       const { state, questions: qs } = waves[idx]!;
       try {
-        const resp = await requester({ model: config.d1.model, state, questions: qs }, signal);
+        const resp = await effRequester({ model: config.d1.model, state, questions: qs }, waveSignal);
         answersList[idx] = resp.answers ?? {};
       } catch (error) {
         if (firstError === undefined) firstError = error;
@@ -584,14 +732,15 @@ async function extractRelevantChunks({ text, query, instructionTemplate, maxTota
   return { usedD1: true, text: merged.text, kept: merged.kept, total: chunks.length, d1Ms };
 }
 
-export async function distillCommandOutput({ rawOutput, command, goal, artifactPath, sourceArtifactPath, existingArtifactPath, partialSource = false, allowReadBypass = true, minChars, maxChars, signal, log, requester }: {
-  rawOutput: string; command: string; goal?: string; artifactPath?: string; sourceArtifactPath?: string; existingArtifactPath?: string;
+export async function distillCommandOutput({ rawOutput, command, goal, preferStructured = true, artifactPath, sourceArtifactPath, existingArtifactPath, partialSource = false, allowReadBypass = true, minChars, maxChars, signal, log, requester }: {
+  rawOutput: string; command: string; goal?: string; preferStructured?: boolean; artifactPath?: string; sourceArtifactPath?: string; existingArtifactPath?: string;
   partialSource?: boolean; allowReadBypass?: boolean;
   minChars: number; maxChars: number; signal?: AbortSignal; log?: D1Log; requester?: D1Requester;
 }) {
   const cleaned = redactSecrets(stripAnsi(rawOutput));
   if (cleaned.length <= minChars || (allowReadBypass && isCodeReadCommand(command))) return { text: cleaned, filtered: false, artifactPath: undefined };
 
+  const { blocks: structuredBlocks, total: structuredTotal } = extractStructuredFailures(cleaned);
   const anomalies = extractAnomalyLines(cleaned, 10);
   const effGoal = redactSecrets(goal?.trim() || `Key results, failing tests, exact file:line errors, tracebacks, and summary from \`${redactSecrets(command).slice(0, 140)}\``);
   const headCap = Math.min(1800, Math.max(120, Math.floor(Math.min(cleaned.length, maxChars) / 8)));
@@ -603,6 +752,39 @@ export async function distillCommandOutput({ rawOutput, command, goal, artifactP
   const middle = cleaned.slice(headCap, Math.max(headCap, cleaned.length - tailCap));
   const plannedPath = artifactPath ?? existingArtifactPath;
   const hdrEstimate = 160 + (plannedPath?.length ?? 0);
+
+  if (preferStructured && structuredBlocks.length && config.d1.failureBlocks.skipD1OnMatch) {
+    const fixedStructOverhead = hdrEstimate + headBlk.length + tailBlk.length + 40;
+    const structBudget = Math.max(0, maxChars - fixedStructOverhead);
+    const fitted = fitStructuredFailureBlock(structuredBlocks, structBudget);
+    if (fitted.kept > 0) {
+      const formatStructured = (savedPath: string | undefined, isPartial: boolean) => {
+        const label = isPartial ? "partial log" : "full output";
+        const ref = savedPath ? `; ${label}: ${savedPath} (use read to inspect)` : "";
+        const assemble = (body: string, keptCount: number) => {
+          const hdr = `[structured failures: ${cleaned.length} chars / ${totalLines} lines -> ${keptCount}/${structuredTotal} failure block(s)${ref}]`;
+          return [hdr, headBlk, body, tailBlk].filter(Boolean).join("\n\n");
+        };
+        let out = assemble(fitted.text, fitted.kept);
+        if (out.length <= maxChars) return { text: out, kept: fitted.kept };
+        const avail = maxChars - assemble("", fitted.kept).length - 4;
+        const smaller = avail > 0 ? fitStructuredFailureBlock(structuredBlocks, avail) : { text: "", kept: 0 };
+        out = assemble(smaller.text, smaller.kept);
+        if (out.length <= maxChars) return { text: out, kept: smaller.kept };
+        return { text: `${out.slice(0, Math.max(0, maxChars - 12)).trimEnd()}\n[trimmed]`, kept: smaller.kept };
+      };
+      const plannedPartial = partialSource && !sourceArtifactPath && plannedPath === artifactPath;
+      const previewOut = formatStructured(plannedPath, plannedPartial);
+      if (previewOut.text.length < cleaned.length || cleaned.length > maxChars) {
+        const { savedPath, isPartial } = await persistCommandArtifact(artifactPath, cleaned, sourceArtifactPath, existingArtifactPath, partialSource);
+        const finalOut = savedPath === plannedPath && isPartial === plannedPartial ? previewOut : formatStructured(savedPath, isPartial);
+        log?.info?.({ event: "d1.structured_failures_extracted", rawChars: cleaned.length, outChars: finalOut.text.length, kept: finalOut.kept, total: structuredTotal });
+        return { text: finalOut.text, filtered: true, artifactPath: savedPath };
+      }
+      return { text: cleaned, filtered: false, artifactPath: undefined };
+    }
+  }
+
   const fixedOverhead = hdrEstimate + headBlk.length + tailBlk.length + (anomBlk ? anomBlk.length + 2 : 0) + 40;
   const midBudget = Math.max(0, maxChars - fixedOverhead);
 
@@ -664,7 +846,8 @@ export async function distillCommandOutput({ rawOutput, command, goal, artifactP
 
   if (cleaned.length <= maxChars) return { text: cleaned, filtered: false, artifactPath: undefined };
   const { savedPath, isPartial } = await persistCommandArtifact(artifactPath, cleaned, sourceArtifactPath, existingArtifactPath, partialSource);
-  const fittedAnom = fitAnomalyBlock(anomalies, Math.floor(maxChars / 2) - 2);
+  const fittedStruct = structuredBlocks.length ? fitStructuredFailureBlock(structuredBlocks, Math.floor(maxChars / 2) - 2).text : "";
+  const fittedAnom = fittedStruct || fitAnomalyBlock(anomalies, Math.floor(maxChars / 2) - 2);
   const anomPrefix = fittedAnom ? `${fittedAnom}\n\n` : "";
   const previewBudget = Math.max(400, maxChars - anomPrefix.length);
   const fallback = boundedPreview(cleaned, previewBudget, savedPath, isPartial);
@@ -726,9 +909,9 @@ export async function distillBrowserText({ rawText, url, focus, artifactPath, pa
   } catch (error) {
     log?.warn({ event: "d1.fallback", target: "browser_text", err: redactSecrets(errorMessage(error)) });
   }
-  if (cleaned.length > config.tools.readBytes.default) {
+  if (cleaned.length > maxChars) {
     const savedPath = await persistArtifact(artifactPath, cleaned);
-    return { text: boundedPreview(cleaned, config.tools.readBytes.default, savedPath, partialSource, partialLabel), filtered: false, artifactPath: savedPath };
+    return { text: boundedPreview(cleaned, maxChars, savedPath, partialSource, partialLabel), filtered: false, artifactPath: savedPath };
   }
   return { text: cleaned, filtered: false, artifactPath: undefined };
 }

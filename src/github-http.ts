@@ -30,10 +30,15 @@ export async function conditionalFetch(input: string | URL | Request, init: Requ
   const resource = response.headers.get("x-ratelimit-resource") ?? "core";
   if ((resource === "core" || resource === "graphql") && response.headers.has("x-ratelimit-remaining")) {
     const rateLimit = rateLimits[resource];
-    Object.assign(rateLimit, {
-      remaining: Number(response.headers.get("x-ratelimit-remaining")), reset: Number(response.headers.get("x-ratelimit-reset")),
-      limit: Number(response.headers.get("x-ratelimit-limit")) || rateLimit.limit,
-    });
+    const remaining = Number(response.headers.get("x-ratelimit-remaining"));
+    const reset = Number(response.headers.get("x-ratelimit-reset"));
+    const limit = Number(response.headers.get("x-ratelimit-limit")) || rateLimit.limit;
+    if (reset > rateLimit.reset) {
+      Object.assign(rateLimit, { remaining, reset, limit });
+    } else if (reset === rateLimit.reset) {
+      rateLimit.remaining = Math.min(rateLimit.remaining, remaining);
+      rateLimit.limit = limit;
+    }
   }
   if (!key) return response;
   if (response.status === 304 && hit) {

@@ -1369,14 +1369,18 @@ export const scenarios = {
     assert.ok(all(s.tasks).some((t) => t.action === "review_issue" && t.status === "queued"), "The latest claimed review is the baseline");
     f.addIssue(2, ["scrat"]); f.enqueue(2, "implement"); const implemented = await success();
     const prItem = all(s.items).find((i) => i.kind === "pr");
-    const feedback = async () => { tasks.enqueueTask({ subjectId: prItem.id, action: "address_pr_feedback", reason: "Reply", input: { source: "github_items", kind: "manual", manual: true } }); f.reset(202, "no-change"); return success(); };
-    const older = await feedback(); assert.equal(older.workspaceId, implemented.workspaceId);
-    assert.equal(older.piSessionFile, implemented.piSessionFile);
-    const copy = implemented.piSessionFile.replace(/\.jsonl$/, "-copy.jsonl");
-    copyFileSync(implemented.piSessionFile, copy);
-    db.update(s.runs).set({ piSessionFile: resolve("pruned-release", basename(copy)) }).where(eq(s.runs.id, older.id)).run();
-    assert.ok(older.sequence > implemented.sequence);
-    const next = await feedback(); assert.equal(next.piSessionFile, realpathSync(copy)); assert.ok(next.sequence > older.sequence);
+    const feedback = async (mode = "no-change") => { tasks.enqueueTask({ subjectId: prItem.id, action: "address_pr_feedback", reason: "Reply", input: { source: "github_items", kind: "manual", manual: true } }); f.reset(202, mode); return mode === "no-change" ? success() : run(); };
+    const separate = await feedback("no-change"); assert.equal(separate.workspaceId, implemented.workspaceId);
+    assert.notEqual(separate.piSessionFile, implemented.piSessionFile, "Distinct actions on one workspace start fresh Pi sessions");
+    const failed = await feedback("incomplete");
+    assert.equal(failed.result.outcome, "incomplete");
+    const copy = failed.piSessionFile.replace(/\.jsonl$/, "-copy.jsonl");
+    copyFileSync(failed.piSessionFile, copy);
+    db.update(s.runs).set({ piSessionFile: resolve("pruned-release", basename(copy)) }).where(eq(s.runs.id, failed.id)).run();
+    tasks.retryTask(failed.taskId); f.reset(202, "no-change");
+    const retried = await success();
+    assert.equal(retried.piSessionFile, realpathSync(copy), "Same-task retry resumes its latest claimed session file");
+    assert.ok(retried.sequence > failed.sequence);
   } },
   scope_snapshots: { title: "PR-only, renamed and deleted paths keep their identities across unrelated base changes", seed: seedScopeSnapshots, configure: [configureScopeSnapshots, (config) => { config.actions.resolve_conflicts.enabled = false; }], run: async () => {
     const implemented = await implement(1), workspace = f.row(s.workspaces, implemented.workspaceId);
@@ -1805,7 +1809,7 @@ export const scenarios = {
     f.addIssue(1); f.enqueue(1, "implement"); const failed = await run();
     assert.ok(failed.error); assert.equal(failed.stage, "validating");
     const calls = f.requests.length;
-    assert.equal(readFileSync("prepare.log", "utf8").trim().split("\n").length, 2);
+    assert.equal(readFileSync("prepare.log", "utf8").trim().split("\n").length, 1, "Unchanged prepare inputs reuse pre-agent preparation");
     execFileSync(process.execPath, [resolve("app/src/retry.ts"), failed.taskId, "--validation-only"], { stdio: "pipe" });
     f.faults.pr.add(1); const publishing = await run();
     assert.equal(f.requests.length, calls, "Validation resume must not invoke Pi");
@@ -1814,7 +1818,7 @@ export const scenarios = {
     assert.equal(publishing.verification.headSha, publishing.publication.commitSha);
     const receipts = readFileSync("database-receipts.jsonl", "utf8").trim().split("\n").map(JSON.parse);
     assert.deepEqual(receipts.map((receipt) => receipt.rows), [1, 0]); assert.notEqual(receipts[0].id, receipts[1].id);
-    assert.equal(readFileSync("prepare.log", "utf8").trim().split("\n").length, 3, "Resume retains post-agent preparation exactly once");
+    assert.equal(readFileSync("prepare.log", "utf8").trim().split("\n").length, 2, "Resume retains post-agent preparation exactly once");
     tasks.retryTask(publishing.taskId); const published = await success();
     assert.equal(f.requests.length, calls); assert.equal(f.prs.length, 1);
     assert.equal(published.inferenceFromRunId, publishing.id); assert.deepEqual(published.verification, publishing.verification);
@@ -2196,13 +2200,13 @@ fi
     changeMain("notes.md", "new docs\n"); await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"));
     changeMain("assets/.vite/manifest.json", '{"app":"app-2.js"}\n'); await route();
     assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "A push touching only ignored paths queues no review");
-    changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "1.0.0", unrelated: "2.0.0" } }));
+    changeMain("package.json", JSON.stringify({ dependencies: { otherRuntime: "1.0.0" }, optionalDependencies: { optPkg: "1.0.0" }, devDependencies: { wrangler: "1.0.0", unrelated: "2.0.0" } }));
     changeMain("pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: old}\n  unrelated@2.0.0:\n    resolution: {integrity: new}\n");
-    await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "Unrelated dev dependencies must not trigger review");
+    await route(); assert.ok(!all(s.tasks).some((t) => t.status === "queued"), "Unrelated dependencies/devDependencies/optionalDependencies must not trigger review");
     changeMain("pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages:\n  wrangler@1.0.0:\n    resolution: {integrity: changed}\n  unrelated@2.0.0:\n    resolution: {integrity: newer}\n");
     await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"), "A changed inspected package beside an unrelated bump must trigger review");
     f.reset(1, "grep"); await success();
-    changeMain("package.json", JSON.stringify({ devDependencies: { wrangler: "2.0.0", unrelated: "2.0.0" } }));
+    changeMain("package.json", JSON.stringify({ dependencies: { otherRuntime: "2.0.0" }, optionalDependencies: { optPkg: "2.0.0" }, devDependencies: { wrangler: "2.0.0", unrelated: "2.0.0" } }));
     await route(); assert.ok(all(s.tasks).some((t) => t.status === "queued"), "Inspected dependency changes must trigger review");
     f.script = [
       { name: "git", args: { operation: "log", path: "src" } },
@@ -4036,8 +4040,8 @@ fi
     const r2 = await success(), secondSession = sessions().at(-1);
     assert.equal(readFileSync(secondSession.context.files.siteMap, "utf8"), "Site map\n- `/products/<handle>`: product page\n");
     const baselines = JSON.parse(readFileSync(secondSession.context.files.baselines, "utf8"));
-    assert.deepEqual(Object.keys(baselines), ["home", "products_tee"]); assert.equal(baselines.home.screenshots.mobile.sha, first);
-    assert.equal(readFileSync(baselines.home.screenshots.desktop.path, "utf8"), "png / 1280 v1", "the agent reads the previous run's screenshot from its own context directory");
+    assert.deepEqual(Object.keys(baselines.pages), ["home", "products_tee"]); assert.equal(baselines.pages.home.sha, first.slice(0, 7));
+    assert.equal(readFileSync(resolve(baselines.baselinesDir, baselines.pages.home.devices.desktop), "utf8"), "png / 1280 v1", "the agent reads the previous run's screenshot from its own context directory");
     assert.equal(replies().at(-1), `*Storefront* on ${second.slice(0, 7)}: The variant picker is broken on product pages.\n• New breakage \`product:variant-picker\`: The variant picker does nothing on mobile\n`
       + "• Lighthouse mobile (2 runs): Performance 62 (-3), Accessibility 90 (±0), Best Practices 96 (±0), SEO 100 (±0); FCP 1.6 s (-0.2), LCP 3.5 s (+0.4), TBT 240 ms (+30), CLS 0.05 (±0.00), Speed Index 2.8 s (-0.1)\n"
       + "• Lighthouse desktop (2 runs): Performance 90 (-3), Accessibility 95 (±0), Best Practices 100 (±0), SEO 100 (±0); FCP 1.8 s (±0.0), LCP 3.1 s (±0.0), TBT 210 ms (±0), CLS 0.05 (±0.00), Speed Index 2.9 s (±0.0)" + link(r2));
@@ -4853,8 +4857,8 @@ fi
     assert.deepEqual([secondRoot.body.thread_ts, secondReply.body.thread_ts], [undefined, second.ts]); assert.equal(secondRoot.body.text, "The store has 1 problem today: the checkout does not open (2 pages checked).");
     assert.match(secondReply.body.text, /^• New breakage `cart:checkout`: Checkout does not open\n• Lighthouse mobile \(2 runs\): Performance 64 \(\+4\), Accessibility 90 \(±0\)/); assert.match(secondReply.body.text, /• Lighthouse desktop \(2 runs\): Performance 90 \(±0\)/);
     assert.deepEqual(secondReply.body.blocks.map((block) => block.type), ["rich_text", "table"]);
-    const baselines = JSON.parse(readFileSync(later.files.baselines, "utf8")); assert.deepEqual(Object.keys(baselines), ["home"]); assert.equal(baselines.home.screenshots.mobile.sha, tip);
-    assert.equal(readFileSync(baselines.home.screenshots.mobile.path, "utf8"), "png / 390 v1", "the audit reads its own previous screenshots");
+    const baselines = JSON.parse(readFileSync(later.files.baselines, "utf8")); assert.deepEqual(Object.keys(baselines.pages), ["home"]); assert.equal(baselines.pages.home.sha, tip.slice(0, 7));
+    assert.equal(readFileSync(resolve(baselines.baselinesDir, baselines.pages.home.devices.mobile), "utf8"), "png / 390 v1", "the audit reads its own previous screenshots");
     assert.match(readFileSync(later.files.history, "utf8"), /## 2026-10-21T13:15:00\.000Z, \S+, complete\n\nYour store is healthy today & all 2 pages were checked <0 problems>\./);
     assert.deepEqual(json("audits/alerts.json"), { "cart:checkout": { title: "Checkout does not open", sha: tip } }); assert.equal(json("audits/lighthouse.json").mobile.scores.performance, 64);
     assert.equal(json("audits/baselines/index.json").home.devices.mobile, tip, "a run that is not clean keeps the baselines");
@@ -4898,6 +4902,27 @@ fi
     assert.equal(reply.body.text, "The shirt page shows the new details.\n• `/products/a-shirt` mobile: the details list shows the new text.");
     assert.deepEqual(JSON.parse(state("baselines/index.json")), { "products_a-shirt": { url: site + "/products/a-shirt", devices: { mobile: run.mainSha } } });
     assert.ok(!existsSync("data/storefront/lighthouse.json"));
+
+    // Verify bounded concurrency across listings + shop + metaobjects never exceeds storefront.changes.concurrency
+    admin.denied.delete("metaobjectDefinitions");
+    admin.roots.metaobjectDefinitions = Array.from({ length: 6 }, (_, i) => ({ type: `custom_type_${i}` }));
+    admin.roots.metaobjects = [];
+    live.storefront.changes.concurrency = 2;
+    const prevFetch = globalThis.fetch;
+    let inFlight = 0, maxInFlight = 0;
+    globalThis.fetch = async (url, init) => {
+      inFlight++;
+      if (inFlight > maxInFlight) maxInFlight = inFlight;
+      try {
+        await new Promise((r) => setTimeout(r, 15));
+        return await prevFetch(url, init);
+      } finally { inFlight--; }
+    };
+    try {
+      await poll(120);
+      assert.ok(maxInFlight >= 2, `store_changes should parallelize queries: maxInFlight=${maxInFlight}`);
+      assert.ok(maxInFlight <= 2, `shared limiter must cap nested listings + metaobjects at concurrency=2: got ${maxInFlight}`);
+    } finally { globalThis.fetch = prevFetch; }
   } },
   storefront_preview: { title: "an enabled storefront gives each Scrat PR review one recorded MAIN duplicate through Loggie, adopts a duplicate whose reply was lost, resumes its processing wait, replaces a theme that vanished, reuses it and deletes it when the PR closes, retrying a failed delete; a refused Loggie call only logs, and a disabled storefront or a human PR makes no Loggie call", configure: [(config) => { Object.assign(config.storefront, { store: "fixture.myshopify.com", publicHost: "shop.example.test" }); Object.assign(config.storefront.preview, { processingPollSeconds: 1, filesPageSize: 2 }); }], run: async () => {
     const { config: live } = await f.app("config.ts"), { loggie } = await f.app("loggie.ts"), { childEnvironment, containsSecret } = await f.app("secrets.ts");
@@ -5481,16 +5506,17 @@ fi
     config.d1.browserText.maxOutputChars = 1400;
     config.d1.history.minChars = 300;
     config.d1.history.maxOutputChars = 1400;
+    config.d1.failureBlocks.skipD1OnMatch = false;
   }], run: async () => {
     const prevToken = process.env.CODEX_LB_API_KEY, prevFetch = globalThis.fetch;
     process.env.CODEX_LB_API_KEY = "d1-secret-token-value-99999";
-    let failD1 = false, fail429Once = false, d1Calls = 0;
+    let failD1 = false, fail429Count = 0, d1Calls = 0;
     globalThis.fetch = async (url, init) => {
       if (String(url) !== "https://codex.unblocklabs.ai/v1/decisions") return prevFetch(url, init);
       d1Calls++;
       assert.equal(new Headers(init.headers).get("authorization"), "Bearer d1-secret-token-value-99999");
-      if (fail429Once) {
-        fail429Once = false;
+      if (fail429Count > 0) {
+        fail429Count--;
         return new Response(JSON.stringify({ error: { message: "at capacity" } }), { status: 429, headers: { "retry-after": "0" } });
       }
       if (failD1) return new Response("overloaded", { status: 500 });
@@ -5550,10 +5576,10 @@ fi
       ].join("\n");
 
       const bashLog = resolve(ctxDir, "bash-1.log");
-      fail429Once = true;
+      fail429Count = 1;
       const longSecretCmd = `pnpm exec vitest run ${"--filter=pkg ".repeat(10)}--token=d1-secret-token-value-99999`;
       const cmdRes = await distillCommandOutput({ rawOutput: noisyLog, command: longSecretCmd, artifactPath: bashLog, minChars: 400, maxChars: 2200 });
-      assert.equal(fail429Once, false, "transient HTTP 429 was retried and recovered");
+      assert.equal(fail429Count, 0, "transient HTTP 429 was retried and recovered");
       assert.equal(cmdRes.filtered, true);
       assert.match(cmdRes.text, /\[d1 filtered:/);
       assert.match(cmdRes.text, /FAIL src\/orders\.test\.ts/);
@@ -5589,7 +5615,7 @@ fi
       const warnHeavy = Array.from({ length: 120 }, (_, i) => `warning ${i}: ${"detail ".repeat(25)}`).join("\n") + "\nFAIL src/orders.test.ts\n";
       const fallback = await distillCommandOutput({ rawOutput: warnHeavy, command: "pnpm exec vitest run", artifactPath: resolve(ctxDir, "fallback.log"), minChars: 400, maxChars: 2200 });
       assert.equal(fallback.filtered, true);
-      assert.match(fallback.text, /FLAGGED ANOMALY LINES[\s\S]*warning 0:/);
+      assert.match(fallback.text, /STRUCTURED FAILURES[\s\S]*FAIL src\/orders\.test\.ts/);
       assert.match(fallback.text, /truncated \d+ chars/);
       assert.ok(fallback.text.length <= 2200, `fallback respects maxChars with anomalies: got ${fallback.text.length}`);
       failD1 = false;
@@ -5662,6 +5688,7 @@ fi
         failD1 = true;
         const fbRes = await browserTool.execute("c4", { action: "text" }, undefined, undefined, {});
         assert.match(fbRes.content[0].text, /truncated \d+ chars.*browser-text-sess-a-/, "35KB browser:text fallback surfaces truncation notice and artifact path");
+        assert.ok(fbRes.content[0].text.length <= 1400, `browser fallback strictly enforces configured maxOutputChars: got ${fbRes.content[0].text.length}`);
         failD1 = false;
         // Page exceeding capture cap is explicitly labeled as partial page text
         pageBody = "Header " + "boilerplate ".repeat(48000) + "\n## Product Details\nOUT OF STOCK\n";
@@ -5683,6 +5710,18 @@ fi
       assert.ok(histRes.text.length <= 1400, `history digest enforces maxOutputChars: got ${histRes.text.length}`);
       assert.ok(existsSync(histFull), "full history saved to history-full.md");
       assert.ok(d1Calls >= 3);
+
+      // Consecutive HTTP 429s open the circuit breaker and short-circuit subsequent calls with 0 RPCs
+      fail429Count = 5;
+      const beforeTrip = d1Calls;
+      const tripped = await distillCommandOutput({ rawOutput: noisyLog, command: "pnpm test", artifactPath: resolve(ctxDir, "cb-1.log"), minChars: 400, maxChars: 2200 });
+      assert.equal(tripped.filtered, true, "circuit breaker trips to bounded fallback");
+      assert.equal(d1Calls, beforeTrip + 2, "trips after configured circuitBreakerThreshold (2) consecutive 429s");
+      const callsWhileOpen = d1Calls;
+      const skipped = await distillCommandOutput({ rawOutput: noisyLog, command: "pnpm test", artifactPath: resolve(ctxDir, "cb-2.log"), minChars: 400, maxChars: 2200 });
+      assert.equal(skipped.filtered, true);
+      assert.equal(d1Calls, callsWhileOpen, "open circuit breaker short-circuits immediately with zero d1 HTTP calls");
+      fail429Count = 0;
     } finally {
       globalThis.fetch = prevFetch;
       if (prevToken === undefined) delete process.env.CODEX_LB_API_KEY; else process.env.CODEX_LB_API_KEY = prevToken;
@@ -5796,6 +5835,307 @@ fi
     const redactedHit = (await runGrep({ pattern: "REDACT_SHIFTED_NEEDLE", path: "src/secret-line.ts", literal: true })).content[0].text;
     assert.match(redactedHit, /REDACT_SHIFTED_NEEDLE/, "match stays visible after preceding long secret is redacted");
     assert.doesNotMatch(redactedHit, /github_pat_AAA/, "secret remains redacted");
+  } },
+  phase1_optimizations: { title: "Phase 1 pre-injects diffStat, deduplicates live unchanged reads safely across compaction, guards bash git diff against lockfile bloat, and re-runs prepare when prepareInputs change", configure: [configureResumePrepare, (config) => {
+    config.d1.enabled = false;
+    config.tools.readDedupMinBytes = 256;
+  }], run: async () => {
+    // 1. Pre-injected diffStat in PR review prompt
+    branchOff("feat-stat", "src/app.ts", "export const value = 2;\n");
+    f.addPr(1, "feat-stat", "human");
+    await route();
+    await success();
+    const prReq = f.requests.find((r) => r.context.action === "review_pr");
+    assert.match(prReq.context.diffStat, /src\/app\.ts\s*\|\s*2\s*\+-/, "PR review prompt pre-injects compact diffStat");
+
+    // 2. Compaction-safe sha256 exact read dedup + deterministic bash git diff lockfile guard (even with d1 disabled)
+    const { createAgentTools } = await f.app("tools.ts");
+    const { logger } = await f.app("logging.ts");
+    const ws = resolve("p1-ws"), ctxDir = resolve("p1-ctx");
+    mkdirSync(resolve(ws, "src"), { recursive: true });
+    mkdirSync(ctxDir, { recursive: true });
+    git(ws, "init", "-b", "main");
+    writeFileSync(resolve(ws, "src/big.ts"), Array.from({ length: 20 }, (_, i) => `export const line_${i} = "${"v".repeat(20)}";`).join("\n") + "\n");
+    writeFileSync(resolve(ws, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\npackages:\n  'alpha@1.0.0':\n    resolution: {integrity: sha512-old}\n");
+    git(ws, "add", "."); commit(ws, "init");
+    writeFileSync(resolve(ws, "src/big.ts"), Array.from({ length: 20 }, (_, i) => `export const line_${i} = "${"w".repeat(20)}";`).join("\n") + "\n");
+    writeFileSync(resolve(ws, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\npackages:\n" + Array.from({ length: 120 }, (_, i) => `  'pkg-${i}@2.0.${i}':\n    resolution: {integrity: sha512-${"x".repeat(40)}}\n`).join(""));
+
+    let liveIds = new Set();
+    const { customTools } = await createAgentTools({
+      run: { id: "p1-run" }, cwd: ws, contextDir: ctxDir, tools: ["read", "bash"],
+      scoped: { mode: "change" }, log: logger, getLiveToolCallIds: () => liveIds,
+    });
+    const readTool = customTools.find((t) => t.name === "read");
+    const bashTool = customTools.find((t) => t.name === "bash");
+
+    const r1 = (await readTool.execute("call-1", { path: "src/big.ts" }, undefined, undefined, {})).content[0].text;
+    assert.match(r1, /line_0/);
+    liveIds.add("call-1");
+    const r2 = (await readTool.execute("call-2", { path: "src/big.ts" }, undefined, undefined, {})).content[0].text;
+    assert.match(r2, /^\[unchanged: identical \d+-byte read of src\/big\.ts is already in this session context/, "identical live read is deduplicated");
+    // Compaction evicts call-1 -> must return full content again
+    liveIds = new Set();
+    const r3 = (await readTool.execute("call-3", { path: "src/big.ts" }, undefined, undefined, {})).content[0].text;
+    assert.match(r3, /line_0/, "evicted read after compaction returns full content");
+    liveIds.add("call-3");
+    // File mutation changes sha256 -> must return updated content even though call-3 is live
+    writeFileSync(resolve(ws, "src/big.ts"), Array.from({ length: 20 }, (_, i) => `export const line_${i} = "${"z".repeat(20)}";`).join("\n") + "\n");
+    const r4 = (await readTool.execute("call-4", { path: "src/big.ts" }, undefined, undefined, {})).content[0].text;
+    assert.match(r4, /zzzzzzzzzz/, "mutated file bypasses read dedup via sha256 check");
+
+    const bashCtx = { sessionManager: { getSessionId: () => "p1-sess", getSessionFile: () => undefined } };
+    const guardedDiff = (await bashTool.execute("b1", { command: "git diff" }, undefined, undefined, bashCtx)).content[0].text;
+    assert.match(guardedDiff, /line_0 = "zzzzzzzzzz/, "bash git diff keeps regular source hunk verbatim");
+    assert.doesNotMatch(guardedDiff, /sha512-xxxxx/, "bash git diff omits lockfile bloat deterministically");
+    assert.match(guardedDiff, /generated\/lockfile diff omitted.*pkg-0@2\.0\.0|Added\/updated entries.*pkg-0@2\.0\.0[\s\S]*generated\/lockfile diff omitted/);
+    const rawDiff = (await bashTool.execute("b2", { command: "git diff", raw: true }, undefined, undefined, bashCtx)).content[0].text;
+    assert.match(rawDiff, /sha512-xxxxx/, "raw: true bypasses bash git diff lockfile guard");
+
+    // 3. prepareInputsSignature skips duplicate post-agent prepare when unchanged, re-runs when package.json changes
+    writeFileSync("prepare.log", "");
+    f.addIssue(10, ["scrat"]); f.enqueue(10, "implement");
+    await success();
+    assert.equal(readFileSync("prepare.log", "utf8").trim().split("\n").length, 1, "unchanged prepareInputs skips duplicate post-agent prepare");
+
+    writeFileSync("prepare.log", "");
+    f.addIssue(11, ["scrat"]); f.enqueue(11, "implement");
+    f.script = [{ name: "write", args: { path: "package.json", content: '{"name":"changed"}\n' } }];
+    await success();
+    f.script = undefined;
+    assert.equal(readFileSync("prepare.log", "utf8").trim().split("\n").length, 2, "editing package.json re-runs post-agent prepare");
+  } },
+  phase2_optimizations: { title: "Phase 2 extracts Vitest/TS/ESLint/Knip failures deterministically without d1 RPCs, honors browser selector + modal-safe DOM scoping + XML sitemap summaries, compacts baselines.json, and runs store_changes concurrently", configure: [(config) => {
+    config.d1.enabled = true;
+    config.d1.bash.minChars = 400;
+    config.d1.bash.maxOutputChars = 2400;
+    config.d1.failureBlocks.enabled = true;
+    config.d1.failureBlocks.skipD1OnMatch = true;
+    config.tools.browser.sitemapSamplesPerGroup = 2;
+  }], run: async () => {
+    const prevToken = process.env.CODEX_LB_API_KEY, prevFetch = globalThis.fetch;
+    process.env.CODEX_LB_API_KEY = "p2-test-token-12345";
+    let d1RpcCount = 0;
+    globalThis.fetch = async (url, init) => {
+      if (String(url) !== "https://codex.unblocklabs.ai/v1/decisions") return prevFetch(url, init);
+      d1RpcCount++;
+      const body = JSON.parse(init.body);
+      const answers = Object.fromEntries(Object.keys(body.questions).map((k) => [k, { type: "noul", noul: 0.9 }]));
+      return new Response(JSON.stringify({ model: body.model, answers }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    try {
+      const { distillCommandOutput } = await f.app("d1.ts");
+      const { createBrowserTool } = await f.app("scoped-tools.ts");
+      const { stageBaselines } = await f.app("storefront-site.ts");
+      const { writeState } = await f.app("storefront.ts");
+      const ctxDir = resolve("p2-ctx"); mkdirSync(ctxDir, { recursive: true });
+
+      // 1. Structured failure-block extraction captures Vitest, TS, ESLint, and Knip errors past 120 noisy warnings with 0 d1 RPCs
+      const mixedFailureLog = [
+        "Running checks...",
+        ...Array.from({ length: 120 }, (_, i) => `{"level":"warn","msg":"warning ${i}: noisy deprecation notice ${"x".repeat(40)}"}`),
+        "FAIL src/orders.test.ts > applies discount",
+        "AssertionError: expected 90 to equal 100",
+        "    at src/orders.test.ts:19:5",
+        "",
+        "src/api/billing.ts(44,12): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.",
+        "",
+        "src/ui/cart.tsx",
+        "  12:7  error  'unusedVar' is assigned a value but never used  @typescript-eslint/no-unused-vars",
+        "",
+        "Unused files (2)",
+        "src/legacy/old.ts",
+        "src/legacy/dead.ts",
+        "",
+        ...Array.from({ length: 40 }, (_, i) => ` ✓ passing-test-${i}.test.ts`),
+        "Exit status 1",
+      ].join("\n");
+      const structRes = await distillCommandOutput({
+        rawOutput: mixedFailureLog, command: "pnpm check", artifactPath: resolve(ctxDir, "struct.log"),
+        minChars: 400, maxChars: 2400,
+      });
+      assert.equal(d1RpcCount, 0, "structured failure blocks skip d1 RPCs completely");
+      assert.equal(structRes.filtered, true);
+      assert.match(structRes.text, /\[structured failures:/);
+      assert.match(structRes.text, /FAIL src\/orders\.test\.ts/);
+      assert.match(structRes.text, /error TS2345/);
+      assert.match(structRes.text, /@typescript-eslint\/no-unused-vars/);
+      assert.match(structRes.text, /Unused files \(2\)/);
+      assert.ok(structRes.text.length <= 2400, `structured summary respects maxChars: got ${structRes.text.length}`);
+
+      // Benign `Error:` log lines in passing tests must NOT trigger skipD1OnMatch (must still invoke d1 so real failures aren't hidden)
+      const benignErrLog = "START\n"
+        + Array.from({ length: 60 }, (_, i) => `  Error: expected validation error ${i} ${"z".repeat(40)}`).join("\n")
+        + "\npanic: real crash in middle of log\n"
+        + Array.from({ length: 30 }, (_, i) => `step ${i}: trailing output ${"a".repeat(30)}`).join("\n");
+      const benignRes = await distillCommandOutput({
+        rawOutput: benignErrLog, command: "pnpm test", artifactPath: resolve(ctxDir, "benign.log"),
+        minChars: 400, maxChars: 2400,
+      });
+      assert.equal(d1RpcCount, 1, "bare Error: log lines do not bypass d1");
+      assert.match(benignRes.text, /\[d1 filtered:/);
+
+      // Unstructured noisy log with no Vitest/TS/ESLint/Knip markers falls through to d1
+      const unstructured = "START\n" + Array.from({ length: 80 }, (_, i) => `step ${i}: building artifact bundle ${"a".repeat(30)}`).join("\n") + "\nDONE";
+      const d1Res = await distillCommandOutput({
+        rawOutput: unstructured, command: "pnpm build", artifactPath: resolve(ctxDir, "unstruct.log"),
+        minChars: 400, maxChars: 2400,
+      });
+      assert.equal(d1RpcCount, 2, "unstructured command output falls through to d1");
+      assert.equal(d1Res.filtered, true);
+      assert.match(d1Res.text, /\[d1 filtered:/);
+
+      // 2. Browser action=text: honors selector, executes real domScopingScript against a DOM fixture, and summarizes XML sitemaps deterministically
+      let curUrl = "https://shop.example.test/products/focus";
+      let bodyText = "BIG HEADER NAV FOOTER BOILERPLATE";
+      let selectorSeen = "";
+      const makeNode = ({ tag, attrs = {}, style = {}, rect = { left: 0, top: 0, right: 200, bottom: 200, width: 200, height: 200 }, innerText = "", children = [] }) => {
+        const node = {
+          nodeType: 1, tagName: tag.toUpperCase(), attrs, style, rect, innerText, children, parentElement: null,
+          getAttribute: (k) => attrs[k] ?? null,
+          hasAttribute: (k) => Object.hasOwn(attrs, k),
+          getBoundingClientRect: () => rect,
+          contains: (other) => {
+            if (other === node) return true;
+            return children.some((c) => c.contains(other));
+          },
+          matches: (sel) => sel.split(",").map((s) => s.trim()).some((part) => {
+            if (part === tag.toLowerCase()) return true;
+            if (part === "[role=main]") return attrs.role === "main";
+            if (part === "[role=dialog]") return attrs.role === "dialog";
+            if (part === "[role=alertdialog]") return attrs.role === "alertdialog";
+            if (part === "[aria-modal=true]") return attrs["aria-modal"] === "true";
+            if (part === "dialog[open]") return tag.toLowerCase() === "dialog" && Object.hasOwn(attrs, "open");
+            if (part === "[role=banner]") return attrs.role === "banner";
+            if (part === "[role=navigation]") return attrs.role === "navigation";
+            if (part === "[role=contentinfo]") return attrs.role === "contentinfo";
+            if (part.includes("cart-drawer")) return /cart-drawer/i.test(`${attrs.id ?? ""} ${attrs.class ?? ""}`);
+            if (part.includes("cookie")) return /cookie/i.test(`${attrs.id ?? ""} ${attrs.class ?? ""}`);
+            return false;
+          }),
+          closest: (sel) => {
+            let cur = node;
+            while (cur) { if (cur.matches(sel)) return cur; cur = cur.parentElement; }
+            return null;
+          },
+        };
+        for (const c of children) c.parentElement = node;
+        return node;
+      };
+      const buildDoc = (nodes) => {
+        const allNodes = [];
+        const walk = (n) => { allNodes.push(n); for (const c of n.children) walk(c); };
+        const body = makeNode({ tag: "body", children: nodes });
+        walk(body);
+        return {
+          body,
+          querySelector: (sel) => allNodes.find((n) => n !== body && n.matches(sel)) ?? null,
+          querySelectorAll: (sel) => allNodes.filter((n) => n !== body && n.matches(sel)),
+        };
+      };
+      const hiddenBackdrop = makeNode({
+        tag: "div", style: { opacity: "0" },
+        children: [makeNode({ tag: "div", attrs: { role: "dialog" }, innerText: "CLOSED SECRET MODAL" })],
+      });
+      let mockDoc = buildDoc([
+        makeNode({ tag: "header", innerText: "BIG HEADER NAV" }),
+        makeNode({ tag: "main", innerText: "Main Product: Focus $48" }),
+        makeNode({ tag: "cart-drawer", innerText: "Cart Drawer: 1 item in cart" }),
+        hiddenBackdrop,
+        makeNode({ tag: "footer", innerText: "FOOTER BOILERPLATE" }),
+      ]);
+      const stubPage = {
+        goto: async (u) => { curUrl = u; return { status: () => 200 }; },
+        title: async () => "Shop",
+        url: () => curUrl,
+        innerText: async (sel) => { selectorSeen = sel; return sel === "#cart" ? "Cart subtotal $48" : bodyText; },
+        evaluate: async (expr) => new Function("document", "getComputedStyle", "window", `return (${expr})`)(
+          mockDoc,
+          (el) => ({ display: "block", visibility: "visible", opacity: "1", ...el.style }),
+          { innerWidth: 1280, innerHeight: 800 },
+        ),
+        screenshot: async () => {},
+        innerHTML: async () => "<html></html>",
+        waitForLoadState: async () => {},
+        on: () => {}, off: () => {}, setViewportSize: async () => {},
+        locator: () => ({ count: async () => 1 }),
+        click: async () => {}, fill: async () => {}, selectOption: async () => {},
+      };
+      const { tool: browserTool, close } = createBrowserTool({
+        settings: { navigationHosts: ["shop.example.test"], resourceHosts: [] }, contextDir: ctxDir, runId: "p2-run", sessionTag: "p2",
+        resolve: async () => [{ address: "93.184.216.34", family: 4 }],
+        launch: async () => ({ newContext: async () => ({ route: async () => {}, newPage: async () => stubPage, close: async () => {} }), close: async () => {} }),
+      });
+      try {
+        await browserTool.execute("g1", { action: "goto", url: "https://shop.example.test/products/focus" }, undefined, undefined, {});
+        const selOut = (await browserTool.execute("t1", { action: "text", selector: "#cart" }, undefined, undefined, {})).content[0].text;
+        assert.equal(selectorSeen, "#cart", "action=text honors selector");
+        assert.equal(selOut, "Cart subtotal $48");
+
+        const domOut = (await browserTool.execute("t2", { action: "text" }, undefined, undefined, {})).content[0].text;
+        assert.match(domOut, /Main Product: Focus \$48[\s\S]*Cart Drawer: 1 item in cart/, "real domScopingScript keeps <main> + <cart-drawer>");
+        assert.doesNotMatch(domOut, /BIG HEADER NAV|FOOTER BOILERPLATE/, "real domScopingScript strips header/footer chrome");
+        assert.doesNotMatch(domOut, /CLOSED SECRET MODAL/, "closed modal under opacity:0 ancestor is excluded");
+
+        // No-<main> SPA page with modal inside #root must not duplicate modal text
+        mockDoc = buildDoc([
+          makeNode({ tag: "header", innerText: "NAV CHROME" }),
+          makeNode({ tag: "div", attrs: { id: "root" }, innerText: "SPA App\nOpen Dialog", children: [makeNode({ tag: "div", attrs: { role: "dialog" }, innerText: "Open Dialog" })] }),
+        ]);
+        const spaOut = (await browserTool.execute("t2b", { action: "text" }, undefined, undefined, {})).content[0].text;
+        assert.equal(spaOut.split("Open Dialog").length - 1, 1, "overlay inside included SPA root is not duplicated");
+
+        const rawOut = (await browserTool.execute("t3", { action: "text", raw: true }, undefined, undefined, {})).content[0].text;
+        assert.equal(rawOut, bodyText, "raw: true bypasses DOM scoping");
+
+        // XML sitemap with query string (?from=1&to=2), &amp; entity, and CDATA <loc> (0 d1 RPCs)
+        const rpcBeforeSitemap = d1RpcCount;
+        await browserTool.execute("g2", { action: "goto", url: "https://shop.example.test/sitemap.xml?from=1&to=2" }, undefined, undefined, {});
+        bodyText = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n`
+          + `<url><loc>https://shop.example.test/sitemap_products_1.xml?from=10&amp;to=20</loc></url>\n`
+          + `<url><loc><![CDATA[https://shop.example.test/products/cdata-item]]></loc></url>\n`
+          + Array.from({ length: 49 }, (_, i) => `<url><loc>https://shop.example.test/products/item-${i}</loc></url>`).join("\n")
+          + "\n"
+          + Array.from({ length: 10 }, (_, i) => `<url><loc>https://shop.example.test/collections/col-${i}</loc></url>`).join("\n")
+          + "\n</urlset>";
+        const mapOut = await browserTool.execute("t4", { action: "text" }, undefined, undefined, {});
+        assert.equal(d1RpcCount, rpcBeforeSitemap, "XML sitemap summarization uses 0 d1 RPCs");
+        assert.match(mapOut.content[0].text, /\[sitemap summary: 61 URLs across 3 group\(s\)\]/);
+        assert.match(mapOut.content[0].text, /sitemap_products_1\.xml\?from=10&to=20/, "decodes &amp; in child sitemap query strings");
+        assert.match(mapOut.content[0].text, /products\/cdata-item/, "extracts CDATA <loc> entries");
+        assert.match(mapOut.content[0].text, /\/products\/\*: 50 — .* \(\+48 more\)/);
+        assert.ok(mapOut.details.artifactPath && existsSync(mapOut.details.artifactPath), "full sitemap saved as escape hatch");
+
+        // HTML challenge/error page at /sitemap.xml must NOT be misclassified as a sitemap
+        bodyText = "<!doctype html><html><body>Access denied https://shop.example.test/a https://shop.example.test/b</body></html>";
+        const htmlErrOut = (await browserTool.execute("t5", { action: "text" }, undefined, undefined, {})).content[0].text;
+        assert.doesNotMatch(htmlErrOut, /\[sitemap summary:/, "HTML error page at /sitemap.xml is not misclassified as a sitemap");
+      } finally { await close(); }
+
+      // 3. Compact multi-line baselines.json hoists shared sha and handles per-device sha differences
+      mkdirSync(resolve("data/storefront/audits/baselines/home"), { recursive: true });
+      mkdirSync(resolve("data/storefront/audits/baselines/cart"), { recursive: true });
+      writeFileSync(resolve("data/storefront/audits/baselines/home/desktop.png"), "d");
+      writeFileSync(resolve("data/storefront/audits/baselines/home/mobile.png"), "m");
+      writeFileSync(resolve("data/storefront/audits/baselines/cart/desktop.png"), "cd");
+      writeFileSync(resolve("data/storefront/audits/baselines/cart/mobile.png"), "cm");
+      await writeState("audits/baselines/index.json", {
+        home: { url: "https://shop.example.test/", devices: { desktop: "abcdef1234567890", mobile: "abcdef1234567890" } },
+        cart: { url: "https://shop.example.test/cart", devices: { desktop: "1111111aaaaaaaaa", mobile: "2222222bbbbbbbbb" } },
+      });
+      const written = {};
+      await stageBaselines(ctxDir, async (_k, name, content) => { written[name] = content; }, "audits");
+      assert.ok(written["baselines.json"].split("\n").length >= 5, "baselines.json emits one page per line so large manifests stay readable by read");
+      const compact = JSON.parse(written["baselines.json"]);
+      assert.equal(compact.baselinesDir, resolve(ctxDir, "baselines"));
+      assert.equal(compact.pages.home.sha, "abcdef1");
+      assert.equal(compact.pages.home.devices.desktop, "home/desktop.png");
+      assert.deepEqual(compact.pages.cart.devices.desktop, { file: "cart/desktop.png", sha: "1111111" });
+      assert.deepEqual(compact.pages.cart.devices.mobile, { file: "cart/mobile.png", sha: "2222222" });
+    } finally {
+      globalThis.fetch = prevFetch;
+      if (prevToken === undefined) delete process.env.CODEX_LB_API_KEY; else process.env.CODEX_LB_API_KEY = prevToken;
+    }
   } },
 };
 

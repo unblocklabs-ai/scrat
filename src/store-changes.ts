@@ -68,15 +68,59 @@ function listings(watched: Set<string>): Listing[] {
   ];
 }
 
-async function metaobjects(log: OperationScope["log"]) {
-  const { pageSizes: size, ignoreMetaobjectTypes } = config.storefront.changes, ignored = ignoreMetaobjectTypes ? new RegExp(ignoreMetaobjectTypes) : undefined;
+function createLimiter(concurrency: number) {
+  let active = 0;
+  const limit = Math.max(1, concurrency);
+  const waiters: Array<() => void> = [];
+  return async <R>(fn: () => Promise<R>): Promise<R> => {
+    if (active >= limit) await new Promise<void>((resolve) => { waiters.push(resolve); });
+    else active++;
+    try { return await fn(); }
+    finally {
+      const next = waiters.shift();
+      if (next) next();
+      else active--;
+    }
+  };
+}
+
+async function mapBounded<T, R>(items: readonly T[], concurrency: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0, failed = false;
+  const workers = await Promise.allSettled(Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
+    while (!failed && next < items.length) {
+      const index = next++;
+      try {
+        results[index] = await fn(items[index]!, index);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  }));
+  const rejected = workers.filter((w): w is PromiseRejectedResult => w.status === "rejected");
+  if (rejected.length) {
+    // Prefer non-permission errors over ACCESS_DENIED/SCOPE_UPGRADE_REQUIRED so throttling/5xx is never masked as missing scope.
+    const nonDenied = rejected.find((w) => {
+      const code = (w.reason as { code?: string } | undefined)?.code;
+      return !code || !denied.has(code);
+    });
+    throw (nonDenied ?? rejected[0]!).reason;
+  }
+  return results;
+}
+
+async function metaobjects(log: OperationScope["log"], limit: ReturnType<typeof createLimiter>) {
+  const { pageSizes: size, ignoreMetaobjectTypes, concurrency } = config.storefront.changes, ignored = ignoreMetaobjectTypes ? new RegExp(ignoreMetaobjectTypes) : undefined;
   try {
-    const definitions = await all<{ metaobjectDefinitions: Connection<{ type: string }> }, { type: string }>("metaobject_definitions",
-      `query ($after: String) { metaobjectDefinitions(first: ${size.metaobjectDefinitions}, after: $after) { nodes { type } ${pageInfo} } }`, (data) => data.metaobjectDefinitions);
+    const definitions = await limit(() => all<{ metaobjectDefinitions: Connection<{ type: string }> }, { type: string }>("metaobject_definitions",
+      `query ($after: String) { metaobjectDefinitions(first: ${size.metaobjectDefinitions}, after: $after) { nodes { type } ${pageInfo} } }`, (data) => data.metaobjectDefinitions));
     const query = `query ($type: String!, $after: String) { metaobjects(type: $type, first: ${size.metaobjects}, after: $after) { nodes { id handle type fields { key value } } ${pageInfo} } }`;
-    const found: { id: string; handle: string; type: string; fields: { key: string; value: string | null }[] }[] = [];
-    for (const { type } of definitions) if (!ignored?.test(type)) found.push(...await all<{ metaobjects: Connection<(typeof found)[number]> }, (typeof found)[number]>("metaobjects", query, (data) => data.metaobjects, { type }));
-    return found;
+    type MetaobjectNode = { id: string; handle: string; type: string; fields: { key: string; value: string | null }[] };
+    const active = definitions.filter(({ type }) => !ignored?.test(type));
+    const batches = await mapBounded(active, concurrency, ({ type }) =>
+      limit(() => all<{ metaobjects: Connection<MetaobjectNode> }, MetaobjectNode>("metaobjects", query, (data) => data.metaobjects, { type })));
+    return batches.flat();
   } catch (error) {
     const code = (error as { code?: string }).code;
     if (!code || !denied.has(code)) throw error;
@@ -86,17 +130,28 @@ async function metaobjects(log: OperationScope["log"]) {
 }
 
 async function read(watched: Set<string>, log: OperationScope["log"]) {
-  const current = new Map<string, Resource>(), kinds = new Set<string>(), { pageSizes: size } = config.storefront.changes;
+  const current = new Map<string, Resource>(), kinds = new Set<string>(), { pageSizes: size, concurrency } = config.storefront.changes;
   const put = (gid: string, kind: string, handle: string, fields: Record<string, unknown>, visible = true) => current.set(gid, { kind, handle, visible, fields: Object.fromEntries(Object.entries(fields).map(([field, value]) => [field, value === null || value === undefined ? "" : String(value)])) });
-  for (const { kind, root, first, selection, fields, visible } of listings(watched)) {
-    const query = `query ($after: String${selection.includes("$keys") ? ", $keys: [String!]" : ""}) { ${root}(first: ${first}, after: $after) { nodes { id ${selection} } ${pageInfo} } }`;
-    for (const node of await all<Record<string, Connection<Node>>, Node>(root, query, (data) => data[root]!, { keys: [...watched] })) put(node.id, kind, node.handle, fields(node), visible?.(node) ?? true);
+  const limit = createLimiter(concurrency);
+  const listingList = listings(watched);
+  const jobs: Array<() => Promise<unknown>> = [
+    ...listingList.map(({ root, first, selection }) => () => limit(() => {
+      const query = `query ($after: String${selection.includes("$keys") ? ", $keys: [String!]" : ""}) { ${root}(first: ${first}, after: $after) { nodes { id ${selection} } ${pageInfo} } }`;
+      return all<Record<string, Connection<Node>>, Node>(root, query, (data) => data[root]!, { keys: [...watched] });
+    })),
+    () => limit(() => all<{ shop: { metafields: Connection<Metafield> } }, Metafield>("shop", `query ($after: String, $keys: [String!]) { shop { metafields(first: ${size.shopMetafields}, after: $after, keys: $keys) { nodes { namespace key value } ${pageInfo} } } }`, (data) => data.shop.metafields, { keys: [...watched] })),
+    ...config.storefront.changes.metaobjects ? [() => metaobjects(log, limit)] : [],
+  ];
+  const outputs = await mapBounded(jobs, concurrency, (job) => job());
+  for (let i = 0; i < listingList.length; i++) {
+    const { kind, fields, visible } = listingList[i]!;
+    for (const node of outputs[i] as Node[]) put(node.id, kind, node.handle, fields(node), visible?.(node) ?? true);
     kinds.add(kind);
   }
-  const shop = await all<{ shop: { metafields: Connection<Metafield> } }, Metafield>("shop", `query ($after: String, $keys: [String!]) { shop { metafields(first: ${size.shopMetafields}, after: $after, keys: $keys) { nodes { namespace key value } ${pageInfo} } } }`, (data) => data.shop.metafields, { keys: [...watched] });
+  const shop = outputs[listingList.length] as Metafield[];
   put("shop", "shop", "shop", mine(watched, shop));
   kinds.add("shop");
-  const objects = config.storefront.changes.metaobjects ? await metaobjects(log) : undefined;
+  const objects = config.storefront.changes.metaobjects ? outputs[listingList.length + 1] as Awaited<ReturnType<typeof metaobjects>> : undefined;
   if (objects) {
     for (const { id, handle, type, fields } of objects) put(id, "metaobject", `${type}/${handle}`, Object.fromEntries(fields.map(({ key, value }) => [`field:${key}`, value])));
     kinds.add("metaobject");
@@ -139,13 +194,14 @@ function compare(previous: Snapshot, current: Map<string, Resource>, kinds: Set<
 
 async function attribute(changes: Change[], since: string) {
   const query = `query ($query: String) { events(first: ${config.storefront.changes.pageSizes.events}, sortKey: CREATED_AT, reverse: true, query: $query) { nodes { message ... on BasicEvent { subjectId } } } }`;
-  for (const kind of new Set(changes.map(({ resource }) => resource).filter((resource) => subjectTypes[resource]))) {
+  const changedKinds = [...new Set(changes.map(({ resource }) => resource).filter((resource) => subjectTypes[resource]))];
+  await mapBounded(changedKinds, config.storefront.changes.concurrency, async (kind) => {
     const { events } = await loggie<{ events: { nodes: { message: string; subjectId?: string }[] } }>("store_changes.events", query, { query: `subject_type:${subjectTypes[kind]} AND created_at:>${since}` });
     for (const change of changes.filter(({ resource }) => resource === kind)) {
       const messages = new Set(events.nodes.filter(({ subjectId }) => subjectId === change.gid).map(({ message }) => message.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim()));
       if (messages.size) change.events = [...messages];
     }
-  }
+  });
 }
 
 function summarize(changes: Change[]) {

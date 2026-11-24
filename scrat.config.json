@@ -4,6 +4,7 @@
     "maxConcurrentValidations": 3,
     "commandTimeoutSeconds": 3600,
     "commandOutputTailBytes": 65536,
+    "distillReadBytes": 2097152,
     "maxOutputBytes": 16777216,
     "gitNetworkTimeoutSeconds": 600,
     "idlePollSeconds": 30,
@@ -47,13 +48,18 @@
   "context": {
     "inlinePaths": 200,
     "historyRuns": 3,
-    "historyBytes": 12288
+    "historyBytes": 12288,
+    "diffStatBytes": 4096
   },
   "relevance": {
-    "ignoredPaths": []
+    "ignoredPaths": [
+      "(?:^|/)README\\.md$",
+      "^\\.dependency-cruiser-known-violations\\.json$"
+    ]
   },
   "tools": {
     "readBytes": { "default": 32768, "max": 65536 },
+    "readDedupMinBytes": 2048,
     "git": {
       "maxCommits": 200,
       "maxScopeBytes": 1048576,
@@ -70,7 +76,7 @@
       "inlineBytes": 10240
     },
     "http": { "timeoutSeconds": 30, "maxRequestBytes": 65536 },
-    "browser": { "steps": 40, "sessionSeconds": 300, "navigationSeconds": 30, "actionSeconds": 12, "defaultViewport": "desktop", "viewports": { "desktop": { "width": 1280, "height": 800 }, "mobile": { "width": 390, "height": 844 } } },
+    "browser": { "steps": 40, "sessionSeconds": 300, "navigationSeconds": 30, "actionSeconds": 12, "textCaptureBytes": 524288, "domScoping": true, "sitemapSamplesPerGroup": 5, "sitemapMaxGroups": 20, "defaultViewport": "desktop", "viewports": { "desktop": { "width": 1280, "height": 800 }, "mobile": { "width": 390, "height": 844 } } },
     "search": { "pageSize": 20, "excerptChars": 300, "maxQueryLength": 256 },
     "redactionMarginBytes": 4096
   },
@@ -80,12 +86,24 @@
     "model": "liquid/d1.2-ultra",
     "tokenEnv": "CODEX_LB_API_KEY",
     "certPath": null,
-    "timeoutMs": 8000,
+    "timeoutMs": 2500,
+    "maxRetries": 2,
+    "retryBaseDelayMs": 250,
+    "retryJitterMs": 150,
+    "retryReserveMs": 300,
+    "circuitBreakerThreshold": 2,
+    "circuitBreakerCooldownMs": 30000,
+    "maxWaves": 1,
+    "waveMaxChars": 12000,
+    "waveMaxItems": 18,
+    "maxCandidateChunks": 12,
+    "waveConcurrency": 2,
     "scoreThreshold": 0.3,
     "bash": { "minChars": 4096, "maxOutputChars": 12000 },
     "validation": { "minChars": 4096, "maxOutputChars": 12000 },
-    "browserText": { "minChars": 3072, "maxOutputChars": 6000 },
-    "history": { "minChars": 6144, "maxOutputChars": 6000 }
+    "browserText": { "minChars": 6144, "maxOutputChars": 6000 },
+    "history": { "minChars": 6144, "maxOutputChars": 6000 },
+    "failureBlocks": { "enabled": true, "skipD1OnMatch": true, "maxBlocks": 12, "contextLines": 8 }
   },
   "storefront": {
     "enabled": false,
@@ -115,6 +133,7 @@
     "changes": {
       "pollMinutes": 5,
       "quietMinutes": 10,
+      "concurrency": 4,
       "valueBytes": 2048,
       "batchRetentionDays": 30,
       "maxPages": 12,
@@ -153,13 +172,23 @@
       ["pnpm", "install", "--frozen-lockfile"],
       ["pnpm", "prisma-typegen"]
     ],
+    "prepareReview": null,
+    "prepareInputs": [
+      "(?:^|/)(?:package\\.json|pnpm-lock\\.yaml|pnpm-workspace\\.yaml|package-lock\\.json|yarn\\.lock|bun\\.lockb?|\\.npmrc|prisma\\.config\\.[cm]?[jt]s)$",
+      "(?:^|/)(?:prisma|patches)/"
+    ],
     "database": {
       "image": "postgres:16-alpine",
       "environment": ["DATABASE_URL", "TEST_DATABASE_URL"],
       "migrate": ["pnpm", "db:migrate"]
     },
     "validate": [
-      ["env", "TEST_DATABASE_URL=", "pnpm", "verify"],
+      ["pnpm", "type-check"],
+      ["pnpm", "lint"],
+      ["pnpm", "knip"],
+      ["env", "TEST_DATABASE_URL=", "pnpm", "test"],
+      ["pnpm", "build:cli"],
+      ["pnpm", "test:cli"],
       ["pnpm", "test:db:ci"]
     ],
     "heavyCommands": [

@@ -4,7 +4,7 @@ import { actionsPublishing, manifestOf } from "./actions.ts";
 import { config } from "./config.ts";
 import { distillHistory } from "./d1.ts";
 import type { ErrorDetails } from "./errors.ts";
-import { changedPaths, git, shortSha } from "./git.ts";
+import { changedPaths, git, gitPage, shortSha } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { botName } from "./identity.ts";
 import { bestEffort, logger } from "./logging.ts";
@@ -64,8 +64,9 @@ export async function contextFiles(directory: string) {
   await mkdir(directory, { recursive: true });
   const files: Record<string, string> = { directory };
   const write = async (key: string, name: string, content: string) => {
-    files[key] = resolve(directory, name);
-    await writeFile(files[key], content);
+    const dest = resolve(directory, name);
+    await writeFile(dest, content);
+    files[key] = dest;
   };
   const spill = async (key: string, name: string, paths: string[]) => paths.length > config.context.inlinePaths ? (await write(key, name, paths.join("\n") + "\n"), paths.length) : undefined;
   return { files, write, spill };
@@ -138,6 +139,21 @@ export async function buildAgentInput(options: {
   const previous = trigger.kind === "item_changed" ? trigger : undefined;
   const previousMainSha = previous?.previousMainSha ?? undefined;
   const previousHeadSha = evaluated.headSha ? previous?.previousHeadSha ?? undefined : undefined;
+  const statBudget = config.context.diffStatBytes;
+  const loadDiffStat = async (from: string, to: string, spillKey: string, spillName: string) => {
+    if (!statBudget || from === to) return undefined;
+    const page = await gitPage(options.workspace.path, ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--stat=240,200", from, to], 0, statBudget).catch(() => undefined);
+    if (!page) return undefined;
+    if (!page.more) return page.text.trim() ? page.text.trimEnd() : undefined;
+    const full = await git(options.workspace.path, ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--stat=240,200", from, to]).catch(() => undefined);
+    if (full?.trim()) await writeContext(spillKey, spillName, `${full.trimEnd()}\n`).catch(() => undefined);
+    return undefined;
+  };
+  const [diffStat, previousHeadDiffStat, previousMainDiffStat] = await Promise.all([
+    diffPaths.length ? loadDiffStat(diffBaseSha, headSha, "diffStat", "diff-stat.txt") : Promise.resolve(undefined),
+    previousHeadSha ? loadDiffStat(previousHeadSha, headSha, "previousHeadDiffStat", "previous-head-diff-stat.txt") : Promise.resolve(undefined),
+    previousMainSha ? loadDiffStat(previousMainSha, mainSha, "previousMainDiffStat", "previous-main-diff-stat.txt") : Promise.resolve(undefined),
+  ]);
   const revisions = { head: headSha, base: diffBaseSha, main: mainSha, ...(previousMainSha && { previousMain: previousMainSha }), ...(previousHeadSha && { previousHead: previousHeadSha }) };
   const prompt = JSON.stringify({
     action,
@@ -149,6 +165,9 @@ export async function buildAgentInput(options: {
     workspace: { path: options.workspace.path, branch: options.workspace.branch, baseRef: options.baseRef, baseBranch: evaluated.baseBranch, mainSha, headSha, mergeInProgress: options.mergeInProgress },
     diffBaseSha, previous: previousMainSha || previousHeadSha ? { mainSha: previousMainSha, headSha: previousHeadSha } : undefined,
     ...(diffPathCount ? { diffPathCount } : { diffPaths }),
+    ...(diffStat ? { diffStat } : {}),
+    ...(previousHeadDiffStat ? { previousHeadDiffStat } : {}),
+    ...(previousMainDiffStat ? { previousMainDiffStat } : {}),
     files,
     database: options.database,
   }, null, 2);

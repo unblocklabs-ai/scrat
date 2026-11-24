@@ -44,6 +44,50 @@ function formatOmittedGenerated(entries: Array<{ path: string; ins: string; del:
   return `[omitted ${entries.length} generated/lockfile diff(s): ${shown}${more}. Pass include_generated=true with a specific path if you need raw generated lines.]`;
 }
 
+const diffHeaderRe = /^diff --git (?:"[abciow]\/((?:[^"\\]|\\.)+)"|[abciow]\/(.+?)) (?:"[abciow]\/((?:[^"\\]|\\.)+)"|[abciow]\/(.+))$/;
+const diffMetaLineRe = /^(?:index [0-9a-f]+\.\.[0-9a-f]+|new file mode |deleted file mode |old mode |new mode |similarity index |rename (?:from|to) |copy (?:from|to) |Binary files |GIT binary patch|--- |(?:\+\+\+ )|@@ )/;
+
+function decodeGitPath(raw: string, quoted: boolean) {
+  return quoted ? raw.replace(/\\(["\\])/g, "$1") : raw;
+}
+
+export function omitGeneratedFromUnifiedDiff(rawText: string, patterns: readonly RegExp[], minBytes: number, artifactNote = ""): { text: string; omitted: string[] } {
+  if (!patterns.length || !rawText.includes("diff --git ")) return { text: rawText, omitted: [] };
+  const sections = rawText.split(/(?=^diff --git )/m);
+  const out: string[] = [];
+  const omitted: string[] = [];
+  for (const section of sections) {
+    const firstNl = section.indexOf("\n");
+    const firstLine = (firstNl >= 0 ? section.slice(0, firstNl) : section).replace(/\r$/, "");
+    const match = diffHeaderRe.exec(firstLine);
+    if (!match) { out.push(section); continue; }
+    const restStart = firstNl >= 0 ? firstNl + 1 : section.length;
+    const secondNl = section.indexOf("\n", restStart);
+    const secondLine = (secondNl >= 0 ? section.slice(restStart, secondNl) : section.slice(restStart)).replace(/\r$/, "");
+    if (!diffMetaLineRe.test(secondLine)) { out.push(section); continue; }
+    const pathA = decodeGitPath(match[1] ?? match[2]!, match[1] !== undefined);
+    const pathB = decodeGitPath(match[3] ?? match[4]!, match[3] !== undefined);
+    const targetPath = pathB && pathB !== "/dev/null" ? pathB : pathA;
+    if (!patterns.some((re) => re.test(pathA) || re.test(pathB)) || Buffer.byteLength(section, "utf8") <= minBytes) {
+      out.push(section);
+      continue;
+    }
+    let ins = 0, del = 0;
+    for (const line of section.split("\n")) {
+      if (line.startsWith("+") && !line.startsWith("+++")) ins++;
+      else if (line.startsWith("-") && !line.startsWith("---")) del++;
+    }
+    const lockSummary = lockfilePathRe.test(targetPath) ? summarizeLockfileEntries(section) : "";
+    omitted.push(`${targetPath} (+${ins}/-${del})`);
+    out.push([
+      firstLine,
+      lockSummary,
+      `[generated/lockfile diff omitted (>${minBytes} bytes; +${ins}/-${del} lines${artifactNote}). Pass raw: true if you need raw generated lines.]\n`,
+    ].filter(Boolean).join("\n"));
+  }
+  return omitted.length ? { text: out.join(""), omitted } : { text: rawText, omitted: [] };
+}
+
 function pageString(text: string, offset: number, limit: number): GitPage {
   const full = Buffer.from(text, "utf8");
   if (offset >= full.length) return { text: "", end: offset, more: false, total: full.length };

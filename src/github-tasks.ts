@@ -14,7 +14,7 @@ import { db } from "./db.ts";
 import { UnpublishedWorkspaceError } from "./errors.ts";
 import { prepareTarget } from "./git.ts";
 import { rateLimitLow, rateLimitState } from "./github-http.ts";
-import type { GitHubRepository } from "./github.ts";
+import { mapConcurrent, type GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
 import { items, runs, subjects, tasks, type Run } from "./schema.ts";
 import { cancelPendingTasks, enqueueTask, latestTask, reconcileIssueImplementation } from "./tasks.ts";
@@ -304,18 +304,26 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       }
       if (labelAction) cancelPendingTasks(item.id, `${botSlug} label removed`, labelAction, true);
       const context = issueContexts.get(item.id);
-      if (context) queued += await routeObserved(ctx, item, context, defaultBaseSha);
-      else deferred++;
+      if (context) {
+        const added = await routeObserved(ctx, item, context, defaultBaseSha);
+        queued += added;
+      } else deferred++;
     } else {
-      queued += await serializePr(github, item.payload.number, async () => {
+      const added = await serializePr(github, item.payload.number, async () => {
         if (rateLimitLow()) { deferred++; return 0; }
         return routeObserved(ctx, item, await github.fetchItemContext("pr", item.payload.number), defaultBaseSha);
       });
+      queued += added;
     }
   };
-  for (const item of ordered) {
+  const closed = ordered.filter((item) => item.state === "closed");
+  const open = ordered.filter((item) => item.state !== "closed");
+  for (const item of closed) {
     await bestEffort(log, "github.routing_failed", { subjectId: item.id }, () => routeItem(item));
   }
+  await mapConcurrent(open, async (item) => {
+    await bestEffort(log, "github.routing_failed", { subjectId: item.id }, () => routeItem(item));
+  });
   if (syncRound % 12 === 1) {
     await bestEffort(log, "workspaces.prune_caches_failed", {}, () => pruneIdleWorkspaceCaches());
   }

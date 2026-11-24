@@ -39,6 +39,7 @@ export type PiOptions = {
   run: Run; cwd: string; tools: readonly ToolName[]; scoped: Pick<Manifest, "mode" | "http"> & { browser?: BrowserScope };
   storefront?: boolean; contextDir?: string; revisions?: Record<string, string>; baseSha?: string;
   environment?: NodeJS.ProcessEnv; log: Logger; stop?: AbortSignal;
+  getLiveToolCallIds?: () => Set<string>;
 };
 
 export async function executePi(options: PiOptions, { context, sessionFile, reviewerIndex, onSession, requireGrade = false, labelCategories, followUp }: {
@@ -59,7 +60,11 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
     throw new Error(modelRuntime.getError() ?? `Configure a Pi model for ${run.provider}/${run.model}`);
   }
   const thinkingLevel = run.thinkingLevel as ThinkingLevel;
-  const { names, customTools, paths, gitPaths, basePaths, close } = await createAgentTools(options, reviewerIndex);
+  let liveToolCallIds: (() => Set<string>) | undefined;
+  const { names, customTools, paths, gitPaths, basePaths, close } = await createAgentTools(
+    { ...options, getLiveToolCallIds: () => liveToolCallIds?.() ?? new Set<string>() },
+    reviewerIndex,
+  );
   const browsing = names.includes("browser"), graded = storefront && requireGrade;
   const settingsManager = SettingsManager.inMemory({ retry: config.harness.agentRetry });
   const resourceLoader = new DefaultResourceLoader({
@@ -102,6 +107,13 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
     cwd, modelRuntime, model, thinkingLevel, settingsManager, sessionManager, resourceLoader,
     tools: names, customTools,
   });
+  liveToolCallIds = () => {
+    const ids = new Set<string>();
+    for (const message of session.messages) {
+      if (message.role === "toolResult" && typeof message.toolCallId === "string") ids.add(message.toolCallId);
+    }
+    return ids;
+  };
   try {
     const sessionDetails = {
       piSessionId: session.sessionId, piSessionFile: session.sessionFile,

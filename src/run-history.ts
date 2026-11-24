@@ -81,9 +81,9 @@ export const latestFinishedRun = (subjectId: string) =>
   db.select({ error: runs.error, stage: runs.stage, headSha: runs.headSha }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
     .where(and(eq(tasks.subjectId, subjectId), isNotNull(runs.finishedAt))).orderBy(desc(runs.sequence)).limit(1).get();
 
-export const latestSessionRun = (workspaceId: string, excludeRunId: string) =>
+export const latestSessionRun = (workspaceId: string, taskId: string, excludeRunId: string) =>
   db.select().from(runs).where(and(
-    eq(runs.workspaceId, workspaceId), ne(runs.id, excludeRunId), isNotNull(runs.piSessionFile),
+    eq(runs.workspaceId, workspaceId), eq(runs.taskId, taskId), ne(runs.id, excludeRunId), isNotNull(runs.piSessionFile),
   )).orderBy(desc(runs.sequence)).limit(1).get();
 
 export const latestPriorRunOfTask = (taskId: string, excludeRunId: string) =>

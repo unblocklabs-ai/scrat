@@ -326,6 +326,7 @@ export class GitHubRepository {
   async prCiBlocker(pr: GithubPullRequest, baseSha: string) {
     if (pr.mergeable_state === "behind") return "behind" as const;
     if (!pr.mergeable_state || pr.mergeable_state === "unknown") return;
+    if (pr.mergeable_state === "clean" && pr.base.sha === baseSha) return;
     const mergeSha = pr.base.sha === baseSha ? pr.merge_commit_sha : undefined;
     const { github, owner, repo } = await githubForRepository(this.repository, "pr_checks");
     const checksFor = async (oid: string): Promise<"failed" | "clear" | undefined> => {

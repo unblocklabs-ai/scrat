@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { access, lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -6,7 +6,7 @@ import { createBashToolDefinition, createEditToolDefinition, createFindToolDefin
 import { Type } from "typebox";
 import { backgroundsWork, createSlots, heavyCommand, withValidationSlot } from "./commands.ts";
 import { config } from "./config.ts";
-import { distillCommandOutput, readHeadAndTail } from "./d1.ts";
+import { copyRedactedFile, distillCommandOutput, readHeadAndTail, stripAnsi, trimUtf8End } from "./d1.ts";
 import { createGrepTool } from "./grep.ts";
 import type { ToolName } from "./manifests.ts";
 import type { PiOptions } from "./pi.ts";
@@ -16,14 +16,14 @@ import { childEnvironment } from "./secrets.ts";
 import { blobSize, gitPage } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import { createBrowserTool, createGithubSearchTool, createHttpTool } from "./scoped-tools.ts";
-import { createReviewGitTool, pageText } from "./review-git.ts";
+import { createReviewGitTool, omitGeneratedFromUnifiedDiff, pageText } from "./review-git.ts";
 import { sandboxCommand } from "./sandbox.ts";
 
 const browserSlot = createSlots(() => config.storefront.limits.browsers, "storefront.browser_waiting", "storefront.browser_started");
 
 type ScopedToolName = "http" | "browser" | "github_search";
 
-export async function createAgentTools({ run: { id: runId }, cwd, contextDir, tools, scoped, baseSha, revisions = {}, environment = {}, log, stop }: PiOptions, reviewerIndex?: number) {
+export async function createAgentTools({ run: { id: runId }, cwd, contextDir, tools, scoped, baseSha, revisions = {}, environment = {}, log, stop, getLiveToolCallIds }: PiOptions, reviewerIndex?: number) {
   const workspaceRoot = await realpath(cwd);
   const contextRoot = contextDir ? await realpath(contextDir) : undefined;
   const roots = [workspaceRoot, ...contextRoot ? [contextRoot] : []];
@@ -72,6 +72,7 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
     },
   });
   const heavy = config.workspace.heavyCommands.map((pattern) => new RegExp(pattern));
+  const generatedDiffPatterns = config.tools.git.generatedPaths.map((pattern) => new RegExp(pattern));
   let bashDumps = 0;
   const runSdkBash = async (toolCallId: string, params: { command: string; timeout?: number }, signal: AbortSignal | undefined, onUpdate: Parameters<typeof sdkBash.execute>[3], ctx: Parameters<typeof sdkBash.execute>[4]) => {
     const hit = heavyCommand(params.command, heavy);
@@ -92,7 +93,7 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
     command: Type.String({ description: "Shell command to execute" }),
     timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
     goal: Type.Optional(Type.String({ description: "Optional short note of what you are checking (used to focus d1 output filtering when output is large)" })),
-    raw: Type.Optional(Type.Boolean({ description: "Set true to bypass d1 output filtering and return raw output" })),
+    raw: Type.Optional(Type.Boolean({ description: "Set true to bypass generated-diff and d1 output filtering and return raw output" })),
   });
   const bash = defineTool({
     name: sdkBash.name,
@@ -102,12 +103,12 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
     outputSchema: sdkBash.outputSchema,
     constrainedSampling: sdkBash.constrainedSampling,
     description: config.d1.enabled
-      ? `${sdkBash.description} Large non-read command outputs (> ${config.d1.bash.minChars} chars) are distilled via d1 into verbatim spans with the full log saved to a readable file; pass \`goal\` to focus extraction or \`raw: true\` to bypass filtering.`
-      : sdkBash.description,
+      ? `${sdkBash.description} Large non-read command outputs (> ${config.d1.bash.minChars} chars) are distilled via d1 into verbatim spans and large generated/lockfile git diffs (> ${config.tools.git.generatedDiffBytes} bytes) are summarized deterministically with the full log saved to a readable file; pass \`goal\` to focus extraction or \`raw: true\` to bypass filtering.`
+      : `${sdkBash.description} Large generated/lockfile git diffs (> ${config.tools.git.generatedDiffBytes} bytes) are summarized deterministically with the full diff saved to a readable file; pass \`raw: true\` to bypass filtering.`,
     parameters: bashParameters,
     async execute(toolCallId, { command, timeout, goal, raw }, signal, onUpdate, ctx) {
       const result = await runSdkBash(toolCallId, { command, timeout }, signal, onUpdate, ctx);
-      if (!config.d1.enabled || raw) return result;
+      if (raw) return result;
       const details = result.details as { fullOutputPath?: string } | undefined;
       const structured = (result as { structuredContent?: { exit_code?: number; full_output_path?: string; output?: string; truncated?: boolean; wall_time_seconds?: number } }).structuredContent;
       const isError = (result as { isError?: boolean }).isError;
@@ -116,13 +117,84 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
       const exitMatch = isError ? /\n\nCommand exited with code (\d+)$/.exec(rawInline) : null;
       const exitCode = structured?.exit_code ?? (exitMatch ? Number(exitMatch[1]) : undefined);
       const inlineBody = exitMatch ? rawInline.slice(0, exitMatch.index) : rawInline;
-      const diskFull = details?.fullOutputPath ? await readHeadAndTail(details.fullOutputPath, Math.min(config.harness.maxOutputBytes, 2 * 1024 * 1024)) : undefined;
+      const formatBashResult = (text: string, artifactPath?: string) => {
+        const finalText = isError && exitCode !== undefined ? `${text}\n\nCommand exited with code ${exitCode}` : text;
+        const structuredRest = structured ? (() => { const { full_output_path: _drop, ...rest } = structured; return rest; })() : undefined;
+        return {
+          ...result,
+          content: [{ type: "text" as const, text: finalText }],
+          details: artifactPath ? { fullOutputPath: artifactPath } : undefined,
+          ...(structuredRest ? { structuredContent: { ...structuredRest, output: finalText, truncated: true, ...(artifactPath ? { full_output_path: artifactPath } : {}) } } : {}),
+        };
+      };
+      // Only guard standalone git diff commands so chained commands like `git diff && pnpm test` never lose later output.
+      const isStandaloneGitDiff = (cmd: string) => {
+        const trimmed = cmd.trim();
+        if (!trimmed || /[\n;&|`<>$]/.test(trimmed)) return false;
+        const tokens = trimmed.split(/\s+/);
+        let idx = 0;
+        while (idx < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[idx]!)) idx++;
+        if (idx >= tokens.length || tokens[idx]!.split("/").at(-1) !== "git") return false;
+        idx++;
+        const valueFlags = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
+        while (idx < tokens.length && tokens[idx]!.startsWith("-")) {
+          const flag = tokens[idx]!;
+          idx += valueFlags.has(flag) ? 2 : 1;
+        }
+        return tokens[idx] === "diff";
+      };
+      const maybeGitDiff = generatedDiffPatterns.length > 0 && isStandaloneGitDiff(command);
+      if (!maybeGitDiff && !config.d1.enabled) return result;
+      const diskFull = details?.fullOutputPath
+        ? await readHeadAndTail(details.fullOutputPath, Math.min(config.harness.maxOutputBytes, config.harness.distillReadBytes))
+        : undefined;
       const sourceText = diskFull?.text ?? inlineBody;
+      // Guard bash `git diff` outputs in change mode against lockfile/generated bloat deterministically.
+      if (maybeGitDiff) {
+        const diffSource = stripAnsi(redactSecrets(sourceText));
+        if (diffSource.includes("diff --git ")) {
+          const artifactToken = "\0SCRAT_DIFF_ARTIFACT\0";
+          const guarded = omitGeneratedFromUnifiedDiff(diffSource, generatedDiffPatterns, config.tools.git.generatedDiffBytes, artifactToken);
+          if (guarded.omitted.length) {
+            let savedPath: string | undefined;
+            let partialArtifact = Boolean(diskFull?.truncated);
+            if (contextRoot) {
+              const dest = join(contextRoot, `bash-${sessionTag}-${++bashDumps}.log`);
+              if (diskFull?.truncated && details?.fullOutputPath) {
+                const copied = await copyRedactedFile(details.fullOutputPath, dest, config.harness.maxOutputBytes);
+                if (copied) { savedPath = copied.path; partialArtifact = copied.truncated; }
+              } else {
+                savedPath = await writeFile(dest, diffSource, { encoding: "utf8", mode: 0o600 }).then(() => dest, () => undefined);
+                if (savedPath) partialArtifact = false;
+              }
+            }
+            const artifactNote = savedPath
+              ? `; ${partialArtifact ? "partial" : "full"} diff saved to ${savedPath} (use read to inspect)`
+              : "";
+            const truncationWarning = diskFull?.truncated
+              ? `[note: raw diff exceeded ${config.harness.distillReadBytes}-byte inspection cap before generated-file filtering; middle output may have been omitted${artifactNote}.]\n\n`
+              : "";
+            const assembled = `${truncationWarning}${guarded.text.replaceAll(artifactToken, artifactNote)}`;
+            const cap = config.tools.readBytes.max;
+            let outText = assembled;
+            if (Buffer.byteLength(assembled, "utf8") > cap) {
+              const suffix = `\n\n[truncated after omitting ${guarded.omitted.length} generated/lockfile diff(s)${artifactNote}]`;
+              const headBudget = Math.max(0, cap - Buffer.byteLength(suffix, "utf8"));
+              const head = trimUtf8End(Buffer.from(assembled, "utf8").subarray(0, headBudget)).toString("utf8");
+              outText = `${head}${suffix}`;
+            }
+            log.info({ event: "bash.generated_diff_omitted", omitted: guarded.omitted.length, rawChars: diffSource.length, outChars: outText.length, truncatedInput: Boolean(diskFull?.truncated) });
+            return formatBashResult(outText, savedPath);
+          }
+        }
+      }
+      if (!config.d1.enabled) return result;
       const candidatePath = contextRoot && sourceText.length > config.d1.bash.minChars
         ? join(contextRoot, `bash-${sessionTag}-${++bashDumps}.log`)
         : undefined;
       const distilled = await distillCommandOutput({
         rawOutput: sourceText, command, goal,
+        preferStructured: !goal?.trim(),
         artifactPath: candidatePath,
         sourceArtifactPath: diskFull?.truncated ? details?.fullOutputPath : undefined,
         existingArtifactPath: details?.fullOutputPath,
@@ -131,13 +203,7 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
         signal, log,
       });
       if (!distilled.filtered) return result;
-      const finalText = isError && exitCode !== undefined ? `${distilled.text}\n\nCommand exited with code ${exitCode}` : distilled.text;
-      return {
-        ...result,
-        content: [{ type: "text" as const, text: finalText }],
-        details: { ...details, ...(distilled.artifactPath ? { fullOutputPath: distilled.artifactPath } : {}) },
-        ...(structured ? { structuredContent: { ...structured, output: finalText, truncated: true, ...(distilled.artifactPath ? { full_output_path: distilled.artifactPath } : {}) } } : {}),
-      };
+      return formatBashResult(distilled.text, distilled.artifactPath);
     },
   });
   const sdkGrep = createGrepToolDefinition(cwd);
@@ -151,19 +217,44 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
   const sdkLs = createLsToolDefinition(cwd);
   const ls: typeof sdkLs = { ...sdkLs, async execute(...args) { await searchRoot(args[1].path); return sdkLs.execute(...args); } };
   const sdkRead = createReadToolDefinition(cwd);
+  const seenReads = new Map<string, { hash: string; toolCallId: string; bytes: number }>();
   const read: typeof sdkRead = {
     ...sdkRead,
-    async execute(...args) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       let absolute: string | undefined;
+      let resolvedReal: string | undefined;
       const tool = createReadToolDefinition(cwd, { operations: {
         access: async (path) => access(await insideWorkspace(path), constants.R_OK),
         detectImageMimeType: async (path) => detectSupportedImageMimeTypeFromFile(await insideWorkspace(path)),
-        readFile: async (path) => { const real = await insideWorkspace(path); absolute = path; return readFile(real); },
+        readFile: async (path) => { const real = await insideWorkspace(path); absolute = path; resolvedReal = real; return readFile(real); },
       } });
-      const result = await tool.execute(...args);
+      const result = await tool.execute(toolCallId, params, signal, onUpdate, ctx);
       if (absolute) {
         const local = relative(cwd, absolute);
         if (local !== ".." && !local.startsWith("../")) paths.add(local || ".");
+      }
+      const minDedup = config.tools.readDedupMinBytes;
+      if (minDedup > 0 && resolvedReal && getLiveToolCallIds && result.content.length && result.content.every((part): part is { type: "text"; text: string } => part.type === "text")) {
+        const textOut = result.content.map((part) => part.text).join("\n");
+        const bytes = Buffer.byteLength(textOut, "utf8");
+        if (bytes >= minDedup) {
+          const hash = createHash("sha256").update(textOut).digest("hex");
+          const normOffset = params.offset ?? 1;
+          const key = `${resolvedReal}\0${normOffset}\0${params.limit ?? ""}`;
+          const prev = seenReads.get(key);
+          if (prev && prev.hash === hash && getLiveToolCallIds().has(prev.toolCallId)) {
+            const range = params.offset !== undefined || params.limit !== undefined
+              ? ` (offset=${normOffset}${params.limit !== undefined ? `, limit=${params.limit}` : ""})`
+              : "";
+            const stub = `[unchanged: identical ${bytes}-byte read of ${params.path}${range} is already in this session context (sha256:${hash.slice(0, 12)})]`;
+            return {
+              ...result,
+              content: [{ type: "text" as const, text: stub }],
+              ...("structuredContent" in result ? { structuredContent: stub } : {}),
+            };
+          }
+          seenReads.set(key, { hash, toolCallId, bytes });
+        }
       }
       return result;
     },

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { appendFile } from "node:fs/promises";
+import { appendFile, writeFile } from "node:fs/promises";
 import type { LookupFunction } from "node:net";
 import { join } from "node:path";
 import { defineTool } from "@earendil-works/pi-coding-agent";
@@ -135,6 +135,7 @@ type PageLike = {
   title(): Promise<string>;
   url(): string;
   innerText(selector: string, options: { timeout: number }): Promise<string>;
+  evaluate?<R>(expression: string): Promise<R>;
   screenshot(options: { path: string; fullPage?: boolean; timeout: number }): Promise<unknown>;
   innerHTML(selector: string, options: { timeout: number }): Promise<string>;
   waitForLoadState(state: "load", options: { timeout: number }): Promise<void>;
@@ -161,6 +162,146 @@ export async function loadPlaywright(): Promise<Playwright> {
 
 export const launchChromium = async (args: string[]) => (await loadPlaywright()).chromium.launch({ headless: true, channel: "chromium", chromiumSandbox: true, args });
 const browserActions = ["goto", "text", "screenshot", "click", "fill", "select", "reset"];
+const xmlSchemaHosts = new Set(["www.sitemaps.org", "sitemaps.org", "www.w3.org", "w3.org", "www.google.com"]);
+const isSitemapPathname = (rawUrl: string) => {
+  try { return /sitemap[^/]*\.xml(?:\.gz)?$/i.test(new URL(rawUrl).pathname); }
+  catch { return false; }
+};
+const decodeXmlEntities = (value: string) => value
+  .replaceAll("&amp;", "&")
+  .replaceAll("&lt;", "<")
+  .replaceAll("&gt;", ">")
+  .replaceAll("&quot;", '"')
+  .replaceAll("&apos;", "'");
+
+const domScopingScript = `(() => {
+  const isElementVisible = (el, requireInViewport = false) => {
+    if (!el || el.nodeType !== 1) return false;
+    let cur = el;
+    while (cur && cur.nodeType === 1) {
+      if (cur.getAttribute("aria-hidden") === "true" || cur.hasAttribute("hidden") || cur.hasAttribute("inert")) return false;
+      const style = getComputedStyle(cur);
+      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+      cur = cur.parentElement;
+    }
+    const rect = el.getBoundingClientRect();
+    let hasBox = rect.width > 0 && rect.height > 0;
+    let box = rect;
+    if (!hasBox) {
+      for (const child of Array.from(el.children || [])) {
+        const cr = child.getBoundingClientRect();
+        if (cr.width > 0 && cr.height > 0) { hasBox = true; box = cr; break; }
+      }
+    }
+    if (!hasBox) return false;
+    if (requireInViewport) {
+      const vw = window.innerWidth || 0, vh = window.innerHeight || 0;
+      if (vw > 0 && vh > 0 && (box.right <= 0 || box.bottom <= 0 || box.left >= vw || box.top >= vh)) return false;
+    }
+    return true;
+  };
+  const chromeSelector = "header, nav, footer, [role=banner], [role=navigation], [role=contentinfo]";
+  const strictOverlaySelector = "[role=dialog], [role=alertdialog], [aria-modal=true], dialog[open], cart-drawer, [id*=cart-drawer i], [class*=cart-drawer i], [id*=cart_drawer i], [class*=cart_drawer i], [id*=onetrust i], [id*=cookie i], [class*=cookie-banner i], [class*=cookie-consent i]";
+  const blocks = [];
+  const seen = new Set();
+  const includedRoots = [];
+  const addText = (text) => {
+    const clean = (text || "").trim();
+    if (!clean || seen.has(clean)) return;
+    seen.add(clean);
+    blocks.push(clean);
+  };
+  const main = document.querySelector("main, [role=main]");
+  if (main && isElementVisible(main)) {
+    includedRoots.push(main);
+    addText(main.innerText);
+  } else if (document.body) {
+    for (const child of Array.from(document.body.children || [])) {
+      const tag = (child.tagName || "").toLowerCase();
+      if (tag === "script" || tag === "style" || tag === "noscript" || tag === "template") continue;
+      if (child.matches(chromeSelector) && !child.matches(strictOverlaySelector)) continue;
+      if (isElementVisible(child)) {
+        includedRoots.push(child);
+        addText(child.innerText);
+      }
+    }
+  }
+  const overlays = Array.from(document.querySelectorAll(strictOverlaySelector)).filter((el) => {
+    if (includedRoots.some((root) => root === el || root.contains(el))) return false;
+    if (el.closest(chromeSelector) && !el.matches("[role=dialog], [role=alertdialog], [aria-modal=true], dialog[open], cart-drawer, [id*=cart-drawer i], [class*=cart-drawer i]")) return false;
+    return isElementVisible(el, true);
+  });
+  const topOverlays = overlays.filter((el) => !overlays.some((other) => other !== el && other.contains(el)));
+  for (const overlay of topOverlays) addText(overlay.innerText);
+  return blocks.join("\\n\\n");
+})()`;
+
+function summarizeXmlSitemap(rawText: string, pageUrl: string, samplesPerGroup: number, maxGroups: number): { text: string; urlCount: number } | undefined {
+  let pageHost = "", isSitemapUrl = false;
+  try {
+    const parsed = new URL(pageUrl);
+    pageHost = parsed.hostname.toLowerCase();
+    isSitemapUrl = isSitemapPathname(pageUrl) || (/\.xml$/i.test(parsed.pathname) && /<(?:urlset|sitemapindex|loc)\b/i.test(rawText));
+  } catch { /* ignore */ }
+  const hasXmlMarkers = /<(?:urlset|sitemapindex)\b/i.test(rawText) || /<loc>\s*(?:<!\[CDATA\[)?\s*https?:\/\//i.test(rawText);
+  const looksLikeHtml = /<(?:!doctype\s+html|html\b|head\b|body\b)/i.test(rawText);
+  if ((!isSitemapUrl && !hasXmlMarkers) || (looksLikeHtml && !hasXmlMarkers)) return undefined;
+
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  const addUrl = (raw: string, fromLoc: boolean) => {
+    const unwrapped = raw.trim().replace(/^<!\[CDATA\[([\s\S]*?)\]\]>$/, "$1").trim();
+    const decoded = fromLoc ? decodeXmlEntities(unwrapped) : unwrapped.replace(/[),.;]+$/, "");
+    if (!decoded || seen.has(decoded)) return;
+    try {
+      const parsed = new URL(decoded);
+      if (xmlSchemaHosts.has(parsed.hostname.toLowerCase()) && /\/schemas\/|\/XMLSchema|\/sitemap/i.test(parsed.pathname)) return;
+      seen.add(decoded);
+      urls.push(decoded);
+    } catch { /* ignore */ }
+  };
+  for (const match of rawText.matchAll(/<loc>\s*([\s\S]*?)\s*<\/loc>/gi)) addUrl(match[1]!, true);
+  if (!urls.length && isSitemapUrl) {
+    for (const match of rawText.matchAll(/https?:\/\/[^\s<>"']+/gi)) addUrl(match[0]!, false);
+  }
+  if (urls.length < 2) return undefined;
+
+  const groups = new Map<string, string[]>();
+  for (const entry of urls) {
+    const parsed = new URL(entry);
+    let key: string;
+    if (/\.xml(?:\.gz)?$/i.test(parsed.pathname)) {
+      key = "sitemaps (*.xml)";
+    } else if (pageHost && parsed.hostname.toLowerCase() !== pageHost) {
+      key = `external:${parsed.hostname.toLowerCase()}`;
+    } else {
+      const segs = parsed.pathname.split("/").filter(Boolean);
+      if (!segs.length) key = "/";
+      else if (segs[0] === "blogs" && segs.length >= 2) key = `/blogs/${segs[1]}/*`;
+      else if (segs.length === 1) key = `/${segs[0]}`;
+      else key = `/${segs[0]}/*`;
+    }
+    const list = groups.get(key) ?? [];
+    list.push(entry);
+    groups.set(key, list);
+  }
+
+  const ordered = [...groups.entries()].sort((a, b) => {
+    if (a[0] === "sitemaps (*.xml)") return -1;
+    if (b[0] === "sitemaps (*.xml)") return 1;
+    return b[1].length - a[1].length || a[0].localeCompare(b[0]);
+  });
+  const shown = ordered.slice(0, maxGroups);
+  const lines = [`[sitemap summary: ${urls.length} URLs across ${ordered.length} group(s)]`];
+  for (const [group, list] of shown) {
+    const sampleCap = group === "sitemaps (*.xml)" ? Math.max(samplesPerGroup, maxGroups) : samplesPerGroup;
+    const samples = list.slice(0, sampleCap).join(", ");
+    const more = list.length > sampleCap ? ` (+${list.length - sampleCap} more)` : "";
+    lines.push(`- ${group}: ${list.length} — ${samples}${more}`);
+  }
+  if (ordered.length > shown.length) lines.push(`- ... and ${ordered.length - shown.length} more group(s)`);
+  return { text: lines.join("\n"), urlCount: urls.length };
+}
 const themeIdOf = (html: string) => {
   const opening = /Shopify\.theme\s*=\s*\{/.exec(html);
   if (!opening) return undefined;
@@ -262,7 +403,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
     description: [
       navigationHosts === "any" ? "Drive a headless browser on public https sites. IP addresses, local host names, explicit ports, URLs with credentials and names that resolve to private addresses are blocked."
         : `Drive a headless browser. Pages may be visited on: ${navigationHosts.join(", ")}. Other hosts, and page resources outside the allowlist, are blocked.`,
-      `action=goto: open \`url\` (optionally with \`viewport\`, one of: ${viewportNames.join(", ")}, applied before the page loads and kept for later actions) and return the final URL, status, title and the page's Shopify.theme id when it declares one. action=text: the visible text of the page (capped at ${config.tools.readBytes.default} characters${config.d1.enabled ? `; long pages > ${config.d1.browserText.minChars} chars are distilled via d1 with full text saved to a readable file — pass optional \`focus\` to target specific page elements or \`raw: true\` for unfiltered text` : ""}).`,
+      `action=goto: open \`url\` (optionally with \`viewport\`, one of: ${viewportNames.join(", ")}, applied before the page loads and kept for later actions) and return the final URL, status, title and the page's Shopify.theme id when it declares one. action=text: the visible text of the page (optionally scoped with \`selector\`, capped at ${config.tools.readBytes.default} characters; XML sitemaps are grouped deterministically${config.tools.browser.domScoping ? ", repetitive header/nav/footer chrome is omitted while preserving main content and open modals/drawers" : ""}${config.d1.enabled ? `, and long pages > ${config.d1.browserText.minChars} chars are distilled via d1 with full text saved to a readable file — pass optional \`focus\` to target specific page elements or \`raw: true\` for full unfiltered body text` : " — pass \`raw: true\` for full unfiltered body text"}).`,
       `action=screenshot: save a PNG and return its path, the final URL and the page's Shopify.theme id when it declares one. \`viewport\` is one of: ${viewportNames.join(", ")}; \`fullPage\` captures the whole page.`,
       "action=reset: drop the page with its cookies and storage; the next action opens a fresh one in the same browser at the current viewport.",
       "action=click: click the element matching `selector`. action=fill: put `text` in the field matching `selector`. action=select: choose the option `text` in the select matching `selector`. They return the resulting URL, title and Shopify.theme id, plus how many elements `selector` matched before the action when the page did not navigate, `popupClosed: true` when a new window opened (it is closed), and `blocked: <url>` when a navigation was refused because its host is not allowed. The viewport stays as last set.",
@@ -321,19 +462,57 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
           return text(JSON.stringify({ url: redactSecrets(page.url()), status: response?.status() ?? null, title: redactSecrets(await page.title()), ...await servedTheme(page, timeout) }), { host: target.hostname });
         }
         if (action === "text") {
-          const rawBody = await page.innerText("body", timeout);
-          const captureCap = config.d1.enabled && !rawText ? Math.min(config.harness.maxOutputBytes, 512 * 1024) : config.tools.readBytes.default;
+          const currentUrl = redactSecrets(page.url());
+          const isXmlPage = isSitemapPathname(currentUrl);
+          const actionDeadline = Date.now() + timeout.timeout;
+          let rawBody: string | undefined;
+          if (selector) {
+            rawBody = await page.innerText(selector, timeout);
+          } else if (config.tools.browser.domScoping && !rawText && !isXmlPage && typeof page.evaluate === "function") {
+            let timer: NodeJS.Timeout | undefined;
+            const scoped = await Promise.race([
+              page.evaluate<string>(domScopingScript).catch(() => undefined),
+              new Promise<undefined>((resolveTimeout) => { timer = setTimeout(() => resolveTimeout(undefined), timeout.timeout); }),
+            ]).finally(() => { if (timer) clearTimeout(timer); });
+            if (typeof scoped === "string" && scoped.trim()) rawBody = scoped;
+          }
+          if (rawBody === undefined) {
+            const remainingTimeout = { timeout: Math.max(500, actionDeadline - Date.now()) };
+            rawBody = await page.innerText("body", remainingTimeout);
+          }
+          const captureCap = (config.d1.enabled || isXmlPage) && !rawText ? Math.min(config.harness.maxOutputBytes, config.tools.browser.textCaptureBytes) : config.tools.readBytes.default;
           const margin = config.tools.redactionMarginBytes;
           const redacted = redactSecrets(rawBody.slice(0, captureCap + margin));
           const content = rawBody.length > captureCap + margin
             ? redacted.slice(0, Math.min(captureCap, Math.max(0, redacted.length - margin)))
             : redacted.slice(0, captureCap);
           const partialCapture = rawBody.length > captureCap;
+          const nameTag = sessionTag ?? prefix;
+          const nextArtifactPath = () => contextDir ? join(contextDir, `browser-text-${nameTag ? `${nameTag}-` : ""}${++textDumps}.txt`) : undefined;
+          if (!rawText && !selector) {
+            const sitemap = summarizeXmlSitemap(content, currentUrl, config.tools.browser.sitemapSamplesPerGroup, config.tools.browser.sitemapMaxGroups);
+            if (sitemap && sitemap.text.length < content.length) {
+              const candidatePath = nextArtifactPath();
+              const savedPath = candidatePath
+                ? await writeFile(candidatePath, content, { encoding: "utf8", mode: 0o600 }).then(() => candidatePath, () => undefined)
+                : undefined;
+              const partialNote = partialCapture ? ` (partial capture: first ${content.length} of ${rawBody.length} chars)` : "";
+              const summaryText = partialNote ? sitemap.text.replace(/^\[sitemap summary: ([^\]]+)\]/, `[sitemap summary: $1${partialNote}]`) : sitemap.text;
+              const label = partialCapture ? `Partial sitemap text (first ${content.length} of ${rawBody.length} chars)` : "Full sitemap text";
+              const suffix = savedPath ? `\n${label} saved to ${savedPath} (use read to inspect).` : "";
+              const inlineCap = config.tools.readBytes.default;
+              const fullRendered = `${summaryText}${suffix}`;
+              const outText = fullRendered.length <= inlineCap
+                ? fullRendered
+                : `${summaryText.slice(0, Math.max(0, inlineCap - suffix.length - 32)).trimEnd()}\n... [truncated]${suffix}`;
+              operation.complete();
+              return text(outText, { filtered: true, sitemapUrls: sitemap.urlCount, ...(partialCapture ? { partial: true } : {}), ...(savedPath ? { artifactPath: savedPath } : {}) });
+            }
+          }
           if (config.d1.enabled && !rawText && content.length > config.d1.browserText.minChars) {
-            const nameTag = sessionTag ?? prefix;
-            const candidatePath = contextDir ? join(contextDir, `browser-text-${nameTag ? `${nameTag}-` : ""}${++textDumps}.txt`) : undefined;
+            const candidatePath = nextArtifactPath();
             const distilled = await distillBrowserText({
-              rawText: content, url: redactSecrets(page.url()), focus, artifactPath: candidatePath,
+              rawText: content, url: currentUrl, focus, artifactPath: candidatePath,
               partialSource: partialCapture, totalSourceChars: rawBody.length,
               minChars: config.d1.browserText.minChars, maxChars: config.d1.browserText.maxOutputChars,
               signal, log,

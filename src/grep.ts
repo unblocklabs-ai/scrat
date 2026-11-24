@@ -218,9 +218,9 @@ export function createGrepTool({ workspaceRoot, contextRoot, sessionTag, searchR
     glob: Type.Optional(Type.String({ description: "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'" })),
     ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive search (default: false)" })),
     literal: Type.Optional(Type.Boolean({ description: "Treat pattern as literal string instead of regex (default: false)" })),
-    context: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_CONTEXT_LINES, description: "Context lines before/after each match in matches mode (default: 0; overlapping context emitted once)" })),
-    limit: Type.Optional(Type.Integer({ minimum: 1, description: `Max displayed match or file rows (default: ${DEFAULT_LIMIT}, max: ${MAX_LIMIT}; never stops the scan)` })),
-    mode: Type.Optional(Type.Union([Type.Literal("matches"), Type.Literal("files")], {
+    context: Type.Optional(Type.Integer({ minimum: 0, description: `Context lines before/after each match in matches mode (default: 0; clamped to ${MAX_CONTEXT_LINES}; overlapping context emitted once)` })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, description: `Max displayed match or file rows (default: ${DEFAULT_LIMIT}, clamped to ${MAX_LIMIT}; never stops the scan)` })),
+    mode: Type.Optional(Type.Union([Type.Literal("matches"), Type.Literal("files"), Type.Literal("content")], {
       description: "Output mode: 'matches' (default, file-grouped matches with compact overflow summary) or 'files' (matching files with exact match counts)",
     })),
   });
@@ -244,7 +244,7 @@ export function createGrepTool({ workspaceRoot, contextRoot, sessionTag, searchR
         return sdkFallback.execute(toolCallId, params, signal, onUpdate, ctx);
       }
 
-      const mode = params.mode ?? "matches";
+      const mode = params.mode === "files" ? "files" : "matches";
       const effectiveLimit = Math.min(MAX_LIMIT, Math.max(1, params.limit ?? DEFAULT_LIMIT));
       const contextLines = mode === "matches" ? Math.min(MAX_CONTEXT_LINES, Math.max(0, params.context ?? 0)) : 0;
       const targetReal = await resolveTarget(params.path);

@@ -5460,12 +5460,16 @@ fi
   }], run: async () => {
     const prevToken = process.env.CODEX_LB_API_KEY, prevFetch = globalThis.fetch;
     process.env.CODEX_LB_API_KEY = "d1-secret-token-value-99999";
-    let failD1 = false, d1Calls = 0;
+    let failD1 = false, fail429Once = false, d1Calls = 0;
     globalThis.fetch = async (url, init) => {
       if (String(url) !== "https://codex.unblocklabs.ai/v1/decisions") return prevFetch(url, init);
       d1Calls++;
       assert.equal(new Headers(init.headers).get("authorization"), "Bearer d1-secret-token-value-99999");
-      if (failD1) return new Response("overloaded", { status: 503 });
+      if (fail429Once) {
+        fail429Once = false;
+        return new Response(JSON.stringify({ error: { message: "at capacity" } }), { status: 429, headers: { "retry-after": "0" } });
+      }
+      if (failD1) return new Response("overloaded", { status: 500 });
       const body = JSON.parse(init.body);
       assert.equal(body.model, "liquid/d1.2-ultra");
       assert.ok(!body.state.includes("d1-secret-token-value-99999"), "secrets in text, goal, focus, and history must be redacted before reaching d1");
@@ -5522,8 +5526,10 @@ fi
       ].join("\n");
 
       const bashLog = resolve(ctxDir, "bash-1.log");
+      fail429Once = true;
       const longSecretCmd = `pnpm exec vitest run ${"--filter=pkg ".repeat(10)}--token=d1-secret-token-value-99999`;
       const cmdRes = await distillCommandOutput({ rawOutput: noisyLog, command: longSecretCmd, artifactPath: bashLog, minChars: 400, maxChars: 2200 });
+      assert.equal(fail429Once, false, "transient HTTP 429 was retried and recovered");
       assert.equal(cmdRes.filtered, true);
       assert.match(cmdRes.text, /\[d1 filtered:/);
       assert.match(cmdRes.text, /FAIL src\/orders\.test\.ts/);
@@ -5695,10 +5701,11 @@ fi
     assert.match(zero, /scan: complete \| display: full .* 0 matches/);
     await assert.rejects(runGrep({ pattern: "(unclosed" }), /regex|parse|error/i);
 
-    // 3. Context dedup (line 3 'const mid = 2;' appears only ONCE between line 2 and line 4 matches)
-    const adj = (await runGrep({ pattern: "targetSymbol", path: "src/adjacent.ts", context: 2 })).content[0].text;
+    // 3. Context dedup + clamping (context: 30 accepted by schema and clamped to 10; mode: "content" accepted as matches alias)
+    const adj = (await runGrep({ pattern: "targetSymbol", path: "src/adjacent.ts", context: 30, mode: "content" })).content[0].text;
     assert.match(adj, /scan: complete \| display: full/);
     assert.equal(adj.split("const mid = 2;").length - 1, 1, "overlapping context line is emitted once");
+    assert.equal(grepTool.parameters.properties.context.maximum, undefined, "context schema must not reject values > 10");
 
     // 4. Match-centered UTF-8 safe clipping on long line
     const longRes = (await runGrep({ pattern: "exact-token", path: "src/long.ts", literal: true })).content[0].text;

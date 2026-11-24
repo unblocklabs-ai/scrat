@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { open, unlink, writeFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { Agent, fetch as undiciFetch } from "undici";
 import { config } from "./config.ts";
 import { errorMessage, redactSecrets } from "./errors.ts";
@@ -35,6 +36,7 @@ const gitReadSubcommands = new Set(["diff", "show", "status", "log", "ls-files",
 
 const nativeFetch = globalThis.fetch;
 let cachedDispatcher: { certPath: string | null; agent: Agent } | undefined;
+let d1RateLimitedUntil = 0;
 
 function getDispatcher(certPath: string | null) {
   if (cachedDispatcher && cachedDispatcher.certPath === certPath) return cachedDispatcher.agent;
@@ -445,6 +447,13 @@ function mergeSelectedChunks(text: string, chunks: Chunk[], ranked: Array<[numbe
   return { text: joined, kept: picked.length };
 }
 
+function retryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  return undefined;
+}
+
 function defaultRequester(): D1Requester | undefined {
   const token = process.env[config.d1.tokenEnv]?.trim();
   const url = (process.env.D1_URL ?? config.d1.url).trim();
@@ -452,23 +461,37 @@ function defaultRequester(): D1Requester | undefined {
   const certPath = process.env.D1_CERT_PATH ?? config.d1.certPath;
   const dispatcher = url.startsWith("https://") && certPath ? getDispatcher(certPath) : undefined;
   return async (payload, signal) => {
-    const timeout = AbortSignal.timeout(config.d1.timeoutMs);
-    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-    const init = {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: combined,
-      ...(dispatcher ? { dispatcher } : {}),
-    };
-    const response = globalThis.fetch === nativeFetch
-      ? await undiciFetch(url, init)
-      : await globalThis.fetch(url, init);
-    if (!response.ok) {
+    const deadline = Date.now() + config.d1.timeoutMs;
+    const maxAttempts = 3;
+    let lastError: Error | undefined;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 100) break;
+      const timeout = AbortSignal.timeout(remaining);
+      const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+      const init = {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: combined,
+        ...(dispatcher ? { dispatcher } : {}),
+      };
+      const response = globalThis.fetch === nativeFetch
+        ? await undiciFetch(url, init)
+        : await globalThis.fetch(url, init);
+      if (response.ok) return await response.json() as D1Response;
+      const status = response.status;
       const snippet = redactSecrets((await response.text().catch(() => "")).slice(0, 300));
-      throw new Error(`d1 HTTP ${response.status}: ${snippet}`);
+      lastError = new Error(`d1 HTTP ${status}: ${snippet}`);
+      if (status === 429) d1RateLimitedUntil = Date.now() + 15_000;
+      const retryable = status === 429 || status === 502 || status === 503;
+      if (!retryable || attempt === maxAttempts) throw lastError;
+      const baseWait = retryAfterMs(response.headers.get("retry-after")) ?? (attempt === 1 ? 350 : 850);
+      const waitMs = Math.min(baseWait + Math.floor(Math.random() * 250), Math.max(0, deadline - Date.now() - 400));
+      if (waitMs <= 0) throw lastError;
+      await delay(waitMs, undefined, { signal: combined });
     }
-    return await response.json() as D1Response;
+    throw lastError ?? new Error("d1 timeout exceeded");
   };
 }
 
@@ -516,13 +539,31 @@ async function extractRelevantChunks({ text, query, instructionTemplate, maxTota
   if (!waves.length) return { usedD1: false, text: "", kept: 0, total: chunks.length, d1Ms: 0 };
 
   const started = performance.now();
-  const responses = await Promise.all(waves.map(({ state, questions: qs }) => requester({ model: config.d1.model, state, questions: qs }, signal)));
-  const answersList = responses.map((resp) => resp.answers ?? {});
+  // Limit concurrent wave bursts (1 during recent 429 cooldown, 2 otherwise) and retain partial wave scores if later waves fail.
+  const waveConcurrency = Date.now() < d1RateLimitedUntil ? 1 : 2;
+  const answersList: Array<Record<string, { noul?: number; span?: number[] }> | undefined> = new Array(waves.length);
+  let nextWave = 0;
+  let firstError: unknown;
+  const runWorker = async () => {
+    while (nextWave < waves.length) {
+      if (signal?.aborted) break;
+      const idx = nextWave++;
+      const { state, questions: qs } = waves[idx]!;
+      try {
+        const resp = await requester({ model: config.d1.model, state, questions: qs }, signal);
+        answersList[idx] = resp.answers ?? {};
+      } catch (error) {
+        if (firstError === undefined) firstError = error;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(waveConcurrency, waves.length) }, runWorker));
   const d1Ms = Math.round(performance.now() - started);
 
   const scores = new Map<number, number>();
-  for (let i = 0; i < Math.min(waves.length, answersList.length); i++) {
-    const ans = answersList[i]!;
+  for (let i = 0; i < waves.length; i++) {
+    const ans = answersList[i];
+    if (!ans) continue;
     for (const [key, chunkIdx] of waves[i]!.map) {
       const score = ans[key]?.noul;
       if (typeof score === "number" && Number.isFinite(score)) {
@@ -531,7 +572,10 @@ async function extractRelevantChunks({ text, query, instructionTemplate, maxTota
       }
     }
   }
-  if (!scores.size) return { usedD1: false, text: "", kept: 0, total: chunks.length, d1Ms };
+  if (!scores.size) {
+    if (firstError !== undefined) throw firstError;
+    return { usedD1: false, text: "", kept: 0, total: chunks.length, d1Ms };
+  }
 
   const ranked = [...scores.entries()].map(([idx, sc]) => [sc, idx] as [number, number]).sort((a, b) => b[0] - a[0]);
   const above = ranked.filter(([sc]) => sc >= threshold).slice(0, maxChunks);

@@ -19,7 +19,7 @@ import type { GithubContext, GithubPullRequest } from "./github-types.ts";
 import { items, runs, subjects, tasks, type Run } from "./schema.ts";
 import { cancelPendingTasks, enqueueTask, latestTask, reconcileIssueImplementation } from "./tasks.ts";
 import { isManual, parseTriggerInput } from "./triggers.ts";
-import { getWorkspace, removeWorkspace, retainWorkspace } from "./workspaces.ts";
+import { getWorkspace, pruneIdleWorkspaceCaches, removeWorkspace, retainWorkspace, stripWorkspaceCaches } from "./workspaces.ts";
 import { bestEffort } from "./logging.ts";
 import { reconcileObserved, serializePr, type ResolvedReview } from "./pr-review-publication.ts";
 import { latestCompletedRun, latestFinishedRun, latestRunOfTask, runHistory } from "./run-history.ts";
@@ -61,15 +61,19 @@ async function cleanupClosedItem({ github, log }: SyncContext, item: Item) {
     const { deletePreview } = await import("./storefront.ts");
     await bestEffort(log, "storefront.delete_failed", { subjectId: item.id }, () => deletePreview(github, item.id, item.payload));
   }
-  if (item.kind !== "pr" || !item.workspaceId) return;
+  if (!item.workspaceId) return;
   const active = db.select().from(runs).where(and(eq(runs.workspaceId, item.workspaceId), isNull(runs.finishedAt))).get();
   const workspace = getWorkspace(item.workspaceId);
   if (active || !workspace || workspace.removedAt || workspace.retainedAt) return;
   const related = db.select().from(subjects).where(eq(subjects.workspaceId, workspace.id)).all();
-  for (const linked of related) cancelPendingTasks(linked.id, "PR merged or closed");
+  if (item.kind !== "pr" && related.some((linked) => linked.id !== item.id && linked.state === "open")) return;
+  for (const linked of related) cancelPendingTasks(linked.id, item.kind === "pr" ? "PR merged or closed" : "Issue closed");
   try { await removeWorkspace(workspace.id, { subjectId: item.id }); }
   catch (error) {
-    if (error instanceof UnpublishedWorkspaceError) retainWorkspace(workspace.id, error.message, { subjectId: item.id });
+    if (error instanceof UnpublishedWorkspaceError) {
+      retainWorkspace(workspace.id, error.message, { subjectId: item.id });
+      await stripWorkspaceCaches(workspace.id, workspace.path, { removeSandboxHome: true });
+    }
   }
 }
 
@@ -311,6 +315,9 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
   };
   for (const item of ordered) {
     await bestEffort(log, "github.routing_failed", { subjectId: item.id }, () => routeItem(item));
+  }
+  if (syncRound % 12 === 1) {
+    await bestEffort(log, "workspaces.prune_caches_failed", {}, () => pruneIdleWorkspaceCaches());
   }
   if (deferred) log.warn({ event: "github.sync_deferred", deferred, ...rateLimitState(), graphql: rateLimitState("graphql") }, "GitHub rate limit is low; deferred item reads to the next sync");
   return queued;

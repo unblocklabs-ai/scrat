@@ -158,6 +158,40 @@ export function retainWorkspace(workspaceId: string, reason: string, references:
   }, { behavior: "immediate" });
 }
 
+export async function stripWorkspaceCaches(workspaceId: string, workspacePath: string, options: { removeSandboxHome?: boolean } = {}) {
+  const real = await ifMissing(realpath(workspacePath), workspacePath);
+  if (real !== resolve(workspaceRoot(), workspaceId)) return;
+  for (const dir of ["node_modules", ".pnpm-store"]) {
+    const target = resolve(real, dir);
+    const stats = await ifMissing(lstat(target), undefined);
+    if (stats?.isDirectory() && !stats.isSymbolicLink()) await rm(target, { recursive: true, force: true }).catch(() => undefined);
+  }
+  const home = sandboxHome(workspaceId);
+  const homeTarget = options.removeSandboxHome ? home : resolve(home, ".cache");
+  const homeStats = await ifMissing(lstat(homeTarget), undefined);
+  if (homeStats?.isDirectory() && !homeStats.isSymbolicLink()) await rm(homeTarget, { recursive: true, force: true }).catch(() => undefined);
+}
+
+export async function pruneIdleWorkspaceCaches(idleDays = 3) {
+  const cutoff = new Date(Date.now() - idleDays * 24 * 60 * 60 * 1000).toISOString();
+  const live = db.select().from(workspaces).where(isNull(workspaces.removedAt)).all();
+  for (const workspace of live) {
+    const active = db.select({ id: runs.id }).from(runs).where(and(eq(runs.workspaceId, workspace.id), isNull(runs.finishedAt))).get();
+    if (active) continue;
+    if (workspace.retainedAt) {
+      await stripWorkspaceCaches(workspace.id, workspace.path, { removeSandboxHome: true });
+      continue;
+    }
+    const latest = db.select({ finishedAt: runs.finishedAt }).from(runs)
+      .where(and(eq(runs.workspaceId, workspace.id), isNotNull(runs.finishedAt)))
+      .orderBy(desc(runs.finishedAt)).limit(1).get();
+    const lastTouched = latest?.finishedAt ?? workspace.createdAt;
+    if (lastTouched < cutoff) {
+      await stripWorkspaceCaches(workspace.id, workspace.path, { removeSandboxHome: false });
+    }
+  }
+}
+
 export async function removeWorkspace(workspaceId: string, references: EventReferences = {}) {
   return withOperation("workspace.remove", { ...references, workspaceId }, async (operation) => {
     operation.stage("lookup");

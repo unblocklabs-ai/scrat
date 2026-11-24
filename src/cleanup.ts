@@ -6,7 +6,7 @@ import { config } from "./config.ts";
 import { listRunDatabases, removeRunDatabase } from "./databases.ts";
 import { getRun } from "./run-history.ts";
 import { runs, tasks, workspaces } from "./schema.ts";
-import { removeWorkspace, retainReplacedWorkspaces } from "./workspaces.ts";
+import { pruneIdleWorkspaceCaches, removeWorkspace, retainReplacedWorkspaces } from "./workspaces.ts";
 import { runCommand } from "./cli.ts";
 
 await runCommand("Cleanup command failed", async () => {
@@ -17,6 +17,7 @@ await runCommand("Cleanup command failed", async () => {
       notExists(db.select({ id: active.id }).from(active).where(and(eq(active.workspaceId, workspaces.id), isNull(active.finishedAt)))),
     )).all();
   retainReplacedWorkspaces();
+  await pruneIdleWorkspaceCaches();
   for (const { workspace: { id } } of pending) {
     try { await removeWorkspace(id); }
     catch { process.exitCode = 1; }

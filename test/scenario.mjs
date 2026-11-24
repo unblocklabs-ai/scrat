@@ -2672,6 +2672,30 @@ fi
     assert.equal(commented.publication.status, "published"); assert.equal(f.comments.get(3).length, 1);
     assert.equal(kept.removedAt, null, "a comment-only release that fails leaves the run completed and the workspace retained");
     assert.equal(readFileSync(kept.path + "/keep.txt", "utf8"), "preserve\n");
+
+    // Retained workspaces strip reinstallable caches (node_modules, .pnpm-store, sandbox-home) while preserving git & tracked files
+    const { retainWorkspace, pruneIdleWorkspaceCaches } = await f.app("workspaces.ts");
+    const { sandboxHome } = await f.app("sandbox.ts");
+    mkdirSync(resolve(kept.path, "node_modules/pkg"), { recursive: true });
+    writeFileSync(resolve(kept.path, "node_modules/pkg/index.js"), "x");
+    mkdirSync(resolve(kept.path, ".pnpm-store"), { recursive: true });
+    mkdirSync(resolve(sandboxHome(kept.id), ".cache"), { recursive: true });
+    retainWorkspace(kept.id, "test retention");
+    await pruneIdleWorkspaceCaches();
+    assert.equal(existsSync(resolve(kept.path, "node_modules")), false, "retained workspace strips node_modules");
+    assert.equal(existsSync(resolve(kept.path, ".pnpm-store")), false, "retained workspace strips .pnpm-store");
+    assert.equal(existsSync(sandboxHome(kept.id)), false, "retained workspace strips sandbox-home");
+    assert.equal(readFileSync(kept.path + "/keep.txt", "utf8"), "preserve\n", "retained workspace preserves source/git recovery files");
+
+    // Closing an issue with no open linked PR cleans up its workspace
+    f.addIssue(4, ["scrat"]); f.reset(4, "no-change"); f.enqueue(4, "implement");
+    const closedIssueRun = await success();
+    const issueWs = f.row(s.workspaces, closedIssueRun.workspaceId);
+    if (!issueWs.removedAt) {
+      f.issues.get(4).state = "closed";
+      await route();
+      assert.ok(f.row(s.workspaces, closedIssueRun.workspaceId).removedAt, "closing an issue without an open PR removes its workspace");
+    }
   } },
   sync_missing_item: { title: "a deleted open item is marked closed and its failed read does not stop routing for the others", run: async () => {
     f.addIssue(1); f.addIssue(2); await route();

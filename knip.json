@@ -6,6 +6,7 @@
     "test/{integration.test,scenario,database-command}.mjs",
     "deploy/prepare-tools.mjs"
   ],
+  "ignoreBinaries": ["rg"],
   "ignoreDependencies": ["lighthouse", "playwright-core"],
   "project":["src/**/*.ts", "test/**/*.mjs", "deploy/**/*.mjs"]
 }

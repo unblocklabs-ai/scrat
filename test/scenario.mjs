@@ -3033,18 +3033,18 @@ fi
     assert.match(second, /, complete\n/); assert.ok(second.includes("## #2,") && second.includes("other subject report"), "other subjects' runs are included with their labels");
     assert.ok(!second.includes("implement report"));
     const last = seen[13];
-    assert.ok(last.indexOf("report 11") < last.indexOf("report 10") && last.indexOf("report 10") < last.indexOf("report 3"), "newest first");
-    assert.ok(!/report 1\b/.test(last), "the history keeps the newest ten runs");
-    assert.equal((last.match(/^## /gm) ?? []).length, 10);
+    assert.ok(last.indexOf("report 11") < last.indexOf("report 10") && last.indexOf("report 10") < last.indexOf("report 9"), "newest first");
+    assert.ok(!/report 1\b/.test(last), "the history keeps the newest three runs");
+    assert.equal((last.match(/^## /gm) ?? []).length, 3);
     const { config } = await f.app("config.ts");
-    config.context.historyRuns = 3; await review(1);
-    assert.equal((seen.at(-1).match(/^## /gm) ?? []).length, 3); config.context.historyRuns = 10;
+    config.context.historyRuns = 5; await review(1);
+    assert.equal((seen.at(-1).match(/^## /gm) ?? []).length, 5); config.context.historyRuns = 3;
     const { r: huge, request } = await review(1);
     assert.match(request.context.files.history, /history\.md$/);
     rewrite(huge, "x".repeat(200 * 1024));
     await review(1);
     const capped = seen.at(-1);
-    assert.ok(Buffer.byteLength(capped) <= 64 * 1024 && Buffer.byteLength(capped) > 60 * 1024, Buffer.byteLength(capped) + capped.slice(0, 300));
+    assert.ok(Buffer.byteLength(capped) <= 12 * 1024 && Buffer.byteLength(capped) > 10 * 1024, Buffer.byteLength(capped) + capped.slice(0, 300));
     assert.ok(capped.includes("## ") && !capped.includes("report 10"), "a report over the cap crowds out older ones");
     config.context.historyBytes = 2048; await review(1);
     assert.ok(Buffer.byteLength(seen.at(-1)) <= 2048 && Buffer.byteLength(seen.at(-1)) > 1500);
@@ -4420,7 +4420,7 @@ fi
     const textOf = (result) => result.content[0].text;
 
     const bound = make({ binding });
-    assert.deepEqual(Object.keys(bound.tool.parameters.properties), ["action", "url", "selector", "text", "viewport", "fullPage"]);
+    assert.deepEqual(Object.keys(bound.tool.parameters.properties), ["action", "url", "selector", "text", "viewport", "fullPage", "focus", "raw"]);
     assert.match(bound.tool.description, /desktop, mobile.*click.*fill.*select/s); assert.doesNotMatch(bound.tool.description, /no way to click/);
     await assert.rejects(act(bound, { action: "teleport" }), /action must be one of: goto, text, screenshot, click, fill, select/);
     await assert.rejects(act(bound, { action: "goto", url: "https://evil.example.net/" }), /Refused: evil\.example\.net is not an allowed host/);
@@ -5371,6 +5371,400 @@ fi
       assert.throws(() => query(new URL(databases[1].url).password), /password authentication failed/);
       assert.throws(() => query("postgres"), /password authentication failed/);
     } finally { await Promise.all(runs.map((run) => removeRunDatabase(run.id))); }
+  } },
+  generated_diff_guard: { title: "review git summarizes large lockfile and generated diffs deterministically while keeping raw opt-in, small diffs and review scope intact", run: async () => {
+    const { createReviewGitTool } = await f.app("review-git.ts");
+    const repo = resolve("gen-repo");
+    mkdirSync(resolve(repo, "src"), { recursive: true }); mkdirSync(resolve(repo, "assets"), { recursive: true });
+    git(repo, "init", "-b", "main");
+    writeFileSync(resolve(repo, "src/app.ts"), "export const version = 1;\n");
+    writeFileSync(resolve(repo, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\npackages:\n  'alpha@1.0.0':\n    resolution: {integrity: sha512-old}\n");
+    writeFileSync(resolve(repo, "assets/main-Ab12Cd.css"), ".a{color:red}\n");
+    writeFileSync(resolve(repo, "assets/index-Tiny1.css"), ".t{color:blue}\n");
+    git(repo, "add", "."); commit(repo, "base");
+    const base = git(repo, "rev-parse", "HEAD");
+    writeFileSync(resolve(repo, "src/app.ts"), "export const version = 2;\n");
+    writeFileSync(resolve(repo, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\npackages:\n" + Array.from({ length: 120 }, (_, i) => `  'pkg-${i}@2.0.${i}':\n    resolution: {integrity: sha512-${"x".repeat(40)}}\n`).join(""));
+    writeFileSync(resolve(repo, "assets/main-Ab12Cd.css"), `.b{content:"${"z".repeat(6000)}"}\n`);
+    writeFileSync(resolve(repo, "assets/index-Tiny1.css"), ".t{color:green}\n");
+    git(repo, "add", "."); commit(repo, "head");
+    const head = git(repo, "rev-parse", "HEAD");
+
+    const touched = new Set();
+    const tool = createReviewGitTool(repo, { base, head, main: base }, touched);
+    const call = async (args) => (await tool.execute("call", args, undefined, undefined, {})).content[0].text;
+
+    const lockSummary = await call({ operation: "diff", from: "base", to: "head", path: "pnpm-lock.yaml" });
+    assert.match(lockSummary, /pnpm-lock\.yaml/);
+    assert.match(lockSummary, /Added\/updated entries.*pkg-0@2\.0\.0/);
+    assert.match(lockSummary, /generated\/lockfile diff omitted.*include_generated=true/);
+    assert.ok(lockSummary.length < 3000, "lockfile summary stays compact");
+    assert.ok(touched.has("pnpm-lock.yaml"), "summarized path still joins touched scope");
+
+    const lockRaw = await call({ operation: "diff", from: "base", to: "head", path: "pnpm-lock.yaml", include_generated: true });
+    assert.match(lockRaw, /diff --git a\/pnpm-lock\.yaml b\/pnpm-lock\.yaml/);
+
+    const smallGen = await call({ operation: "diff", from: "base", to: "head", path: "assets/index-Tiny1.css" });
+    assert.match(smallGen, /\+\.t\{color:green\}/, "small generated diff passes through verbatim");
+
+    // Small generated diff with tiny page limit must not be misclassified as > generatedDiffBytes
+    const smallPaged = await call({ operation: "diff", from: "base", to: "head", path: "assets/index-Tiny1.css", limit: 60 });
+    assert.match(smallPaged, /^diff --git a\/assets\/index-Tiny1\.css/);
+    assert.doesNotMatch(smallPaged, /generated\/lockfile diff omitted/);
+
+    // Generated diff summary honors caller limit and pages cleanly across offset > 0 without leaking raw generated lines
+    const lockPage1 = await call({ operation: "diff", from: "base", to: "head", path: "pnpm-lock.yaml", limit: 80 });
+    const lockNext = Number(/offset=(\d+)/.exec(lockPage1)?.[1]);
+    assert.ok(lockNext > 0 && lockNext <= 80, lockPage1);
+    assert.match(lockPage1, /\[truncated: bytes 0-/);
+    const lockPage2 = await call({ operation: "diff", from: "base", to: "head", path: "pnpm-lock.yaml", offset: lockNext, limit: 4000 });
+    assert.match(lockPage2, /generated\/lockfile diff omitted/);
+    assert.doesNotMatch(lockPage2, /sha512-xxxxx/);
+
+    const broad = await call({ operation: "diff", from: "base", to: "head" });
+    assert.match(broad, /\+export const version = 2;/, "broad diff keeps regular source patch");
+    assert.doesNotMatch(broad, /sha512-xxxxx/, "broad diff omits raw lockfile bloat");
+    assert.match(broad, /omitted 3 generated\/lockfile diff\(s\):.*assets\/main-Ab12Cd\.css.*pnpm-lock\.yaml/);
+
+    // Mixed broad diff pagination stays on the filtered regular-files stream across offset > 0 and keeps notice inside page budget
+    const p1 = await call({ operation: "diff", from: "base", to: "head", limit: 80 });
+    const nextOff = Number(/offset=(\d+)/.exec(p1)?.[1]);
+    assert.ok(nextOff > 0 && nextOff <= 80, p1);
+    const p2 = await call({ operation: "diff", from: "base", to: "head", offset: nextOff, limit: 800 });
+    assert.match(p2, /\+export const version = 2;/, "page 2 continues the filtered regular-files diff");
+    assert.doesNotMatch(p2, /sha512-xxxxx|zzzzzz/, "page 2 never leaks omitted generated diffs");
+    const p3 = await call({ operation: "diff", from: "base", to: "head", offset: 250, limit: 400 });
+    assert.doesNotMatch(p3, /\[omitted \d+ generated/, "omission notice is not repeated on later pages");
+
+    // Large mixed diff (> 200 regular files + generated lockfile) still excludes generated diffs
+    mkdirSync(resolve(repo, "src/many"), { recursive: true });
+    for (let i = 0; i < 210; i++) writeFileSync(resolve(repo, `src/many/f${i}.ts`), `export const n${i} = ${i};\n`);
+    writeFileSync(resolve(repo, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\npackages:\n" + Array.from({ length: 130 }, (_, i) => `  'big-${i}@3.0.${i}':\n    resolution: {integrity: sha512-${"y".repeat(40)}}\n`).join(""));
+    git(repo, "add", "."); commit(repo, "many-files");
+    const manyHead = git(repo, "rev-parse", "HEAD");
+    const manyTool = createReviewGitTool(repo, { base: head, head: manyHead, main: base }, new Set());
+    const manyDiff = (await manyTool.execute("call", { operation: "diff", from: "base", to: "head" }, undefined, undefined, {})).content[0].text;
+    assert.match(manyDiff, /src\/many\/f0\.ts/, "large mixed diff keeps regular files");
+    assert.doesNotMatch(manyDiff, /sha512-yyyyy/, "large mixed diff (>200 regular files) still filters out lockfile");
+    assert.match(manyDiff, /omitted 1 generated\/lockfile diff\(s\):.*pnpm-lock\.yaml/);
+  } },
+  d1_filtering: { title: "d1 perceptual filtering distills large bash, browser text and history outputs into verbatim spans with contextDir escape hatches and fail-open fallback", configure: [(config) => {
+    config.d1.enabled = true;
+    config.d1.url = "https://codex.unblocklabs.ai/v1/decisions";
+    config.d1.bash.minChars = 400;
+    config.d1.bash.maxOutputChars = 2200;
+    config.d1.browserText.minChars = 300;
+    config.d1.browserText.maxOutputChars = 1400;
+    config.d1.history.minChars = 300;
+    config.d1.history.maxOutputChars = 1400;
+  }], run: async () => {
+    const prevToken = process.env.CODEX_LB_API_KEY, prevFetch = globalThis.fetch;
+    process.env.CODEX_LB_API_KEY = "d1-secret-token-value-99999";
+    let failD1 = false, d1Calls = 0;
+    globalThis.fetch = async (url, init) => {
+      if (String(url) !== "https://codex.unblocklabs.ai/v1/decisions") return prevFetch(url, init);
+      d1Calls++;
+      assert.equal(new Headers(init.headers).get("authorization"), "Bearer d1-secret-token-value-99999");
+      if (failD1) return new Response("overloaded", { status: 503 });
+      const body = JSON.parse(init.body);
+      assert.equal(body.model, "liquid/d1.2-ultra");
+      assert.ok(!body.state.includes("d1-secret-token-value-99999"), "secrets in text, goal, focus, and history must be redacted before reaching d1");
+      const answers = {};
+      for (const key of Object.keys(body.questions)) {
+        const idx = key.slice(1);
+        const match = new RegExp(`\\[${idx}\\]([\\s\\S]*?)(?=\\n\\n\\[\\d+\\]|$)`).exec(body.state);
+        const chunk = match?.[1] ?? "";
+        const hot = /FAIL src\/orders\.test\.ts|AssertionError|Add to cart|OUT OF STOCK|recurring checkout|TAIL_SENTINEL_BUG/i.test(chunk);
+        answers[key] = { type: "noul", noul: hot ? 0.92 : 0.05 };
+      }
+      return new Response(JSON.stringify({ model: body.model, answers }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    try {
+      const { distillCommandOutput, distillHistory, readHeadAndTail } = await f.app("d1.ts");
+      const { createBrowserTool } = await f.app("scoped-tools.ts");
+      const { createAgentTools } = await f.app("tools.ts");
+      const { logger } = await f.app("logging.ts");
+      const ctxDir = resolve("d1-ctx"); mkdirSync(ctxDir, { recursive: true });
+
+      // readHeadAndTail preserves tail + UTF-8 boundaries and redacts secrets straddling cut boundaries
+      const bigLogPath = resolve(ctxDir, "big-utf8.log");
+      const pem = "-----BEGIN RSA PRIVATE KEY-----\n" + "SECRETKEYLINE".repeat(20) + "\n-----END RSA PRIVATE KEY-----";
+      writeFileSync(bigLogPath, `HEAD_START\n${"🚀".repeat(250)}d1-secret-token-value-99999${"x".repeat(20000)}${pem}${"y".repeat(20000)}d1-secret-token-value-99999\nREAL_TAIL_FAILURE: line 999\n`);
+      const ht = await readHeadAndTail(bigLogPath, 2048);
+      assert.equal(ht.truncated, true);
+      assert.match(ht.text, /^HEAD_START/);
+      assert.match(ht.text, /REAL_TAIL_FAILURE: line 999/);
+      assert.ok(!ht.text.includes("\uFFFD"), "UTF-8 boundaries preserved across head/tail cut");
+      assert.ok(!ht.text.includes("d1-secret-token-value-99999") && !ht.text.includes("SECRETKEYLINE"), "boundary-crossing secrets redacted before clipping");
+
+      // bash wrapper preserves promptSnippet, avoids parallel filename races, and keeps exit-0 literal stdout
+      const wsDir = resolve("d1-ws"); mkdirSync(wsDir, { recursive: true });
+      const { customTools: changeTools } = await createAgentTools({ run: { id: "bash-meta" }, cwd: wsDir, contextDir: ctxDir, tools: ["read", "bash"], scoped: { mode: "change" }, log: logger });
+      const bashTool = changeTools.find((t) => t.name === "bash");
+      assert.ok(bashTool.promptSnippet, "bash retains promptSnippet for Pi system prompt <tools>");
+      const bashCtx = { sessionManager: { getSessionId: () => "bash-test-sess", getSessionFile: () => undefined } };
+      const [parA, parB] = await Promise.all([
+        bashTool.execute("p1", { command: `node -e 'console.log("RUN_ALPHA\\n" + "ok line\\n".repeat(400) + "FAIL src/orders.test.ts ALPHA_ONLY\\n" + "ok line\\n".repeat(400))'` }, undefined, undefined, bashCtx),
+        bashTool.execute("p2", { command: `node -e 'console.log("RUN_BETA\\n" + "ok line\\n".repeat(400) + "FAIL src/orders.test.ts BETA_ONLY\\n" + "ok line\\n".repeat(400))'` }, undefined, undefined, bashCtx),
+      ]);
+      assert.ok(parA.details.fullOutputPath && parB.details.fullOutputPath && parA.details.fullOutputPath !== parB.details.fullOutputPath, "parallel bash calls get distinct artifact paths");
+      assert.match(readFileSync(parA.details.fullOutputPath, "utf8"), /ALPHA_ONLY/);
+      assert.match(readFileSync(parB.details.fullOutputPath, "utf8"), /BETA_ONLY/);
+      const exit0Literal = await bashTool.execute("p3", { command: `node -e 'process.stdout.write("START\\n" + "x".repeat(600) + "\\n\\nCommand exited with code 0")'` }, undefined, undefined, bashCtx);
+      assert.match(exit0Literal.content[0].text, /Command exited with code 0$/, "exit-0 stdout ending with exit line is preserved");
+
+      const noisyLog = [
+        "\x1b[32mRUN  v2.0.0\x1b[0m",
+        ...Array.from({ length: 40 }, (_, i) => ` ✓ test/passing-${i}.test.ts (12ms) ok ${".".repeat(80)}`),
+        "\n\x1b[31mFAIL src/orders.test.ts > charges tax once\x1b[0m\nAssertionError: expected 108 to equal 100 (token d1-secret-token-value-99999)\n    at src/orders.ts:42:9\n",
+        ...Array.from({ length: 40 }, (_, i) => ` ✓ test/more-passing-${i}.test.ts (8ms) ok ${".".repeat(80)}`),
+        "Test Files  1 failed | 80 passed (81)",
+      ].join("\n");
+
+      const bashLog = resolve(ctxDir, "bash-1.log");
+      const longSecretCmd = `pnpm exec vitest run ${"--filter=pkg ".repeat(10)}--token=d1-secret-token-value-99999`;
+      const cmdRes = await distillCommandOutput({ rawOutput: noisyLog, command: longSecretCmd, artifactPath: bashLog, minChars: 400, maxChars: 2200 });
+      assert.equal(cmdRes.filtered, true);
+      assert.match(cmdRes.text, /\[d1 filtered:/);
+      assert.match(cmdRes.text, /FAIL src\/orders\.test\.ts/);
+      assert.match(cmdRes.text, /src\/orders\.ts:42:9/);
+      assert.ok(cmdRes.text.length <= 2200, `d1 formatted summary enforces maxChars: got ${cmdRes.text.length}`);
+      assert.doesNotMatch(cmdRes.text, /\x1b\[/, "ANSI escape codes are stripped");
+      assert.doesNotMatch(cmdRes.text, /d1-secret-token-value-99999/, "d1 token is redacted");
+      assert.ok(cmdRes.text.includes(bashLog) && readFileSync(bashLog, "utf8").includes("FAIL src/orders.test.ts"), "full log saved for read escape hatch");
+      assert.ok(cmdRes.text.length < noisyLog.length / 2, "significant token compression achieved");
+
+      // sourceArtifactPath preserves full redacted middle content and never leaks secrets across 256 KiB chunk boundaries
+      const rawBigSrc = resolve(ctxDir, "raw-big-src.log");
+      const ghpTok = ["ghp", "1234567890abcdefghijklmnopqrstuvwxyzABCD"].join("_");
+      const xoxTok = ["xoxb", "1234567890", "1234567890", "abcdefghijklmnopqrstuvwx"].join("-");
+      // Place PEM across the (256 KiB - 8 KiB) split boundary and ghp_ across the exact 256 KiB read boundary
+      const prefixBeforeGhp = `HEAD_LINE\n${"a".repeat(256 * 1024 - 8192 - 40)}\n${pem}\n`;
+      const pad2Len = Math.max(0, 256 * 1024 - Buffer.byteLength(prefixBeforeGhp, "utf8") - 10);
+      writeFileSync(rawBigSrc, `${prefixBeforeGhp}${"b".repeat(pad2Len)} ${ghpTok}\nMIDDLE_ONLY_SENTINEL_12345 ${xoxTok} d1-secret-token-value-99999\n${"c".repeat(2000)}\nFAIL src/orders.test.ts\n`);
+      const fullCopyDest = resolve(ctxDir, "full-copy.log");
+      const fullCopyRes = await distillCommandOutput({ rawOutput: noisyLog, command: "pnpm test", artifactPath: fullCopyDest, sourceArtifactPath: rawBigSrc, partialSource: true, minChars: 400, maxChars: 2200 });
+      assert.equal(fullCopyRes.artifactPath, fullCopyDest);
+      assert.match(fullCopyRes.text, /full output:.*full-copy\.log/);
+      const copiedText = readFileSync(fullCopyDest, "utf8");
+      assert.match(copiedText, /MIDDLE_ONLY_SENTINEL_12345/, "full source artifact preserves middle diagnostics");
+      assert.ok(!copiedText.includes("d1-secret-token-value-99999") && !copiedText.includes("SECRETKEYLINE") && !copiedText.includes("ghp_1234") && !copiedText.includes("uvwxyzABCD") && !copiedText.includes("xoxb-1234"), "chunk-boundary secrets fully redacted");
+
+      const readCmd = await distillCommandOutput({ rawOutput: noisyLog, command: "cat src/orders.ts", artifactPath: resolve(ctxDir, "skip.log"), minChars: 400, maxChars: 2200 });
+      assert.equal(readCmd.filtered, false, "code-read shell commands bypass d1 filtering");
+      const forcedVal = await distillCommandOutput({ rawOutput: noisyLog, command: "git diff --exit-code", allowReadBypass: false, artifactPath: resolve(ctxDir, "val-diff.log"), minChars: 400, maxChars: 2200 });
+      assert.equal(forcedVal.filtered, true, "validation disables read-command bypass");
+
+      failD1 = true;
+      const warnHeavy = Array.from({ length: 120 }, (_, i) => `warning ${i}: ${"detail ".repeat(25)}`).join("\n") + "\nFAIL src/orders.test.ts\n";
+      const fallback = await distillCommandOutput({ rawOutput: warnHeavy, command: "pnpm exec vitest run", artifactPath: resolve(ctxDir, "fallback.log"), minChars: 400, maxChars: 2200 });
+      assert.equal(fallback.filtered, true);
+      assert.match(fallback.text, /FLAGGED ANOMALY LINES[\s\S]*warning 0:/);
+      assert.match(fallback.text, /truncated \d+ chars/);
+      assert.ok(fallback.text.length <= 2200, `fallback respects maxChars with anomalies: got ${fallback.text.length}`);
+      failD1 = false;
+
+      // Test F5-01 Trigger 1 (-----END straddling limit), Trigger 2 (completed PEM before limit with non-newline tail), and R5-02 (unbroken line opaque secret straddling limit)
+      const { copyRedactedFile } = await f.app("d1.ts");
+      const pemEndLimit = 256 * 1024 - 8192;
+      const pemEndPos = pem.indexOf("-----END ");
+      const trig1Src = resolve(ctxDir, "pem-end-straddle.log");
+      const trig1Dst = resolve(ctxDir, "pem-end-straddle.out.log");
+      writeFileSync(trig1Src, "a".repeat(pemEndLimit - pemEndPos - 10) + pem + "\n" + "z".repeat(12000));
+      await copyRedactedFile(trig1Src, trig1Dst, 1024 * 1024);
+      assert.ok(!readFileSync(trig1Dst, "utf8").includes("SECRETKEYLINE"), "PEM with -----END straddling limit is redacted");
+
+      const trig2Src = resolve(ctxDir, "pem-before-limit.log");
+      const trig2Dst = resolve(ctxDir, "pem-before-limit.out.log");
+      writeFileSync(trig2Src, "a".repeat(pemEndLimit - pem.length - 50) + pem + "json_tail".repeat(20) + "\n" + "z".repeat(12000));
+      await copyRedactedFile(trig2Src, trig2Dst, 1024 * 1024);
+      assert.ok(!readFileSync(trig2Dst, "utf8").includes("SECRETKEYLINE"), "PEM ending before limit with non-newline suffix is redacted");
+
+      const unbrokenSrc = resolve(ctxDir, "unbroken-secret.log");
+      const unbrokenDst = resolve(ctxDir, "unbroken-secret.out.log");
+      writeFileSync(unbrokenSrc, "x".repeat(pemEndLimit - 12) + "d1-secret-token-value-99999" + "y".repeat(20000));
+      await copyRedactedFile(unbrokenSrc, unbrokenDst, 1024 * 1024);
+      assert.ok(!readFileSync(unbrokenDst, "utf8").includes("d1-secret-token-value-99999"), "opaque secret straddling cut inside unbroken 270KiB line is redacted");
+
+      // Mid-size d1 inflation rejection must not leave an orphan artifact file
+      const orphanPath = resolve(ctxDir, "should-not-exist.log");
+      const midSize = Array.from({ length: 8 }, (_, i) => `line ${i}: ${"payload ".repeat(12)}`).join("\n");
+      const midRes = await distillCommandOutput({ rawOutput: midSize, command: "pnpm test", artifactPath: orphanPath, minChars: 400, maxChars: 2200 });
+      assert.equal(midRes.filtered, false);
+      assert.equal(existsSync(orphanPath), false, "rejected mid-size d1 output writes no orphan artifact");
+
+      // If persistArtifact fails and falls back to existingArtifactPath, label stays "full output" even with partialSource
+      const badDirArtifact = resolve(ctxDir, "missing-dir/bash.log");
+      const existingFull = resolve(ctxDir, "existing-full.log");
+      const fbLabelRes = await distillCommandOutput({ rawOutput: noisyLog, command: "pnpm test", artifactPath: badDirArtifact, existingArtifactPath: existingFull, partialSource: true, minChars: 400, maxChars: 2200 });
+      assert.equal(fbLabelRes.artifactPath, existingFull);
+      assert.match(fbLabelRes.text, /full output:.*existing-full\.log/);
+      assert.doesNotMatch(fbLabelRes.text, /partial head\+tail/);
+
+      // 35 KB page with detail near the tail proves priority wave packing never drops pinned tail chunks
+      let pageBody = [
+        "Header Nav Shop About FAQ Reviews Login Cart\n" + "Menu item navigation boilerplate link ".repeat(60),
+        "\n\n## Product Details\nDaily Focus Pack — $48.00\nAdd to cart button disabled: OUT OF STOCK on mobile variant.\n\n",
+        ...Array.from({ length: 24 }, (_, i) => `## Section ${i}\n${"Filler marketing paragraph text ".repeat(45)}\n`),
+        "\n\n## Footer Status\nTAIL_SENTINEL_BUG: checkout broken at bottom of 35KB page\n",
+      ].join("\n");
+      const stubPage = {
+        goto: async () => ({ status: () => 200 }), title: async () => "Product", url: () => "https://shop.example.test/products/focus",
+        innerText: async () => pageBody, screenshot: async () => {}, innerHTML: async () => "<html></html>",
+        waitForLoadState: async () => {}, on: () => {}, off: () => {}, setViewportSize: async () => {},
+        locator: () => ({ count: async () => 1 }), click: async () => {}, fill: async () => {}, selectOption: async () => {},
+      };
+      const { tool: browserTool, close } = createBrowserTool({
+        settings: { navigationHosts: ["shop.example.test"], resourceHosts: [] }, contextDir: ctxDir, runId: "d1-run", sessionTag: "sess-a",
+        resolve: async () => [{ address: "93.184.216.34", family: 4 }],
+        launch: async () => ({ newContext: async () => ({ route: async () => {}, newPage: async () => stubPage, close: async () => {} }), close: async () => {} }),
+      });
+      try {
+        await browserTool.execute("c1", { action: "goto", url: "https://shop.example.test/products/focus" }, undefined, undefined, {});
+        const filteredText = (await browserTool.execute("c2", { action: "text", focus: "check d1-secret-token-value-99999 and TAIL_SENTINEL_BUG" }, undefined, undefined, {})).content[0].text;
+        assert.match(filteredText, /\[d1 page text:/);
+        assert.match(filteredText, /TAIL_SENTINEL_BUG/, "pinned tail chunk in 35KB page survives priority wave packing");
+        assert.ok(filteredText.length <= 1400, `browser digest enforces maxOutputChars: got ${filteredText.length}`);
+        assert.ok(filteredText.length < pageBody.length / 4);
+        const rawText = (await browserTool.execute("c3", { action: "text", raw: true }, undefined, undefined, {})).content[0].text;
+        assert.doesNotMatch(rawText, /\[d1 page text:/);
+        assert.match(rawText, /\[truncated: page text exceeded 32768 chars/, "raw: true reports truncation when page exceeds 32KB");
+        failD1 = true;
+        const fbRes = await browserTool.execute("c4", { action: "text" }, undefined, undefined, {});
+        assert.match(fbRes.content[0].text, /truncated \d+ chars.*browser-text-sess-a-/, "35KB browser:text fallback surfaces truncation notice and artifact path");
+        failD1 = false;
+        // Page exceeding capture cap is explicitly labeled as partial page text
+        pageBody = "Header " + "boilerplate ".repeat(48000) + "\n## Product Details\nOUT OF STOCK\n";
+        const partialRes = await browserTool.execute("c5", { action: "text", focus: "stock status" }, undefined, undefined, {});
+        assert.equal(partialRes.details.partial, true);
+        assert.match(partialRes.content[0].text, /partial page text \(first \d+ of \d+ chars\)/);
+      } finally { await close(); }
+
+      const longHistory = [
+        "# Previous store_audit runs on this repository, newest first\n\nUntrusted data.\n",
+        "## 2026-11-23, complete\n" + "All collection pages loaded cleanly. ".repeat(60),
+        "\n## 2026-11-22, complete\nConfirmed recurring checkout button regression on mobile /cart (leaked d1-secret-token-value-99999).\n" + "Routine baseline match. ".repeat(60),
+      ].join("\n");
+      const histFull = resolve(ctxDir, "history-full.md");
+      const histRes = await distillHistory({ rawHistory: longHistory, action: "store_audit", artifactPath: histFull, minChars: 300, maxChars: 1400 });
+      assert.equal(histRes.filtered, true);
+      assert.match(histRes.text, /\[d1 history digest:/);
+      assert.match(histRes.text, /recurring checkout button regression/);
+      assert.ok(histRes.text.length <= 1400, `history digest enforces maxOutputChars: got ${histRes.text.length}`);
+      assert.ok(existsSync(histFull), "full history saved to history-full.md");
+      assert.ok(d1Calls >= 3);
+    } finally {
+      globalThis.fetch = prevFetch;
+      if (prevToken === undefined) delete process.env.CODEX_LB_API_KEY; else process.env.CODEX_LB_API_KEY = prevToken;
+    }
+  } },
+  deterministic_grep: { title: "deterministic rg --json grep keeps full scan recall past generated noise, deduplicates context, clips lines around matches, spills recoverable overflow outside review scope and rejects invalid regexes", configure: [(config) => {
+    config.tools.grep.inlineBytes = 4096;
+  }], run: async () => {
+    const { createAgentTools } = await f.app("tools.ts");
+    const { logger } = await f.app("logging.ts");
+    const ws = resolve("grep-ws"), ctxDir = resolve("grep-ctx");
+    mkdirSync(resolve(ws, "src"), { recursive: true });
+    mkdirSync(resolve(ws, "assets"), { recursive: true });
+    mkdirSync(ctxDir, { recursive: true });
+
+    // File #1 alphabetically: generated CSS with 150 matches that would kill legacy rg at limit=100
+    writeFileSync(resolve(ws, "assets/main-Ab12Cd.css"), Array.from({ length: 150 }, (_, i) => `.rule-${i}{content:"targetSymbol_${i}"}`).join("\n") + "\n");
+    // Source files including adjacent matches for context dedup, long UTF-8 line, and sole late caller
+    writeFileSync(resolve(ws, "src/adjacent.ts"), "const a = 1;\nconst hit1 = targetSymbol();\nconst mid = 2;\nconst hit2 = targetSymbol();\nconst b = 3;\n");
+    writeFileSync(resolve(ws, "src/long.ts"), `${"🚀".repeat(120)} const deep = targetSymbol("exact-token"); ${"🔥".repeat(120)}\n`);
+    for (let i = 0; i < 12; i++) {
+      writeFileSync(resolve(ws, `src/mod_${String(i).padStart(2, "0")}.ts`), Array.from({ length: 6 }, (_, j) => `export const f${i}_${j} = () => targetSymbol(${i}, ${j});`).join("\n") + "\n");
+    }
+    writeFileSync(resolve(ws, "src/z_sole_caller.ts"), "export function lateConsumer() { return targetSymbol('sole'); }\n");
+
+    const { customTools, paths } = await createAgentTools({
+      run: { id: "grep-run" }, cwd: ws, contextDir: ctxDir, tools: ["read", "grep"],
+      scoped: { mode: "review" }, log: logger,
+    }, 0);
+    const grepTool = customTools.find((t) => t.name === "grep");
+    const readTool = customTools.find((t) => t.name === "read");
+    const runGrep = (args) => grepTool.execute("c", args, undefined, undefined, {});
+
+    // 1. Confinement preserved
+    await assert.rejects(runGrep({ pattern: "targetSymbol", path: ".." }), /outside the workspace/);
+    await assert.rejects(runGrep({ pattern: "targetSymbol", path: "~" }), /outside the workspace/);
+
+    // 2. Clean zero vs invalid regex (must never become clean zero)
+    const zero = (await runGrep({ pattern: "definitely_absent_symbol_xyz", literal: true })).content[0].text;
+    assert.match(zero, /scan: complete \| display: full .* 0 matches/);
+    await assert.rejects(runGrep({ pattern: "(unclosed" }), /regex|parse|error/i);
+
+    // 3. Context dedup (line 3 'const mid = 2;' appears only ONCE between line 2 and line 4 matches)
+    const adj = (await runGrep({ pattern: "targetSymbol", path: "src/adjacent.ts", context: 2 })).content[0].text;
+    assert.match(adj, /scan: complete \| display: full/);
+    assert.equal(adj.split("const mid = 2;").length - 1, 1, "overlapping context line is emitted once");
+
+    // 4. Match-centered UTF-8 safe clipping on long line
+    const longRes = (await runGrep({ pattern: "exact-token", path: "src/long.ts", literal: true })).content[0].text;
+    assert.match(longRes, /exact-token/, "match stays visible inside centered window");
+    assert.match(longRes, /\[clipped: \d+B\]/);
+    assert.ok(!longRes.includes("\uFFFD"), "UTF-8 boundary clipping produces no replacement chars");
+
+    // 5. Overflow shaping past 150 generated matches: complete scan, late caller visible, generated collapsed to count, spill readable (with context) without polluting paths
+    const overflow = await runGrep({ pattern: "targetSymbol", literal: true, context: 1 });
+    const text = overflow.content[0].text;
+    assert.ok(Buffer.byteLength(text, "utf8") <= 4096, `inline budget enforced: got ${Buffer.byteLength(text, "utf8")}B`);
+    assert.match(text, /scan: complete \| display: reduced/);
+    assert.match(text, /assets\/main-Ab12Cd\.css: 150 \[generated\]/, "generated file accounted for in inventory");
+    assert.match(text, /src\/z_sole_caller\.ts: 1/, "sole late caller discovered past 150 earlier matches");
+    assert.match(text, /lateConsumer\(\)/, "round-robin previews prioritize real source files over generated bundle");
+    assert.doesNotMatch(text, /\.rule-0\{/, "generated bundle collapsed to count instead of burning snippet space");
+    assert.ok(overflow.details.spillPath && existsSync(overflow.details.spillPath), "spill file written in contextDir");
+
+    // Read spill file via read tool -> readable, preserves requested context lines, & must NOT enter workspace review paths
+    const spilled = (await readTool.execute("r1", { path: overflow.details.spillPath, limit: 30 }, undefined, undefined, {})).content[0].text;
+    assert.match(spilled, /## FILE INDEX[\s\S]*assets\/main-Ab12Cd\.css: 150/);
+    assert.match(readFileSync(overflow.details.spillPath, "utf8"), /src\/adjacent\.ts:3- const mid = 2;/, "spill file preserves requested context lines");
+    assert.equal(paths.size, 0, "reading spill artifact outside worktree does not pollute review paths");
+
+    // 6. mode: "files" returns compact inventory
+    const filesMode = (await runGrep({ pattern: "targetSymbol", literal: true, mode: "files" })).content[0].text;
+    assert.match(filesMode, /mode: files \| scan: complete \| display: full/);
+    assert.match(filesMode, /src\/z_sole_caller\.ts: 1/);
+
+    // 7. params.glob cannot override contextDir/grep spill-dir exclusion
+    writeFileSync(resolve(ctxDir, "note.txt"), "context_needle_here\n");
+    const ctxSearch = (await runGrep({ pattern: "targetSymbol", path: ctxDir, glob: "*.txt", literal: true })).content[0].text;
+    assert.match(ctxSearch, /0 matches/, "spill files under contextDir/grep stay excluded even with glob=*.txt");
+
+    // 8. Aborted AbortSignal rejects instead of returning a partial result
+    const ac = new AbortController(); ac.abort();
+    await assert.rejects(grepTool.execute("ab", { pattern: "targetSymbol", literal: true }, ac.signal, undefined, {}), /Operation aborted/);
+
+    // 9. Symlinked cwd preserves repo-relative paths and generated-file detection
+    const symlinkWs = resolve("grep-ws-link");
+    symlinkSync(ws, symlinkWs);
+    const { customTools: symTools } = await createAgentTools({ run: { id: "grep-sym" }, cwd: symlinkWs, contextDir: ctxDir, tools: ["read", "grep"], scoped: { mode: "review" }, log: logger }, 0);
+    const symOut = (await symTools.find((t) => t.name === "grep").execute("s1", { pattern: "targetSymbol", literal: true }, undefined, undefined, {})).content[0].text;
+    assert.match(symOut, /assets\/main-Ab12Cd\.css: 150 \[generated\]/, "symlinked cwd still normalizes repo-relative paths and detects anchored generatedPaths");
+
+    // 10. Workspace-root file literally named "-" is searched as a file, not stdin
+    writeFileSync(resolve(ws, "-"), "export const dashHit = 'dash_file_needle';\n");
+    const dashRes = (await runGrep({ pattern: "dash_file_needle", path: "-", literal: true })).content[0].text;
+    assert.match(dashRes, /scan: complete \| display: full .* 1 match in 1 file/, "file literally named '-' is searched via ./-");
+
+    // 11. Nested contextDir inside searched workspace subdirectory still excludes its grep spill dir
+    const nestedCtx = resolve(ws, "src/nested-ctx");
+    mkdirSync(resolve(nestedCtx, "grep/s1"), { recursive: true });
+    writeFileSync(resolve(nestedCtx, "grep/s1/001.txt"), "nested_spill_secret_needle\n");
+    writeFileSync(resolve(ws, "src/real.txt"), "nested_real_needle\n");
+    const { customTools: nestedTools } = await createAgentTools({ run: { id: "grep-nested" }, cwd: ws, contextDir: nestedCtx, tools: ["read", "grep"], scoped: { mode: "review" }, log: logger }, 0);
+    const nestedGrep = nestedTools.find((t) => t.name === "grep");
+    const nestedSpillRes = (await nestedGrep.execute("n1", { pattern: "nested_spill_secret_needle", path: "src", glob: "*.txt", literal: true }, undefined, undefined, {})).content[0].text;
+    assert.match(nestedSpillRes, /0 matches/, "nested contextDir/grep inside searched subdir stays excluded");
+
+    // 12. Long secret redacted before match keeps preview centered on the match
+    const longTok = "github_pat_" + "A".repeat(420);
+    writeFileSync(resolve(ws, "src/secret-line.ts"), `const k = "${longTok}"; const hit = "REDACT_SHIFTED_NEEDLE"; ${"z".repeat(400)}\n`);
+    const redactedHit = (await runGrep({ pattern: "REDACT_SHIFTED_NEEDLE", path: "src/secret-line.ts", literal: true })).content[0].text;
+    assert.match(redactedHit, /REDACT_SHIFTED_NEEDLE/, "match stays visible after preceding long secret is redacted");
+    assert.doesNotMatch(redactedHit, /github_pat_AAA/, "secret remains redacted");
   } },
 };
 

@@ -85,8 +85,10 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
       `- Before reading a path you have not seen listed, list it first (\`ls\`, \`find\`${readOnly ? ", or \`diffPaths\`" : ""}). Do not guess repo layouts or config names.`,
       ...readOnly && (tools.includes("read_base") && baseSha || tools.includes("git")) ? [`- A path the PR deletes or renames is missing from the head checkout; read it with ${tools.includes("read_base") && baseSha ? "`read_base`" : "`git show` with revision=base"}${tools.includes("read_base") && baseSha && tools.includes("git") ? " if you have it, otherwise `git show` with revision=base" : ""}.`] : [],
       "- Look inside `node_modules/<pkg>` only after listing it or reading its `package.json` `main`/`exports`.",
-      ...readOnly ? ["- Reviews have no shell and no `bash`."] : [],
-      "- `grep` is Rust regex: no lookahead or backreferences; set `literal: true` for exact text.",
+      ...readOnly ? ["- Reviews have no shell and no `bash`.", "- Before calling code unused, verify the relevant consumer paths. Cite original head/base source, not a search preview."] : [],
+      (readOnly ? config.tools.grep.review : config.tools.grep.change) === "deterministic"
+        ? "- `grep` is Rust regex: no lookahead or backreferences; set `literal: true` for exact text and `mode: \"files\"` for broad inventories. Counts cover the stated search scope; reduced output is for navigation and a partial scan cannot establish absence — narrow or read the spill file when missing results matter."
+        : "- `grep` is Rust regex: no lookahead or backreferences; set `literal: true` for exact text.",
       "End your final Markdown response with exactly one line: SCRAT_STATUS: complete, SCRAT_STATUS: incomplete, or SCRAT_STATUS: needs_decision. Complete means the assigned work is finished, not merely that this session ended. For reviews, a complete assessment may contain defects or find the issue unready; use incomplete only if the assessment itself cannot be completed. For implementation, partial work or unresolved blockers are not complete. The harness withholds incomplete implementations from publication. Put an issue's SCRAT_READY marker before the status line, only when warranted.",
     ],
   });

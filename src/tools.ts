@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { access, lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -5,6 +6,8 @@ import { createBashToolDefinition, createEditToolDefinition, createFindToolDefin
 import { Type } from "typebox";
 import { backgroundsWork, createSlots, heavyCommand, withValidationSlot } from "./commands.ts";
 import { config } from "./config.ts";
+import { distillCommandOutput, readHeadAndTail } from "./d1.ts";
+import { createGrepTool } from "./grep.ts";
 import type { ToolName } from "./manifests.ts";
 import type { PiOptions } from "./pi.ts";
 import { botName } from "./identity.ts";
@@ -22,7 +25,9 @@ type ScopedToolName = "http" | "browser" | "github_search";
 
 export async function createAgentTools({ run: { id: runId }, cwd, contextDir, tools, scoped, baseSha, revisions = {}, environment = {}, log, stop }: PiOptions, reviewerIndex?: number) {
   const workspaceRoot = await realpath(cwd);
-  const roots = [workspaceRoot, ...contextDir ? [await realpath(contextDir)] : []];
+  const contextRoot = contextDir ? await realpath(contextDir) : undefined;
+  const roots = [workspaceRoot, ...contextRoot ? [contextRoot] : []];
+  const sessionTag = `${reviewerIndex === undefined ? "main" : `reviewer-${reviewerIndex + 1}`}-${randomUUID().slice(0, 8)}`;
   function assertInside(real: string, path: string, allowed: string[]) {
     if (!allowed.some((root) => { const local = relative(root, real); return local !== ".." && !local.startsWith("../"); })) throw new Error(`Path is outside the workspace: ${path}`);
     return real;
@@ -47,11 +52,12 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
     }
   }
   const insideWorkspace = (path: string) => confine(path, roots);
-  async function searchRoot(path = ".") {
+  async function resolveSearchTarget(path = ".") {
     const requested = path.startsWith("@") ? path.slice(1) : path;
     if (requested === "~" || requested.startsWith("~/")) throw new Error(`Path is outside the workspace: ${path}`);
-    await insideWorkspace(resolve(cwd, requested));
+    return insideWorkspace(resolve(cwd, requested));
   }
+  const searchRoot = async (path = ".") => { await resolveSearchTarget(path); };
   const paths = new Set<string>();
   const gitPaths = new Set<string>();
   const basePaths = new Set<string>();
@@ -66,26 +72,80 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
     },
   });
   const heavy = config.workspace.heavyCommands.map((pattern) => new RegExp(pattern));
-  const bash: typeof sdkBash = {
-    ...sdkBash,
-    async execute(...args) {
-      const hit = heavyCommand(args[1].command, heavy);
-      if (!hit) return sdkBash.execute(...args);
-      const segment = redactSecrets(hit).slice(0, config.harness.logTargetChars);
-      if (backgroundsWork(args[1].command)) {
-        log.warn({ event: "pi.command_blocked", command: segment });
-        throw new Error(`This command line runs a background job (a lone &, nohup, setsid or disown) and includes the heavy check \`${segment}\`. Run heavy checks in the foreground, in a command without background jobs, so ${botName} can queue them behind other heavy jobs.`);
-      }
-      args[1] = { ...args[1], timeout: Math.min(args[1].timeout ?? config.harness.commandTimeoutSeconds, config.harness.commandTimeoutSeconds) };
-      const queuedAt = performance.now();
-      return withValidationSlot(() => {
-        log.info({ event: "pi.heavy_command", command: segment, waitedMs: Math.round(performance.now() - queuedAt) });
-        return sdkBash.execute(...args);
-      }, { runId }, args[2]);
-    },
+  let bashDumps = 0;
+  const runSdkBash = async (toolCallId: string, params: { command: string; timeout?: number }, signal: AbortSignal | undefined, onUpdate: Parameters<typeof sdkBash.execute>[3], ctx: Parameters<typeof sdkBash.execute>[4]) => {
+    const hit = heavyCommand(params.command, heavy);
+    if (!hit) return sdkBash.execute(toolCallId, params, signal, onUpdate, ctx);
+    const segment = redactSecrets(hit).slice(0, config.harness.logTargetChars);
+    if (backgroundsWork(params.command)) {
+      log.warn({ event: "pi.command_blocked", command: segment });
+      throw new Error(`This command line runs a background job (a lone &, nohup, setsid or disown) and includes the heavy check \`${segment}\`. Run heavy checks in the foreground, in a command without background jobs, so ${botName} can queue them behind other heavy jobs.`);
+    }
+    const bounded = { ...params, timeout: Math.min(params.timeout ?? config.harness.commandTimeoutSeconds, config.harness.commandTimeoutSeconds) };
+    const queuedAt = performance.now();
+    return withValidationSlot(() => {
+      log.info({ event: "pi.heavy_command", command: segment, waitedMs: Math.round(performance.now() - queuedAt) });
+      return sdkBash.execute(toolCallId, bounded, signal, onUpdate, ctx);
+    }, { runId }, signal);
   };
+  const bashParameters = Type.Object({
+    command: Type.String({ description: "Shell command to execute" }),
+    timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+    goal: Type.Optional(Type.String({ description: "Optional short note of what you are checking (used to focus d1 output filtering when output is large)" })),
+    raw: Type.Optional(Type.Boolean({ description: "Set true to bypass d1 output filtering and return raw output" })),
+  });
+  const bash = defineTool({
+    name: sdkBash.name,
+    label: sdkBash.label,
+    promptSnippet: sdkBash.promptSnippet,
+    promptGuidelines: sdkBash.promptGuidelines,
+    outputSchema: sdkBash.outputSchema,
+    constrainedSampling: sdkBash.constrainedSampling,
+    description: config.d1.enabled
+      ? `${sdkBash.description} Large non-read command outputs (> ${config.d1.bash.minChars} chars) are distilled via d1 into verbatim spans with the full log saved to a readable file; pass \`goal\` to focus extraction or \`raw: true\` to bypass filtering.`
+      : sdkBash.description,
+    parameters: bashParameters,
+    async execute(toolCallId, { command, timeout, goal, raw }, signal, onUpdate, ctx) {
+      const result = await runSdkBash(toolCallId, { command, timeout }, signal, onUpdate, ctx);
+      if (!config.d1.enabled || raw) return result;
+      const details = result.details as { fullOutputPath?: string } | undefined;
+      const structured = (result as { structuredContent?: { exit_code?: number; full_output_path?: string; output?: string; truncated?: boolean; wall_time_seconds?: number } }).structuredContent;
+      const isError = (result as { isError?: boolean }).isError;
+      const textParts = (result.content ?? []).filter((part): part is { type: "text"; text: string } => part.type === "text");
+      const rawInline = textParts.map((part) => part.text).join("\n");
+      const exitMatch = isError ? /\n\nCommand exited with code (\d+)$/.exec(rawInline) : null;
+      const exitCode = structured?.exit_code ?? (exitMatch ? Number(exitMatch[1]) : undefined);
+      const inlineBody = exitMatch ? rawInline.slice(0, exitMatch.index) : rawInline;
+      const diskFull = details?.fullOutputPath ? await readHeadAndTail(details.fullOutputPath, Math.min(config.harness.maxOutputBytes, 2 * 1024 * 1024)) : undefined;
+      const sourceText = diskFull?.text ?? inlineBody;
+      const candidatePath = contextRoot && sourceText.length > config.d1.bash.minChars
+        ? join(contextRoot, `bash-${sessionTag}-${++bashDumps}.log`)
+        : undefined;
+      const distilled = await distillCommandOutput({
+        rawOutput: sourceText, command, goal,
+        artifactPath: candidatePath,
+        sourceArtifactPath: diskFull?.truncated ? details?.fullOutputPath : undefined,
+        existingArtifactPath: details?.fullOutputPath,
+        partialSource: Boolean(diskFull?.truncated),
+        minChars: config.d1.bash.minChars, maxChars: config.d1.bash.maxOutputChars,
+        signal, log,
+      });
+      if (!distilled.filtered) return result;
+      const finalText = isError && exitCode !== undefined ? `${distilled.text}\n\nCommand exited with code ${exitCode}` : distilled.text;
+      return {
+        ...result,
+        content: [{ type: "text" as const, text: finalText }],
+        details: { ...details, ...(distilled.artifactPath ? { fullOutputPath: distilled.artifactPath } : {}) },
+        ...(structured ? { structuredContent: { ...structured, output: finalText, truncated: true, ...(distilled.artifactPath ? { full_output_path: distilled.artifactPath } : {}) } } : {}),
+      };
+    },
+  });
   const sdkGrep = createGrepToolDefinition(cwd);
-  const grep: typeof sdkGrep = { ...sdkGrep, async execute(...args) { await searchRoot(args[1].path); return sdkGrep.execute(...args); } };
+  const legacyGrep: typeof sdkGrep = { ...sdkGrep, async execute(...args) { await searchRoot(args[1].path); return sdkGrep.execute(...args); } };
+  const grepPolicy = scoped.mode === "review" ? config.tools.grep.review : config.tools.grep.change;
+  const grep = grepPolicy === "deterministic"
+    ? createGrepTool({ workspaceRoot, contextRoot, sessionTag, searchRoot, resolveTarget: resolveSearchTarget, sdkFallback: legacyGrep, log })
+    : legacyGrep;
   const sdkFind = createFindToolDefinition(cwd);
   const find: typeof sdkFind = { ...sdkFind, async execute(...args) { await searchRoot(args[1].path); return sdkFind.execute(...args); } };
   const sdkLs = createLsToolDefinition(cwd);
@@ -140,7 +200,7 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
   } satisfies Record<Exclude<ToolName, ScopedToolName>, object>;
   const binding = (name?: string) => name === undefined ? undefined : config.bindings[name];
   const browser = scoped.browser
-    ? createBrowserTool({ settings: scoped.browser, binding: binding(scoped.browser.binding), contextDir, runId, log, acquire: () => browserSlot({ runId }, stop), limits: scoped.browser.limits, prefix: reviewerIndex === undefined ? undefined : `reviewer-${reviewerIndex + 1}` }) : undefined;
+    ? createBrowserTool({ settings: scoped.browser, binding: binding(scoped.browser.binding), contextDir: contextRoot, runId, sessionTag, log, acquire: () => browserSlot({ runId }, stop), limits: scoped.browser.limits, prefix: reviewerIndex === undefined ? undefined : `reviewer-${reviewerIndex + 1}` }) : undefined;
   const table = {
     ...core,
     ...scoped.http && { http: createHttpTool({ settings: scoped.http, binding: binding(scoped.http.binding)!, runId }) },

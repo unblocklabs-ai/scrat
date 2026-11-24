@@ -26,11 +26,32 @@ const schema = Type.Object({
   relevance: Type.Object({ ignoredPaths: Type.Array(Type.String()) }, strict),
   tools: Type.Object({
     readBytes: Type.Object({ default: positive, max: positive }, strict),
-    git: Type.Object({ maxCommits: positive, maxScopeBytes: positive }, strict),
+    git: Type.Object({
+      maxCommits: positive, maxScopeBytes: positive,
+      generatedDiffBytes: positive, generatedPaths: Type.Array(Type.String()),
+    }, strict),
+    grep: Type.Object({
+      review: Type.Enum(["legacy", "deterministic"]),
+      change: Type.Enum(["legacy", "deterministic"]),
+      inlineBytes: Type.Integer({ minimum: 4096, maximum: 16384 }),
+    }, strict),
     http: Type.Object({ timeoutSeconds: positive, maxRequestBytes: positive }, strict),
     browser: Type.Object({ steps: positive, sessionSeconds: positive, navigationSeconds: positive, actionSeconds: positive, defaultViewport: Type.String(), viewports: Type.Record(Type.String({ pattern: "^[a-z][a-z0-9-]*$" }), Type.Object({ width: positive, height: positive }, strict)) }, strict),
     search: Type.Object({ pageSize: positive, excerptChars: positive, maxQueryLength: positive }, strict),
     redactionMarginBytes: positive,
+  }, strict),
+  d1: Type.Object({
+    enabled: Type.Boolean(),
+    url: Type.String({ minLength: 1 }),
+    model: Type.String({ minLength: 1 }),
+    tokenEnv: Type.String({ minLength: 1 }),
+    certPath: nullable(Type.String()),
+    timeoutMs: positive,
+    scoreThreshold: Type.Number({ minimum: 0, maximum: 1 }),
+    bash: Type.Object({ minChars: positive, maxOutputChars: positive }, strict),
+    validation: Type.Object({ minChars: positive, maxOutputChars: positive }, strict),
+    browserText: Type.Object({ minChars: positive, maxOutputChars: positive }, strict),
+    history: Type.Object({ minChars: positive, maxOutputChars: positive }, strict),
   }, strict),
   storefront: Type.Object({
     enabled: Type.Boolean(), store: Type.String(), publicHost: Type.String(), model: Type.Optional(modelSettings), siteMapMaxAgeDays: positive, siteMapRetryHours: positive, siteMapPaths: Type.String(), auditPaths: Type.Array(Type.String({ pattern: "^/(?!/)" }), { uniqueItems: true }), screenshotRetentionDays: positive,
@@ -85,7 +106,15 @@ const where = (path: string, key: string) => [dotted(path), key].filter(Boolean)
 export const configError = (problems: Iterable<string>) => new Error(`Invalid Scrat configuration:\n${[...problems].map((problem) => `- ${problem}`).join("\n")}`);
 
 export function validateConfig(value: unknown): ScratConfig {
-  if (Value.Check(schema, value)) return value;
+  if (Value.Check(schema, value)) {
+    const regexErrors: string[] = [];
+    value.tools.git.generatedPaths.forEach((pattern, index) => {
+      try { new RegExp(pattern); }
+      catch (error) { regexErrors.push(`tools.git.generatedPaths.${index}: invalid regular expression (${error instanceof Error ? error.message : String(error)})`); }
+    });
+    if (regexErrors.length) throw configError(regexErrors);
+    return value;
+  }
   const problems = new Set<string>();
   for (const { keyword, instancePath, message, params } of Value.Errors(schema, value)) {
     if (keyword === "boolean" || keyword === "anyOf") continue;

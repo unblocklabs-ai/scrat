@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { Agent, fetch as pinnedFetch } from "undici";
 import { type Binding, type Resolver, bindingSecret, hostProblem, publicAnswers, resolveHost } from "./bindings.ts";
 import { config } from "./config.ts";
+import { distillBrowserText } from "./d1.ts";
 import { redactSecrets } from "./errors.ts";
 import type { GitHubRepository } from "./github.ts";
 import { withOperation } from "./logging.ts";
@@ -172,12 +173,13 @@ const describeElement = (tag: string) => {
   return `${/^<([\w-]+)/.exec(tag)?.[1] ?? "?"}${id ? `#${id}` : ""}${classes.split(/\s+/).filter(Boolean).map((name) => `.${name}`).join("")}`;
 };
 
-export function createBrowserTool({ settings, binding, contextDir, runId, prefix, launch = launchChromium, resolve = resolveHost, acquire, limits = { steps: config.tools.browser.steps, milliseconds: config.tools.browser.sessionSeconds * 1000 }, log }: {
+export function createBrowserTool({ settings, binding, contextDir, runId, prefix, sessionTag, launch = launchChromium, resolve = resolveHost, acquire, limits = { steps: config.tools.browser.steps, milliseconds: config.tools.browser.sessionSeconds * 1000 }, log }: {
   settings: { navigationHosts: Hosts; resourceHosts: Hosts };
   binding?: Binding;
   contextDir?: string;
   runId: string;
   prefix?: string;
+  sessionTag?: string;
   launch?: (args: string[]) => Promise<BrowserLike>;
   resolve?: Resolver;
   acquire?: () => Promise<() => void>;
@@ -188,7 +190,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
   if (!Object.hasOwn(viewports, config.tools.browser.defaultViewport)) throw new Error(`tools.browser.defaultViewport must be one of: ${viewportNames.join(", ")}`);
   let blockedNavigation: string | undefined, size = viewports[config.tools.browser.defaultViewport], pendingGotoViewport: string | null = null;
   const secret = binding && bindingSecret(binding);
-  let browser: BrowserLike | undefined, closed = false, release: (() => void) | undefined, session: { context: ContextLike; page: PageLike } | undefined, startedAt: number | undefined, halted: string | undefined, steps = 0, shots = 0;
+  let browser: BrowserLike | undefined, closed = false, release: (() => void) | undefined, session: { context: ContextLike; page: PageLike } | undefined, startedAt: number | undefined, halted: string | undefined, steps = 0, shots = 0, textDumps = 0;
   const answered = new Map<string, Promise<boolean>>();
   const resolvesPublicly = (host: string) => {
     if (!answered.has(host)) answered.set(host, publicAnswers(host, resolve).then(Boolean, () => false));
@@ -260,7 +262,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
     description: [
       navigationHosts === "any" ? "Drive a headless browser on public https sites. IP addresses, local host names, explicit ports, URLs with credentials and names that resolve to private addresses are blocked."
         : `Drive a headless browser. Pages may be visited on: ${navigationHosts.join(", ")}. Other hosts, and page resources outside the allowlist, are blocked.`,
-      `action=goto: open \`url\` (optionally with \`viewport\`, one of: ${viewportNames.join(", ")}, applied before the page loads and kept for later actions) and return the final URL, status, title and the page's Shopify.theme id when it declares one. action=text: the visible text of the page (capped at ${config.tools.readBytes.default} characters).`,
+      `action=goto: open \`url\` (optionally with \`viewport\`, one of: ${viewportNames.join(", ")}, applied before the page loads and kept for later actions) and return the final URL, status, title and the page's Shopify.theme id when it declares one. action=text: the visible text of the page (capped at ${config.tools.readBytes.default} characters${config.d1.enabled ? `; long pages > ${config.d1.browserText.minChars} chars are distilled via d1 with full text saved to a readable file — pass optional \`focus\` to target specific page elements or \`raw: true\` for unfiltered text` : ""}).`,
       `action=screenshot: save a PNG and return its path, the final URL and the page's Shopify.theme id when it declares one. \`viewport\` is one of: ${viewportNames.join(", ")}; \`fullPage\` captures the whole page.`,
       "action=reset: drop the page with its cookies and storage; the next action opens a fresh one in the same browser at the current viewport.",
       "action=click: click the element matching `selector`. action=fill: put `text` in the field matching `selector`. action=select: choose the option `text` in the select matching `selector`. They return the resulting URL, title and Shopify.theme id, plus how many elements `selector` matched before the action when the page did not navigate, `popupClosed: true` when a new window opened (it is closed), and `blocked: <url>` when a navigation was refused because its host is not allowed. The viewport stays as last set.",
@@ -273,9 +275,11 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
       text: Type.Optional(Type.String()),
       viewport: Type.Optional(Type.String()),
       fullPage: Type.Optional(Type.Boolean()),
+      focus: Type.Optional(Type.String({ description: "Optional question or topic for action=text to focus d1 extraction on long pages" })),
+      raw: Type.Optional(Type.Boolean({ description: "Set true with action=text to bypass d1 filtering and return raw page text" })),
     }),
     executionMode: "sequential",
-    async execute(_id, { action, url: raw, selector, text: value, viewport: requested, fullPage }) {
+    async execute(_id, { action, url: raw, selector, text: value, viewport: requested, fullPage, focus, raw: rawText }, signal) {
       const viewport = requested || undefined;
       if (!browserActions.includes(action)) throw new Error(`action must be one of: ${browserActions.join(", ")}`);
       const interaction = action === "click" || action === "fill" || action === "select";
@@ -317,9 +321,31 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
           return text(JSON.stringify({ url: redactSecrets(page.url()), status: response?.status() ?? null, title: redactSecrets(await page.title()), ...await servedTheme(page, timeout) }), { host: target.hostname });
         }
         if (action === "text") {
-          const content = redactSecrets((await page.innerText("body", timeout)).slice(0, config.tools.readBytes.default + config.tools.redactionMarginBytes)).slice(0, config.tools.readBytes.default);
+          const rawBody = await page.innerText("body", timeout);
+          const captureCap = config.d1.enabled && !rawText ? Math.min(config.harness.maxOutputBytes, 512 * 1024) : config.tools.readBytes.default;
+          const margin = config.tools.redactionMarginBytes;
+          const redacted = redactSecrets(rawBody.slice(0, captureCap + margin));
+          const content = rawBody.length > captureCap + margin
+            ? redacted.slice(0, Math.min(captureCap, Math.max(0, redacted.length - margin)))
+            : redacted.slice(0, captureCap);
+          const partialCapture = rawBody.length > captureCap;
+          if (config.d1.enabled && !rawText && content.length > config.d1.browserText.minChars) {
+            const nameTag = sessionTag ?? prefix;
+            const candidatePath = contextDir ? join(contextDir, `browser-text-${nameTag ? `${nameTag}-` : ""}${++textDumps}.txt`) : undefined;
+            const distilled = await distillBrowserText({
+              rawText: content, url: redactSecrets(page.url()), focus, artifactPath: candidatePath,
+              partialSource: partialCapture, totalSourceChars: rawBody.length,
+              minChars: config.d1.browserText.minChars, maxChars: config.d1.browserText.maxOutputChars,
+              signal, log,
+            });
+            operation.complete();
+            return text(distilled.text, { filtered: distilled.filtered, ...(partialCapture ? { partial: true } : {}), ...(distilled.artifactPath ? { artifactPath: distilled.artifactPath } : {}) });
+          }
           operation.complete();
-          return text(content);
+          const inlineCap = config.tools.readBytes.default;
+          const inlineText = content.length > inlineCap ? content.slice(0, inlineCap) : content;
+          const inlineTruncated = rawBody.length > inlineCap || content.length > inlineCap;
+          return text(inlineTruncated ? `${inlineText}\n\n[truncated: page text exceeded ${inlineCap} chars (${rawBody.length} total)]` : inlineText);
         }
         if (interaction && selector) {
           pendingGotoViewport = null;

@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { actionsPublishing, manifestOf } from "./actions.ts";
 import { config } from "./config.ts";
+import { distillHistory } from "./d1.ts";
 import type { ErrorDetails } from "./errors.ts";
 import { changedPaths, git, shortSha } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
@@ -94,7 +95,10 @@ export async function buildAgentInput(options: {
   if (repair && !report) throw new Error("Missing review report for self-repair");
   const failure = run.retryOfRunId ? getRun(run.retryOfRunId)?.error : undefined;
   const manifest = manifestOf(action), listed = manifest.files;
-  const history = listed.includes("history") ? historyReport(completedRunsOfActionInRepository(config.github.repository, action, config.context.historyRuns), action) : undefined;
+  const rawHistory = listed.includes("history") ? historyReport(completedRunsOfActionInRepository(config.github.repository, action, config.context.historyRuns), action) : undefined;
+  const history = rawHistory && config.d1.enabled && rawHistory.length > config.d1.history.minChars
+    ? (await distillHistory({ rawHistory, action, artifactPath: resolve(contextDir, "history-full.md"), minChars: config.d1.history.minChars, maxChars: config.d1.history.maxOutputChars, log: logger })).text
+    : rawHistory;
   const assessesPr = manifest.publish.includes("pr_assessment");
   const prior = assessesPr ? priorReviewTexts(task.subjectId) : undefined;
   const previousAssessment = listed.includes("previous_assessment") ? assessesPr ? prior?.assessment : latestCompletedRun(task.subjectId, action)?.result?.text : undefined;

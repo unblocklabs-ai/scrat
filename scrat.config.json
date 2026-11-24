@@ -46,19 +46,46 @@
   "bindings": {},
   "context": {
     "inlinePaths": 200,
-    "historyRuns": 10,
-    "historyBytes": 65536
+    "historyRuns": 3,
+    "historyBytes": 12288
   },
   "relevance": {
     "ignoredPaths": []
   },
   "tools": {
     "readBytes": { "default": 32768, "max": 65536 },
-    "git": { "maxCommits": 200, "maxScopeBytes": 1048576 },
+    "git": {
+      "maxCommits": 200,
+      "maxScopeBytes": 1048576,
+      "generatedDiffBytes": 4096,
+      "generatedPaths": [
+        "(?:^|/)(?:pnpm-lock\\.yaml|package-lock\\.json|yarn\\.lock|bun\\.lockb?|Cargo\\.lock|Gemfile\\.lock|poetry\\.lock|uv\\.lock)$",
+        "(?:\\.min\\.(?:js|css)|\\.map|\\.snap)$",
+        "^assets/(?:main|index|customer-portal)-[A-Za-z0-9_-]+\\.(?:js|css)$"
+      ]
+    },
+    "grep": {
+      "review": "deterministic",
+      "change": "deterministic",
+      "inlineBytes": 10240
+    },
     "http": { "timeoutSeconds": 30, "maxRequestBytes": 65536 },
     "browser": { "steps": 40, "sessionSeconds": 300, "navigationSeconds": 30, "actionSeconds": 12, "defaultViewport": "desktop", "viewports": { "desktop": { "width": 1280, "height": 800 }, "mobile": { "width": 390, "height": 844 } } },
     "search": { "pageSize": 20, "excerptChars": 300, "maxQueryLength": 256 },
     "redactionMarginBytes": 4096
+  },
+  "d1": {
+    "enabled": false,
+    "url": "https://codex.unblocklabs.ai/v1/decisions",
+    "model": "liquid/d1.2-ultra",
+    "tokenEnv": "CODEX_LB_API_KEY",
+    "certPath": null,
+    "timeoutMs": 8000,
+    "scoreThreshold": 0.3,
+    "bash": { "minChars": 4096, "maxOutputChars": 12000 },
+    "validation": { "minChars": 4096, "maxOutputChars": 12000 },
+    "browserText": { "minChars": 3072, "maxOutputChars": 6000 },
+    "history": { "minChars": 6144, "maxOutputChars": 6000 }
   },
   "storefront": {
     "enabled": false,

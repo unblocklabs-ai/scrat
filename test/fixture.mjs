@@ -312,6 +312,7 @@ export async function fixture(scenario, spec) {
   config.storefront.loggie = { ...config.storefront.loggie, url: `http://127.0.0.1:${server.address().port}`, slug: loggie.slug };
   config.cloudflare.loggie = { ...config.cloudflare.loggie, url: `http://127.0.0.1:${server.address().port}`, slug: cloudflare.slug };
   config.cloudflare.accountId = cloudflare.accountId;
+  config.d1.enabled = false;
   config.actions = Object.fromEntries(readdirSync("app/actions").map((file) => parseYaml(readFileSync("app/actions/" + file, "utf8")))
     .map(({ name, reviewers = [] }) => [name, { provider: "fixture", ...reviewers.length && { reviewers: reviewers.map((reviewer) => ({ ...reviewer, provider: "fixture" })) } }]));
   for (const configure of spec.configure ?? []) configure(config);

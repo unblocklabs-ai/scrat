@@ -1,12 +1,16 @@
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { and, eq, isNull } from "drizzle-orm";
+import type { Logger } from "pino";
 import { contextDirOf, evaluateContext, readDiffScope } from "./agent-input.ts";
 import { config } from "./config.ts";
+import { copyRedactedFile, distillCommandOutput, readHeadAndTail, stripAnsi, utf8TailSlice } from "./d1.ts";
 import type { Manifest } from "./manifests.ts";
 import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
-import { CompetingImplementation, describeError, type ErrorDetails, errorExitCode } from "./errors.ts";
+import { CompetingImplementation, describeError, type ErrorDetails, errorExitCode, redactSecrets } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { bestEffort } from "./logging.ts";
 import { conventionalTitle, git, headOf, hasPendingMerge, isAncestor, mergeBase, prepareTarget, remoteBranchHead, shortSha } from "./git.ts";
@@ -35,10 +39,53 @@ async function asCheckFailure<T>(fn: () => Promise<T>) {
   }
 }
 
-function validationMessage(error: CheckFailure, round: number) {
-  const { message, exitCode, stdout } = describeError(error.cause);
-  const output = stdout?.trim() ? `\nOutput (tail):\n${stdout.trim()}\n` : "";
-  return `${botName}'s validation failed after your changes (round ${round} of ${config.harness.corrections.validation}).\n\nCommand: ${message.split("\n")[0].replace(/^Command failed: /, "")}\nExit code: ${exitCode ?? "unknown"}\n${output}\nFix only what is reported. ${botName} re-validates after your turn, so a full rerun of the failing check is not needed. Then end your turn with one or two sentences on what you changed to fix this (it is appended to your earlier handoff), and the usual SCRAT_STATUS footer (add SCRAT_READY if the change is still ready).`;
+async function validationMessage(error: CheckFailure, round: number, runId: string, contextDir?: string, signal?: AbortSignal, log?: Logger) {
+  const { message, exitCode, stdout, evidence } = describeError(error.cause);
+  const command = message.split("\n")[0].replace(/^Command failed: /, "");
+  const full = evidence ? await readHeadAndTail(evidence, Math.min(config.harness.maxOutputBytes, 2 * 1024 * 1024)) : undefined;
+  const cleaned = redactSecrets(stripAnsi(full?.text ?? stdout ?? "")).trim();
+  const artifactPath = contextDir && cleaned ? join(contextDir, `validation-${runId.slice(0, 8)}-round-${round}.log`) : undefined;
+  let output = "";
+  if (cleaned) {
+    let handled = false;
+    if (config.d1.enabled && cleaned.length > config.d1.validation.minChars) {
+      const distilled = await distillCommandOutput({
+        rawOutput: cleaned, command,
+        goal: `Exact failing tests, type/lint errors, file:line locations, and root cause of validation failure for \`${command}\``,
+        artifactPath,
+        sourceArtifactPath: full?.truncated ? evidence : undefined,
+        partialSource: Boolean(full?.truncated),
+        allowReadBypass: false,
+        minChars: config.d1.validation.minChars,
+        maxChars: config.d1.validation.maxOutputChars,
+        signal, log,
+      });
+      if (distilled.filtered) {
+        output = `\nOutput (d1 filtered):\n${distilled.text}\n`;
+        handled = true;
+      }
+    }
+    if (!handled) {
+      const exceedsTail = Buffer.byteLength(cleaned, "utf8") > config.harness.commandOutputTailBytes;
+      let savedPath: string | undefined;
+      let isPartial = Boolean(full?.truncated);
+      if (artifactPath && exceedsTail) {
+        if (full?.truncated && evidence) {
+          const copied = await copyRedactedFile(evidence, artifactPath, config.harness.maxOutputBytes);
+          if (copied) { savedPath = copied.path; isPartial = copied.truncated; }
+        }
+        if (!savedPath) {
+          savedPath = await writeFile(artifactPath, cleaned, { encoding: "utf8", mode: 0o600 }).then(() => artifactPath, () => undefined);
+        }
+      }
+      const logLabel = isPartial ? "Partial validation log" : "Full validation log";
+      const tail = exceedsTail
+        ? `${utf8TailSlice(cleaned, config.harness.commandOutputTailBytes)}${savedPath ? `\n\n[${logLabel}: ${savedPath}]` : ""}`
+        : cleaned;
+      output = `\nOutput (tail):\n${tail}\n`;
+    }
+  }
+  return `${botName}'s validation failed after your changes (round ${round} of ${config.harness.corrections.validation}).\n\nCommand: ${command}\nExit code: ${exitCode ?? "unknown"}\n${output}\nFix only what is reported. ${botName} re-validates after your turn, so a full rerun of the failing check is not needed. Then end your turn with one or two sentences on what you changed to fix this (it is appended to your earlier handoff), and the usual SCRAT_STATUS footer (add SCRAT_READY if the change is still ready).`;
 }
 
 const unresolvedConflict = "PR still conflicts with its base branch after resolution";
@@ -267,7 +314,7 @@ async function correctionRound({ run, operation, manifest, stop }: Ctx, p: Chang
   if (!sessionFile || round > config.harness.corrections.validation) throw error.cause;
   operation.log.warn({ event: "pi.validation_retry", round });
   updateRun(run.id, { stage: "agent" });
-  const followUp = await executePi({ run, cwd: p.workspace.path, tools: manifest.tools, scoped: manifest, log: operation.log, environment: p.environment, ...p.agentInput, stop }, { context: "", sessionFile, followUp: validationMessage(error, round) });
+  const followUp = await executePi({ run, cwd: p.workspace.path, tools: manifest.tools, scoped: manifest, log: operation.log, environment: p.environment, ...p.agentInput, stop }, { context: "", sessionFile, followUp: await validationMessage(error, round, run.id, p.agentInput?.contextDir, stop, operation.log) });
   const corrected = { ...followUp, text: `${result.text}\n\n**Validation correction ${round}:** ${followUp.text}`, paths: [...new Set([...result.paths, ...followUp.paths])] };
   updateRun(run.id, { result: corrected, stage: "validating" });
   assertComplete(corrected);

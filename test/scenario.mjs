@@ -6137,6 +6137,76 @@ fi
       if (prevToken === undefined) delete process.env.CODEX_LB_API_KEY; else process.env.CODEX_LB_API_KEY = prevToken;
     }
   } },
+  codemode: { title: "codemode runs sandboxed JS batching tools, bypasses read dedup inside scripts, enforces workspace confinement, redacts secrets, tracks path receipts, and respects per-action opt-out", configure: [(config) => {
+    config.tools.readDedupMinBytes = 256;
+    config.tools.codemode = { review: true, change: false, mode: "on", inlineBudget: 3000, maxWorkers: 2, models: false };
+    config.actions.label_items.enabled = true;
+    for (const name of ["review_pr", "resolve_conflicts", "address_pr_feedback", "address_review"]) config.actions[name].enabled = false;
+  }], run: async () => {
+    const seed = resolve("seed"), remote = resolve("remote.git");
+    writeFileSync(resolve(seed, "src/big.ts"), `export const BIG_MARKER = "found-big-file";\n${"// pad line\n".repeat(40)}`);
+    writeFileSync(resolve(seed, "src/other.ts"), 'export const OTHER = "from-codemode";\n');
+    git(seed, "add", "."); commit(seed, "add codemode fixtures"); git(seed, "push", remote, "main");
+    f.addIssue(1);
+    await route();
+
+    const code = [
+      'const [big, grepOut, other] = await Promise.all([',
+      '  tools.read({ path: "src/big.ts" }),',
+      '  tools.grep({ pattern: "BIG_MARKER" }),',
+      '  tools.read({ path: "src/other.ts" }),',
+      ']);',
+      'let escapeBlocked = false;',
+      'try { await tools.read({ path: "/etc/passwd" }); } catch (e) { escapeBlocked = String(e.message).includes("outside the workspace"); }',
+      'return {',
+      '  bigHasMarker: big.includes("found-big-file") && !big.includes("[unchanged: identical"),',
+      '  grepHasMarker: grepOut.includes("BIG_MARKER"),',
+      '  otherHasMarker: other.includes("from-codemode"),',
+      '  escapeBlocked,',
+      '  secret: "Bearer codemode-secret-token-xyz",',
+      '};',
+    ].join("\n");
+
+    f.script = [
+      { name: "read", args: { path: "src/big.ts" } },
+      { name: "read", args: { path: "src/big.ts" } },
+      { name: "codemode", args: { code } },
+    ];
+    const done = await success();
+    assert.equal(f.row(s.tasks, done.taskId).action, "review_issue");
+    const reviewReqs = f.requests.filter((req) => req.context.action === "review_issue");
+    assert.ok(reviewReqs.length >= 4, `expected >= 4 requests, got ${reviewReqs.length}`);
+    const toolNames = reviewReqs[0].request.tools.map((t) => t.function?.name ?? t.name);
+    assert.ok(toolNames.includes("codemode"), `expected codemode tool in review_issue, got ${toolNames.join(",")}`);
+
+    const toolMessages = reviewReqs.at(-1).request.messages.filter((m) => m.role === "tool").map((m) => typeof m.content === "string" ? m.content : JSON.stringify(m.content));
+    assert.equal(toolMessages.length, 3);
+    assert.match(toolMessages[0], /found-big-file/, "first direct read returns full file");
+    assert.match(toolMessages[1], /\[unchanged: identical /, "second identical direct read returns dedup stub");
+    assert.match(toolMessages[2], /"bigHasMarker":\s*true/, "nested read inside codemode bypasses dedup and returns real content");
+    assert.match(toolMessages[2], /"grepHasMarker":\s*true/, "nested grep inside codemode works");
+    assert.match(toolMessages[2], /"otherHasMarker":\s*true/, "parallel read inside codemode works");
+    assert.match(toolMessages[2], /"escapeBlocked":\s*true/, "workspace confinement enforced inside codemode");
+    assert.doesNotMatch(toolMessages[2], /codemode-secret-token-xyz/, "secrets redacted from codemode output");
+    assert.match(toolMessages[2], /Bearer \[redacted\]/, "redacted marker present in codemode output");
+    assert.ok(done.result.paths.includes("src/big.ts") && done.result.paths.includes("src/other.ts"), `receipt paths tracked inside codemode: ${done.result.paths}`);
+
+    // Verify per-action codemode: false (label_items) omits codemode from tools
+    f.script = undefined;
+    const { config: live } = await f.app("config.ts");
+    assert.equal(live.actions.label_items.codemode, false);
+    const labelReqCountBefore = f.requests.length;
+    branchOff("cm-pr", "src/app.ts", "export const value = 2;\n");
+    f.addPr(2, "cm-pr", "human");
+    await route();
+    f.script = ['Low risk.\nSCRAT_LABELS: [{"category":"risk","name":"risk: low"}]\nSCRAT_STATUS: complete'];
+    const labeled = await success();
+    assert.equal(f.row(s.tasks, labeled.taskId).action, "label_items");
+    const labelReqs = f.requests.slice(labelReqCountBefore).filter((req) => req.context.action === "label_items");
+    assert.ok(labelReqs.length >= 1);
+    const labelTools = labelReqs[0].request.tools.map((t) => t.function?.name ?? t.name);
+    assert.ok(!labelTools.includes("codemode"), `label_items must omit codemode, got ${labelTools.join(",")}`);
+  } },
 };
 
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {

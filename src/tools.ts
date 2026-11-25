@@ -23,7 +23,7 @@ const browserSlot = createSlots(() => config.storefront.limits.browsers, "storef
 
 type ScopedToolName = "http" | "browser" | "github_search";
 
-export async function createAgentTools({ run: { id: runId }, cwd, contextDir, tools, scoped, baseSha, revisions = {}, environment = {}, log, stop, getLiveToolCallIds }: PiOptions, reviewerIndex?: number) {
+export async function createAgentTools({ run: { id: runId }, cwd, contextDir, tools, scoped, baseSha, revisions = {}, environment = {}, log, stop, getLiveToolCallIds, isNestedToolCall }: PiOptions, reviewerIndex?: number) {
   const workspaceRoot = await realpath(cwd);
   const contextRoot = contextDir ? await realpath(contextDir) : undefined;
   const roots = [workspaceRoot, ...contextRoot ? [contextRoot] : []];
@@ -246,7 +246,8 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
         if (local !== ".." && !local.startsWith("../")) paths.add(local || ".");
       }
       const minDedup = config.tools.readDedupMinBytes;
-      if (minDedup > 0 && resolvedReal && getLiveToolCallIds && result.content.length && result.content.every((part): part is { type: "text"; text: string } => part.type === "text")) {
+      const nestedCall = Boolean(isNestedToolCall?.(toolCallId));
+      if (!nestedCall && minDedup > 0 && resolvedReal && getLiveToolCallIds && result.content.length && result.content.every((part): part is { type: "text"; text: string } => part.type === "text")) {
         const textOut = result.content.map((part) => part.text).join("\n");
         const bytes = Buffer.byteLength(textOut, "utf8");
         if (bytes >= minDedup) {

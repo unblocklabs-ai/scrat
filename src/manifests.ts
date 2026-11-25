@@ -38,6 +38,7 @@ const settings = {
   maxSelfRepairs: Type.Optional(Type.Integer({ minimum: 0 })), exhaustedLabel: Type.Optional(nullable(Type.String())), failedLabel: Type.Optional(nullable(Type.String())),
   targets: Type.Optional(list(Type.Enum(["issues", "prs"]), 1)),
   issue_labels: Type.Optional(labelCategories), pr_labels: Type.Optional(labelCategories),
+  codemode: Type.Optional(Type.Boolean()),
 };
 export const actionSettings = Type.Object({
   ...settings, ...modelSettings.properties, reviewers: Type.Array(modelSettings), branch: Type.Optional(Type.String()), retry: Type.Optional(nullable(retrySettings)),
@@ -232,7 +233,7 @@ export const resolveAction = (manifest: Manifest, entry: ActionSettings) => ({ .
 export type Action = ReturnType<typeof resolveAction>;
 
 export function deploymentDefaults(m: Manifest) {
-  const optional = { targets: m.targets, issue_labels: m.issue_labels, pr_labels: m.pr_labels, branch: m.trigger.branch, cron: m.trigger.cron, window: m.trigger.window, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, browserSteps: m.browserSteps, browserSeconds: m.browserSeconds, rootInstructions: m.rootInstructions, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel, failedLabel: m.failedLabel, retry: m.retry };
+  const optional = { targets: m.targets, issue_labels: m.issue_labels, pr_labels: m.pr_labels, codemode: m.codemode, branch: m.trigger.branch, cron: m.trigger.cron, window: m.trigger.window, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, browserSteps: m.browserSteps, browserSeconds: m.browserSeconds, rootInstructions: m.rootInstructions, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel, failedLabel: m.failedLabel, retry: m.retry };
   return {
     enabled: m.enabled ?? true, priority: m.priority, skill: m.skill, ...m.model, reviewers: m.reviewers,
     ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== undefined)),

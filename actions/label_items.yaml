@@ -2,6 +2,7 @@ name: label_items
 enabled: false
 trigger: { source: github_items, kind: item_labels }
 mode: review
+codemode: false
 context: change
 files: []
 publish: [item_labels]

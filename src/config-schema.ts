@@ -39,6 +39,14 @@ const schema = Type.Object({
     http: Type.Object({ timeoutSeconds: positive, maxRequestBytes: positive }, strict),
     browser: Type.Object({ steps: positive, sessionSeconds: positive, navigationSeconds: positive, actionSeconds: positive, textCaptureBytes: positive, domScoping: Type.Boolean(), sitemapSamplesPerGroup: positive, sitemapMaxGroups: positive, defaultViewport: Type.String(), viewports: Type.Record(Type.String({ pattern: "^[a-z][a-z0-9-]*$" }), Type.Object({ width: positive, height: positive }, strict)) }, strict),
     search: Type.Object({ pageSize: positive, excerptChars: positive, maxQueryLength: positive }, strict),
+    codemode: Type.Object({
+      review: Type.Boolean(),
+      change: Type.Boolean(),
+      mode: Type.Enum(["on", "only"]),
+      inlineBudget: positive,
+      maxWorkers: positive,
+      models: Type.Boolean(),
+    }, strict),
     redactionMarginBytes: positive,
   }, strict),
   d1: Type.Object({

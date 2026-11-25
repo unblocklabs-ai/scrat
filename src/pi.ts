@@ -1,7 +1,7 @@
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { isContextOverflow, isRetryableAssistantError } from "@earendil-works/pi-ai";
-import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, createCodemodeExtension, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, type CodemodeToolDetails } from "@earendil-works/pi-coding-agent";
 import type { Logger } from "pino";
 import { config } from "./config.ts";
 import type { LabelCategory, ThinkingLevel } from "./manifests.ts";
@@ -36,11 +36,35 @@ export function saveReviewer(runId: string, index: number, patch: Partial<Review
 }
 
 export type PiOptions = {
-  run: Run; cwd: string; tools: readonly ToolName[]; scoped: Pick<Manifest, "mode" | "http"> & { browser?: BrowserScope };
+  run: Run; cwd: string; tools: readonly ToolName[]; scoped: Pick<Manifest, "mode" | "http" | "codemode"> & { browser?: BrowserScope };
   storefront?: boolean; contextDir?: string; revisions?: Record<string, string>; baseSha?: string;
   environment?: NodeJS.ProcessEnv; log: Logger; stop?: AbortSignal;
   getLiveToolCallIds?: () => Set<string>;
+  isNestedToolCall?: (toolCallId: string) => boolean;
 };
+
+function createScratCodemodeExtension(options: Parameters<typeof createCodemodeExtension>[0]): ReturnType<typeof createCodemodeExtension> {
+  const base = createCodemodeExtension(options);
+  return (pi) => {
+    base(pi);
+    pi.on("tool_result", (event) => {
+      if (event.toolName !== "codemode") return undefined;
+      const content = event.content.map((part) => (part.type === "text" ? { ...part, text: redactSecrets(part.text) } : part));
+      const details = event.details as CodemodeToolDetails | undefined;
+      const redactedDetails = details?.calls
+        ? {
+            ...details,
+            calls: details.calls.map((call) => ({
+              ...call,
+              args: redactSecrets(call.args),
+              ...(call.error ? { error: redactSecrets(call.error) } : {}),
+            })),
+          }
+        : details;
+      return { content, details: redactedDetails };
+    });
+  };
+}
 
 export async function executePi(options: PiOptions, { context, sessionFile, reviewerIndex, onSession, requireGrade = false, labelCategories, followUp }: {
   context: string;
@@ -61,14 +85,24 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
   }
   const thinkingLevel = run.thinkingLevel as ThinkingLevel;
   let liveToolCallIds: (() => Set<string>) | undefined;
+  const nestedToolCallIds = new Set<string>();
   const { names, customTools, paths, gitPaths, basePaths, close } = await createAgentTools(
-    { ...options, getLiveToolCallIds: () => liveToolCallIds?.() ?? new Set<string>() },
+    {
+      ...options,
+      getLiveToolCallIds: () => liveToolCallIds?.() ?? new Set<string>(),
+      isNestedToolCall: (toolCallId) => nestedToolCallIds.has(toolCallId),
+    },
     reviewerIndex,
   );
   const browsing = names.includes("browser"), graded = storefront && requireGrade;
+  const codemodeEnabled = (scoped.codemode ?? (readOnly ? config.tools.codemode.review : config.tools.codemode.change)) && names.length > 0;
+  if (codemodeEnabled) process.env.PI_CODEMODE_MAX_WORKERS = String(config.tools.codemode.maxWorkers);
   const settingsManager = SettingsManager.inMemory({ retry: config.harness.agentRetry });
   const resourceLoader = new DefaultResourceLoader({
     cwd, agentDir: getAgentDir(), settingsManager, noExtensions: true, noSkills: true,
+    extensionFactories: codemodeEnabled
+      ? [createScratCodemodeExtension({ mode: config.tools.codemode.mode, inlineBudget: config.tools.codemode.inlineBudget, models: config.tools.codemode.models })]
+      : [],
     appendSystemPromptOverride: (base) => [...base,
       `${botName} handles Git commits, pushes, GitHub comments, labels, and PR creation. Do not publish or commit changes yourself.`,
       "Use dependency implementations from this workspace and its lockfile. Another checkout or a globally cached version is not evidence for this revision.",
@@ -94,6 +128,7 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
       (readOnly ? config.tools.grep.review : config.tools.grep.change) === "deterministic"
         ? "- `grep` is Rust regex: no lookahead or backreferences; set `literal: true` for exact text and `mode: \"files\"` for broad inventories. Counts cover the stated search scope; reduced output is for navigation and a partial scan cannot establish absence — narrow or read the spill file when missing results matter."
         : "- `grep` is Rust regex: no lookahead or backreferences; set `literal: true` for exact text.",
+      ...codemodeEnabled ? ["- `codemode` runs JavaScript in a QuickJS sandbox against your available tools; intermediate tool outputs stay inside the script, so use it to batch parallel reads/greps/git diffs (`Promise.all`) or filter large outputs before returning concise findings."] : [],
       "End your final Markdown response with exactly one line: SCRAT_STATUS: complete, SCRAT_STATUS: incomplete, or SCRAT_STATUS: needs_decision. Complete means the assigned work is finished, not merely that this session ended. For reviews, a complete assessment may contain defects or find the issue unready; use incomplete only if the assessment itself cannot be completed. For implementation, partial work or unresolved blockers are not complete. The harness withholds incomplete implementations from publication. Put an issue's SCRAT_READY marker before the status line, only when warranted.",
     ],
   });
@@ -105,7 +140,7 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
     : SessionManager.create(cwd, sessionDir);
   const { session } = await createAgentSession({
     cwd, modelRuntime, model, thinkingLevel, settingsManager, sessionManager, resourceLoader,
-    tools: names, customTools,
+    tools: codemodeEnabled ? [...names, "codemode"] : names, customTools,
   });
   liveToolCallIds = () => {
     const ids = new Set<string>();
@@ -126,13 +161,20 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
     const targets = new Map<string, Record<string, unknown>>();
     session.subscribe((event) => {
       if (event.type === "tool_execution_start") {
+        const parentToolCallId = "parentToolCallId" in event && typeof event.parentToolCallId === "string" ? event.parentToolCallId : undefined;
+        if (parentToolCallId) nestedToolCallIds.add(event.toolCallId);
         const { path, pattern, operation, command, revision, from, to } = event.args ?? {};
         targets.set(event.toolCallId, { path: brief(path), pattern: brief(pattern), operation: brief(operation), command: brief(command), revision: brief(revision), from: brief(from), to: brief(to) });
-        log.debug({ event: "pi.tool_started", tool: event.toolName, toolCallId: event.toolCallId });
+        log.debug({ event: "pi.tool_started", tool: event.toolName, toolCallId: event.toolCallId, ...(parentToolCallId ? { parentToolCallId } : {}) });
       }
       if (event.type === "tool_execution_end") {
+        nestedToolCallIds.delete(event.toolCallId);
         const target = targets.get(event.toolCallId);
         targets.delete(event.toolCallId);
+        if (event.toolName === "codemode") {
+          const details = event.result?.details as CodemodeToolDetails | undefined;
+          log.info({ event: "pi.codemode_completed", toolCallId: event.toolCallId, isError: event.isError, nestedCalls: details?.calls?.length ?? 0 });
+        }
         if (event.isError) {
           const text = (event.result?.content ?? []).map((part: { text?: string }) => part.text ?? "").join(" ").split("\n\nReceived arguments:")[0]!;
           const error = redactSecrets(text).replace(/\s+/g, " ").trim();

@@ -348,7 +348,7 @@ tools: [read, grep, find, ls, http]
 files: [history]
 publish: [issue]
 skill: skills/error_sweep/SKILL.md
-model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }
+model: { provider: codex-lb, model: gpt-6.2-sol, thinkingLevel: high }
 priority: 20
 ```
 

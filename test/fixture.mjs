@@ -304,7 +304,7 @@ export async function fixture(scenario, spec) {
   config.harness.agentRetry = { maxRetries: 0, baseDelayMs: 0 }; config.slack.minimumGapMs = 0;
   config.harness.maxConcurrency = 6; config.github.repository = "fixture/project"; config.github.repositoryPath = resolve("checkout");
   config.providers = { fixture: { api: "openai-completions", baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: "fixture", models: [
-    { id: "gpt-6.1-sol", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
+    { id: "gpt-6.2-sol", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
     { id: "gpt-6.1-terra", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
     { id: "deepseek/deepseek-v4.1-flash", reasoning: true, input: ["text"], contextWindow: 32768, maxTokens: 4096 },
   ] } };

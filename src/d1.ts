@@ -732,8 +732,8 @@ async function extractRelevantChunks({ text, query, instructionTemplate, maxTota
   return { usedD1: true, text: merged.text, kept: merged.kept, total: chunks.length, d1Ms };
 }
 
-export async function distillCommandOutput({ rawOutput, command, goal, preferStructured = true, artifactPath, sourceArtifactPath, existingArtifactPath, partialSource = false, allowReadBypass = true, minChars, maxChars, signal, log, requester }: {
-  rawOutput: string; command: string; goal?: string; preferStructured?: boolean; artifactPath?: string; sourceArtifactPath?: string; existingArtifactPath?: string;
+export async function distillCommandOutput({ rawOutput, command, goal, artifactPath, sourceArtifactPath, existingArtifactPath, partialSource = false, allowReadBypass = true, minChars, maxChars, signal, log, requester }: {
+  rawOutput: string; command: string; goal?: string; artifactPath?: string; sourceArtifactPath?: string; existingArtifactPath?: string;
   partialSource?: boolean; allowReadBypass?: boolean;
   minChars: number; maxChars: number; signal?: AbortSignal; log?: D1Log; requester?: D1Requester;
 }) {
@@ -753,7 +753,7 @@ export async function distillCommandOutput({ rawOutput, command, goal, preferStr
   const plannedPath = artifactPath ?? existingArtifactPath;
   const hdrEstimate = 160 + (plannedPath?.length ?? 0);
 
-  if (preferStructured && structuredBlocks.length && config.d1.failureBlocks.skipD1OnMatch) {
+  if (structuredBlocks.length && config.d1.failureBlocks.skipD1OnMatch) {
     const fixedStructOverhead = hdrEstimate + headBlk.length + tailBlk.length + 40;
     const structBudget = Math.max(0, maxChars - fixedStructOverhead);
     const fitted = fitStructuredFailureBlock(structuredBlocks, structBudget);

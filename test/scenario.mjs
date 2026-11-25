@@ -249,7 +249,7 @@ const configureSchedule = (config) => {
   const sweep = (name, cron, window, tools) => writeFileSync(`deployment/${name}.yaml`, [
     `name: ${name}`, `trigger: { source: schedule, kind: tick, cron: "${cron}", window: ${window} }`, "mode: review", "agent: single", "context: all",
     `tools: [${tools}]`, "files: [history]", "publish: [issue]", `skill: ${skill}`,
-    "model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }", "priority: 20", "",
+    "model: { provider: codex-lb, model: gpt-6.2-sol, thinkingLevel: high }", "priority: 20", "",
   ].join("\n"));
   sweep("error_sweep", "0 */6 * * *", "6h", "read, grep, find, ls");
   config.actions.error_sweep = { provider: "fixture" };
@@ -549,13 +549,13 @@ const commitReview = async (variant) => {
       text: `Store update: Fixture changed the theme: <https://github.com/fixture/project/commit/${head}|"Fix a&lt;b &amp; c&gt;d">. ${bot} is checking the live site.`,
       blocks: [{ type: "section", text: { type: "mrkdwn", text: `Store update: Fixture changed the theme: <https://github.com/fixture/project/commit/${head}|"Fix a&lt;b &amp; c&gt;d">. ${bot} is checking the live site.` } }],
     });
-    assert.equal(reply.body.thread_ts, "1700000000.000001"); assert.equal(reply.body.text, "Independent review from gpt-6.1-sol. &lt;!channel&gt;");
-    assert.deepEqual(reply.body.blocks, [{ type: "rich_text", elements: [{ type: "rich_text_section", elements: [{ type: "text", text: "Independent review from gpt-6.1-sol. <!channel>" }] }] }]);
+    assert.equal(reply.body.thread_ts, "1700000000.000001"); assert.equal(reply.body.text, "Independent review from gpt-6.2-sol. &lt;!channel&gt;");
+    assert.deepEqual(reply.body.blocks, [{ type: "rich_text", elements: [{ type: "rich_text_section", elements: [{ type: "text", text: "Independent review from gpt-6.2-sol. <!channel>" }] }] }]);
     assert.ok(posts().every((call) => call.token === process.env.SLACK_BOT_TOKEN));
     const [thread] = all(s.slackThreads); assert.equal(all(s.slackThreads).length, 1);
     assert.deepEqual({ subjectId: thread.subjectId, channel: thread.channel, ts: thread.ts }, { subjectId: all(s.tasks)[0].subjectId, channel, ts: "1700000000.000001" });
     assert.equal(r.publication.slackReplyTs, "1700000000.000002"); assert.equal(r.publication.status, "published");
-    assert.equal(r.stage, "publishing"); assert.equal(r.result.text, "Independent review from gpt-6.1-sol. <!channel>"); assert.deepEqual(r.result.paths.filter((path) => path === "src/app.ts"), ["src/app.ts"]);
+    assert.equal(r.stage, "publishing"); assert.equal(r.result.text, "Independent review from gpt-6.2-sol. <!channel>"); assert.deepEqual(r.result.paths.filter((path) => path === "src/app.ts"), ["src/app.ts"]);
     assert.equal(r.context.item.number, 0); assert.equal(r.mainSha, head); assert.equal(r.headSha, head);
     assert.equal(f.row(s.tasks, r.taskId).status, "completed"); assert.equal(all(s.subjects)[0].state, "open");
     assert.ok(f.row(s.workspaces, r.workspaceId).removedAt);
@@ -624,7 +624,7 @@ const commitReview = async (variant) => {
     assert.deepEqual(reactions().map((call) => [call.body.channel, call.body.timestamp, call.body.name]), [[channel, all(s.slackThreads)[0].ts, "large_orange_square"]]);
     assert.equal(all(s.slackThreads)[0].ts, posts()[1].body.thread_ts);
     } else if (variant === "panel") {
-    f.verdicts["gpt-6.1-sol"] = "clean"; f.verdicts["deepseek/deepseek-v4.1-flash"] = "breaking"; f.verdicts.consolidating = "concerns";
+    f.verdicts["gpt-6.2-sol"] = "clean"; f.verdicts["deepseek/deepseek-v4.1-flash"] = "breaking"; f.verdicts.consolidating = "concerns";
     assert.equal(await push("Panel change"), 1);
     const r = await success();
     assert.deepEqual(r.reviewers.map((reviewer) => reviewer.result.verdict).sort(), ["breaking", "clean"]);
@@ -765,7 +765,7 @@ export const scenarios = {
 
     // A second category and issue-only targeting use the same task and replace the defaults.
     settings.targets = ["issues"];
-    settings.model = "gpt-6.1-sol";
+    settings.model = "gpt-6.2-sol";
     settings.issue_labels = [
       { category: "type", choices: [{ name: "type: bug", description: "A reported defect" }, { name: "type: feature", description: "New functionality" }] },
       { category: "scope", choices: [{ name: "scope: product", description: "Product work" }] },
@@ -776,7 +776,7 @@ export const scenarios = {
       selections([{ category: "type", name: "type: bug" }, { category: "type", name: "type: feature" }]),
       selections([{ category: "type", name: "type: bug" }, { category: "scope", name: "scope: product" }]),
     ];
-    const issue = await success(); assert.equal(issue.model, "gpt-6.1-sol");
+    const issue = await success(); assert.equal(issue.model, "gpt-6.2-sol");
     assert.deepEqual(names(f.issues.get(1)), ["scope: product", "type: bug"]);
     assert.deepEqual(f.requests.at(-1).context.label_categories, settings.issue_labels);
     await route(); assert.equal(queued().length, 0);
@@ -1128,10 +1128,10 @@ export const scenarios = {
     const implemented = await implement(1); f.prs[0].labels.push({ name: "human-label" }); await route();
     const review = await success();
     assert.equal(review.reviewers.length, 2);
-    assert.deepEqual(review.reviewers.map((r) => r.model), ["gpt-6.1-sol", "deepseek/deepseek-v4.1-flash"]);
+    assert.deepEqual(review.reviewers.map((r) => r.model), ["gpt-6.2-sol", "deepseek/deepseek-v4.1-flash"]);
     assert.equal(new Set([...review.reviewers.map((r) => r.piSessionId), review.piSessionId]).size, 3);
     assert.ok(review.reviewers.every((r) => r.result?.outcome === "complete"));
-    for (const model of ["gpt-6.1-sol", "deepseek/deepseek-v4.1-flash"]) {
+    for (const model of ["gpt-6.2-sol", "deepseek/deepseek-v4.1-flash"]) {
       assert.ok(f.requests.some((r) => r.context.action === "review_pr" && !r.consolidating && r.request.model === model
         && r.request.messages.some((m) => m.role === "tool" && JSON.stringify(m.content).includes("9.8.7"))), "Reviewer must read the prepared dependency in its own workspace");
       assert.ok(f.requests.some((r) => r.context.action === "review_pr" && !r.consolidating && r.request.model === model
@@ -1150,7 +1150,7 @@ export const scenarios = {
     }
     const panel = f.requests.filter((r) => r.context.action === "review_pr" && !r.consolidating);
     const consolidation = f.requests.filter((r) => r.consolidating);
-    for (const model of ["gpt-6.1-sol", "deepseek/deepseek-v4.1-flash"]) {
+    for (const model of ["gpt-6.2-sol", "deepseek/deepseek-v4.1-flash"]) {
       const mine = panel.filter((r) => r.request.model === model).at(-1);
       assert.ok(toolText(mine, "src/app.ts | 2"), "diff_stat output reaches the model");
       assert.ok(toolText(mine, "node_modules/"), "show reads the immutable base file");
@@ -1726,7 +1726,7 @@ export const scenarios = {
     await route(); const first = await success();
     const normal = reviewCounts();
     assert.equal(Object.keys(normal).length, 3);
-    for (const [mode, target] of [["reviewer-grade-once", "deepseek/deepseek-v4.1-flash/false"], ["consolidation-grade-once", "gpt-6.1-sol/true"]]) {
+    for (const [mode, target] of [["reviewer-grade-once", "deepseek/deepseek-v4.1-flash/false"], ["consolidation-grade-once", "gpt-6.2-sol/true"]]) {
       const start = reviewCounts(); f.reset(201, mode);
       tasks.enqueueTask({ subjectId: f.row(s.tasks, first.taskId).subjectId, action: "review_pr", reason: "Review again", input: { source: "github_items", kind: "manual", manual: true } });
       const reviewed = await success(); const end = reviewCounts();
@@ -2796,7 +2796,7 @@ fi
     await route();
     const review = await success();
     const hugeSize = 64 * (17 * 16384 + 10), midSize = readFileSync("seed/src/mid.txt").length, mid = readFileSync("seed/src/mid.txt", "latin1");
-    const mine = f.requests.filter((r) => r.context.action === "review_pr" && !r.consolidating && r.request.model === "gpt-6.1-sol").at(-1);
+    const mine = f.requests.filter((r) => r.context.action === "review_pr" && !r.consolidating && r.request.model === "gpt-6.2-sol").at(-1);
     const results = mine.request.messages.filter((m) => m.role === "tool").map((m) => typeof m.content === "string" ? m.content : m.content.map((part) => part.text ?? "").join(""));
     assert.equal(results.length, 11, results.map((text) => text.slice(0, 80)).join("\n"));
     const [, first, second, multibyte, show, diff, diffNext, deep, stat, missing, whole] = results;
@@ -3450,7 +3450,7 @@ fi
     assert.deepEqual(written.models, defaults.providers[provider].models);
 
     const labels = {
-      enabled: true, provider: "fixture", model: "gpt-6.1-sol", targets: ["issues", "prs"],
+      enabled: true, provider: "fixture", model: "gpt-6.2-sol", targets: ["issues", "prs"],
       issue_labels: [{ category: "type", choices: [{ name: "bug", description: "A reported defect" }] }],
       pr_labels: [{ category: "risk", choices: [{ name: "custom: low", description: "Our deployment's low-risk rule" }] }],
     };
@@ -3462,7 +3462,7 @@ fi
     assert.deepEqual(JSON.parse(probe(overrides, showLabels)), beforeUpgrade, "a new shipped default cannot overwrite deployment label settings");
     assert.deepEqual(beforeUpgrade.pr_labels, labels.pr_labels, "category arrays replace the shipped choices in full");
     assert.deepEqual(beforeUpgrade.issue_labels, labels.issue_labels);
-    assert.equal(beforeUpgrade.model, "gpt-6.1-sol");
+    assert.equal(beforeUpgrade.model, "gpt-6.2-sol");
     assert.deepEqual(JSON.parse(readFileSync(local, "utf8")), overrides, "loading does not rewrite local overrides");
     writeFileSync(manifestPath, shipped);
     const validate = `const { validateStaticConfig } = await import(${JSON.stringify(resolve("app/src/startup.ts"))}); await validateStaticConfig();`;
@@ -4219,7 +4219,7 @@ fi
     assert.equal(isActionEnabled("review_issue"), true); assert.equal(isActionEnabled("nope"), false);
     assert.equal(live.actions.review_pr.provider, "fixture"); assert.equal(live.actions.review_pr.reviewers[1].provider, "fixture");
     const claimed = tasks.claimTask();
-    assert.equal(claimed.run.provider, "fixture"); assert.equal(claimed.run.model, "gpt-6.1-sol");
+    assert.equal(claimed.run.provider, "fixture"); assert.equal(claimed.run.model, "gpt-6.2-sol");
   } },
   manifest_directory: { title: "a deployment manifest directory adds an action for a freed trigger, rejects duplicate enabled triggers, unknown tools and files, and bad directories", configure: [configureManifestDirectory], run: async () => {
     const { routeFor } = await f.app("actions.ts");

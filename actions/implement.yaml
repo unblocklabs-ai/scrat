@@ -5,6 +5,6 @@ files: [discussion, triage, cloudflare]
 acceptance: nonempty_diff
 publish: [push, pull_request]
 skill: skills/implement/SKILL.md
-model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }
+model: { provider: codex-lb, model: gpt-6.2-sol, thinkingLevel: high }
 priority: 60
 failedLabel: Scrat failed

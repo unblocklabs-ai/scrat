@@ -194,7 +194,6 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
         : undefined;
       const distilled = await distillCommandOutput({
         rawOutput: sourceText, command, goal,
-        preferStructured: !goal?.trim(),
         artifactPath: candidatePath,
         sourceArtifactPath: diskFull?.truncated ? details?.fullOutputPath : undefined,
         existingArtifactPath: details?.fullOutputPath,

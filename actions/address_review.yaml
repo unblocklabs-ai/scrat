@@ -6,7 +6,7 @@ acceptance: complete
 commitPrefix: Address review
 publish: [push, comment]
 skill: skills/address_review/SKILL.md
-model: { provider: codex-lb, model: gpt-6.1-sol, thinkingLevel: high }
+model: { provider: codex-lb, model: gpt-6.2-sol, thinkingLevel: high }
 priority: 60
 maxSelfRepairs: 2
 exhaustedLabel: Scrat repair exhausted

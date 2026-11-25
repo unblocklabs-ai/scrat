@@ -1,8 +1,8 @@
 diff --git a/node_modules/@earendil-works/pi-ai/dist/api/openai-responses.js b/node_modules/@earendil-works/pi-ai/dist/api/openai-responses.js
-index 2ab985c..762bfba 100644
+index 0977a46..00afb4b 100644
 --- a/node_modules/@earendil-works/pi-ai/dist/api/openai-responses.js
 +++ b/node_modules/@earendil-works/pi-ai/dist/api/openai-responses.js
-@@ -171,6 +171,11 @@ export const stream = (model, context, options) => {
+@@ -173,6 +173,11 @@ export const stream = (model, context, options) => {
              stream.end();
          }
          catch (error) {
@@ -11,6 +11,6 @@ index 2ab985c..762bfba 100644
 +                output.errorName = error.name;
 +                output.errorStack = error.stack;
 +            }
-             for (const block of output.content) {
-                 delete block.index;
-                 // Streaming scratch buffers are only used during parsing; never persist them.
+             output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+             const errorMessage = formatProviderError(normalizeProviderError(error), `${model.provider === "openai" ? "OpenAI" : model.provider} API error`);
+             // Sign in with ChatGPT shares the subscription's usage limit with other apps.

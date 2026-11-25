@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { access, lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, open, readFile, realpath, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { createBashToolDefinition, createEditToolDefinition, createFindToolDefinition, createGrepToolDefinition, createLsToolDefinition, createReadToolDefinition, createWriteToolDefinition, defineTool, detectSupportedImageMimeTypeFromFile } from "@earendil-works/pi-coding-agent";
@@ -226,6 +226,19 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
         access: async (path) => access(await insideWorkspace(path), constants.R_OK),
         detectImageMimeType: async (path) => detectSupportedImageMimeTypeFromFile(await insideWorkspace(path)),
         readFile: async (path) => { const real = await insideWorkspace(path); absolute = path; resolvedReal = real; return readFile(real); },
+        createReadStream: async function* (path) {
+          const real = await insideWorkspace(path);
+          absolute = path;
+          resolvedReal = real;
+          const handle = await open(real, "r");
+          try {
+            const stats = await handle.stat();
+            const end = stats.isFile() && stats.size > 0 ? stats.size - 1 : undefined;
+            yield* handle.createReadStream({ end, autoClose: false });
+          } finally {
+            await handle.close();
+          }
+        },
       } });
       const result = await tool.execute(toolCallId, params, signal, onUpdate, ctx);
       if (absolute) {

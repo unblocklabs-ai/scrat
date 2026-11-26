@@ -1,7 +1,7 @@
 import { db } from "./db.ts";
 import { and, eq, inArray, isNotNull, isNull, notExists } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
-import { manifests, workflows } from "./actions.ts";
+import { workflows } from "./actions.ts";
 import { config } from "./config.ts";
 import { listRunDatabases, removeRunDatabase } from "./databases.ts";
 import { getRun } from "./run-history.ts";
@@ -13,10 +13,7 @@ await runCommand("Cleanup command failed", async () => {
   const active = alias(runs, "active_run");
   const pending = db.selectDistinct({ workspace: workspaces }).from(workspaces)
     .innerJoin(runs, eq(runs.workspaceId, workspaces.id)).innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(isNotNull(runs.finishedAt), isNull(workspaces.removedAt), inArray(tasks.action, [
-      ...manifests.filter((manifest) => manifest.mode === "review").map((manifest) => manifest.name),
-      ...workflows.map((wf) => wf.name),
-    ]),
+    .where(and(isNotNull(runs.finishedAt), isNull(workspaces.removedAt), inArray(tasks.action, workflows.filter((wf) => wf.mode === "review").map((wf) => wf.name)),
       notExists(db.select({ id: active.id }).from(active).where(and(eq(active.workspaceId, workspaces.id), isNull(active.finishedAt)))),
     )).all();
   retainReplacedWorkspaces();

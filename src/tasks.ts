@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, lte, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
-import { defaultPriorityOf, isWorkflow, manifestOf, manifests, workflowOf, workflows } from "./actions.ts";
-import { config, isActionEnabled, isWorkflowEnabled } from "./config.ts";
+import { defaultPriorityOf, isWorkflow, workflowOf, workflows } from "./actions.ts";
+import { config, isWorkflowEnabled } from "./config.ts";
 import { findItem, sameRepository } from "./repository.ts";
 import { db } from "./db.ts";
 import { CompetingImplementation, competingImplementationCode, describeError, type ErrorDetails, errorCode, errorMessage, ImplementationEnded, transientInferenceCode } from "./errors.ts";
@@ -19,6 +19,7 @@ import { categoriesFor, itemLabelKey } from "./item-labels.ts";
 import { items, runs, type Run, subjects, tasks, type Task, type Subject, workspaces } from "./schema.ts";
 import { isBaseOnly, isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
 import { signalWork } from "./work-signal.ts";
+import { workflowItemLabelSettings } from "./workflows.ts";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -50,16 +51,15 @@ export function latestTask(subjectId: string, action: string, database: Pick<typ
     .orderBy(desc(tasks.createdAt), desc(tasks.id)).limit(1).get();
 }
 
-const modeOf = (action: string) => manifests.find(({ name }) => name === action)?.mode;
+const modeOf = (action: string) => isWorkflow(action) ? workflowOf(action).mode : undefined;
 const workflowNames = workflows.map(({ name }) => name);
 
 function checkClaimable({ task, subject }: { task: Task; subject: Subject }, database: Pick<typeof db, "select">) {
-  const wf = isWorkflow(task.action);
-  if (!wf && !isActionEnabled(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
+  if (!isWorkflow(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   let trigger;
   try { trigger = parseTriggerInput(task.input); }
   catch (error) { return { ok: false as const, reason: `Invalid trigger input for ${task.action}: ${errorMessage(error)}` }; }
-  if (wf && !isWorkflowEnabled(task.action) && !isManual(task.input)) {
+  if (!isWorkflowEnabled(task.action) && !(isManual(task.input) && trigger.source === "workflow")) {
     return { ok: false as const, reason: `Workflow ${task.action} is disabled` };
   }
   const { repository } = subject;
@@ -69,50 +69,38 @@ function checkClaimable({ task, subject }: { task: Task; subject: Subject }, dat
 }
 
 function sameRunInput(previous: Run, task: Task) {
-  // For issue implementation, manual intent changes admission, not the evaluated work.
+  const wf = workflowOf(task.action);
+  const isImplement = wf.mode === "change" && wf.on.event?.kind === "label";
   return isDeepStrictEqual(previous.input, task.input)
-    || !isWorkflow(task.action) && isManual(task.input) && manifestOf(task.action).publish.includes("pull_request")
-      && isDeepStrictEqual({ ...previous.input, manual: true }, task.input);
+    || isManual(task.input) && isImplement && isDeepStrictEqual({ ...previous.input, manual: true }, task.input);
 }
 
 function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run | undefined; trigger: TriggerInput }) {
-  if (isWorkflow(task.action)) {
-    const wf = workflowOf(task.action);
-    const retry = previousRun?.error && sameRunInput(previousRun, task) ? previousRun : undefined;
-    const interrupted = retry?.error?.name === "InterruptedError";
-    const prior = interrupted ? undefined : retry;
-    const resumeReason = !interrupted ? "retry" as const : retry?.error?.message === workerStoppedMessage ? "crash" as const : "drain" as const;
-    return {
-      prior, resume: undefined, publicationResume: undefined, review: true, reviewers: [] as Run["reviewers"],
-      skill: wf.skillPath ?? wf.scriptPath ?? wf.file,
-      provider: wf.defaults.provider, model: wf.defaults.model, thinkingLevel: wf.defaults.thinkingLevel,
-      resumeReason, resumingDeferred: false, stage: "preparing" as const,
-    };
-  }
   const retry = previousRun?.error && sameRunInput(previousRun, task) ? previousRun : undefined;
-  const action = manifestOf(task.action);
+  const wf = workflowOf(task.action);
   const resumingDeferred = task.lastCompetingPullRequest !== null;
   const validationOnly = task.retryMode === "validation"
     || retry?.error?.code === competingImplementationCode && hasValidationCheckpoint(retry);
   const publicationResume = !validationOnly && hasPublicationSnapshot(retry) ? retry : undefined;
   const interrupted = retry?.error?.name === "InterruptedError";
-  const review = action.mode === "review";
+  const review = wf.mode === "review";
   const reviewResume = interrupted && review && !validationOnly && hasReviewCheckpoint(retry) ? retry : undefined;
   const resume = validationOnly ? (hasValidationCheckpoint(retry) ? retry : undefined) : publicationResume ?? reviewResume;
   const prior = interrupted && !resume ? undefined : retry;
   const resumeReason = !interrupted ? "retry" as const : retry?.error?.message === workerStoppedMessage ? "crash" as const : "drain" as const;
   const pinned = review && !resume ? undefined : prior;
-  const settings = pinned ?? action;
-  const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? (isBaseOnly(trigger) ? action.reviewers.slice(0, 1) : action.reviewers);
-  const { provider, model, thinkingLevel } = !resume && reviewers.length === 1 ? reviewers[0] : settings;
-  return { prior, resume, publicationResume, review, reviewers, skill: settings.skill, provider, model, thinkingLevel, resumeReason, resumingDeferred,
+  const configuredReviewers = wf.defaults.reviewers;
+  const configuredSkill = wf.skillPath ?? wf.scriptPath ?? wf.file;
+  const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? (isBaseOnly(trigger) ? configuredReviewers.slice(0, 1) : configuredReviewers);
+  const { provider, model, thinkingLevel } = !resume && reviewers.length === 1 ? reviewers[0]! : (pinned ?? wf.defaults);
+  const skill = pinned?.skill ?? configuredSkill;
+  return { prior, resume, publicationResume, review, reviewers, skill, provider, model, thinkingLevel, resumeReason, resumingDeferred,
     stage: entryStage(retry, validationOnly ? "validation" : "repair", reviewResume) };
 }
 
 export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | "action" | "priority" | "reason"> & { input: TriggerInput }) {
   return withOperationSync("task.enqueue", { subjectId: task.subjectId, action: task.action }, (operation) => {
-    if (isWorkflow(task.action)) workflowOf(task.action);
-    else manifestOf(task.action);
+    workflowOf(task.action);
     const queued = db.transaction((transaction) => {
       const previous = pendingTaskOf(transaction, task.subjectId, task.action);
       if (previous?.status === "blocked" && !isManual(task.input)) return previous;
@@ -158,20 +146,27 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | 
 type ManualEnqueueResult = { target: string; number?: number; itemId?: string; taskId?: string; error?: string };
 
 export function enqueueManualTasks(action: string, targets: string[], priority?: number): ManualEnqueueResult[] {
-  const manifest = manifests.find(({ name }) => name === action);
-  if (!manifest) throw new Error(`Unknown action: ${action}; expected one of ${manifests.map(({ name }) => name).join(", ")}`);
-  if (manifest.trigger.manual === false) throw new Error(`${action} is queued automatically by sync and cannot be enqueued by hand`);
-  const needs = manifest.trigger.item;
-  if (!needs && manifest.trigger.kind !== "item_labels") throw new Error(`${action} is not triggered by an issue or PR`);
+  const wf = workflows.find(({ name }) => name === action);
+  if (!wf) {
+    const known = workflows.map(({ name }) => name);
+    throw new Error(`Unknown action: ${action}; expected one of ${known.join(", ")}`);
+  }
+  const trigger = wf.on.event;
+  if (!wf.on.manual) throw new Error(`${action} is queued automatically by sync and cannot be enqueued by hand`);
+  const needs = trigger?.item;
+  if (!trigger || (!needs && trigger.kind !== "item_labels")) throw new Error(`${action} is not triggered by an issue or PR`);
   return targets.map((target): ManualEnqueueResult => {
     const item = findItem(config.github.repository, target);
     if (!item) return { target, error: `No item ${target} in ${config.github.repository}` };
     const base = { target, number: item.payload.number, itemId: item.id };
     if (item.state !== "open") return { ...base, error: "Item is closed" };
     if (needs && item.kind !== needs) return { ...base, error: `${action} needs ${needs === "pr" ? "a PR" : "an issue"}, but ${target} is ${item.kind === "pr" ? "a PR" : "an issue"}` };
-    if (manifest.trigger.kind === "item_labels" && !categoriesFor(manifestOf(action), item.kind).length) return { ...base, error: `${action} has no label categories enabled for ${item.kind}` };
-    const input: TriggerInput = manifest.trigger.kind === "item_labels"
-      ? { source: "github_items", kind: "item_labels", triggerKey: itemLabelKey(item.payload, categoriesFor(manifestOf(action), item.kind)), manual: true }
+    const labelCats = trigger.kind === "item_labels"
+      ? categoriesFor(workflowItemLabelSettings(workflowOf(action)), item.kind)
+      : [];
+    if (trigger.kind === "item_labels" && !labelCats.length) return { ...base, error: `${action} has no label categories enabled for ${item.kind}` };
+    const input: TriggerInput = trigger.kind === "item_labels"
+      ? { source: "github_items", kind: "item_labels", triggerKey: itemLabelKey(item.payload, labelCats), manual: true }
       : { source: "github_items", kind: "manual", manual: true };
     try { return { ...base, taskId: enqueueTask({ subjectId: item.id, action, priority, reason: "Manually enqueued", input }).id }; }
     catch (error) { return { ...base, error: errorMessage(error) }; }
@@ -181,6 +176,10 @@ export function enqueueManualTasks(action: string, targets: string[], priority?:
 export function enqueueWorkflowRun(name: string, options: { input?: Record<string, unknown>; dryRun?: boolean; priority?: number; reason?: string } = {}) {
   const wf = workflowOf(name);
   if (!wf.on.manual) throw new Error(`Workflow ${name} does not allow manual runs (on.manual is false)`);
+  if (wf.on.event) {
+    const hint = wf.on.event.source === "github_items" ? ` Use "npm run enqueue -- ${name} <number>" for item-based workflows.` : "";
+    throw new Error(`Workflow ${name} is event-triggered (${wf.on.event.source}:${wf.on.event.kind}) and cannot run via "workflow run".${hint}`);
+  }
   const key = `${name}:${randomUUID()}`;
   const subject = upsertSubject({ repository: config.github.repository, kind: "workflow", key });
   const triggerInput: TriggerInput = {
@@ -213,7 +212,7 @@ export function claimTask(taskId?: string) {
           .where(and(eq(busyTasks.status, "running"), or(
             eq(busyTasks.subjectId, tasks.subjectId),
             and(isNotNull(subjects.workspaceId), eq(busySubjects.workspaceId, subjects.workspaceId)),
-            workflowNames.length ? and(inArray(busyTasks.action, workflowNames), eq(busyTasks.action, tasks.action)) : undefined,
+            workflowNames.length ? and(eq(subjects.kind, "workflow"), inArray(busyTasks.action, workflowNames), eq(busyTasks.action, tasks.action)) : undefined,
           ))),
       )))
       .orderBy(desc(tasks.priority), asc(tasks.createdAt), asc(tasks.id)).limit(1).get();
@@ -384,7 +383,7 @@ export function reconcileIssueImplementation({ subjectId, action, observedTask, 
       || latest && latest.status !== "cancelled" && !newlySelected)) return false;
     const task = transaction.insert(tasks).values({ ...set, subjectId, action, createdAt: observedAt,
       input: newOpening ? { ...input, freshOpening: true } : input, issueOpening: facts.opening,
-      priority: config.actions[action].priority, reason: newOpening ? "Selected GitHub issue reopened" : `Issue has the ${botSlug} label`,
+      priority: defaultPriorityOf(action), reason: newOpening ? "Selected GitHub issue reopened" : `Issue has the ${botSlug} label`,
     }).returning().get()!;
     recordEvent({ subjectId, taskId: task.id, type: "task.enqueued", data: { action, priority: task.priority, reason: task.reason } }, transaction);
     if (competitor !== undefined) recordEvent({ subjectId, taskId: task.id, type: "task.blocked", data: { action, competingPullRequest: competitor } }, transaction);
@@ -398,8 +397,7 @@ export function retryTransientFailure(runId: string, error: unknown) {
   const run = getRun(runId);
   const task = run && getTask(run.taskId);
   const retry = !task ? undefined
-    : isWorkflow(task.action) ? workflowOf(task.action).retry
-      : modeOf(task.action) === "review" ? config.actions[task.action]?.retry : undefined;
+    : modeOf(task.action) === "review" ? workflowOf(task.action).retry : undefined;
   if (!run || !retry || run.stage !== "agent" || errorCode(error) !== transientInferenceCode) return false;
   interruptRun(runId, error, retry);
   return true;

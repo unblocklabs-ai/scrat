@@ -1,0 +1,24 @@
+name: store_audit
+description: Audit the live storefront on a schedule against previous clean baselines and report a plain-language Slack summary.
+enabled: false
+mode: review
+priority: 40
+on:
+  cron: "15 13 * * *"
+  window: "1d"
+  manual: false
+defaults:
+  provider: codex-lb
+  model: gpt-6.1-terra
+  thinkingLevel: high
+  tools: [read, grep, find, ls, browser]
+  retry: { initialDelaySeconds: 60, maxDelaySeconds: 3600 }
+permissions:
+  github: [read]
+  slack: [post]
+  workspace: [read]
+config:
+  channel: ""
+  browserSteps: 200
+  browserSeconds: 2700
+  rootInstructions: "One sentence for a non-technical reader: how the live store is doing today, how many pages were checked and how many problems were found. No file names, no technical terms."

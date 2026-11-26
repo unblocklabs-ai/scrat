@@ -1,0 +1,23 @@
+name: review_store_change
+description: Review live storefront pages affected by a Shopify admin edit and report findings to Slack.
+enabled: false
+mode: review
+priority: 100
+on:
+  event:
+    source: shopify
+    kind: store_change
+defaults:
+  provider: codex-lb
+  model: gpt-6.1-terra
+  thinkingLevel: high
+  tools: [read, grep, find, ls, browser]
+  retry: { initialDelaySeconds: 60, maxDelaySeconds: 3600 }
+permissions:
+  github: [read]
+  slack: [post]
+  workspace: [read]
+config:
+  channel: ""
+  browserSteps: 120
+  browserSeconds: 1800

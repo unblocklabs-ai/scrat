@@ -1,8 +1,9 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Logger } from "pino";
-import { manifestOf, manifests, matchingActions, routeFor } from "./actions.ts";
+import { matchingActions, routeFor, workflowOf, workflows } from "./actions.ts";
 import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import type { Signal } from "./manifests.ts";
+import { workflowItemLabelSettings } from "./workflows.ts";
 import { botSlug } from "./identity.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { acknowledgedTaskIds, commentKey } from "./markers.ts";
@@ -101,8 +102,21 @@ async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observatio
   };
 }
 
+function repairConfigOf(name: string | undefined) {
+  if (name === undefined) return undefined;
+  const cfg = workflowOf(name).config;
+  const rawMax = cfg.maxSelfRepairs;
+  if (rawMax !== undefined && (!Number.isInteger(rawMax) || (rawMax as number) < 0)) {
+    throw new Error(`${name}: config.maxSelfRepairs must be a non-negative integer`);
+  }
+  return {
+    exhaustedLabel: typeof cfg.exhaustedLabel === "string" ? cfg.exhaustedLabel : null,
+    maxSelfRepairs: rawMax as number | undefined,
+  };
+}
+
 async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation: ItemObservation, routes: Routes, repair: string | undefined, state: PrReviewState, count: number) {
-  const name = repair ?? routes.repairs[0], settings = name === undefined ? undefined : manifestOf(name);
+  const name = repair ?? routes.repairs[0], settings = repairConfigOf(name);
   const latestRepair = latestOf(item.id, name);
   const repairActive = latestRepair?.status === "queued" || latestRepair?.status === "running";
   if (!settings?.exhaustedLabel || !routes.repairs.length || state.kind !== "current" || repairActive) return;
@@ -112,9 +126,10 @@ async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation
 }
 
 async function reconcileFailedLabels(ctx: SyncContext, item: Item) {
-  const labelled = manifests.flatMap(({ name, trigger }) => {
-    const label = manifestOf(name).failedLabel;
-    return trigger.item === item.kind && label ? [{ name, label, selected: trigger.kind !== "label" || hasScratLabel(item) }] : [];
+  const labelled = workflows.flatMap((wf) => {
+    const resolved = workflowOf(wf.name);
+    const label = typeof resolved.config.failedLabel === "string" && resolved.config.failedLabel ? resolved.config.failedLabel : undefined;
+    return resolved.on.event?.item === item.kind && label ? [{ name: wf.name, label, selected: resolved.on.event.kind !== "label" || hasScratLabel(item) }] : [];
   });
   if (!labelled.length) return;
   await bestEffort(ctx.log, "github.label_pending", { subjectId: item.id }, () => reconcileLabels(ctx.github, item.payload.number, {
@@ -129,7 +144,7 @@ function conflictMergePreservesLabel(subjectId: string, pr: GithubPullRequest, l
   if (!previousHead || !latestRun.context?.labeling?.key) return false;
   if (pr.head.sha === previousHead) return false;
   if (itemLabelKey({ ...pr, head: { ...pr.head, sha: previousHead } }, categories) !== latestRun.context.labeling.key) return false;
-  const conflictActions = manifests.filter((manifest) => manifest.trigger.kind === "pr_conflicts").map((manifest) => manifest.name);
+  const conflictActions = workflows.filter((wf) => wf.on.event?.kind === "pr_conflicts").map((wf) => wf.name);
   if (!conflictActions.length) return false;
   const merges = new Map<string, string>();
   const rows = db.select({
@@ -152,8 +167,8 @@ function conflictMergePreservesLabel(subjectId: string, pr: GithubPullRequest, l
 function routeItemLabels(item: Item) {
   let queued = 0;
   for (const action of matchingActions(signalFor(item, item.payload.user?.login, "item_labels"))) {
-    const settings = manifestOf(action);
-    const categories = settings.enabled === false ? [] : categoriesFor(settings, item.kind);
+    const resolved = workflowOf(action);
+    const categories = resolved.enabled ? categoriesFor(workflowItemLabelSettings(resolved), item.kind) : [];
     if (!categories.length) {
       cancelPendingTasks(item.id, "Item labeling disabled for this kind", action);
       supersedeRunningReviews(item.id, "Item labeling disabled for this kind", { action });
@@ -188,7 +203,7 @@ async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObse
   });
   const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
   const repairAction = routes.repairFor(state.kind === "current" ? state.assessment.result.grade : undefined);
-  const limit = repairAction === undefined ? undefined : manifestOf(repairAction).maxSelfRepairs;
+  const limit = repairConfigOf(repairAction)?.maxSelfRepairs;
   const repair = planSelfRepair({
     repairAction, repairActions: routes.repairs, state, feedbackTask: latestOf(item.id, routes.feedback),
     conflictTask, reviewTask: latest, repairTask: latestOf(item.id, repairAction), count, limit,

@@ -86,11 +86,11 @@ export async function itemRevisions({ github, pullRequest, mainSha }: Observed) 
 }
 
 export async function runAgent({ run, task, manifest, operation, stop }: Ctx, { environment, input, sessionFile, baseSha, panel }: {
-  environment: Environment; input: Omit<Parameters<typeof buildAgentInput>[0], "run" | "task">;
+  environment: Environment; input: Omit<Parameters<typeof buildAgentInput>[0], "run" | "task" | "manifest">;
   sessionFile?: string; baseSha?: string; panel?: { baseSha: string; requireGrade: boolean; beforeReview?: (storefront: boolean) => Run };
 }) {
   const { workspace } = input;
-  const { prompt, contextDir, revisions, storefront, labelCategories } = await buildAgentInput({ run, task, ...input });
+  const { prompt, contextDir, revisions, storefront, labelCategories } = await buildAgentInput({ run, task, manifest, ...input });
   const activeRun = panel?.beforeReview ? panel.beforeReview(Boolean(storefront)) : run;
   const { browserSteps, browserSeconds } = config.storefront.limits;
   const browser = storefront && manifest.tools.includes("browser")

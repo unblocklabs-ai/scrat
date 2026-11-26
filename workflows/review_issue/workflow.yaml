@@ -1,0 +1,19 @@
+name: review_issue
+description: Triage an open GitHub issue against the repository and post an assessment with readiness labels.
+enabled: true
+mode: review
+priority: 10
+on:
+  event:
+    source: github_items
+    kind: item_changed
+    item: issue
+defaults:
+  provider: codex-lb
+  model: gpt-6.2-sol
+  thinkingLevel: high
+  tools: [read, grep, find, ls, git]
+  retry: { initialDelaySeconds: 60, maxDelaySeconds: 3600 }
+permissions:
+  github: [read, comment, label]
+  workspace: [read]

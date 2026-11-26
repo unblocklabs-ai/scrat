@@ -5,7 +5,7 @@ import type { Logger } from "pino";
 import { contextDirOf, evaluateContext, readDiffScope } from "./agent-input.ts";
 import { config } from "./config.ts";
 import { copyRedactedFile, distillCommandOutput, readHeadAndTail, stripAnsi, utf8TailSlice } from "./d1.ts";
-import type { Manifest } from "./manifests.ts";
+import type { Action } from "./manifests.ts";
 import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
@@ -25,7 +25,7 @@ import { assertCurrentImplementation } from "./tasks.ts";
 import { assertNoCommittedSecrets, checkpointMatches, checkpointWorkspace, commitWorkspace, createWorkspace, expectedBranchHead, getWorkspace, pinWorkspaceBase, removeWorkspace, stageTree, validateWorkspace, workspaceMatchesCommit } from "./workspaces.ts";
 import { botAuthor, type Ctx, type DatabaseConfig, type Environment, itemRevisions, type Observed, prepareInputsSignature, prepareWorkspace, runAgent, stopBefore } from "./run-context.ts";
 
-type Acceptance = NonNullable<Manifest["acceptance"]>;
+type Acceptance = NonNullable<Action["acceptance"]>;
 
 async function asCheckFailure<T>(fn: () => Promise<T>) {
   try { return await fn(); }
@@ -381,7 +381,7 @@ export async function validateRefreshedChange(ctx: Ctx, workspace: Workspace, ba
 async function agentStage(ctx: Ctx, observed: Observed, p: Change, acceptance: Acceptance, { diffPaths, diffBaseSha }: Awaited<ReturnType<typeof readDiffScope>>) {
   const { task, run, stop } = ctx;
   const { workspace, mainSha, environment, database } = p;
-  const evaluated = evaluateContext(run, task, observed.observation);
+  const evaluated = evaluateContext(run, task, observed.observation, ctx.manifest);
   updateRun(run.id, { context: evaluated });
   const mergedBehind = await mergeBehind(ctx, observed, p, diffPaths, acceptance);
   if (p.validated) return;

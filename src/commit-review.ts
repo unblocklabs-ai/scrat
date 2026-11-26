@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { evaluateContext } from "./agent-input.ts";
-import { manifestOf } from "./actions.ts";
+import { workflowOf } from "./actions.ts";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { changedPaths, git, shortSha } from "./git.ts";
@@ -64,10 +64,18 @@ const rootPost = async (subject: Subject, channel: string, text: string) => {
   return db.insert(slackThreads).values({ subjectId: subject.id, channel, ts }).returning().get();
 };
 
+function slackConfigOf(action: string) {
+  const cfg = workflowOf(action).config;
+  return {
+    channel: typeof cfg.channel === "string" ? cfg.channel : "",
+    startMessage: typeof cfg.startMessage === "string" ? cfg.startMessage : "",
+  };
+}
+
 async function threadRoot(subject: Subject, action: string, { sha, branch, commitCount }: CommitInput) {
   const existing = savedRoot(subject);
   if (existing) return existing;
-  const { channel = "", startMessage = "" } = manifestOf(action);
+  const { channel, startMessage } = slackConfigOf(action);
   const metadata = commitMetadata(subject);
   const values: Record<string, string> = {
     sha, short_sha: shortSha(sha), author: escapeSlack(metadata.author), title: escapeSlack(metadata.title),
@@ -90,7 +98,7 @@ export async function describeCommit({ subject, run, task, manifest, operation, 
 
 export async function postReply(subject: Subject, action: string, run: Evaluated, text?: string, blocks?: unknown[]) {
   const thread = subject.kind === "window"
-    ? savedRoot(subject) ?? await rootPost(subject, manifestOf(action).channel ?? "", escapeSlack((subject.metadata && "summary" in subject.metadata && subject.metadata.summary) || run.result.text.split("\n").find((line) => line.trim())!.trim()))
+    ? savedRoot(subject) ?? await rootPost(subject, slackConfigOf(action).channel, escapeSlack((subject.metadata && "summary" in subject.metadata && subject.metadata.summary) || run.result.text.split("\n").find((line) => line.trim())!.trim()))
     : await threadRoot(subject, action, commitInput(run.input));
   return postMessage({ channel: thread.channel, text: text ?? escapeSlack(run.result.text), blocks: text === undefined ? reviewBlocks(run.result.text) : blocks, threadTs: thread.ts });
 }

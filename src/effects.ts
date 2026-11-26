@@ -1,5 +1,4 @@
 import { eq } from "drizzle-orm";
-import { manifestOf } from "./actions.ts";
 import { postReply, reactToRoot, verdictReaction } from "./commit-review.ts";
 import { upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
@@ -9,7 +8,7 @@ import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { isBotLogin } from "./config.ts";
 import { botSlug } from "./identity.ts";
-import type { EffectName } from "./manifests.ts";
+import type { Action, EffectName } from "./manifests.ts";
 import { upsertItem } from "./items.ts";
 import { reconcileLabels } from "./labels.ts";
 import { categoriesFor, itemLabelKey } from "./item-labels.ts";
@@ -34,6 +33,7 @@ export type EffectContext = {
   subject: Subject;
   task: Task;
   run: Evaluated;
+  action: Action;
   current?: GithubContext;
   workspace?: NonNullable<ReturnType<typeof getWorkspace>>;
   commitSha?: string;
@@ -127,7 +127,7 @@ const comment = {
   receipted: (publication) => Boolean(publication.commentId),
   async apply(context) {
     const { github, task, run, references, saveReceipt } = context;
-    const marker = manifestOf(task.action).mode === "review" ? reviewMarker : taskMarker(task.id);
+    const marker = context.action.mode === "review" ? reviewMarker : taskMarker(task.id);
     const observation = observed(context);
     const existing = observation.own.findLast((candidate) => isIssueComment(candidate) && endsWithMarker(candidate.body, marker));
     const commentId = await upsertComment(github, run.context.item.number, existing, withMarker(`${run.result.text}\n\n${validationLine(run)}`, marker), references);
@@ -152,9 +152,9 @@ const prAssessment = {
 
 const itemLabels = {
   async apply(context) {
-    const { github, task, run, references } = context;
+    const { github, run, references } = context;
     const observation = observed(context);
-    const categories = categoriesFor(manifestOf(task.action), observation.kind);
+    const categories = categoriesFor(context.action, observation.kind);
     if (run.context.labeling?.key !== itemLabelKey(observation.item, categories)) throw new Error("GitHub item changed or label policy changed; enqueue a fresh labeling task");
     validateLabelSelections(run.result.labels, categories);
     await reconcileLabels(github, run.context.item.number, {

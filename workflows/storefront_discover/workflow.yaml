@@ -1,0 +1,18 @@
+name: storefront_discover
+description: Map a Shopify storefront from its sitemap with the browser tool so later reviews can pick pages and journeys.
+enabled: true
+mode: review
+priority: 20
+on:
+  event:
+    source: storefront
+    kind: site_map
+defaults:
+  provider: codex-lb
+  model: gpt-6.1-terra
+  thinkingLevel: high
+  tools: [read, grep, find, ls, browser]
+  retry: { initialDelaySeconds: 60, maxDelaySeconds: 3600 }
+permissions:
+  github: [read]
+  workspace: [read]

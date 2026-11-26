@@ -28,7 +28,7 @@ type Pages = { value: AgentResult } | { error: string };
 type Verdict = NonNullable<AgentResult["verdict"]>;
 type Storefront = NonNullable<AgentResult["storefrontReview"]>;
 
-const skill = fileURLToPath(new URL("../skills/review_storefront/SKILL.md", import.meta.url));
+const skill = fileURLToPath(new URL("../workflows/review_base_change/STOREFRONT.md", import.meta.url));
 const locks = new Map<string, Promise<unknown>>();
 const rank: Record<Verdict, number> = { clean: 0, concerns: 1, breaking: 2 };
 const shown = (path: string) => relative(process.cwd(), path);

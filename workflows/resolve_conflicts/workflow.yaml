@@ -1,0 +1,19 @@
+name: resolve_conflicts
+description: Rebase or merge a bot pull request to resolve base-branch merge conflicts and push the clean result.
+enabled: true
+mode: change
+priority: 60
+on:
+  event:
+    source: github_items
+    kind: pr_conflicts
+    item: pr
+    author: bot
+defaults:
+  provider: codex-lb
+  model: gpt-6.2-sol
+  thinkingLevel: high
+  tools: [read, grep, find, ls, bash, edit, write]
+permissions:
+  github: [read, comment, push]
+  workspace: [read, write]

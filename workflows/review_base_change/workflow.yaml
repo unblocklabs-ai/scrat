@@ -1,0 +1,23 @@
+name: review_base_change
+description: Review an update to the base branch and summarize findings in a Slack thread.
+enabled: false
+mode: review
+priority: 110
+on:
+  event:
+    source: github_commits
+    kind: commit
+    branch: main
+defaults:
+  provider: codex-lb
+  model: gpt-6.2-sol
+  thinkingLevel: high
+  tools: [read, grep, find, ls, git, read_base]
+permissions:
+  github: [read]
+  slack: [post]
+  workspace: [read]
+config:
+  channel: ""
+  maxRangeCommits: 50
+  startMessage: "Store update: {{change}} {{bot}} is checking the live site."

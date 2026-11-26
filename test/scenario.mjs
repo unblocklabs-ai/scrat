@@ -225,50 +225,75 @@ export default async function lighthouse(url, flags, settings) {
     link: (run) => `\n<${run.publication.storefrontReportUrl}|Full storefront report>`,
   };
 };
-const withTools = (text, tools) => text.replace(/^tools: .*\n/m, "").trimEnd() + `\ntools: ${tools}\n`;
+const withTools = (text, tools) => text.replace(/^  tools: .*\n/m, "").replace(/^defaults:\n/m, `defaults:\n  tools: ${tools}\n`);
 const configureManifestDirectory = (config) => {
-  const directory = resolve("deployment"), shipped = (name) => readFileSync(`app/actions/${name}.yaml`, "utf8"), field = (text, key, value) => text.replace(new RegExp(`^${key}: .*$`, "m"), `${key}: ${value}`);
-  mkdirSync(directory); config.actions.directory = directory;
+  const directory = resolve("deployment");
+  const copyWorkflow = (from, to, transformYaml) => {
+    const dest = resolve(directory, to);
+    cpSync(resolve("app/workflows", from), dest, { recursive: true });
+    const yamlPath = resolve(dest, "workflow.yaml");
+    const raw = readFileSync(yamlPath, "utf8").replace(new RegExp(`^name: ${from}$`, "m"), `name: ${to}`);
+    writeFileSync(yamlPath, transformYaml ? transformYaml(raw) : raw);
+  };
+  mkdirSync(directory);
+  config.workflows.directory = directory;
+  config.workflows.trustLocalScripts = true;
   if (scenario === "manifest_directory") {
-    mkdirSync("deployment/skills/review_triage", { recursive: true }); cpSync("app/skills/review_issue/SKILL.md", "deployment/skills/review_triage/SKILL.md");
-    writeFileSync("deployment/review_triage.yaml", field(field(shipped("review_issue"), "name", "review_triage"), "skill", "skills/review_triage/SKILL.md"));
-    config.actions.review_issue.enabled = false;
-    config.actions.review_triage = { provider: "fixture" };
-    writeFileSync("deployment/my_pr_review.yaml", field(field(shipped("review_pr"), "name", "my_pr_review"), "skill", resolve("app/skills/review_pr/SKILL.md")));
-    config.actions.my_pr_review = { provider: "fixture", reviewers: structuredClone(config.actions.review_pr.reviewers) };
-    config.actions.review_pr.enabled = false;
+    copyWorkflow("review_issue", "review_triage");
+    config.workflows.review_issue.enabled = false;
+    config.workflows.review_triage = { provider: "fixture" };
+    copyWorkflow("review_pr", "my_pr_review");
+    config.workflows.my_pr_review = { provider: "fixture", reviewers: structuredClone(config.workflows.review_pr.reviewers) };
+    config.workflows.review_pr.enabled = false;
   } else {
-    const skill = (name) => resolve("app/skills", name, "SKILL.md");
-    writeFileSync("deployment/review_issue.yaml", withTools(field(field(shipped("review_issue"), "files", "[]"), "skill", skill("review_issue")), "[read, grep]"));
-    writeFileSync("deployment/implement.yaml", withTools(field(field(shipped("implement"), "files", "[discussion, history]"), "skill", skill("implement")), "[read, grep, find, ls, edit, write]"));
+    copyWorkflow("review_issue", "review_issue", (text) => withTools(text, "[read, grep]") + "config:\n  files: []\n");
+    copyWorkflow("implement", "implement", (text) => withTools(text, "[read, grep, find, ls, edit, write]").replace(/^config:\n/m, "config:\n  files: [discussion, history]\n"));
   }
 };
 const configureSchedule = (config) => {
-  const directory = resolve("deployment"), skill = resolve("app/skills/review_issue/SKILL.md");
-  mkdirSync(directory); config.actions.directory = directory;
-  const sweep = (name, cron, window, tools) => writeFileSync(`deployment/${name}.yaml`, [
-    `name: ${name}`, `trigger: { source: schedule, kind: tick, cron: "${cron}", window: ${window} }`, "mode: review", "agent: single", "context: all",
-    `tools: [${tools}]`, "files: [history]", "publish: [issue]", `skill: ${skill}`,
-    "model: { provider: codex-lb, model: gpt-6.2-sol, thinkingLevel: high }", "priority: 20", "",
-  ].join("\n"));
+  const directory = resolve("deployment");
+  mkdirSync(directory);
+  config.workflows.directory = directory;
+  config.workflows.trustLocalScripts = true;
+  const sweep = (name, cron, window, tools) => {
+    const dir = resolve(directory, name);
+    mkdirSync(dir, { recursive: true });
+    cpSync("app/workflows/review_issue/SKILL.md", resolve(dir, "SKILL.md"));
+    writeFileSync(resolve(dir, "workflow.yaml"), [
+      `name: ${name}`, "enabled: true", "mode: review", "priority: 20",
+      "on:", `  cron: "${cron}"`, `  window: ${window}`,
+      "defaults:", "  provider: codex-lb", "  model: gpt-6.2-sol", "  thinkingLevel: high", `  tools: [${tools}]`,
+      "permissions:", "  github: [read, issue]", "  workspace: [read]", "",
+    ].join("\n"));
+    writeFileSync(resolve(dir, "run.ts"), 'export default async function (ctx) { await ctx.review.run({ files: ["history"], publish: ["issue"] }); }\n');
+  };
   sweep("error_sweep", "0 */6 * * *", "6h", "read, grep, find, ls");
-  config.actions.error_sweep = { provider: "fixture" };
-  if (scenario === "schedule_source") { sweep("slow_sweep", "30 3 * * 1", "24h", "read, grep"); config.actions.slow_sweep = { provider: "fixture" }; }
+  config.workflows.error_sweep = { provider: "fixture" };
+  if (scenario === "schedule_source") { sweep("slow_sweep", "30 3 * * 1", "24h", "read, grep"); config.workflows.slow_sweep = { provider: "fixture" }; }
 };
-const configureCommitSource = (config) => Object.assign(config.actions.review_base_change, { enabled: true, channel: "C0123456789" });
+const configureCommitSource = (config) => {
+  Object.assign(config.workflows.review_base_change, { enabled: true, config: { ...config.workflows.review_base_change.config, channel: "C0123456789" } });
+};
 const configureCommitPanel = (config) => {
-  const reviewers = structuredClone(config.actions.review_pr.reviewers);
-  writeFileSync("app/actions/review_base_change.yaml", readFileSync("app/actions/review_base_change.yaml", "utf8") + `agent: panel\nreviewers: ${JSON.stringify(reviewers)}\n`);
-  Object.assign(config.actions.review_base_change, { reviewers });
+  config.workflows.review_base_change.reviewers = structuredClone(config.workflows.review_pr.reviewers);
 };
-const configureNoStart = () => writeFileSync("app/actions/review_base_change.yaml", readFileSync("app/actions/review_base_change.yaml", "utf8").replace("start: [slack_post]\n", ""));
-const configureHistory = () => writeFileSync("app/actions/review_issue.yaml", readFileSync("app/actions/review_issue.yaml", "utf8").replace("files: [discussion, previous_assessment, cloudflare]", "files: [discussion, previous_assessment, history]"));
+const configureNoStart = (config) => {
+  config.workflows.review_base_change.config = { ...config.workflows.review_base_change.config, start: [] };
+};
+const configureHistory = (config) => {
+  config.workflows.review_issue.config = { ...config.workflows.review_issue.config, files: ["discussion", "previous_assessment", "history"] };
+};
 const configureScoped = (config) => {
   config.bindings = { scout: { secret: "${SCOUT_TOKEN}", hosts: ["api.example.test", "other.example.test"], header: "Authorization", prefix: "Bearer " } };
   const scopedTools = { scoped_http: ["[read, grep, http]", "http: { binding: scout, methods: [GET] }"], bindings_startup: ["[read, grep, http]", "http: { binding: scout }"], scoped_github_search: ["[read, grep, github_search]", ""],
     scoped_browser: ["[read, grep, browser]", "browser: { navigationHosts: [shop.example.test], resourceHosts: [cdn.example.test], binding: scout }"] }[scenario];
-  mkdirSync("deployment"); config.actions.directory = resolve("deployment");
-  writeFileSync("deployment/review_issue.yaml", withTools(readFileSync("app/actions/review_issue.yaml", "utf8").replace(/^skill: .*$/m, "skill: " + resolve("app/skills/review_issue/SKILL.md")), scopedTools[0]) + scopedTools[1] + "\n");
+  const directory = resolve("deployment");
+  mkdirSync(directory);
+  config.workflows.directory = directory;
+  config.workflows.trustLocalScripts = true;
+  const dest = resolve(directory, "review_issue");
+  cpSync(resolve("app/workflows/review_issue"), dest, { recursive: true });
+  writeFileSync(resolve(dest, "workflow.yaml"), withTools(readFileSync(resolve(dest, "workflow.yaml"), "utf8"), scopedTools[0]) + (scopedTools[1] ? scopedTools[1] + "\n" : ""));
 };
 const deletedReview = async (variant) => {
   await implement(1); await route(); f.faults.label.add(201);
@@ -519,7 +544,7 @@ const validationFeedback = async (variant) => {
     tasks.retryTask(limited.taskId); await route(); assert.ok(!marked(4), "a retried task clears the label"); assert.ok(marked(3));
     f.issues.get(3).labels = f.issues.get(3).labels.filter(({ name }) => name !== "scrat"); await route();
     assert.ok(!marked(3), "deselecting an issue clears the label"); assert.ok(marked(2));
-    config.actions.implement.enabled = false; f.addIssue(6, ["scrat"]); await route();
+    config.workflows.implement.enabled = false; f.addIssue(6, ["scrat"]); await route();
     assert.deepEqual(all(s.tasks).filter((t) => t.subjectId === "issue-6" && t.action === "implement"), [], "a disabled action gets no task to fail and label");
   }
 };
@@ -695,10 +720,10 @@ const commitReview = async (variant) => {
 };
 export const scenarios = {
   item_labels: { title: "optional item labeling backfills independently, uses configured categories, preserves grades, requeues commits and rejects invalid or stale classifications", configure: [(config) => {
-    for (const name of ["review_issue", "resolve_conflicts", "address_pr_feedback", "address_review"]) config.actions[name].enabled = false;
+    for (const name of ["review_issue", "resolve_conflicts", "address_pr_feedback", "address_review"]) config.workflows[name].enabled = false;
     script(config, "prepare", 'throw new Error("labeling must not run dependency preparation");');
   }], run: async () => {
-    const { config: live } = await f.app("config.ts"), settings = live.actions.label_items;
+    const { config: live } = await f.app("config.ts"), settings = live.workflows.label_items;
     // Let the normal grade review prepare, then make preparation fail for classification.
     const prepare = live.workspace.prepare; live.workspace.prepare = [];
     branchOff("human", "src/app.ts", "export const value = 2;\n");
@@ -736,14 +761,14 @@ export const scenarios = {
     await route(); assert.equal(queued().length, 0, "the snapshot actually reviewed is covered even if its queued fingerprint was older");
     assert.equal(f.written("comment").length, comments, "classification posts no review comment");
     const request = f.requests.findLast((entry) => entry.context.action === "label_items");
-    assert.deepEqual(request.context.label_categories, settings.pr_labels);
+    assert.deepEqual(request.context.label_categories, settings.config.pr_labels);
     assert.ok(f.requests.some((entry) => entry.context.action === "label_items" && entry.request.messages.some((message) => message.role === "tool" && JSON.stringify(message.content).includes("value = 3"))), "classification can inspect the real fork PR diff");
-    live.actions.review_pr.enabled = false;
+    live.workflows.review_pr.enabled = false;
     f.comments.set(201, [...f.comments.get(201), humanComment(201, 9901, "A comment alone", "2026-11-07T12:00:00Z")]);
     f.prs[0].labels.push({ name: "unrelated" });
     changeMain("unrelated.txt", "Base tip moved\n");
     await route(); assert.equal(queued().length, 0, "comments, labels and base-tip changes do not requeue");
-    live.actions.resolve_conflicts.enabled = true;
+    live.workflows.resolve_conflicts.enabled = true;
     const savedPrepare = live.workspace.prepare;
     live.workspace.prepare = [];
     const pr201 = all(s.items).find((item) => item.kind === "pr" && item.payload.number === 201);
@@ -751,7 +776,7 @@ export const scenarios = {
     const merged201 = await success();
     live.workspace.prepare = savedPrepare;
     f.prs[0].head.sha = merged201.publication.publishedCommitSha;
-    live.actions.resolve_conflicts.enabled = false;
+    live.workflows.resolve_conflicts.enabled = false;
     await route(); assert.equal(queued().length, 0, "pure base-branch conflict merges do not requeue classification");
     // AI-assisted conflict merges (which invoke Pi and may edit PR code) do requeue classification.
     db.update(s.runs).set({ piSessionId: "pi-session-conflict" }).where(eq(s.runs.id, merged201.id)).run();
@@ -764,9 +789,9 @@ export const scenarios = {
     assert.ok(f.requests.at(-1).request.messages.some((message) => message.role === "user" && JSON.stringify(message.content).includes("Your previous final answer was not accepted")), "invalid model choices go through format correction");
 
     // A second category and issue-only targeting use the same task and replace the defaults.
-    settings.targets = ["issues"];
+    settings.config.targets = ["issues"];
     settings.model = "gpt-6.2-sol";
-    settings.issue_labels = [
+    settings.config.issue_labels = [
       { category: "type", choices: [{ name: "type: bug", description: "A reported defect" }, { name: "type: feature", description: "New functionality" }] },
       { category: "scope", choices: [{ name: "scope: product", description: "Product work" }] },
     ];
@@ -778,20 +803,20 @@ export const scenarios = {
     ];
     const issue = await success(); assert.equal(issue.model, "gpt-6.2-sol");
     assert.deepEqual(names(f.issues.get(1)), ["scope: product", "type: bug"]);
-    assert.deepEqual(f.requests.at(-1).context.label_categories, settings.issue_labels);
+    assert.deepEqual(f.requests.at(-1).context.label_categories, settings.config.issue_labels);
     await route(); assert.equal(queued().length, 0);
     f.issues.get(1).body += " Updated scope"; await route(); assert.equal(queued().length, 1);
     settings.enabled = false; await route(); assert.equal(queued().length, 0, "disabling cancels queued classification");
 
-    settings.enabled = true; settings.targets = ["prs"]; settings.model = "gpt-6.1-terra";
-    settings.pr_labels[0].choices[0].description += " Narrowly scoped changes.";
+    settings.enabled = true; settings.config.targets = ["prs"]; settings.model = "gpt-6.1-terra";
+    settings.config.pr_labels[0].choices[0].description += " Narrowly scoped changes.";
     await route(); assert.equal(queued().length, 2, "policy changes backfill previously classified PRs");
     // Keep one PR active so the following checks have an unambiguous next task.
     f.prs[1].state = "closed"; await route(); assert.equal(queued().length, 1);
-    settings.pr_labels[0].choices[0].description += " Policy updated while queued.";
+    settings.config.pr_labels[0].choices[0].description += " Policy updated while queued.";
     assert.ok(tasks.enqueueManualTasks("label_items", ["201"])[0].taskId);
     await classify(201); await route(); assert.equal(queued().length, 0, "manual coalescing does not pin classification to the old policy");
-    assert.deepEqual(f.requests.at(-1).context.label_categories, settings.pr_labels);
+    assert.deepEqual(f.requests.at(-1).context.label_categories, settings.config.pr_labels);
     const before = names(f.prs[0]);
     tasks.enqueueManualTasks("label_items", ["201"]);
     f.onModel = (context) => { if (context.action === "label_items") { f.onModel = undefined; touchPr(201); } };
@@ -810,7 +835,7 @@ export const scenarios = {
     f.faults.label.add(201);
     const publishing = await run(); assert.ok(publishing.error); assert.equal(publishing.stage, "publishing");
     const requests = f.requests.length, labelsBeforeRetry = names(f.prs[0]);
-    settings.pr_labels[0].choices[0].description += " Changed after inference.";
+    settings.config.pr_labels[0].choices[0].description += " Changed after inference.";
     tasks.retryTask(publishing.taskId);
     const outdated = await run(); assert.match(outdated.error.message, /label policy changed/);
     assert.equal(f.requests.length, requests, "publication retry reuses the persisted classification");
@@ -818,8 +843,8 @@ export const scenarios = {
     await route(); assert.equal(queued().length, 1);
     await classify(201); await route(); assert.equal(queued().length, 0);
   } },
-  base_only_review: { title: "a re-review caused only by relevant main changes runs the primary reviewer alone with a graded assessment, while every other trigger keeps the panel and retries keep the right plan", configure: [(config) => { config.actions.resolve_conflicts.enabled = false; }], run: async () => {
-    const [primary, secondary] = f.config.actions.review_pr.reviewers.map((reviewer) => reviewer.model);
+  base_only_review: { title: "a re-review caused only by relevant main changes runs the primary reviewer alone with a graded assessment, while every other trigger keeps the panel and retries keep the right plan", configure: [(config) => { config.workflows.resolve_conflicts.enabled = false; }], run: async () => {
+    const [primary, secondary] = f.config.workflows.review_pr.reviewers.map((reviewer) => reviewer.model);
     const sessions = (since) => {
       const seen = f.requests.slice(since).filter((r) => r.context.action === "review_pr");
       const count = (predicate) => seen.filter(predicate).length;
@@ -1032,7 +1057,7 @@ export const scenarios = {
     f.rate.remaining = 100; since = f.calls.length; await route();
     assert.equal(count(since, /\/comments|\/reviews|\/pulls\/\d+$/), 0);
     assert.ok(count(since, /\/issues\?/) > 0);
-    f.rate.remaining = 5000; since = f.calls.length; await route();
+    f.rate.remaining = 5000; f.rate.reset++; since = f.calls.length; await route();
     assert.ok(count(since, /\/issues\/10\/comments/) > 0);
     {
       const original = globalThis.fetch;
@@ -1124,7 +1149,7 @@ export const scenarios = {
     assert.equal(replied.publication.publishedCommitSha, head); assert.equal(f.prs.length, 1);
     assert.equal(f.comments.get(202).length, 1); assert.equal(replied.workspaceId, implemented.workspaceId);
   } },
-  panel: { title: "Scrat-authored PR gets two independent Pi sessions and one consolidated comment", seed: seedIgnore, configure: [configurePanel, (config) => { config.actions.resolve_conflicts.enabled = false; }], run: async () => {
+  panel: { title: "Scrat-authored PR gets two independent Pi sessions and one consolidated comment", seed: seedIgnore, configure: [configurePanel, (config) => { config.workflows.resolve_conflicts.enabled = false; }], run: async () => {
     const implemented = await implement(1); f.prs[0].labels.push({ name: "human-label" }); await route();
     const review = await success();
     assert.equal(review.reviewers.length, 2);
@@ -1382,7 +1407,7 @@ export const scenarios = {
     assert.equal(retried.piSessionFile, realpathSync(copy), "Same-task retry resumes its latest claimed session file");
     assert.ok(retried.sequence > failed.sequence);
   } },
-  scope_snapshots: { title: "PR-only, renamed and deleted paths keep their identities across unrelated base changes", seed: seedScopeSnapshots, configure: [configureScopeSnapshots, (config) => { config.actions.resolve_conflicts.enabled = false; }], run: async () => {
+  scope_snapshots: { title: "PR-only, renamed and deleted paths keep their identities across unrelated base changes", seed: seedScopeSnapshots, configure: [configureScopeSnapshots, (config) => { config.workflows.resolve_conflicts.enabled = false; }], run: async () => {
     const implemented = await implement(1), workspace = f.row(s.workspaces, implemented.workspaceId);
     unlinkSync(workspace.path + "/src/deleted.ts");
     git(workspace.path, "mv", "src/renamed.ts", "src/moved.ts");
@@ -1574,7 +1599,7 @@ export const scenarios = {
     assert.doesNotMatch(notice().body, /processResponsesStream/);
     assert.equal(notice().id, commentId);
   } },
-  review_retry: { title: "a review whose reviewers all fail transiently is held until due and publishes once after recovery, while a mixed panel stays failed, and a dropped consolidation retries only the consolidation", configure: [(config) => { config.harness.agentRetry.maxRetries = 1; config.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 100 }; }], run: async () => {
+  review_retry: { title: "a review whose reviewers all fail transiently is held until due and publishes once after recovery, while a mixed panel stays failed, and a dropped consolidation retries only the consolidation", configure: [(config) => { config.harness.agentRetry.maxRetries = 1; config.workflows.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 100 }; }], run: async () => {
     await implement(2); await route(); f.transient.failures = 4; f.reset(202, "transient");
     let failed = await run(); const task = () => f.row(s.tasks, failed.taskId);
     const delay = () => (Date.parse(task().availableAt) - Date.parse(f.row(s.runs, failed.id).finishedAt)) / 1000;
@@ -1955,7 +1980,7 @@ fi
     const credential = Buffer.from(readFileSync("push-auth", "utf8").trim().split(" ").at(-1), "base64").toString("utf8").split(":").at(-1);
     assert.equal(f.tokens.get(credential)?.workflows, "write");
   } },
-  competing_implementation: { title: "a GitHub-linked PR defers implementation and closing it unmerged resumes the same task", configure: [configureValidation, (config) => { config.actions.review_pr.enabled = false; }], run: async () => {
+  competing_implementation: { title: "a GitHub-linked PR defers implementation and closing it unmerged resumes the same task", configure: [configureValidation, (config) => { config.workflows.review_pr.enabled = false; }], run: async () => {
     branchOff("human-fix", "src/app.ts", "export const value = 42;\n");
     f.onModel = () => { f.onModel = undefined; f.addPr(301, "human-fix", "human", { linkedIssues: [1] }); };
     const remote = resolve("remote.git"), before = git(remote, "for-each-ref", "refs/heads");
@@ -2037,7 +2062,7 @@ fi
     reopened.reopened = { id: "reopen-3-again", createdAt: new Date(Date.now() + 2000).toISOString() };
     await route();
     assert.equal(all(s.tasks).filter((t) => t.subjectId === "issue-3" && t.action === "implement").length, 2);
-    f.rate.remaining = savedRemaining;
+    f.rate.remaining = savedRemaining; f.rate.reset++;
     await route();
     assert.equal(all(s.tasks).filter((t) => t.subjectId === "issue-3" && t.action === "implement").length, 3,
       "A deferred settled-issue update is retried after rate limits recover");
@@ -2048,7 +2073,7 @@ fi
     const lagBlocked = all(s.tasks).find((t) => t.subjectId === "issue-5" && t.action === "implement");
     assert.equal(lagBlocked?.status, "blocked", "A PR merged in the current opening blocks first selection through closure lag");
   } },
-  ambiguous_pr: { title: "partial publication resumes safely after a lost PR response or a competing PR after push", configure: [configureValidation, (config) => { config.actions.review_pr.enabled = false; }], seed: () => {
+  ambiguous_pr: { title: "partial publication resumes safely after a lost PR response or a competing PR after push", configure: [configureValidation, (config) => { config.workflows.review_pr.enabled = false; }], seed: () => {
     mkdirSync("seed/.github/workflows", { recursive: true }); writeFileSync("seed/.github/workflows/ci.yml", "name: old\n");
   }, run: async () => {
     const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
@@ -3076,8 +3101,9 @@ fi
     assert.ok(capped.includes("## ") && !capped.includes("report 10"), "a report over the cap crowds out older ones");
     config.context.historyBytes = 2048; await review(1);
     assert.ok(Buffer.byteLength(seen.at(-1)) <= 2048 && Buffer.byteLength(seen.at(-1)) > 1500);
-    const { buildAgentInput } = await f.app("agent-input.ts"), sha = "a".repeat(40), evaluated = { revision: "r", baseBranch: "main", headSha: undefined, item: { number: 1, title: "t", body: "", url: "u" }, comments: [], commentRevisions: [] };
-    const build = async (paths) => JSON.parse((await buildAgentInput({ run: huge, task: f.row(s.tasks, huge.taskId), evaluated, diffBaseSha: sha, diffPaths: paths, mainSha: sha, headSha: sha, baseRef: "main", mergeInProgress: false, workspace: { path: "w", branch: null } })).prompt);
+    const { buildAgentInput } = await f.app("agent-input.ts"), { workflowOf } = await f.app("actions.ts"), { workflowToAction } = await f.app("workflows.ts"), manifest = workflowToAction(workflowOf("review_issue"), { publish: ["comment", "labels"] });
+    const sha = "a".repeat(40), evaluated = { revision: "r", baseBranch: "main", headSha: undefined, item: { number: 1, title: "t", body: "", url: "u" }, comments: [], commentRevisions: [] };
+    const build = async (paths) => JSON.parse((await buildAgentInput({ run: huge, task: f.row(s.tasks, huge.taskId), manifest, evaluated, diffBaseSha: sha, diffPaths: paths, mainSha: sha, headSha: sha, baseRef: "main", mergeInProgress: false, workspace: { path: "w", branch: null } })).prompt);
     assert.deepEqual((await build(["a", "b", "c"])).diffPaths, ["a", "b", "c"]);
     config.context.inlinePaths = 2;
     const offloaded = await build(["a", "b", "c"]);
@@ -3421,16 +3447,16 @@ fi
       const script = `const { config } = await import(${JSON.stringify(resolve("app/src/config.ts"))}); ${code}`;
       return execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     };
-    const defaults = { ...JSON.parse(readFileSync("app/scrat.config.json", "utf8")), actions: JSON.parse(probe({}, "console.log(JSON.stringify(config.actions));")) };
+    const defaults = { ...JSON.parse(readFileSync("app/scrat.config.json", "utf8")), workflows: JSON.parse(probe({}, "console.log(JSON.stringify(config.workflows));")) };
     const rejected = (overrides, message) => assert.throws(() => buildConfig(defaults, overrides), message);
     const merged = buildConfig(defaults, {
-      harness: { maxConcurrency: 8 }, github: { auth: "pat" }, actions: { implement: { model: "other-model" } },
+      harness: { maxConcurrency: 8 }, github: { auth: "pat" }, workflows: { implement: { model: "other-model" } },
       workspace: { environment: { EXTRA: "1" }, heavyCommands: ["^only$"], database: null },
     });
     assert.equal(merged.harness.maxConcurrency, 8); assert.equal(merged.harness.logLevel, defaults.harness.logLevel);
     assert.equal(merged.github.auth, "pat"); assert.equal(defaults.github.auth, "app"); assert.equal(merged.github.botLogin, defaults.github.botLogin);
-    assert.equal(merged.actions.implement.model, "other-model");
-    assert.deepEqual({ ...merged.actions.implement, model: defaults.actions.implement.model }, defaults.actions.implement);
+    assert.equal(merged.workflows.implement.model, "other-model");
+    assert.deepEqual({ ...merged.workflows.implement, model: defaults.workflows.implement.model }, defaults.workflows.implement);
     assert.deepEqual(merged.workspace.environment, { ...defaults.workspace.environment, EXTRA: "1" });
     assert.deepEqual(merged.workspace.heavyCommands, ["^only$"]); assert.equal(merged.workspace.database, null);
     assert.deepEqual(merged.workspace.validate, defaults.workspace.validate);
@@ -3454,24 +3480,24 @@ fi
       issue_labels: [{ category: "type", choices: [{ name: "bug", description: "A reported defect" }] }],
       pr_labels: [{ category: "risk", choices: [{ name: "custom: low", description: "Our deployment's low-risk rule" }] }],
     };
-    const overrides = { actions: { ...f.config.actions, label_items: labels } };
-    const showLabels = "console.log(JSON.stringify(config.actions.label_items));";
+    const overrides = { actions: { label_items: labels }, workflows: f.config.workflows };
+    const showLabels = "console.log(JSON.stringify(config.workflows.label_items));";
     const beforeUpgrade = JSON.parse(probe(overrides, showLabels));
-    const manifestPath = resolve("app/actions/label_items.yaml"), shipped = readFileSync(manifestPath, "utf8");
+    const manifestPath = resolve("app/workflows/label_items/workflow.yaml"), shipped = readFileSync(manifestPath, "utf8");
     writeFileSync(manifestPath, shipped.replace("gpt-6.1-terra", "deepseek/deepseek-v4.1-flash").replace("category: risk", "category: upgraded-risk").replace("risk: low", "upgraded: low"));
     assert.deepEqual(JSON.parse(probe(overrides, showLabels)), beforeUpgrade, "a new shipped default cannot overwrite deployment label settings");
-    assert.deepEqual(beforeUpgrade.pr_labels, labels.pr_labels, "category arrays replace the shipped choices in full");
-    assert.deepEqual(beforeUpgrade.issue_labels, labels.issue_labels);
+    assert.deepEqual(beforeUpgrade.config.pr_labels, labels.pr_labels, "category arrays replace the shipped choices in full");
+    assert.deepEqual(beforeUpgrade.config.issue_labels, labels.issue_labels);
     assert.equal(beforeUpgrade.model, "gpt-6.2-sol");
     assert.deepEqual(JSON.parse(readFileSync(local, "utf8")), overrides, "loading does not rewrite local overrides");
     writeFileSync(manifestPath, shipped);
     const validate = `const { validateStaticConfig } = await import(${JSON.stringify(resolve("app/src/startup.ts"))}); await validateStaticConfig();`;
     probe(overrides, validate);
-    const invalidLabels = (changes, message) => assert.throws(() => probe({ actions: { ...f.config.actions, label_items: { ...labels, ...changes } } }, validate), (error) => message.test(error.stderr));
+    const invalidLabels = (changes, message) => assert.throws(() => probe({ actions: { label_items: { ...labels, ...changes } }, workflows: f.config.workflows }, validate), (error) => message.test(error.stderr));
     invalidLabels({ issue_labels: [] }, /issues target requires non-empty issue_labels/);
     invalidLabels({ pr_labels: [{ category: "risk", choices: [{ name: "Low", description: "low" }, { name: "low", description: "same" }] }] }, /label names must be unique/);
     invalidLabels({ issue_labels: [...labels.issue_labels, { category: "TYPE", choices: [{ name: "feature", description: "New behavior" }] }] }, /category names must be unique/);
-    invalidLabels({ pr_labels: [{ category: "risk", choices: [] }] }, /Invalid Scrat configuration/);
+    invalidLabels({ pr_labels: [{ category: "risk", choices: [] }] }, /Invalid Scrat configuration|minItems|must NOT have fewer than 1 items/);
   } },
   pat_auth: { title: "a personal access token authenticates every GitHub call and git credential without the App, is redacted, and must belong to botLogin case-insensitively", configure: [configurePat], run: async () => {
     const { GitHubRepository } = await f.app("github.ts"), { containsSecret } = await f.app("secrets.ts"), { redactSecrets } = await f.app("errors.ts");
@@ -3585,19 +3611,17 @@ fi
     schema((c) => { c.harness = 8; }, /harness: must be object/);
     schema((c) => { c.harness = null; }, /harness: must be object/);
     schema((c) => { c.harness.toString = 1; }, /harness\.toString: unknown setting/);
-    schema((c) => { c.actions.address_review.exhaustedLabel = 5; }, /actions\.address_review\.exhaustedLabel: must be string/);
-    schema((c) => { c.actions.implement.failedLabel = 5; }, /actions\.implement\.failedLabel: must be string/);
     schema((c) => { c.harness.maxConcurrentValidations = 0; }, /^Error: Invalid Scrat configuration:\n- harness\.maxConcurrentValidations: must be >= 1$/);
     schema((c) => { c.harness.corrections.incomplete = -1; }, /harness\.corrections\.incomplete: must be >= 0/);
     schema((c) => { c.harness.retryJitter = 2; }, /harness\.retryJitter: must be <= 1/);
-    schema((c) => { c.actions.implement.thinkingLevel = "turbo"; }, /actions\.implement\.thinkingLevel: must be equal to one of the allowed values/);
+    schema((c) => { c.workflows.implement.thinkingLevel = "turbo"; }, /workflows\.implement\.thinkingLevel: must be equal to one of the allowed values/);
     schema((c) => { c.github.auth = "token"; }, /github\.auth: must be equal to one of the allowed values/);
     schema((c) => { c.workspace.commandMemoryMax = "lots"; }, /workspace\.commandMemoryMax: must match pattern/);
     schema((c) => { c.workspace.packageStore = "relative/store"; }, /workspace\.packageStore: must match pattern/);
     schema((c) => { delete c.tools; }, /tools: required/);
-    schema((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 0, maxDelaySeconds: 30 }; }, /actions\.review_pr\.retry\.initialDelaySeconds: must be >= 1/);
-    for (const change of [(c) => { c.workspace.commandMemoryMax = null; }, (c) => { c.workspace.packageStore = null; }, (c) => { c.actions.review_pr.retry = null; },
-      (c) => { c.actions.address_review.exhaustedLabel = null; }, (c) => { c.actions.address_review.exhaustedLabel = ""; }, (c) => { c.actions.implement.failedLabel = null; }, (c) => { c.workspace.environment = { ANY_NEW_KEY: "1" }; }]) {
+    schema((c) => { c.workflows.review_pr.retry = { initialDelaySeconds: 0, maxDelaySeconds: 30 }; }, /workflows\.review_pr\.retry\.initialDelaySeconds: must be >= 1/);
+    for (const change of [(c) => { c.workspace.commandMemoryMax = null; }, (c) => { c.workspace.packageStore = null; }, (c) => { c.workflows.review_pr.retry = null; },
+      (c) => { c.workflows.address_review.config = { exhaustedLabel: null }; }, (c) => { c.workflows.address_review.config = { exhaustedLabel: "" }; }, (c) => { c.workflows.implement.config = { failedLabel: null }; }, (c) => { c.workspace.environment = { ANY_NEW_KEY: "1" }; }]) {
       const copy = structuredClone(merged); change(copy); validateConfig(copy);
     }
 
@@ -3608,15 +3632,15 @@ fi
     await startup((c) => { c.workspace.heavyCommands = ["^(unclosed"]; }, /heavyCommands\[0\] is not a valid regular expression/);
     await startup((c) => { c.relevance.ignoredPaths = ["^assets/", "^(unclosed"]; }, /relevance\.ignoredPaths\[1\] is not a valid regular expression/);
     await startup((c) => { c.workspace.validate = []; }, /workspace\.validate is empty but address_pr_feedback, address_review, implement, resolve_conflicts publish commits.*\[\["true"\]\]/);
-    await validateStaticConfig(variant((c) => { c.workspace.validate = []; for (const name of ["implement", "address_review", "address_pr_feedback", "resolve_conflicts"]) c.actions[name].enabled = false; }));
-    schema((c) => { c.actions.implement.agent = "panel"; }, /actions\.implement\.agent: unknown setting/);
-    await startup((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 30 }; }, /review_pr: retry\.maxDelaySeconds must be at least retry\.initialDelaySeconds/);
-    await validateStaticConfig(variant((c) => { c.actions.review_pr.retry = { initialDelaySeconds: 5, maxDelaySeconds: 5 }; }));
-    await startup((c) => { c.actions.implement.retry = { initialDelaySeconds: 1, maxDelaySeconds: 2 }; }, /implement: retry requires mode review/);
-    await startup((c) => { c.actions.review_pr.failedLabel = "Scrat failed"; }, /review_pr: failedLabel requires mode change/);
-    await startup((c) => { c.actions.review_issue.model = "missing-model"; }, /review_issue: no Pi model fixture\/missing-model/);
-    await startup((c) => { c.actions.review_pr.reviewers[0].provider = "nowhere"; }, /review_pr reviewer 1: no Pi model nowhere/);
-    await startup((c) => { c.actions.resolve_conflicts.skill = "skills/missing/SKILL.md"; }, /resolve_conflicts: skill file not found/);
+    await validateStaticConfig(variant((c) => { c.workspace.validate = []; for (const name of ["implement", "address_review", "address_pr_feedback", "resolve_conflicts"]) c.workflows[name].enabled = false; }));
+    schema((c) => { c.workflows.implement.agent = "panel"; }, /workflows\.implement\.agent: unknown setting/);
+    await startup((c) => { c.workflows.review_pr.retry = { initialDelaySeconds: 60, maxDelaySeconds: 30 }; }, /review_pr: retry\.maxDelaySeconds must be at least retry\.initialDelaySeconds/);
+    await validateStaticConfig(variant((c) => { c.workflows.review_pr.retry = { initialDelaySeconds: 5, maxDelaySeconds: 5 }; }));
+    await startup((c) => { c.workflows.implement.retry = { initialDelaySeconds: 1, maxDelaySeconds: 2 }; }, /implement: retry requires mode review/);
+    await startup((c) => { c.workflows.review_pr.config = { failedLabel: "Scrat failed" }; }, /review_pr: failedLabel requires mode change/);
+    await startup((c) => { c.workflows.review_issue.model = "missing-model"; }, /review_issue: no Pi model fixture\/missing-model/);
+    await startup((c) => { c.workflows.review_pr.reviewers[0].provider = "nowhere"; }, /review_pr reviewer 1: no Pi model nowhere/);
+    await startup((c) => { c.workflows.resolve_conflicts.skill = "missing/SKILL.md"; }, /resolve_conflicts: skill file not found/);
 
     await startup((c) => { c.github.botLogin = " "; }, /github\.botLogin must not be empty/);
     await startup((c) => { c.github.botName = " !! "; }, /github\.botName must contain a letter or digit/);
@@ -3634,7 +3658,7 @@ fi
     for (const pages of [["home"], ["//other.example.net/"]]) schema((c) => { c.storefront.lighthouse.pages = pages; }, /storefront\.lighthouse\.pages\.0: must match pattern/);
     schema((c) => { c.storefront.lighthouse.timeoutSeconds = 0; }, /storefront\.lighthouse\.timeoutSeconds: must be >= 1/);
     if (!await import("lighthouse").then(() => true, () => false)) {
-      await startup((c) => { c.storefront.enabled = true; Object.assign(c.actions.review_base_change, { enabled: true, channel: "C0123456789" }); }, /review_base_change: storefront: Storefront Lighthouse runs need the optional lighthouse package, which is not installed/);
+      await startup((c) => { c.storefront.enabled = true; Object.assign(c.workflows.review_base_change, { enabled: true, config: { ...c.workflows.review_base_change.config, channel: "C0123456789" } }); }, /review_base_change: storefront: Storefront Lighthouse runs need the optional lighthouse package, which is not installed/);
     }
     const key = process.env.GITHUB_APP_PRIVATE_KEY;
     delete process.env.GITHUB_APP_PRIVATE_KEY;
@@ -3646,17 +3670,17 @@ fi
     const token = ["xoxb", "1111", "2222", "fixturetoken"].join("-");
     const status = (change) => variant((c) => { c.slack = { enabled: true, channel: "C0123456789" }; change(c.slack); });
     const enabled = (change = () => {}) => variant((c) => {
-      Object.assign(c.actions.review_base_change, { enabled: true, channel: "C0123456789", skill: "skills/review_issue/SKILL.md" }); change(c.actions.review_base_change);
+      Object.assign(c.workflows.review_base_change, { enabled: true, config: { ...c.workflows.review_base_change.config, channel: "C0123456789" } }); change(c.workflows.review_base_change);
     });
     delete process.env.SLACK_BOT_TOKEN;
     await assert.rejects(validateStaticConfig(status(() => {})), /SLACK_BOT_TOKEN is not set/);
     await assert.rejects(validateStaticConfig(enabled()), /review_base_change: SLACK_BOT_TOKEN is not set/);
     process.env.SLACK_BOT_TOKEN = token;
     await assert.rejects(validateStaticConfig(status((slack) => { slack.channel = " "; })), /slack\.channel must not be empty/);
-    await assert.rejects(validateStaticConfig(enabled((a) => { a.channel = " "; })), /review_base_change: channel must not be empty/);
+    await assert.rejects(validateStaticConfig(enabled((a) => { a.config.channel = " "; })), /review_base_change: channel must not be empty/);
     await assert.rejects(validateStaticConfig(enabled((a) => { a.branch = " "; })), /branch must not be empty/);
-    await assert.rejects(validateStaticConfig(enabled((a) => { a.startMessage = "{{bot}} saw {{commit}}"; })), /unknown startMessage variable \{\{commit\}\}/);
-    await startup((c) => { c.actions.review_pr.reviewers.pop(); }, /review_pr: agent: panel requires exactly two reviewers/);
+    await assert.rejects(validateStaticConfig(enabled((a) => { a.config.startMessage = "{{bot}} saw {{commit}}"; })), /unknown startMessage variable \{\{commit\}\}/);
+    await startup((c) => { c.workflows.review_pr.reviewers.pop(); }, /review_pr: reviewers must specify exactly two reviewers/);
     f.slack.fail = "invalid_auth";
     await assert.rejects(validateStaticConfig(status(() => {})), /slack: auth\.test failed: .*invalid_auth/);
     await assert.rejects(validateStaticConfig(enabled()), /review_base_change: Slack auth\.test failed: .*invalid_auth/);
@@ -3693,7 +3717,7 @@ fi
     const token = ["xoxb", "1111", "2222", "fixturetoken"].join("-");
     const variant = (change) => { const copy = structuredClone(f.config); change(copy); return copy; };
     const enabled = (change = () => {}) => variant((c) => {
-      Object.assign(c.actions.review_base_change, { enabled: true, channel: "C0123456789", skill: "skills/review_issue/SKILL.md" }); change(c.actions.review_base_change);
+      Object.assign(c.workflows.review_base_change, { enabled: true, config: { ...c.workflows.review_base_change.config, channel: "C0123456789" } }); change(c.workflows.review_base_change);
     });
     await validateStaticConfig(f.config);
     assert.equal(f.slack.calls.length, 0);
@@ -3705,17 +3729,17 @@ fi
     assert.deepEqual(f.slack.calls.map((call) => call.method), ["auth.test"]);
     delete process.env.SLACK_BOT_TOKEN;
     const calls = f.slack.calls.length;
-    await validateStaticConfig(variant((c) => { c.actions.review_base_change.channel = ""; c.actions.review_base_change.startMessage = "{{nope}}"; }));
+    await validateStaticConfig(variant((c) => { c.workflows.review_base_change.config = { channel: "", startMessage: "{{nope}}" }; }));
     assert.equal(f.slack.calls.length, calls);
-    const { config: live, isActionEnabled } = await f.app("config.ts");
-    assert.equal(isActionEnabled("review_base_change"), false);
-    assert.equal(isActionEnabled("review_issue"), true);
+    const { config: live, isWorkflowEnabled } = await f.app("config.ts");
+    assert.equal(isWorkflowEnabled("review_base_change"), false);
+    assert.equal(isWorkflowEnabled("review_issue"), true);
     f.addIssue(1); f.enqueue(1, "review_base_change"); f.addIssue(2); f.enqueue(2);
     assert.equal(tasks.claimTask().task.subjectId, "issue-2");
     const rejected = all(s.events).filter((e) => e.type === "task.rejected");
-    assert.equal(rejected.length, 1); assert.equal(rejected[0].data.reason, "Unknown action: review_base_change");
+    assert.equal(rejected.length, 1); assert.equal(rejected[0].data.reason, "Workflow review_base_change is disabled");
     assert.equal(f.row(s.tasks, rejected[0].taskId).status, "failed");
-    live.actions.review_base_change.enabled = true;
+    live.workflows.review_base_change.enabled = true;
     f.addIssue(3); f.enqueue(3, "review_base_change");
     assert.equal(tasks.claimTask().task.action, "review_base_change");
     assert.equal(f.slack.calls.length, calls);
@@ -3851,14 +3875,14 @@ fi
     assert.ok(f.calls.length > 0); assert.ok(!f.calls.some((call) => /\/(issues|pulls)\/0(\/|\?|$)/.test(call.path)), JSON.stringify(f.calls));
     assert.equal(JSON.stringify(all(s.subjects).filter((row) => row.kind === "commit")), before);
     assert.equal(reviews().length, 4); assert.equal(all(s.tasks).length, 4);
-    live.actions.review_base_change.enabled = false;
+    live.workflows.review_base_change.enabled = false;
     assert.equal(await pollCommits(), 0); assert.deepEqual(cursor(), []);
     changeMain("src/five.ts", "export const five = 1;\n");
     assert.equal(await pollCommits(), 0); assert.deepEqual(cursor(), []); assert.equal(reviews().length, 4);
-    live.actions.review_base_change.enabled = true;
+    live.workflows.review_base_change.enabled = true;
     assert.equal(await pollCommits(), 0); assert.deepEqual(cursor(), [tip()]); assert.equal(reviews().length, 4);
     assert.equal(db.select().from(s.sourceCursors).where(eq(s.sourceCursors.branch, "main")).all().length, 1);
-    live.actions.review_base_change.maxRangeCommits = 1; const beforeCap = tip();
+    live.workflows.review_base_change.config.maxRangeCommits = 1; const beforeCap = tip();
     changeMain("src/six.ts", "export const six = 1;\n"); changeMain("src/seven.ts", "export const seven = 1;\n");
     assert.equal(await pollCommits(), 1); assert.equal(reviews().length, 5);
     const capped = tip();
@@ -3871,11 +3895,12 @@ fi
   } },
   commits_source_modes: { title: "the commit source enqueues one task per matching commit oldest first with a cap, applies author and message filters in both modes, polls a second branch with its own cursor and rejects only identical trigger filters", configure: [configureCommitSource], run: async () => {
     const { pollCommits } = await f.app("commit-source.ts");
-    const { manifests } = await f.app("actions.ts");
-    const { findTriggerConflicts, readManifests } = await f.app("manifests.ts");
+    const { workflows } = await f.app("actions.ts");
+    const { findTriggerConflicts } = await f.app("manifests.ts");
+    const { readWorkflows } = await f.app("workflows.ts");
     const { config: live } = await f.app("config.ts");
     const seed = resolve("seed"), remote = resolve("remote.git");
-    const base = manifests.find((m) => m.name === "review_base_change"), trigger = base.trigger;
+    const base = workflows.find((w) => w.name === "review_base_change"), trigger = base.on.event;
     const authored = (name, file, message, branch = "main") => {
       writeFileSync(resolve(seed, "src", file), "export const " + file.replace(".ts", "") + " = 1;\n"); git(seed, "add", ".");
       git(seed, "-c", "user.name=" + name, "-c", "user.email=" + name + "@users.noreply.github.com", "commit", "-m", message); git(seed, "push", remote, branch);
@@ -3895,13 +3920,13 @@ fi
     assert.deepEqual(all(s.subjects).filter((row) => row.kind === "commit").map((row) => row.key), ["main:" + c1, "main:" + c2, "main:" + c3]);
     assert.deepEqual(f.row(s.subjects, reviews()[1].subjectId).metadata, { title: "Add a2", author: "carol", url: `https://github.com/fixture/project/commit/${c2}` });
     assert.equal(cursor(), c3); assert.equal(await pollCommits(), 0); assert.equal(reviews().length, 3);
-    live.actions.review_base_change.maxRangeCommits = 2;
+    live.workflows.review_base_change.config.maxRangeCommits = 2;
     const [c4, c5, c6] = ["b1", "b2", "b3"].map((name) => authored("carol", name + ".ts", "Add " + name));
     assert.equal(await pollCommits(), 2);
     assert.deepEqual(reviews().slice(3).map((t) => t.input), [input(c4, c3, 1, false), input(c5, c4, 1, false)]);
     assert.equal(cursor(), c5); assert.equal(await pollCommits(), 1); assert.deepEqual(reviews().slice(5).map((t) => t.input), [input(c6, c5, 1, false)]);
     assert.equal(cursor(), c6); assert.equal(await pollCommits(), 0); assert.equal(reviews().length, 6);
-    live.actions.review_base_change.maxRangeCommits = 50;
+    live.workflows.review_base_change.config.maxRangeCommits = 50;
     trigger.author = "alice";
     const [, d2, , d4] = [authored("bob", "d1.ts", "Bob one"), authored("Alice", "d2.ts", "Alice one"), authored("bob", "d3.ts", "Bob two"), authored("alice", "d4.ts", "Alice two")];
     assert.equal(await pollCommits(), 2); assert.deepEqual(shas().slice(6), [d2, d4]);
@@ -3933,8 +3958,8 @@ fi
     delete trigger.message;
     const count = reviews().length;
     git(seed, "switch", "-c", "develop"); const dev0 = authored("dave", "dev0.ts", "Develop start", "develop");
-    manifests.push({ ...base, name: "review_develop", file: "actions/review_develop.yaml", trigger: { ...trigger, branch: "develop", granularity: "commit" } });
-    live.actions.review_develop = { ...live.actions.review_base_change, branch: "develop" };
+    workflows.push({ ...base, name: "review_develop", file: "workflows/review_develop/workflow.yaml", on: { ...base.on, event: { ...trigger, branch: "develop", granularity: "commit" } } });
+    live.workflows.review_develop = { ...live.workflows.review_base_change, branch: "develop" };
     assert.equal(await pollCommits(), 0); assert.equal(cursor("develop"), dev0);
     const dev1 = authored("dave", "dev1.ts", "Develop one", "develop"), dev2 = authored("dave", "dev2.ts", "Develop two", "develop");
     assert.equal(await pollCommits(), 2);
@@ -3943,33 +3968,33 @@ fi
     assert.equal(reviews().length, count); assert.equal(all(s.sourceCursors).length, 2);
     assert.equal(cursor("main"), k3); assert.equal(cursor("develop"), dev2);
     assert.equal(await pollCommits(), 0);
-    const identical = [{ ...base, file: "one.yaml" }, { ...base, name: "other", file: "two.yaml" }];
+    const identical = [{ file: "one.yaml", trigger: base.on.event }, { file: "two.yaml", trigger: base.on.event }];
     assert.match(findTriggerConflicts(identical, () => true)[0], /one\.yaml and two\.yaml both match \{source: github_commits, kind: commit, branch: main\}/);
-    const pair = (first, second) => findTriggerConflicts([{ ...base, file: "one.yaml", trigger: { ...base.trigger, ...first } }, { ...base, name: "other", file: "two.yaml", trigger: { ...base.trigger, ...second } }], () => true);
+    const pair = (first, second) => findTriggerConflicts([{ file: "one.yaml", trigger: { ...base.on.event, ...first } }, { file: "two.yaml", trigger: { ...base.on.event, ...second } }], () => true);
     assert.deepEqual(pair({ author: "alice" }, {}), []);
     assert.deepEqual(pair({ author: "alice" }, { author: "bob" }), []);
     assert.deepEqual(pair({ message: "a" }, { message: "b" }), []);
     assert.equal(pair({ author: "alice", message: "a" }, { author: "alice", message: "a" }).length, 1);
     assert.deepEqual(findTriggerConflicts(identical, (m) => m.file === "one.yaml"), []);
     let loaded = 0;
-    const mutate = (file, change, message) => {
+    const mutate = (name, change, message) => {
       const root = resolve("modes-" + ++loaded); mkdirSync(root);
-      cpSync(resolve("app/actions"), resolve(root, "actions"), { recursive: true });
-      const path = resolve(root, "actions", file + ".yaml");
+      cpSync(resolve("app/workflows"), resolve(root, "workflows"), { recursive: true });
+      const path = resolve(root, "workflows", name, "workflow.yaml");
       writeFileSync(path, change(readFileSync(path, "utf8")));
-      if (message) assert.throws(() => readManifests(root), message); else readManifests(root);
+      if (message) assert.throws(() => readWorkflows(root), message); else readWorkflows(root);
     };
-    const extend = (fields) => (text) => text.replace(/^trigger: \{(.*)\}$/m, "trigger: {$1, " + fields + "}");
-    mutate("review_base_change", extend("granularity: commit, author: alice, message: ship it"));
-    mutate("review_base_change", extend("author: bot"));
-    mutate("address_review", (text) => text.replace(/^maxSelfRepairs: .*\n/m, ""), /kind low_grade requires maxSelfRepairs/);
-    mutate("review_base_change", (text) => text.replace(/^maxRangeCommits: .*\n/m, ""), /source github_commits requires maxRangeCommits/);
-    mutate("review_base_change", extend("granularity: sometimes"), /granularity/);
-    mutate("review_base_change", extend('message: ""'), /message/);
-    mutate("review_issue", extend("message: x"), /trigger\.message and trigger\.granularity are only allowed with source github_commits/);
-    mutate("review_issue", extend("granularity: commit"), /trigger\.message and trigger\.granularity are only allowed/);
-    mutate("review_issue", extend("author: alice"), /trigger\.author must be "bot" for github_items/);
-    mutate("review_issue", extend("author: bot"));
+    const extend = (lines) => (text) => text.replace(/^  event:\n/m, `  event:\n${lines.map((line) => `    ${line}`).join("\n")}\n`);
+    mutate("review_base_change", extend(["granularity: commit", "author: alice", "message: ship it"]));
+    mutate("review_base_change", extend(["author: bot"]));
+    mutate("address_review", (text) => text.replace(/^  maxSelfRepairs: .*\n/m, ""), /kind low_grade requires config\.maxSelfRepairs/);
+    mutate("review_base_change", (text) => text.replace(/^  maxRangeCommits: .*\n/m, ""), /source github_commits requires config\.maxRangeCommits/);
+    mutate("review_base_change", extend(["granularity: sometimes"]), /granularity/);
+    mutate("review_base_change", extend(['message: ""']), /message/);
+    mutate("review_issue", extend(["message: x"]), /on\.event\.message and on\.event\.granularity are only allowed with source github_commits/);
+    mutate("review_issue", extend(["granularity: commit"]), /on\.event\.message and on\.event\.granularity are only allowed/);
+    mutate("review_issue", extend(["author: alice"]), /on\.event\.author must be "bot" for github_items/);
+    mutate("review_issue", extend(["author: bot"]));
   } },
   commit_review_e2e: { title: "a push to the base branch posts one templated root, runs one diff-only review, replies once in the thread and reacts on the root with the verdict, without any GitHub write", configure: [configureCommitSource], run: () => commitReview("e2e") },
   commit_review_no_start: { title: "a commit manifest without a start slot posts no thread root before the agent and the reply creates the root", configure: [configureCommitSource, configureNoStart], run: () => commitReview("no_start") },
@@ -4000,7 +4025,7 @@ fi
     assert.deepEqual(session.context.diffPaths, ["README.md", "assets/app.css", "sections/hero.liquid"]);
     assert.equal(session.request.model, "gpt-6.1-terra"); assert.notEqual(f.requests.find((request) => !request.context.storefront).request.model, "gpt-6.1-terra");
     assert.deepEqual([session.context.files.siteMap, session.context.files.baselines], [undefined, undefined], "the first run has no site map and no baselines");
-    assert.deepEqual(session.request.tools.map((tool) => tool.function.name), ["read", "grep", "find", "ls", "git", "browser"]); assert.match(session.text, /# Live storefront review/);
+    assert.deepEqual(session.request.tools.map((tool) => tool.function.name).filter((name) => name !== "codemode"), ["read", "grep", "find", "ls", "git", "browser"]); assert.match(session.text, /# Live storefront review/);
     assert.match(browserTool.function.description, /public https sites.*At most 80 actions and 1200 seconds per session/s);
     assert.ok(f.requests.filter((request) => !request.context.storefront).every((request) => !request.request.tools.some((tool) => tool.function.name === "browser")), "the code review itself gets no browser");
     const { piSessionId, piSessionFile } = f.row(s.runs, r1.id), storefrontSession = r1.result.storefrontReview.session;
@@ -4197,35 +4222,32 @@ fi
     assert.equal(replies().at(-2), codeText); assert.match(replies().at(-1), /^\*Storefront\* on \w{7}: Nothing visible changed\./);
     assert.ok(all(s.events).some((event) => event.type === "run.resumed" && event.runId === resumed.id && event.data.fromRunId === cut.id && event.data.reason === "drain"));
   } },
-  manifests: { title: "every action is loaded from a validated manifest, malformed manifests are rejected with file and path, and local overrides reach the runtime", run: async () => {
-    const { readManifests } = await f.app("manifests.ts");
-    const { config: live, isActionEnabled } = await f.app("config.ts");
+  manifests: { title: "every workflow is loaded from a validated bundle, malformed workflows are rejected with file and path, and local overrides reach the runtime", run: async () => {
+    const { readWorkflows } = await f.app("workflows.ts");
+    const { config: live, isWorkflowEnabled } = await f.app("config.ts");
     let count = 0;
-    const broken = (file, change, message) => {
+    const broken = (name, change, message) => {
       const root = resolve("broken-" + ++count); mkdirSync(root);
-      cpSync(resolve("app/actions"), resolve(root, "actions"), { recursive: true });
-      const path = resolve(root, "actions", file + ".yaml");
+      cpSync(resolve("app/workflows"), resolve(root, "workflows"), { recursive: true });
+      const path = resolve(root, "workflows", name, "workflow.yaml");
       writeFileSync(path, change(readFileSync(path, "utf8")));
-      assert.throws(() => readManifests(root), message);
+      assert.throws(() => readWorkflows(root), message);
     };
-    broken("review_pr", (text) => text + "bogus: 1\n", /actions\/review_pr\.yaml: \/bogus: unknown key/);
-    broken("review_pr", (text) => text.replace("[pr_assessment]", "[teleport]"), /actions\/review_pr\.yaml: \/publish\/0/);
-    broken("implement", (text) => text.replace("nonempty_diff", "sometimes"), /actions\/implement\.yaml: \/acceptance/);
-    broken("review_issue", (text) => withTools(text, "[read, teleport]"), /actions\/review_issue\.yaml: \/tools\/1/);
-    broken("review_issue", (text) => text.replace("files: [discussion, previous_assessment, cloudflare]", "files: [secrets]"), /actions\/review_issue\.yaml: \/files\/0/);
-    broken("review_issue", (text) => text.replace("name: review_issue", "name: Review-Issue"), /actions\/review_issue\.yaml: \/name/);
+    broken("review_pr", (text) => text + "bogus: 1\n", /workflows\/review_pr\/workflow\.yaml: \/bogus: unknown key/);
+    broken("review_issue", (text) => withTools(text, "[read, teleport]"), /workflows\/review_issue\/workflow\.yaml: \/defaults\/tools\/1/);
+    broken("review_issue", (text) => text.replace("name: review_issue", "name: Review-Issue"), /workflows\/review_issue\/workflow\.yaml: \/name/);
     broken("review_issue", (text) => withTools(text, "[read, bash]"), /mode review forbids the bash, edit and write tools/);
     f.addIssue(1); f.enqueue(1);
-    assert.equal(isActionEnabled("review_issue"), true); assert.equal(isActionEnabled("nope"), false);
-    assert.equal(live.actions.review_pr.provider, "fixture"); assert.equal(live.actions.review_pr.reviewers[1].provider, "fixture");
+    assert.equal(isWorkflowEnabled("review_issue"), true); assert.equal(isWorkflowEnabled("nope"), false);
+    assert.equal(live.workflows.review_pr.provider, "fixture"); assert.equal(live.workflows.review_pr.reviewers[1].provider, "fixture");
     const claimed = tasks.claimTask();
     assert.equal(claimed.run.provider, "fixture"); assert.equal(claimed.run.model, "gpt-6.2-sol");
   } },
-  manifest_directory: { title: "a deployment manifest directory adds an action for a freed trigger, rejects duplicate enabled triggers, unknown tools and files, and bad directories", configure: [configureManifestDirectory], run: async () => {
+  manifest_directory: { title: "a deployment workflow directory adds a workflow for a freed trigger, rejects duplicate enabled triggers, unknown tools and bad directories", configure: [configureManifestDirectory], run: async () => {
     const { routeFor } = await f.app("actions.ts");
     const { validateStaticConfig } = await f.app("startup.ts");
     await validateStaticConfig(f.config);
-    await assert.rejects(validateStaticConfig({ ...f.config, actions: { ...f.config.actions, review_issue: { ...f.config.actions.review_issue, enabled: true } } }), /review_issue, review_triage would share one review comment on each issue; enable only one/);
+    await assert.rejects(validateStaticConfig({ ...f.config, workflows: { ...f.config.workflows, review_issue: { ...f.config.workflows.review_issue, enabled: true } } }), /review_issue, review_triage would share one review comment on each issue; enable only one/);
     const issue = { source: "github_items", kind: "item_changed", item: "issue", author: "other" };
     assert.equal(routeFor(issue), "review_triage"); assert.equal(routeFor({ ...issue, item: "pr" }), "my_pr_review");
     assert.equal(routeFor({ ...issue, kind: "pr_conflicts", item: "pr", author: "other" }), undefined);
@@ -4233,28 +4255,32 @@ fi
     f.addIssue(1); await route();
     assert.deepEqual(all(s.tasks).map((t) => t.action), ["review_triage"]);
     const done = await success();
-    assert.equal(done.skill, resolve("deployment/skills/review_triage/SKILL.md"));
+    assert.equal(done.skill, resolve("deployment/review_triage/SKILL.md"));
     assert.equal(f.requests.at(-1).context.action, "review_triage"); assert.ok(f.writes.some((w) => w.type === "comment" && w.number === 1));
-    assert.throws(() => f.enqueue(1, "nope"), /Unknown action: nope/); assert.throws(() => tasks.enqueueManualTasks("nope", ["1"]), /Unknown action/);
+    assert.throws(() => f.enqueue(1, "nope"), /Unknown workflow: nope/); assert.throws(() => tasks.enqueueManualTasks("nope", ["1"]), /Unknown action/);
     const local = resolve("app/scrat.local.json"), directory = resolve("deployment");
-    const probe = (actions, files = {}) => {
-      for (const [name, text] of Object.entries(files)) writeFileSync(resolve(directory, name), text);
-      writeFileSync(local, JSON.stringify({ actions }));
+    const probe = (workflows, extra = {}) => {
+      for (const [name, yaml] of Object.entries(extra)) {
+        const dir = resolve(directory, name);
+        mkdirSync(dir, { recursive: true });
+        cpSync(resolve("app/workflows/review_issue/SKILL.md"), resolve(dir, "SKILL.md"));
+        writeFileSync(resolve(dir, "workflow.yaml"), yaml);
+      }
+      writeFileSync(local, JSON.stringify({ workflows }));
       try { return execFileSync(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(resolve("app/src/config.ts"))});`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); }
       catch (error) { return error.stderr; }
-      finally { for (const name of Object.keys(files)) rmSync(resolve(directory, name)); }
+      finally { for (const name of Object.keys(extra)) rmSync(resolve(directory, name), { recursive: true, force: true }); }
     };
-    const triage = readFileSync(resolve(directory, "review_triage.yaml"), "utf8"), named = (name, key, value) => triage.replace("name: review_triage", "name: " + name).replace(new RegExp(`^${key}: .*$`, "m"), `${key}: ${value}`);
-    const base = { directory, review_issue: { enabled: false }, review_pr: { enabled: false } };
+    const triage = readFileSync(resolve(directory, "review_triage/workflow.yaml"), "utf8"), named = (name, key, value) => triage.replace("name: review_triage", "name: " + name).replace(new RegExp(`^${key}: .*$`, "m"), `${key}: ${value}`);
+    const base = { directory, trustLocalScripts: true, review_issue: { enabled: false }, review_pr: { enabled: false } };
     assert.doesNotMatch(probe(base), /Error/);
-    assert.match(probe({ directory, review_pr: { enabled: false } }), /actions\/review_issue\.yaml and .*review_triage\.yaml both match \{source: github_items, kind: item_changed, item: issue\}; disable one/);
-    assert.doesNotMatch(probe({ directory, review_pr: { enabled: false }, review_triage: { enabled: false } }), /Error/);
-    const commits = readFileSync(resolve("app/actions/review_base_change.yaml"), "utf8");
-    assert.match(probe({ ...base, review_base_change: { enabled: true, branch: "develop" }, dup_commits: { enabled: true } }, { "dup_commits.yaml": commits.replace("name: review_base_change", "name: dup_commits").replace("enabled: false\n", "").replace("branch: main", "branch: develop") }), /both match \{source: github_commits, kind: commit, branch: develop\}/);
-    assert.match(probe(base, { "bad_tool.yaml": withTools(named("bad_tool", "priority", "10"), "[teleport]") }), /bad_tool\.yaml: \/tools\/0/);
-    assert.match(probe(base, { "bad_file.yaml": named("bad_file", "files", "[secrets]") }), /bad_file\.yaml: \/files\/0/);
-    assert.match(probe({ ...base, directory: "relative/actions" }), /actions\.directory must be an absolute path/);
-    assert.match(probe({ ...base, directory: resolve("missing-actions") }), /Cannot read manifests in/);
+    assert.match(probe({ directory, trustLocalScripts: true, review_pr: { enabled: false } }), /workflows\/review_issue\/workflow\.yaml and .*review_triage\/workflow\.yaml both match \{source: github_items, kind: item_changed, item: issue\}; disable one/);
+    assert.doesNotMatch(probe({ directory, trustLocalScripts: true, review_pr: { enabled: false }, review_triage: { enabled: false } }), /Error/);
+    const commits = readFileSync(resolve("app/workflows/review_base_change/workflow.yaml"), "utf8");
+    assert.match(probe({ ...base, review_base_change: { enabled: true, branch: "develop" }, dup_commits: { enabled: true } }, { dup_commits: commits.replace("name: review_base_change", "name: dup_commits").replace("enabled: false\n", "enabled: true\n").replace("branch: main", "branch: develop") }), /both match \{source: github_commits, kind: commit, branch: develop\}/);
+    assert.match(probe(base, { bad_tool: withTools(named("bad_tool", "priority", "10"), "[teleport]") }), /bad_tool\/workflow\.yaml: \/defaults\/tools\/0/);
+    assert.match(probe({ ...base, directory: "relative/workflows" }), /workflows\.directory must be an absolute path/);
+    assert.match(probe({ ...base, directory: resolve("missing-workflows") }), /Cannot read workflows in/);
     await implement(2);
     f.reset(202, "grade-C"); await route();
     const queuedFor = (action) => all(s.tasks).filter((t) => t.action === action && t.status === "queued");
@@ -4264,11 +4290,11 @@ fi
     await route(); assert.equal(queuedFor("address_review").length, 1);
     f.reset(202, "no-change"); const repair = await success();
     assert.equal(repair.error, null); assert.equal(repair.publication.status, "published");
-    assert.match(probe(base, { "mismatch.yaml": named("other_name", "priority", "10") }), /mismatch\.yaml: name other_name must equal the file name/);
+    assert.match(probe(base, { mismatch: named("other_name", "priority", "10") }), /mismatch\/workflow\.yaml: name other_name must equal folder name mismatch/);
   } },
-  manifest_tools_files: { title: "manifest tools and files lists decide which tools and context files reach the agent session, and cross-field rules reject unsafe combinations", configure: [configureManifestDirectory], run: async () => {
-    const { readManifests } = await f.app("manifests.ts");
-    const toolsOf = (request) => request.request.tools.map((tool) => tool.function.name);
+  manifest_tools_files: { title: "workflow tools and files lists decide which tools and context files reach the agent session, and cross-field rules reject unsafe combinations", configure: [configureManifestDirectory], run: async () => {
+    const { readWorkflows } = await f.app("workflows.ts");
+    const toolsOf = (request) => request.request.tools.map((tool) => tool.function.name).filter((name) => name !== "codemode");
     f.addIssue(1); f.enqueue(1); await success();
     const review = f.requests[0];
     assert.deepEqual(toolsOf(review), ["read", "grep"]); assert.deepEqual(Object.keys(review.context.files), ["directory"]);
@@ -4280,25 +4306,17 @@ fi
     let count = 0;
     const rejects = (name, change, message) => {
       const directory = resolve("rules-" + ++count); mkdirSync(directory);
-      writeFileSync(resolve(directory, "rule_check.yaml"), change(readFileSync(resolve("app/actions", name + ".yaml"), "utf8").replace("name: " + name, "name: rule_check")));
-      assert.throws(() => readManifests(resolve("app"), directory), message);
+      const dest = resolve(directory, "rule_check");
+      cpSync(resolve("app/workflows", name), dest, { recursive: true });
+      const path = resolve(dest, "workflow.yaml");
+      writeFileSync(path, change(readFileSync(path, "utf8").replace("name: " + name, "name: rule_check")));
+      assert.throws(() => readWorkflows(resolve("app"), directory), message);
     };
-    rejects("review_issue", (text) => withTools(text, "[read, bash]"), /rule_check\.yaml: mode review forbids the bash, edit and write tools/);
-    rejects("review_issue", (text) => withTools(text, "[read, git, read_base]"), /read_base requires a review with agent: panel or context: change/);
-    rejects("review_pr", (text) => text.replace("[discussion, previous_assessment, previous_repair, validation, issue, storefront]", "[history]"), /files: history is not allowed with the pr_assessment effect/);
-    rejects("review_pr", (text) => text.replace("validation, issue, storefront]", "validation, triage, storefront]"), /files: triage requires trigger.item issue/);
-    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment, cloudflare]", "files: [issue]"), /files: issue requires trigger.item pr/);
-    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment, cloudflare]", "files: [review]"), /files: review requires trigger.kind low_grade/);
-    rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [labels]"), /files: previous_assessment requires the pr_assessment effect or a review that publishes comment/);
-    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment, cloudflare]", "files: [discussion, previous_repair]"), /files: previous_repair requires the pr_assessment effect/);
-    rejects("review_issue", (text) => text.replace("files: [discussion, previous_assessment, cloudflare]", "files: [discussion, previous_assessment, storefront]"), /files: storefront requires the pr_assessment effect, a storefront trigger, a schedule trigger or a shopify trigger/);
-    rejects("storefront_discover", (text) => text.replace("files: [storefront]", "files: []"), /the browser tool and the browser setting require each other, except that a manifest listing the storefront file may list browser alone/);
-    rejects("storefront_discover", (text) => text.replace("publish: [site_map]", "publish: [issue]"), /the site_map effect and a storefront trigger require each other/);
-    rejects("review_issue", (text) => text.replace("publish: [comment, labels]", "publish: [comment, labels, site_map]"), /the site_map effect and a storefront trigger require each other/);
-    rejects("storefront_discover", (text) => withTools(text.replace("mode: review", "mode: change"), "[read, browser]") + "acceptance: complete\n", /a storefront trigger requires mode review/);
+    rejects("review_issue", (text) => withTools(text, "[read, bash]"), /rule_check\/workflow\.yaml: mode review forbids the bash, edit and write tools/);
+    rejects("storefront_discover", (text) => withTools(text.replace("mode: review", "mode: change"), "[read, browser]"), /a storefront trigger requires mode review/);
     rejects("implement", (text) => withTools(text, "[read, git]"), /mode change forbids the git and read_base tools/);
-    rejects("implement", (text) => text.replace("item: issue", "item: pr"), /trigger.kind label requires item: issue/);
-    rejects("review_issue", (text) => text + "failedLabel: Scrat failed\n", /rule_check\.yaml: failedLabel requires mode change/);
+    rejects("implement", (text) => text.replace("item: issue", "item: pr"), /on\.event\.kind label requires item: issue/);
+    rejects("review_issue", (text) => text + "config:\n  failedLabel: Scrat failed\n", /rule_check\/workflow\.yaml: failedLabel requires mode change/);
   } },
   scoped_http: { title: "the http tool injects its binding's credential after the model's call, refuses off-list, IP, loopback and metadata hosts, never follows redirects, redacts echoed secrets and journals only method, host and status", configure: [configureScoped], run: async () => {
     const secret = process.env.SCOUT_TOKEN;
@@ -4336,7 +4354,7 @@ fi
     assert.equal(f.external[0].headers.accept, "application/json");
     for (const call of f.external) { assert.equal(call.headers.authorization, "Bearer " + secret); assert.equal(call.redirect, "manual"); assert.equal(call.method, "GET"); }
     assert.ok(!JSON.stringify(sent).includes(secret) && !JSON.stringify(f.requests.map((entry) => entry.request.messages)).includes(secret));
-    assert.deepEqual(sent.tools.map((tool) => tool.function.name), ["read", "grep", "http"]);
+    assert.deepEqual(sent.tools.map((tool) => tool.function.name).filter((name) => name !== "codemode"), ["read", "grep", "http"]);
     assert.ok(existsSync(result.piSessionFile)); assert.ok(!readFileSync(result.piSessionFile, "utf8").includes(secret));
     const operations = lines.filter((line) => line.operation === "agent.http"), done = operations.filter((line) => line.event === "operation.completed");
     assert.deepEqual(done.map(({ method, host, status }) => [method, host, status]), [["GET", "api.example.test", 200], ["GET", "api.example.test", 200], ["GET", "other.example.test", 200],
@@ -4390,7 +4408,7 @@ fi
     const sent = f.requests.at(-1).request;
     const textOf = (message) => typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("");
     const answers = sent.messages.filter((message) => message.role === "tool").map(textOf);
-    assert.deepEqual(sent.tools.map((tool) => tool.function.name), ["read", "grep", "github_search"]);
+    assert.deepEqual(sent.tools.map((tool) => tool.function.name).filter((name) => name !== "codemode"), ["read", "grep", "github_search"]);
     assert.equal(answers.length, 10);
     assert.deepEqual(f.searches, [{ q: "repo:fixture/project is:open label:bug", ifNoneMatch: null }, { q: "repo:fixture/project is:open label:bug", ifNoneMatch: null }]);
     for (const index of [0, 1]) {
@@ -4610,11 +4628,11 @@ fi
     const installed = await import("playwright-core").then(() => true, () => false);
     if (!installed) await assert.rejects(validateStaticConfig({ ...f.config, resolve: async () => publicAnswer }), /review_issue: The browser tool needs the optional playwright-core package, which is not installed/);
     f.addIssue(1); f.enqueue(1); await success();
-    assert.deepEqual(f.requests.at(-1).request.tools.map((tool) => tool.function.name), ["read", "grep", "browser"]);
+    assert.deepEqual(f.requests.at(-1).request.tools.map((tool) => tool.function.name).filter((name) => name !== "codemode"), ["read", "grep", "browser"]);
   } },
-  bindings_startup: { title: "a binding host that resolves privately stops startup while an unresolvable one does not, a manifest naming an unknown binding is rejected at load, and tool settings are validated structurally", configure: [configureScoped], run: async () => {
+  bindings_startup: { title: "a binding host that resolves privately stops startup while an unresolvable one does not, a workflow naming an unknown binding is rejected at load, and tool settings are validated structurally", configure: [configureScoped], run: async () => {
     const secret = process.env.SCOUT_TOKEN;
-    const { validateStaticConfig } = await f.app("startup.ts"), { readManifests } = await f.app("manifests.ts");
+    const { validateStaticConfig } = await f.app("startup.ts"), { readWorkflows } = await f.app("workflows.ts");
     const publicAnswer = [{ address: "93.184.216.34", family: 4 }], resolving = (answers) => async (host) => answers[host] ?? publicAnswer;
     await validateStaticConfig({ ...f.config, resolve: resolving({}) });
     for (const address of ["10.0.0.9", "fd00:ec2::254"]) {
@@ -4628,20 +4646,23 @@ fi
       try { return execFileSync(process.execPath, ["--input-type=module", "-e", `const { config } = await import(${JSON.stringify(resolve("app/src/config.ts"))}); console.log(JSON.stringify(config.bindings));`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); }
       catch (error) { return error.stderr; }
     };
-    const manifestFile = resolve(directory, "review_issue.yaml"), manifest = readFileSync(manifestFile, "utf8");
+    const manifestFile = resolve(directory, "review_issue/workflow.yaml"), manifest = readFileSync(manifestFile, "utf8");
     assert.deepEqual(JSON.parse(probe(JSON.parse(original))).scout.hosts, ["api.example.test", "other.example.test"]);
     const extra = { secret: "${SCOUT_TOKEN}", hosts: ["x.example.test"], header: "X-Api-Key" };
     assert.deepEqual(Object.keys(JSON.parse(probe({ ...JSON.parse(original), bindings: { extra } }))), ["scout", "extra"]);
     writeFileSync(manifestFile, manifest.replace("binding: scout", "binding: nope"));
-    assert.match(probe(JSON.parse(original)), /review_issue\.yaml: unknown binding nope; define it under bindings in scrat\.local\.json/);
+    assert.match(probe(JSON.parse(original)), /review_issue\/workflow\.yaml: unknown binding nope; define it under bindings in scrat\.local\.json/);
     writeFileSync(manifestFile, manifest);
     writeFileSync(local, original);
 
     let count = 0;
     const invalid = (name, change, message) => {
       const rules = resolve("rules-" + ++count); mkdirSync(rules);
-      writeFileSync(resolve(rules, "rule_check.yaml"), change(readFileSync(resolve("app/actions", name + ".yaml"), "utf8").replace("name: " + name, "name: rule_check")));
-      assert.throws(() => readManifests(resolve("app"), rules), message);
+      const dest = resolve(rules, "rule_check");
+      cpSync(resolve("app/workflows", name), dest, { recursive: true });
+      const path = resolve(dest, "workflow.yaml");
+      writeFileSync(path, change(readFileSync(path, "utf8").replace("name: " + name, "name: rule_check")));
+      assert.throws(() => readWorkflows(resolve("app"), rules), message);
     };
     const mutual = (kind) => new RegExp(`the ${kind} tool and the ${kind} setting require each other`);
     invalid("review_issue", (text) => withTools(text, "[read, http]"), mutual("http"));
@@ -4650,20 +4671,22 @@ fi
     invalid("review_issue", (text) => text + "browser: { navigationHosts: [shop.example.test], resourceHosts: [] }\n", mutual("browser"));
     invalid("review_issue", (text) => withTools(text, "[read, browser]") + "browser: { navigationHosts: [127.0.0.1], resourceHosts: [] }\n", /browser: 127\.0\.0\.1 is an IP address/);
     invalid("review_issue", (text) => withTools(text, "[read, browser]") + 'browser: { navigationHosts: [shop.example.test], resourceHosts: ["*.example.test"] }\n', /browser: \*\.example\.test is not an exact public hostname/);
-    invalid("review_issue", (text) => withTools(text, "[read, http]") + "http: { binding: scout, methods: [TRACE] }\n", /rule_check\.yaml: \/http\/methods\/0/);
-    invalid("review_issue", (text) => withTools(text, "[read, http]") + "http: { binding: scout, hosts: [x.example.test] }\n", /rule_check\.yaml: \/http\/hosts: unknown key/);
+    invalid("review_issue", (text) => withTools(text, "[read, http]") + "http: { binding: scout, methods: [TRACE] }\n", /rule_check\/workflow\.yaml: \/http\/methods\/0/);
+    invalid("review_issue", (text) => withTools(text, "[read, http]") + "http: { binding: scout, hosts: [x.example.test] }\n", /rule_check\/workflow\.yaml: \/http\/hosts: unknown key/);
     invalid("implement", (text) => withTools(text, "[read, bash, github_search]"), /github_search requires mode review/);
     const accepted = resolve("accepted"); mkdirSync(accepted);
-    writeFileSync(resolve(accepted, "scoped_check.yaml"), withTools(readFileSync(resolve("app/actions/review_issue.yaml"), "utf8").replace("name: review_issue", "name: scoped_check"), "[read, github_search, http]") + "http: { binding: scout, methods: [GET, POST] }\n");
-    assert.deepEqual(readManifests(resolve("app"), accepted).find((entry) => entry.name === "scoped_check").http, { binding: "scout", methods: ["GET", "POST"] });
+    const scopedDir = resolve(accepted, "scoped_check");
+    cpSync(resolve("app/workflows/review_issue"), scopedDir, { recursive: true });
+    writeFileSync(resolve(scopedDir, "workflow.yaml"), withTools(readFileSync(resolve(scopedDir, "workflow.yaml"), "utf8").replace("name: review_issue", "name: scoped_check"), "[read, github_search, http]") + "http: { binding: scout, methods: [GET, POST] }\n");
+    assert.deepEqual(readWorkflows(resolve("app"), accepted).find((entry) => entry.name === "scoped_check").http, { binding: "scout", methods: ["GET", "POST"] });
 
     const { containsSecret } = await f.app("secrets.ts"), { redactSecrets } = await f.app("errors.ts"), { childEnvironment } = await f.app("secrets.ts");
     assert.ok(containsSecret(`x ${secret} x`)); assert.ok(!redactSecrets(`x ${secret}`).includes(secret)); assert.equal(childEnvironment(process.env).SCOUT_TOKEN, undefined);
   } },
-  schedule_source: { title: "the schedule source parses cron expressions, seeds silently, fires one window task per due tick, fires a missed tick once, keeps a cursor per manifest and stops when disabled", configure: [configureSchedule], run: async () => {
+  schedule_source: { title: "the schedule source parses cron expressions, seeds silently, fires one window task per due tick, fires a missed tick once, keeps a cursor per workflow and stops when disabled", configure: [configureSchedule], run: async () => {
     const { parseCron, nextTick, parseWindow } = await f.app("cron.ts");
     const { pollSchedules } = await f.app("schedule-source.ts");
-    const { readManifests } = await f.app("manifests.ts");
+    const { readWorkflows } = await f.app("workflows.ts");
     const { config: live } = await f.app("config.ts");
     const next = (expression, after) => nextTick(parseCron(expression), new Date(after)).toISOString();
     const table = [
@@ -4694,22 +4717,19 @@ fi
     for (const bad of ["6", "0h", "h", "6 h", "1w", "1.5h", "-1h"]) assert.throws(() => parseWindow(bad), /window/, bad);
 
     let count = 0;
-    const broken = (file, change, message) => {
+    const broken = (name, change, message) => {
       const root = resolve("broken-" + ++count); mkdirSync(root);
-      cpSync(resolve("app/actions"), resolve(root, "actions"), { recursive: true });
-      const path = resolve(root, "actions", file + ".yaml");
+      cpSync(resolve("app/workflows"), resolve(root, "workflows"), { recursive: true });
+      const path = resolve(root, "workflows", name, "workflow.yaml");
       writeFileSync(path, change(readFileSync(path, "utf8")));
-      assert.throws(() => readManifests(root), message);
+      assert.throws(() => readWorkflows(root), message);
     };
-    const trigger = (text, replacement) => text.replace(/^trigger: .*$/m, `trigger: ${replacement}`);
-    broken("implement", (text) => trigger(text, '{ source: schedule, kind: tick, cron: "0 * * * *", window: 1h }'), /a schedule trigger requires mode review/);
-    broken("review_issue", (text) => trigger(text, '{ source: schedule, kind: tick, cron: "0 * * *", window: 1h }'), /needs 5 fields/);
-    broken("review_issue", (text) => trigger(text, '{ source: schedule, kind: tick, cron: "0 * * * *", window: "6" }'), /A window must be/);
-    broken("review_issue", (text) => trigger(text, '{ source: schedule, kind: tick, cron: "0 0 31 2 *", window: 1h }'), /never matches/);
-    broken("review_issue", (text) => trigger(text, '{ source: schedule, kind: tick, cron: "0 * * * *" }'), /trigger\.cron and trigger\.window are required/);
-    broken("review_issue", (text) => trigger(text, '{ source: github_items, kind: item_changed, item: issue, cron: "0 * * * *", window: 1h }'), /forbidden for other sources/);
-    broken("review_issue", (text) => trigger(text, '{ source: schedule, kind: item_changed, cron: "0 * * * *", window: 1h }'), /does not belong to source schedule/);
-    broken("review_issue", (text) => trigger(text, '{ source: schedule, kind: tick, item: issue, cron: "0 * * * *", window: 1h }'), /trigger\.item is required for github_items/);
+    const replaceOn = (text, replacement) => text.replace(/^on:\n(?:  .*\n)+/m, `on:\n${replacement}\n`);
+    broken("implement", (text) => replaceOn(text, '  cron: "0 * * * *"\n  window: 1h'), /a schedule trigger requires mode review/);
+    broken("review_issue", (text) => replaceOn(text, '  cron: "0 * * *"\n  window: 1h'), /needs 5 fields/);
+    broken("review_issue", (text) => replaceOn(text, '  cron: "0 * * * *"\n  window: "6"'), /A window must be/);
+    broken("review_issue", (text) => replaceOn(text, '  cron: "0 0 31 2 *"\n  window: 1h'), /never matches/);
+    broken("review_issue", (text) => replaceOn(text, "  window: 1h"), /on\.window requires on\.cron/);
 
     const cursors = () => Object.fromEntries(all(s.sourceCursors).map((row) => [row.action, JSON.parse(row.sha).next]));
     const tasksOf = (action) => all(s.tasks).filter((t) => t.action === action);
@@ -4745,21 +4765,21 @@ fi
     assert.equal(tasksOf("slow_sweep")[0].priority, 20);
     assert.equal(tasksOf("error_sweep").at(-1).input.end, "2026-10-26T00:00:00.000Z");
     assert.deepEqual(cursors(), { error_sweep: "2026-10-26T06:00:00.000Z", slow_sweep: "2026-11-02T03:30:00.000Z" });
-    live.actions.error_sweep.enabled = false;
+    live.workflows.error_sweep.enabled = false;
     assert.equal(await poll("2026-10-26T07:00:00Z"), 0);
     assert.deepEqual(cursors(), { slow_sweep: "2026-11-02T03:30:00.000Z" }); assert.equal(all(s.tasks).length, 4);
     assert.equal(await poll("2026-10-27T07:00:00Z"), 0); assert.equal(all(s.tasks).length, 4);
-    live.actions.error_sweep.enabled = true;
+    live.workflows.error_sweep.enabled = true;
     assert.equal(await poll("2026-10-27T07:00:00Z"), 0);
     assert.deepEqual(cursors(), { error_sweep: "2026-10-27T12:00:00.000Z", slow_sweep: "2026-11-02T03:30:00.000Z" }); assert.equal(all(s.tasks).length, 4);
     assert.equal(all(s.sourceCursors).length, 2);
-    const { validateStaticConfig } = await f.app("startup.ts"), withAction = (name, change) => ({ ...f.config, actions: { ...f.config.actions, [name]: { ...f.config.actions[name], ...change } } });
-    await validateStaticConfig(withAction("error_sweep", { cron: "0 */4 * * *", window: "4h" }));
-    await assert.rejects(validateStaticConfig(withAction("error_sweep", { cron: "0 * * *" })), /actions\.error_sweep\.cron: A cron expression needs 5 fields/);
-    await assert.rejects(validateStaticConfig(withAction("error_sweep", { window: "6" })), /actions\.error_sweep\.window: A window must be/);
-    await assert.rejects(validateStaticConfig(withAction("review_issue", { cron: "0 * * * *" })), /review_issue: cron and window are only allowed with source schedule/);
+    const { validateStaticConfig } = await f.app("startup.ts"), withWorkflow = (name, change) => ({ ...f.config, workflows: { ...f.config.workflows, [name]: { ...f.config.workflows[name], ...change } } });
+    await validateStaticConfig(withWorkflow("error_sweep", { cron: "0 */4 * * *", window: "4h" }));
+    await assert.rejects(validateStaticConfig(withWorkflow("error_sweep", { cron: "0 * * *" })), /workflows\.error_sweep\.cron: A cron expression needs 5 fields/);
+    await assert.rejects(validateStaticConfig(withWorkflow("error_sweep", { window: "6" })), /workflows\.error_sweep\.window: A window must be/);
+    await assert.rejects(validateStaticConfig(withWorkflow("review_issue", { cron: "0 * * * *" })), /review_issue: cron and window are only allowed on scheduled workflows/);
     const logs = captureLogs();
-    Object.assign(live.actions.error_sweep, { cron: "0 */4 * * *", window: "4h" });
+    Object.assign(live.workflows.error_sweep, { cron: "0 */4 * * *", window: "4h" });
     assert.equal(await poll("2026-10-27T07:30:00Z"), 0);
     restoreLogs();
     const reseeded = logs.find((line) => line.event === "schedule.reseeded");
@@ -4800,7 +4820,7 @@ fi
     assert.match(history, /## 2026-10-21T12:00:00\.000Z/); assert.match(history, /link:docs-a/);
     assert.equal(all(s.items).length, 0); assert.equal(all(s.subjects).length, 2); assert.equal(all(s.runs).length, 2);
   } },
-  store_audit: { title: "a scheduled store audit runs the browser from the manifest's budget with the site map, the audit's own baselines and known breakages, keeps its Lighthouse, baselines and alerts apart from the main-change review, and posts the agent's first line as the root, one reply with the findings and the Lighthouse table, the verdict reaction and a report file, without posting twice on a retry", configure: [configureMainStorefront, (config) => { config.storefront.auditPaths = ["/pages/about"]; Object.assign(config.actions.store_audit, { enabled: true, channel: "C0123456789" }); }], run: async () => {
+  store_audit: { title: "a scheduled store audit runs the browser from the workflow's budget with the site map, the audit's own baselines and known breakages, keeps its Lighthouse, baselines and alerts apart from the main-change review, and posts the agent's first line as the root, one reply with the findings and the Lighthouse table, the verdict reaction and a report file, without posting twice on a retry", configure: [configureMainStorefront, (config) => { config.storefront.auditPaths = ["/pages/about"]; Object.assign(config.workflows.store_audit, { enabled: true, config: { ...config.workflows.store_audit.config, channel: "C0123456789" } }); }], run: async () => {
     const { fakes, scored, state } = await mainStorefront();
     const { pollSchedules } = await f.app("schedule-source.ts"), { config: live } = await f.app("config.ts"), site = "https://shop.example.test", channel = "C0123456789", S = storefrontScores;
     const tip = git(resolve("remote.git"), "rev-parse", "main"), first = "2026-10-21T13:15:00.000Z", next = "2026-10-22T13:15:00.000Z";
@@ -4820,8 +4840,8 @@ fi
     assert.deepEqual(one.context.input, { kind: "tick", triggerKey: first, start: "2026-10-20T13:15:00.000Z", end: first });
     assert.deepEqual(JSON.parse(readFileSync(files.storefront, "utf8")), { liveUrl: site + "/", devices: ["desktop", "mobile"], confirmationRuns: 1, auditPaths: ["/pages/about"], knownBreakages: [] });
     assert.equal(readFileSync(files.siteMap, "utf8"), "Site map\n- `/products/<handle>`: product page\n"); assert.deepEqual([files.baselines, files.history], [undefined, undefined]);
-    assert.equal(one.context.rootInstructions, live.actions.store_audit.rootInstructions); assert.match(one.context.rootInstructions, /^One sentence for a non-technical reader/);
-    assert.deepEqual(one.request.tools.map((tool) => tool.function.name), ["read", "grep", "find", "ls", "browser"]); assert.match(one.text, /# Scheduled store audit/);
+    assert.equal(one.context.rootInstructions, live.workflows.store_audit.config.rootInstructions); assert.match(one.context.rootInstructions, /^One sentence for a non-technical reader/);
+    assert.deepEqual(one.request.tools.map((tool) => tool.function.name).filter((name) => name !== "codemode"), ["read", "grep", "find", "ls", "browser"]); assert.match(one.text, /# Scheduled store audit/);
     assert.match(one.request.tools.find((tool) => tool.function.name === "browser").function.description, /At most 200 actions and 2700 seconds per session/);
     assert.deepEqual(fakes.visits, [site + "/", site + "/cart"]);
     const m1 = { "first-contentful-paint": 1.8, "largest-contentful-paint": 3.1, "total-blocking-time": 210, "cumulative-layout-shift": 0.05, "speed-index": 2.9 };
@@ -4865,7 +4885,7 @@ fi
     assert.ok(state(`audits/${next}.md`).includes("### Confirmed breakage\n\n- **Checkout does not open** (`cart:checkout`, new on this commit)")); assert.ok(existsSync(`data/storefront/audits/${first}.md`));
     assert.ok(!existsSync("data/storefront/lighthouse.json")); assert.equal(all(s.slackThreads).length, 2);
   } },
-  store_changes: { title: "the Shopify admin source seeds silently, reports a watched metafield change once after the quiet window with its before and after, the admin log line and its page, ignores app, unwatched and ignored metafields, skips metaobjects while their scope is denied, and its review posts the summary as the root and the verdict as the reply without Lighthouse", seed: seedStoreTheme, configure: [configureMainStorefront, (config) => { config.storefront.changes.ignoreMetafields = ["custom.skipped"]; Object.assign(config.actions.review_store_change, { enabled: true, channel: "C0123456789" }); }], run: async () => {
+  store_changes: { title: "the Shopify admin source seeds silently, reports a watched metafield change once after the quiet window with its before and after, the admin log line and its page, ignores app, unwatched and ignored metafields, skips metaobjects while their scope is denied, and its review posts the summary as the root and the verdict as the reply without Lighthouse", seed: seedStoreTheme, configure: [configureMainStorefront, (config) => { config.storefront.changes.ignoreMetafields = ["custom.skipped"]; Object.assign(config.workflows.review_store_change, { enabled: true, config: { ...config.workflows.review_store_change.config, channel: "C0123456789" } }); }], run: async () => {
     const { fakes, state } = await mainStorefront();
     const { pollStoreChanges } = await f.app("store-changes.ts"), { GitHubRepository } = await f.app("github.ts"), { config: live } = await f.app("config.ts"), { admin } = f.loggie, site = "https://shop.example.test", minute = 60_000, t0 = Date.parse("2026-10-30T12:00:00Z");
     await new GitHubRepository(live.github.repository).fetchBranch("main");
@@ -5161,7 +5181,7 @@ fi
     const sessions = () => f.requests.filter((request) => request.context.action === "storefront_discover");
     const site = resolve("data/storefront/site.md"), written = () => all(s.sourceCursors).find((row) => row.action === "storefront_discover" && row.branch === "site_map")?.sha.split(" ")[0];
     const stored = (iso) => `Site map of https://shop.example.test/, written by Scrat on ${iso}.\n\n- \`/products/<handle>\`: product page with add to cart.\n`;
-    const names = (request) => request.request.tools.map((tool) => tool.function.name), panel = JSON.stringify(["read", "grep", "find", "ls", "git", "read_base"]);
+    const names = (request) => request.request.tools.map((tool) => tool.function.name).filter((name) => name !== "codemode"), panel = JSON.stringify(["read", "grep", "find", "ls", "git", "read_base"]);
     const reviewed = async () => { const from = f.requests.length; await route(); await success(); return f.requests.slice(from).filter((request) => request.context.action === "review_pr"); };
     f.loggie.processingPolls = 0;
     live.storefront.enabled = false;
@@ -5212,7 +5232,7 @@ fi
     const secondWritten = written();
     assert.ok(secondWritten > firstWritten); assert.equal(readFileSync(site, "utf8"), stored(secondWritten));
     assert.equal(await poll(at(secondWritten, 1)), 0);
-    const skill = resolve("app/skills/storefront_discover/SKILL.md"), { GitHubRepository } = await f.app("github.ts");
+    const skill = resolve("app/workflows/storefront_discover/SKILL.md"), { GitHubRepository } = await f.app("github.ts");
     const pushMain = async (path, text) => { const sha = pushFile("main", path, text); await new GitHubRepository("fixture/project").fetchBranch("main"); return sha; };
     writeFileSync(skill, readFileSync(skill, "utf8") + "\nName the close control of each blocking overlay.\n");
     assert.equal(await poll(at(secondWritten, 1)), 1, "a changed discovery skill makes the map due");
@@ -5247,7 +5267,7 @@ fi
     assert.ok(off.length && off.every((request) => request.context.item.number === 201 && request.context.files.storefront === undefined && JSON.stringify(names(request)) === panel), "a disabled storefront gives no browser");
     assert.equal(all(s.sourceCursors).filter((row) => row.action === "storefront_discover").length, 1);
   } },
-  storefront_review: { title: "a review of a Scrat PR whose preview matches the head gives every panel session the storefront section, the storefront browser and the preview, live and limits context; a confirmed regression caps the grade through the format correction and stays sticky, a missing line is corrected, unavailable keeps the grade, the line never reaches the comment, the consolidator sees each reviewer's result and its own line wins, and an unavailable preview, a human PR or a disabled storefront get neither section nor browser", seed: seedTheme, configure: [configureStorefront, (config) => { config.actions.resolve_conflicts.enabled = false; }], run: async () => {
+  storefront_review: { title: "a review of a Scrat PR whose preview matches the head gives every panel session the storefront section, the storefront browser and the preview, live and limits context; a confirmed regression caps the grade through the format correction and stays sticky, a missing line is corrected, unavailable keeps the grade, the line never reaches the comment, the consolidator sees each reviewer's result and its own line wins, and an unavailable preview, a human PR or a disabled storefront get neither section nor browser", seed: seedTheme, configure: [configureStorefront, (config) => { config.workflows.resolve_conflicts.enabled = false; }], run: async () => {
     const { config: live } = await f.app("config.ts"), { parseResult, storefrontProblem } = await f.app("results.ts");
     const parsed = (footer) => parseResult(`R.\n${footer}\nSCRAT_STATUS: complete`, [], { requireGrade: true });
     assert.throws(() => parsed("SCRAT_STOREFRONT: maybe\nSCRAT_GRADE: B"), /valid SCRAT_STOREFRONT: verified, regression, or unavailable/);
@@ -5260,7 +5280,7 @@ fi
     assert.deepEqual(parsed("SCRAT_STOREFRONT: unavailable\nSCRAT_GRADE: A"), { text: "R.", ready: false, paths: [], outcome: "complete", grade: "A", verdict: undefined, storefront: "unavailable", issues: undefined });
     f.loggie.processingPolls = 0;
     await implement(1);
-    const pr = f.prs[0], names = (request) => request.request.tools.map((tool) => tool.function.name);
+    const pr = f.prs[0], names = (request) => request.request.tools.map((tool) => tool.function.name).filter((name) => name !== "codemode");
     let pushes = 0;
     const reviewOf = async (mode) => { if (pushes++) pushFile(pr.head.ref, "snippets/badge.liquid", `<span>${pushes}</span>\n`); f.reset(201, mode); const from = f.requests.length; await route(); const run = await success(); return { run, requests: f.requests.slice(from).filter((request) => request.context.action === "review_pr") }; };
     const comment = () => f.botComments(201).find((entry) => entry.body.includes("<!-- scrat-review -->")).body;
@@ -5326,7 +5346,7 @@ fi
 
     live.storefront.enabled = false;
     const disabled = await reviewOf("normal");
-    const skill = readFileSync(resolve("app/skills/review_pr/SKILL.md"), "utf8").replace(/^\{\{#storefront\}\}\n[\s\S]*?^\{\{\/storefront\}\}\n/m, "").replaceAll("{{bot}}", "Scrat");
+    const skill = readFileSync(resolve("app/workflows/review_pr/SKILL.md"), "utf8").replace(/^\{\{#storefront\}\}\n[\s\S]*?^\{\{\/storefront\}\}\n/m, "").replaceAll("{{bot}}", "Scrat");
     assert.ok(disabled.requests.length && disabled.requests.every((request) => request.context.item.number === 201 && request.context.files.storefront === undefined && request.text.startsWith(skill) && JSON.stringify(names(request)) === panel), "a disabled storefront gets the unchanged skill and tools");
   } },
   cloudflare_issues: { title: "an enabled Cloudflare source files each active exception issue once it reaches the threshold and while fewer than maxOpen are open, files a new issue when a version unseen before a completed close recurs after it, but not for the old version or a not-planned close, never refiles across rounds, and gives the review a context file without headers or user data", configure: [(config) => { Object.assign(config.cloudflare, { enabled: true, services: ["api"] }); config.cloudflare.issues.maxOpen = 2; }], run: async () => {
@@ -6140,8 +6160,8 @@ fi
   codemode: { title: "codemode runs sandboxed JS batching tools, bypasses read dedup inside scripts, enforces workspace confinement, redacts secrets, tracks path receipts, and respects per-action opt-out", configure: [(config) => {
     config.tools.readDedupMinBytes = 256;
     config.tools.codemode = { review: true, change: false, mode: "on", inlineBudget: 3000, maxWorkers: 2, models: false };
-    config.actions.label_items.enabled = true;
-    for (const name of ["review_pr", "resolve_conflicts", "address_pr_feedback", "address_review"]) config.actions[name].enabled = false;
+    config.workflows.label_items.enabled = true;
+    for (const name of ["review_pr", "resolve_conflicts", "address_pr_feedback", "address_review"]) config.workflows[name].enabled = false;
   }], run: async () => {
     const seed = resolve("seed"), remote = resolve("remote.git");
     writeFileSync(resolve(seed, "src/big.ts"), `export const BIG_MARKER = "found-big-file";\n${"// pad line\n".repeat(40)}`);
@@ -6194,7 +6214,7 @@ fi
     // Verify per-action codemode: false (label_items) omits codemode from tools
     f.script = undefined;
     const { config: live } = await f.app("config.ts");
-    assert.equal(live.actions.label_items.codemode, false);
+    assert.equal(live.workflows.label_items.codemode, false);
     const labelReqCountBefore = f.requests.length;
     branchOff("cm-pr", "src/app.ts", "export const value = 2;\n");
     f.addPr(2, "cm-pr", "human");
@@ -6334,6 +6354,7 @@ fi
     },
     configure: [(config) => {
       config.workflows = {
+        ...config.workflows,
         directory: resolve("local-workflows"),
         "maintainer-sweep": {
           enabled: false,

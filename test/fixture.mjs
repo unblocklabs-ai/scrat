@@ -26,7 +26,7 @@ function schemaTemplate(repository) {
 export async function fixture(scenario, spec) {
   const repository = fileURLToPath(new URL("..", import.meta.url));
   const root = mkdtempSync(resolve(tmpdir(), "scrat-integration-"));
-  for (const path of ["src", "skills", "actions", "workflows", "scrat.config.json", "package.json"]) {
+  for (const path of ["src", "workflows", "scrat.config.json", "package.json"]) {
     if (existsSync(resolve(repository, path))) cpSync(resolve(repository, path), resolve(root, "app", path), { recursive: true });
   }
   symlinkSync(resolve(repository, "node_modules"), resolve(root, "app/node_modules"));
@@ -315,12 +315,17 @@ export async function fixture(scenario, spec) {
   config.cloudflare.loggie = { ...config.cloudflare.loggie, url: `http://127.0.0.1:${server.address().port}`, slug: cloudflare.slug };
   config.cloudflare.accountId = cloudflare.accountId;
   config.d1.enabled = false;
-  config.actions = Object.fromEntries(readdirSync("app/actions").map((file) => parseYaml(readFileSync("app/actions/" + file, "utf8")))
-    .map(({ name, reviewers = [] }) => [name, { provider: "fixture", ...reviewers.length && { reviewers: reviewers.map((reviewer) => ({ ...reviewer, provider: "fixture" })) } }]));
+  config.workflows = Object.fromEntries(readdirSync("app/workflows")
+    .filter((entry) => existsSync(`app/workflows/${entry}/workflow.yaml`))
+    .map((entry) => {
+      const parsed = parseYaml(readFileSync(`app/workflows/${entry}/workflow.yaml`, "utf8"));
+      const reviewers = parsed.defaults?.reviewers ?? [];
+      return [parsed.name, { provider: "fixture", ...reviewers.length && { reviewers: reviewers.map((reviewer) => ({ ...reviewer, provider: "fixture" })) } }];
+    }));
   for (const configure of spec.configure ?? []) configure(config);
   const { actions, workflows, ...fileSettings } = config;
   writeFileSync("app/scrat.config.json", JSON.stringify(fileSettings));
-  writeFileSync("app/scrat.local.json", JSON.stringify({ actions, ...(workflows && { workflows }) }));
+  writeFileSync("app/scrat.local.json", JSON.stringify({ workflows, ...(actions && { actions }) }));
   mkdirSync("data");
   copyFileSync(schemaTemplate(repository), "data/scrat.sqlite");
   const app = async (path) => import(pathToFileURL(resolve("app/src", path)));

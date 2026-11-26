@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import type { GithubItem } from "./github-types.ts";
-import type { ActionSettings, LabelCategory } from "./manifests.ts";
+import type { Action, LabelCategory } from "./manifests.ts";
 
 const fingerprint = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-export function categoriesFor(settings: Pick<ActionSettings, "targets" | "issue_labels" | "pr_labels">, kind: "issue" | "pr") {
+export function categoriesFor(settings: Pick<Action, "targets" | "issue_labels" | "pr_labels">, kind: "issue" | "pr") {
   if (!settings.targets?.includes(kind === "pr" ? "prs" : "issues")) return [];
   return (kind === "pr" ? settings.pr_labels : settings.issue_labels) ?? [];
 }

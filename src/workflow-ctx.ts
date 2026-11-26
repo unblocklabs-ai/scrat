@@ -3,22 +3,35 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { and, eq } from "drizzle-orm";
 import type { Logger } from "pino";
+import { buildItemAgentInput, evaluateItemContext, readDiffScope } from "./agent-input.ts";
 import { upsertComment } from "./comments.ts";
 import { config, isBotLogin } from "./config.ts";
 import { db } from "./db.ts";
 import { describeError, errorCode, SupersededError, transientInferenceCode } from "./errors.ts";
 import type { EventReferences } from "./events.ts";
+import { freshness, savedEvaluation } from "./freshness.ts";
+import { gitList } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
-import type { GithubIssue, GithubPullRequest } from "./github-types.ts";
-import type { ThinkingLevel, ToolName } from "./manifests.ts";
-import { endsWithMarker, fingerprintMarker, isIssueComment, withMarker } from "./markers.ts";
+import type { GithubContext, GithubIssue, GithubPullRequest } from "./github-types.ts";
+import { botSlug } from "./identity.ts";
+import { categoriesFor, itemLabelKey } from "./item-labels.ts";
+import type { Item } from "./items.ts";
+import { reconcileLabels } from "./labels.ts";
+import type { LabelCategory, ThinkingLevel, ToolName } from "./manifests.ts";
+import { endsWithMarker, fingerprintMarker, isIssueComment, reviewMarker, withMarker } from "./markers.ts";
+import { observe, type ItemObservation } from "./observation.ts";
 import { executePi, type SubmitResultSpec } from "./pi.ts";
-import { InterruptedError, SecretLeakError } from "./results.ts";
-import { updateRun } from "./run-history.ts";
+import { assertComplete, hasPublicationSnapshot, InterruptedError, SecretLeakError } from "./results.ts";
+import { canonicalReviewPaths } from "./review-paths.ts";
+import { getRun, latestCompletedRun, latestPriorRunOfTask, updateRun } from "./run-history.ts";
 import { steps, workflowState, type Run, type Subject, type Task } from "./schema.ts";
 import { assertPublishable } from "./secrets.ts";
 import { postMessage } from "./slack.ts";
-import { type GithubPermission, hashJson, type ResolvedWorkflow, type SlackPermission, workflowAllowedTools, type WorkspacePermission } from "./workflows.ts";
+import { parseTriggerInput } from "./triggers.ts";
+import {
+  type GithubPermission, hashJson, type ResolvedWorkflow, type SlackPermission, workflowAllowedTools,
+  workflowItemLabelSettings, type WorkflowPipelineSpec, type WorkspacePermission,
+} from "./workflows.ts";
 import { createWorkspace, removeWorkspace } from "./workspaces.ts";
 
 type WorkflowCheckout = {
@@ -45,9 +58,33 @@ type WorkflowAgentResult<T = Record<string, unknown>> = {
   text: string;
   data?: T;
   outcome: "complete" | "incomplete" | "needs_decision";
+  ready: boolean;
+  labels?: Array<{ category: string; name: string }>;
   paths: string[];
   sessionId?: string;
   sessionFile?: string;
+};
+
+type WorkflowPipelineOutcome = { skipped?: string; cancelled?: string; published?: boolean };
+export type WorkflowPipelineRunner = (spec: WorkflowPipelineSpec, dryRun: boolean) => Promise<WorkflowPipelineOutcome>;
+
+type WorkflowItemObserved = {
+  context: GithubContext;
+  observation: ItemObservation;
+  pullRequest?: GithubPullRequest;
+  mainSha: string;
+};
+
+type WorkflowItemCheckout = {
+  id: string;
+  path: string;
+  branch: string | null;
+  mainSha: string;
+  headSha: string;
+  diffBaseSha: string;
+  diffPaths: string[];
+  evaluated: NonNullable<Run["context"]>;
+  observed: WorkflowItemObserved;
 };
 
 type WorkflowMergedPr = {
@@ -69,10 +106,12 @@ export type WorkflowContext = {
     config: Record<string, unknown>;
   };
   trigger: {
-    kind: "cron" | "manual";
+    kind: "cron" | "manual" | "event";
+    manual: boolean;
     input: Record<string, unknown>;
     start?: string;
     end?: string;
+    item?: { id: string; kind: "issue" | "pr"; number: number; title: string };
   };
   signal: AbortSignal;
   log: Logger;
@@ -101,6 +140,40 @@ export type WorkflowContext = {
   };
   slack: {
     post: (args: { key: string; channel: string; text: string; threadTs?: string }) => Promise<{ ts: string; dryRun?: boolean; previewPath?: string }>;
+  };
+  item: {
+    connect: () => Promise<WorkflowItemObserved>;
+    savedResult: () => { result: WorkflowAgentResult; labelingKey?: string } | undefined;
+    labelCategories: () => LabelCategory[];
+    labelKey: (observed: WorkflowItemObserved, categories: readonly LabelCategory[]) => string;
+    isFresh: (observed: WorkflowItemObserved) => Promise<boolean>;
+    skipAsUnchanged: (reason: string) => never;
+    withCheckout: <T>(
+      observed: WorkflowItemObserved,
+      options: { prepare?: boolean; labelingCategories?: LabelCategory[] },
+      fn: (ws: WorkflowItemCheckout) => Promise<T>,
+    ) => Promise<T>;
+    runAgent: (
+      ws: WorkflowItemCheckout,
+      options: {
+        files: readonly string[];
+        contextMode?: "all" | "change";
+        labelCategories?: readonly LabelCategory[];
+        skill?: string;
+        tools?: readonly ToolName[];
+        codemode?: boolean;
+      },
+    ) => Promise<WorkflowAgentResult>;
+    assertFreshForPublication: (current: WorkflowItemObserved, options?: { labelKey?: string; labelCategories?: readonly LabelCategory[] }) => Promise<void>;
+    upsertReviewComment: (args: { key: string; current: WorkflowItemObserved; body: string }) => Promise<{ commentId: number; dryRun?: boolean; previewPath?: string }>;
+    reconcileLabels: (args: { key: string; current: WorkflowItemObserved; desired: string[]; managed: string[] }) => Promise<{ desired: string[]; dryRun?: boolean; previewPath?: string }>;
+    addReadyLabel: (args: { key: string; current: WorkflowItemObserved }) => Promise<{ desired: string[]; dryRun?: boolean; previewPath?: string }>;
+  };
+  review: {
+    run: (spec: Omit<WorkflowPipelineSpec, "acceptance" | "commitPrefix">) => Promise<WorkflowPipelineOutcome>;
+  };
+  change: {
+    run: (spec: Omit<WorkflowPipelineSpec, "agent" | "start">) => Promise<WorkflowPipelineOutcome>;
   };
 };
 
@@ -160,6 +233,7 @@ export type CreateWorkflowContextInput = {
   task: Task;
   run: Run;
   subject: Subject;
+  item?: Item;
   references: EventReferences;
   repositoryPath: string;
   log: Logger;
@@ -168,16 +242,19 @@ export type CreateWorkflowContextInput = {
   trigger: WorkflowContext["trigger"];
   onWorkspaceAcquired?: (workspace: { id: string; path: string }) => void;
   onWorkspaceReleased?: () => void;
+  onTargetObserved?: (target: string) => void;
+  runPipeline?: WorkflowPipelineRunner;
 };
 
-export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx: WorkflowContext; hasPublishedEffects: () => boolean } {
-  const { workflow, task, run, subject, references, repositoryPath, log, signal, dryRun, trigger } = input;
+export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx: WorkflowContext; hasPublishedEffects: () => boolean; usedManagedPipeline: () => boolean } {
+  const { workflow, task, run, subject, item, references, repositoryPath, log, signal, dryRun, trigger } = input;
   const github = new GitHubRepository(subject.repository);
   const usedStepNames = new Set<string>();
   const inFlightEffects = new Set<string>();
   let checkoutActive = false;
   const dryRunState = new Map<string, { v: unknown } | undefined>();
   let published = false;
+  let managedPipelineUsed = false;
 
   async function writeDryRunPreview(kind: string, key: string, payload: Record<string, unknown>) {
     const dir = resolve("data/workflow-dry-runs", `${workflow.name}-${run.id.slice(0, 8)}`);
@@ -441,6 +518,9 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
           if (!allowedToolSet.has(tool)) {
             throw new Error(`Workflow ${workflow.name} requested disallowed tool "${tool}"`);
           }
+          if (tool === "read_base") {
+            throw new Error(`Workflow ${workflow.name} requested "read_base" outside ctx.item.runAgent`);
+          }
         }
         if (effectiveTools.includes("github_search")) {
           assertPermission<GithubPermission>(workflow.permissions.github, "read", "github", workflow.name);
@@ -469,6 +549,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
           model: options.model ?? workflow.defaults.model,
           thinkingLevel: options.thinkingLevel ?? workflow.defaults.thinkingLevel,
         };
+        if (getRun(run.id)?.stage !== "publishing") updateRun(run.id, { stage: "agent" });
         let sessionInfo: { id?: string; file?: string } = {};
         const res = await executePi({
           run: effectiveRun,
@@ -491,6 +572,8 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
           text: res.text,
           data: res.data as T | undefined,
           outcome: res.outcome,
+          ready: res.ready,
+          labels: res.labels,
           paths: res.paths,
           sessionId: sessionInfo.id,
           sessionFile: sessionInfo.file,
@@ -579,6 +662,281 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
     },
   };
 
+  function requireItem(): Item {
+    if (!item) throw new Error(`Workflow ${workflow.name} called ctx.item on a non-item subject (${subject.kind})`);
+    return item;
+  }
+
+  const itemHelper: WorkflowContext["item"] = {
+    async connect() {
+      assertNotAborted(signal, "item.connect");
+      assertPermission<GithubPermission>(workflow.permissions.github, "read", "github", workflow.name);
+      const currentItem = requireItem();
+      const context = await github.fetchItemContext(currentItem.kind, currentItem.payload.number);
+      if (context.item.state !== "open") throw new Error("GitHub item is no longer open");
+      const pullRequest = "head" in context.item ? context.item : undefined;
+      const observation = observe(context);
+      const mainSha = await github.fetchBranch(observation.baseBranch);
+      if (pullRequest) input.onTargetObserved?.(`${pullRequest.head.sha}@${observation.baseBranch}`);
+      return { context, observation, pullRequest, mainSha };
+    },
+    savedResult() {
+      const prior = run.retryOfRunId ? getRun(run.retryOfRunId) : latestPriorRunOfTask(task.id, run.id);
+      if (!hasPublicationSnapshot(prior) || !prior.result || !prior.context) return undefined;
+      updateRun(run.id, {
+        context: prior.context,
+        result: prior.result,
+        mainSha: prior.mainSha,
+        headSha: prior.headSha,
+        piSessionId: prior.piSessionId,
+        piSessionFile: prior.piSessionFile,
+      });
+      return {
+        result: {
+          text: prior.result.text,
+          outcome: prior.result.outcome,
+          ready: prior.result.ready,
+          labels: prior.result.labels,
+          paths: prior.result.paths,
+          sessionId: prior.piSessionId ?? undefined,
+          sessionFile: prior.piSessionFile ?? undefined,
+        },
+        labelingKey: prior.context.labeling?.key,
+      };
+    },
+    labelCategories() {
+      const currentItem = requireItem();
+      return categoriesFor(workflowItemLabelSettings(workflow), currentItem.kind);
+    },
+    labelKey(observed, categories) {
+      return itemLabelKey(observed.observation.item, categories);
+    },
+    async isFresh(observed) {
+      assertNotAborted(signal, "item.isFresh");
+      const currentItem = requireItem();
+      const completed = latestCompletedRun(currentItem.id, workflow.name);
+      if (!completed) return false;
+      const state = await freshness(savedEvaluation(completed), { ...observed.observation, mainSha: observed.mainSha }, "relevant-paths");
+      return state.kind === "current";
+    },
+    skipAsUnchanged(reason) {
+      throw new SupersededError(reason);
+    },
+    async withCheckout(observed, options, fn) {
+      assertNotAborted(signal, "item.withCheckout");
+      assertPermission<WorkspacePermission>(workflow.permissions.workspace, "read", "workspace", workflow.name);
+      if (checkoutActive) throw new Error("Overlapping workspace checkout calls are not supported in a single workflow run");
+      checkoutActive = true;
+      let ws: { id: string; path: string; branch: string | null; baseSha: string } | undefined;
+      try {
+        const headSha = observed.pullRequest ? await github.fetchPullRequestHead(observed.pullRequest) : observed.mainSha;
+        const evaluated = evaluateItemContext(run, observed.observation, { labelCategories: options.labelingCategories });
+        const { diffBaseSha, diffPaths } = await readDiffScope(repositoryPath, observed.mainSha, headSha, Boolean(observed.pullRequest));
+        ws = await createWorkspace({ repositoryPath, baseRef: headSha }, references);
+        updateRun(run.id, { workspaceId: ws.id, mainSha: observed.mainSha, headSha, context: evaluated });
+        input.onWorkspaceAcquired?.({ id: ws.id, path: ws.path });
+        if (!options.prepare) {
+          log.info({ event: "workspace.prepare_skipped", reason: options.labelingCategories ? "item labeling" : "issue review" });
+        }
+        return await fn({
+          id: ws.id,
+          path: ws.path,
+          branch: ws.branch,
+          mainSha: observed.mainSha,
+          headSha,
+          diffBaseSha,
+          diffPaths,
+          evaluated,
+          observed,
+        });
+      } finally {
+        checkoutActive = false;
+        if (ws) {
+          input.onWorkspaceReleased?.();
+          try {
+            await removeWorkspace(ws.id, references);
+          } catch (cleanupError) {
+            log.warn({ err: cleanupError, workspaceId: ws.id }, "Failed to remove workflow workspace");
+          }
+        }
+      }
+    },
+    async runAgent(ws, options) {
+      assertNotAborted(signal, "item.runAgent");
+      const currentItem = requireItem();
+      const skillFile = options.skill ? resolveWorkflowFile(workflow.dir, options.skill) : workflow.skillPath;
+      if (!skillFile) throw new Error(`Workflow ${workflow.name} has no SKILL.md and no skill option was provided`);
+      const effectiveTools = options.tools ?? workflow.defaults.tools;
+      for (const tool of effectiveTools) {
+        if (!allowedToolSet.has(tool)) throw new Error(`Workflow ${workflow.name} requested disallowed tool "${tool}"`);
+      }
+      if (effectiveTools.includes("github_search")) {
+        assertPermission<GithubPermission>(workflow.permissions.github, "read", "github", workflow.name);
+      }
+      const changeContext = options.contextMode === "change";
+      const baseSha = changeContext ? ws.diffBaseSha : undefined;
+      if (effectiveTools.includes("read_base") && !baseSha) {
+        throw new Error(`Workflow ${workflow.name} requested "read_base" without contextMode: "change"`);
+      }
+      const { prompt, contextDir, revisions, labelCategories } = await buildItemAgentInput({
+        run,
+        task,
+        evaluated: ws.evaluated,
+        diffBaseSha: ws.diffBaseSha,
+        diffPaths: ws.diffPaths,
+        mainSha: ws.mainSha,
+        headSha: ws.headSha,
+        baseRef: ws.mainSha,
+        mergeInProgress: false,
+        workspace: { path: ws.path, branch: ws.branch },
+        files: options.files,
+      });
+      const effectiveRun: Run = {
+        ...run,
+        skill: skillFile,
+        provider: workflow.defaults.provider,
+        model: workflow.defaults.model,
+        thinkingLevel: workflow.defaults.thinkingLevel,
+      };
+      let sessionInfo: { id?: string; file?: string } = {};
+      updateRun(run.id, { stage: "agent" });
+      const res = await executePi({
+        run: effectiveRun,
+        cwd: ws.path,
+        tools: effectiveTools,
+        scoped: { mode: "review", codemode: options.codemode ?? workflow.defaults.codemode },
+        baseSha,
+        contextDir,
+        revisions,
+        environment: { ...config.workspace.environment },
+        log: log.child({ workflow: workflow.name, model: effectiveRun.model }),
+        stop: signal,
+      }, {
+        context: prompt,
+        skillPath: skillFile,
+        labelCategories: options.labelCategories ? [...options.labelCategories] : labelCategories,
+        onSession: (details) => {
+          sessionInfo = { id: details.piSessionId, file: details.piSessionFile };
+          updateRun(run.id, { piSessionId: details.piSessionId, piSessionFile: details.piSessionFile });
+        },
+      });
+      const combined = [...new Set([...ws.diffPaths, ...res.paths])];
+      const parsedTrigger = parseTriggerInput(run.input);
+      let retained = combined;
+      if (parsedTrigger.kind === "item_changed") {
+        const previous = latestCompletedRun(currentItem.id, workflow.name);
+        if (previous && previous.context?.revision === ws.evaluated.revision) {
+          const mainOnly = new Set(parsedTrigger.changedPaths);
+          const mainTracked = await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", ws.mainSha]);
+          const headTracked = ws.headSha !== ws.mainSha ? await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", ws.headSha]) : [];
+          const previousMainTracked = previous.mainSha && previous.mainSha !== ws.mainSha && previous.mainSha !== ws.headSha
+            ? await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", previous.mainSha]).catch(() => []) : [];
+          const tracked = headTracked.length || previousMainTracked.length ? [...mainTracked, ...headTracked, ...previousMainTracked] : mainTracked;
+          const prior = canonicalReviewPaths(previous.result?.paths ?? [], tracked).filter((path) => path !== ".");
+          retained = [...new Set([...prior, ...ws.diffPaths, ...res.paths.filter((path) => !mainOnly.has(path))])];
+        }
+      }
+      const finalResult = { ...res, paths: retained };
+      updateRun(run.id, { result: finalResult, stage: "validating" });
+      assertComplete(finalResult);
+      updateRun(run.id, { stage: "publishing" });
+      return {
+        text: finalResult.text,
+        outcome: finalResult.outcome,
+        ready: finalResult.ready,
+        labels: finalResult.labels,
+        paths: finalResult.paths,
+        sessionId: sessionInfo.id,
+        sessionFile: sessionInfo.file,
+      };
+    },
+    async assertFreshForPublication(current, options = {}) {
+      assertNotAborted(signal, "item.assertFreshForPublication");
+      const evaluatedRun = getRun(run.id)!;
+      if (options.labelKey !== undefined && options.labelCategories) {
+        if (itemLabelKey(current.observation.item, options.labelCategories) !== options.labelKey) {
+          throw new Error("GitHub item changed or label policy changed; enqueue a fresh labeling task");
+        }
+        return;
+      }
+      const state = await freshness(savedEvaluation(evaluatedRun), { ...current.observation, mainSha: async () => github.fetchBranch(current.observation.baseBranch) }, "relevant-paths", true);
+      if (state.kind === "stale") {
+        throw new Error(state.reason === "context"
+          ? "GitHub task context changed; enqueue a fresh task instead of retrying publication"
+          : "Reviewed code changed; enqueue a fresh review instead of retrying publication");
+      }
+    },
+    async upsertReviewComment({ key, current, body }) {
+      assertNotAborted(signal, "item.upsertReviewComment");
+      assertPermission<GithubPermission>(workflow.permissions.github, "comment", "github", workflow.name);
+      const safeKey = safeIdempotencyKey(key, workflow.name);
+      assertPublishable(body);
+      if (dryRun) {
+        const previewPath = await writeDryRunPreview("github-review-comment", safeKey, { number: current.observation.item.number, body });
+        return { commentId: 0, dryRun: true, previewPath };
+      }
+      return runEffectStep("github.review_comment", safeKey, { number: current.observation.item.number, body }, async () => {
+        const existing = current.observation.own.findLast((candidate) => isIssueComment(candidate) && endsWithMarker(candidate.body, reviewMarker));
+        const commentId = await upsertComment(github, current.observation.item.number, existing, withMarker(`${body}\n\n`, reviewMarker), references);
+        const currentPub = getRun(run.id)?.publication ?? { status: "pending" as const };
+        updateRun(run.id, { publication: { ...currentPub, commentId } });
+        return { commentId };
+      });
+    },
+    async reconcileLabels({ key, current, desired, managed }) {
+      assertNotAborted(signal, "item.reconcileLabels");
+      assertPermission<GithubPermission>(workflow.permissions.github, "label", "github", workflow.name);
+      const safeKey = safeIdempotencyKey(key, workflow.name);
+      if (dryRun) {
+        const previewPath = await writeDryRunPreview("github-labels", safeKey, { number: current.observation.item.number, desired, managed });
+        return { desired, dryRun: true, previewPath };
+      }
+      return runEffectStep("github.labels", safeKey, { number: current.observation.item.number, desired, managed }, async () => {
+        await reconcileLabels(github, current.observation.item.number, { current: current.observation.labels, desired, managed }, references);
+        return { desired };
+      });
+    },
+    async addReadyLabel({ key, current }) {
+      return itemHelper.reconcileLabels({ key, current, desired: [botSlug], managed: [] });
+    },
+  };
+
+  const runManaged = async (expectedMode: "review" | "change", spec: WorkflowPipelineSpec) => {
+    assertNotAborted(signal, `${expectedMode}.run`);
+    if (workflow.mode !== expectedMode) {
+      throw new Error(`Workflow ${workflow.name} has mode "${workflow.mode}" and cannot call ctx.${expectedMode}.run()`);
+    }
+    if (expectedMode === "change" && spec.publish[0] !== "push") {
+      throw new Error(`Workflow ${workflow.name} change pipeline must publish "push" first`);
+    }
+    assertPermission<WorkspacePermission>(workflow.permissions.workspace, expectedMode === "change" ? "write" : "read", "workspace", workflow.name);
+    for (const effect of spec.start ?? []) {
+      if (effect === "slack_post") assertPermission<SlackPermission>(workflow.permissions.slack, "post", "slack", workflow.name);
+    }
+    for (const effect of spec.publish) {
+      if (effect === "comment") assertPermission<GithubPermission>(workflow.permissions.github, "comment", "github", workflow.name);
+      else if (effect === "labels" || effect === "item_labels") assertPermission<GithubPermission>(workflow.permissions.github, "label", "github", workflow.name);
+      else if (effect === "pr_assessment") {
+        assertPermission<GithubPermission>(workflow.permissions.github, "comment", "github", workflow.name);
+        assertPermission<GithubPermission>(workflow.permissions.github, "label", "github", workflow.name);
+        if (workflow.on.event?.item !== "pr") throw new Error(`Workflow ${workflow.name} pr_assessment requires on.event.item: pr`);
+      } else if (effect === "issue") assertPermission<GithubPermission>(workflow.permissions.github, "issue", "github", workflow.name);
+      else if (effect === "push") assertPermission<GithubPermission>(workflow.permissions.github, "push", "github", workflow.name);
+      else if (effect === "pull_request") assertPermission<GithubPermission>(workflow.permissions.github, "pull_request", "github", workflow.name);
+      else if (effect === "slack_reply") assertPermission<SlackPermission>(workflow.permissions.slack, "post", "slack", workflow.name);
+      else if (effect === "site_map" && workflow.on.event?.source !== "storefront") {
+        throw new Error(`Workflow ${workflow.name} site_map requires on.event.source: storefront`);
+      }
+    }
+    if (!input.runPipeline) {
+      throw new Error(`Managed ${expectedMode} pipeline is not available in this execution context`);
+    }
+    managedPipelineUsed = true;
+    const outcome = await input.runPipeline(spec, dryRun);
+    if (outcome.published) published = true;
+    return outcome;
+  };
+
   return {
     ctx: {
       workflow: { name: workflow.name, dir: workflow.dir, hash: workflow.hash, dryRun, config: workflow.config },
@@ -592,7 +950,11 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       agent,
       github: githubHelper,
       slack: slackHelper,
+      item: itemHelper,
+      review: { run: (spec) => runManaged("review", spec) },
+      change: { run: (spec) => runManaged("change", spec) },
     },
     hasPublishedEffects: () => published,
+    usedManagedPipeline: () => managedPipelineUsed,
   };
 }

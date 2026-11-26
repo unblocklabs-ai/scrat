@@ -78,9 +78,9 @@ async function retainedScope({ run, task, repositoryPath }: Ctx, { item, observa
   return [...new Set([...prior, ...diffPaths, ...paths.filter((path) => !mainOnly.has(path))])];
 }
 
-const itemScope = async ({ run, task, repositoryPath }: Ctx, observed: Observed) => {
+const itemScope = async ({ run, task, manifest, repositoryPath }: Ctx, observed: Observed) => {
   const { mainSha, headSha } = await itemRevisions(observed);
-  return { mainSha, headSha, evaluated: evaluateContext(run, task, observed.observation), ...await readDiffScope(repositoryPath, mainSha, headSha, Boolean(observed.pullRequest)) };
+  return { mainSha, headSha, evaluated: evaluateContext(run, task, observed.observation, manifest), ...await readDiffScope(repositoryPath, mainSha, headSha, Boolean(observed.pullRequest)) };
 };
 
 async function prepareReviewCommands({ run, repositoryPath, references, operation, cleanup }: Ctx, { context, observation }: Observed, review: Review, environment: Environment, commands: string[][]) {

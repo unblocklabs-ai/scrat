@@ -1,0 +1,20 @@
+name: implement
+description: Implement a selected GitHub issue on a dedicated branch, validate it, and open a pull request.
+enabled: true
+mode: change
+priority: 60
+on:
+  event:
+    source: github_items
+    kind: label
+    item: issue
+defaults:
+  provider: codex-lb
+  model: gpt-6.2-sol
+  thinkingLevel: high
+  tools: [read, grep, find, ls, bash, edit, write]
+permissions:
+  github: [read, push, pull_request, label]
+  workspace: [read, write]
+config:
+  failedLabel: Scrat failed

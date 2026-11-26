@@ -422,7 +422,7 @@ print_first_sync_plan() {
   log "Fetching open issues and pull requests for the first-sync plan"
   npm run --silent fetch
   node --input-type=module -e '
-    const { config, isActionEnabled } = await import("./src/config.ts");
+    const { config, isWorkflowEnabled } = await import("./src/config.ts");
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync("data/scrat.sqlite", { readOnly: true });
     const items = db.prepare("select i.kind as kind, i.payload as payload from items i join subjects s on s.id = i.id where s.state = ?").all("open")
@@ -431,7 +431,7 @@ print_first_sync_plan() {
     const count = (kind) => items.filter((item) => item.kind === kind).length;
     const bot = items.filter((item) => item.author === config.github.botLogin.toLowerCase()).length;
     console.log("First sync of " + config.github.repository + ": " + count("issue") + " open issues and " + count("pr") + " open pull requests, " + bot + " of them by " + config.github.botLogin);
-    console.log("Enabled actions: " + Object.keys(config.actions).filter(isActionEnabled).join(", "));
+    console.log("Enabled workflows: " + Object.keys(config.workflows).filter(isWorkflowEnabled).join(", "));
   '
   log "scrat.service is stopped. Start it with: $(systemctl_command) enable --now scrat.service"
 }

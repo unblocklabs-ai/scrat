@@ -1,4 +1,4 @@
-import { actionsPublishing, manifests } from "./actions.ts";
+import { actionsPublishing, workflows } from "./actions.ts";
 import { branchConflictCode } from "./errors.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import type { ItemObservation } from "./observation.ts";
@@ -37,7 +37,7 @@ function selectAssessment(history: History) {
 export function priorReviewTexts(subjectId: string) {
   const assessment = selectAssessment(prReviewHistory(subjectId));
   if (!assessment) return undefined;
-  const repairRun = runHistory(subjectId, manifests.filter((manifest) => manifest.trigger.kind === "low_grade").map((manifest) => manifest.name))
+  const repairRun = runHistory(subjectId, workflows.filter((wf) => wf.on.event?.kind === "low_grade").map((wf) => wf.name))
     .find(({ run }) => run.result?.outcome === "complete" && run.sequence > assessment.run.sequence)?.run;
   return { assessment: runText(assessment.run.id), repair: repairRun && runText(repairRun.id) };
 }

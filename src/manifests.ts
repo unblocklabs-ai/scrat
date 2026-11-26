@@ -1,29 +1,25 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { basename, resolve } from "node:path";
 import { type Static, type TSchema, Type } from "typebox";
-import Value from "typebox/value";
-import { parse } from "yaml";
 import { nextTick, parseCron, parseWindow } from "./cron.ts";
-import { hostProblem } from "./bindings.ts";
 import { prGrades } from "./results.ts";
-import { triggerKinds, triggerSource } from "./triggers.ts";
+import { triggerKinds } from "./triggers.ts";
+type TriggerKind = (typeof triggerKinds)[number];
 
 const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const toolNames = ["read", "grep", "find", "ls", "git", "read_base", "bash", "edit", "write", "http", "browser", "github_search"] as const;
-const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "history", "validation", "triage", "issue", "storefront", "cloudflare", "store_changes"] as const;
+export const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "history", "validation", "triage", "issue", "storefront", "cloudflare", "store_changes"] as const;
 const effectNames = ["push", "pull_request", "comment", "labels", "item_labels", "pr_assessment", "issue", "slack_reply", "site_map"] as const;
-const startEffectNames = ["slack_post"] as const;
+export const startEffectNames = ["slack_post"] as const;
 export type ThinkingLevel = (typeof thinkingLevels)[number];
 export type ToolName = (typeof toolNames)[number];
+export type ContextFileName = (typeof contextFileNames)[number];
 export type EffectName = (typeof effectNames)[number];
+export type StartEffectName = (typeof startEffectNames)[number];
 
 const strict = { additionalProperties: false } as const;
 export const nullable = <T extends TSchema>(schema: T) => Type.Union([schema, Type.Null()]);
 const list = <T extends TSchema>(items: T, minItems = 0) => Type.Array(items, { minItems, uniqueItems: true });
 export const modelSettings = Type.Object({ provider: Type.String(), model: Type.String(), thinkingLevel: Type.Enum(thinkingLevels) }, strict);
-const retrySettings = Type.Object({ initialDelaySeconds: Type.Integer({ minimum: 1 }), maxDelaySeconds: Type.Integer({ minimum: 1 }) }, strict);
-const positive = Type.Integer({ minimum: 1 });
-const labelCategories = Type.Array(Type.Object({
+export const labelCategories = Type.Array(Type.Object({
   category: Type.String({ minLength: 1, pattern: "\\S" }),
   choices: Type.Array(Type.Object({
     name: Type.String({ minLength: 1, maxLength: 50, pattern: "^\\S(?:.*\\S)?$" }),
@@ -31,69 +27,10 @@ const labelCategories = Type.Array(Type.Object({
   }, strict), { minItems: 1 }),
 }, strict));
 export type LabelCategory = Static<typeof labelCategories>[number];
-const settings = {
-  enabled: Type.Optional(Type.Boolean()), priority: Type.Integer(), skill: Type.String(),
-  channel: Type.Optional(Type.String()), maxRangeCommits: Type.Optional(positive), startMessage: Type.Optional(Type.String()),
-  browserSteps: Type.Optional(positive), browserSeconds: Type.Optional(positive), rootInstructions: Type.Optional(Type.String()),
-  maxSelfRepairs: Type.Optional(Type.Integer({ minimum: 0 })), exhaustedLabel: Type.Optional(nullable(Type.String())), failedLabel: Type.Optional(nullable(Type.String())),
-  targets: Type.Optional(list(Type.Enum(["issues", "prs"]), 1)),
-  issue_labels: Type.Optional(labelCategories), pr_labels: Type.Optional(labelCategories),
-  codemode: Type.Optional(Type.Boolean()),
-};
-export const actionSettings = Type.Object({
-  ...settings, ...modelSettings.properties, reviewers: Type.Array(modelSettings), branch: Type.Optional(Type.String()), retry: Type.Optional(nullable(retrySettings)),
-  cron: Type.Optional(Type.String()), window: Type.Optional(Type.String()),
-}, strict);
-export type ActionSettings = Static<typeof actionSettings>;
-const trigger = Type.Object({
-  source: Type.Enum(["github_items", "github_commits", "schedule", "storefront", "shopify"]), kind: Type.Enum(triggerKinds),
-  item: Type.Optional(Type.Enum(["issue", "pr"])), author: Type.Optional(Type.String({ minLength: 1 })),
-  grades: Type.Optional(list(Type.Enum(prGrades), 1)),
-  manual: Type.Optional(Type.Boolean()), branch: Type.Optional(Type.String()),
-  granularity: Type.Optional(Type.Enum(["range", "commit"])), message: Type.Optional(Type.String({ minLength: 1 })),
-  cron: Type.Optional(Type.String()), window: Type.Optional(Type.String()),
-}, strict);
-const httpSettings = Type.Object({ binding: Type.String(), methods: Type.Optional(list(Type.Enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]), 1)) }, strict);
-const browserSettings = Type.Object({ navigationHosts: list(Type.String(), 1), resourceHosts: list(Type.String()), binding: Type.Optional(Type.String()) }, strict);
-const schema = Type.Object({
-  name: Type.String({ pattern: "^[a-z][a-z0-9_]{0,63}$" }),
-  trigger, mode: Type.Enum(["review", "change"]), agent: Type.Optional(Type.Enum(["single", "panel"])), reviewers: Type.Optional(Type.Array(modelSettings)),
-  context: Type.Optional(Type.Enum(["all", "feedback", "change"])),
-  tools: Type.Optional(list(Type.Enum(toolNames), 1)), http: Type.Optional(httpSettings), browser: Type.Optional(browserSettings), files: Type.Optional(list(Type.Enum(contextFileNames))),
-  acceptance: Type.Optional(Type.Enum(["complete", "nonempty_diff", "conflict_free"])), commitPrefix: Type.Optional(Type.String({ minLength: 1 })),
-  start: Type.Optional(list(Type.Enum(startEffectNames))), publish: list(Type.Enum(effectNames), 1),
-  ...settings, model: modelSettings, retry: Type.Optional(retrySettings),
-}, strict);
 
-type Parsed = Static<typeof schema>;
-type Resolved = Parsed & Required<Pick<Parsed, "tools" | "files" | "reviewers" | "agent" | "context">>;
-export type Manifest = Resolved & { file: string; root: string };
-
-const defaultTools = ({ mode, agent, context }: Pick<Resolved, "mode" | "agent" | "context">): ToolName[] => mode === "change" ? ["read", "grep", "find", "ls", "bash", "edit", "write"]
-  : ["read", "grep", "find", "ls", "git", ...agent === "panel" || context === "change" ? ["read_base" as const] : []];
-
-type EntrySettings = Partial<Omit<ActionSettings, "model">>;
-
-export function scheduleProblem(key: "cron" | "window", value: string) {
-  try { if (key === "cron") nextTick(parseCron(value), new Date(0)); else parseWindow(value); } catch (error) { return (error as Error).message; }
-}
-
-export function entryProblems({ mode, agent, trigger }: Pick<Resolved, "mode" | "agent" | "trigger">, entry: EntrySettings) {
-  const checks: [boolean, string][] = [
-    [agent !== "panel" || entry.reviewers?.length === 2, "agent: panel requires exactly two reviewers"],
-    [!entry.retry || mode === "review", "retry requires mode review"],
-    [!entry.retry || entry.retry.maxDelaySeconds >= entry.retry.initialDelaySeconds, "retry.maxDelaySeconds must be at least retry.initialDelaySeconds"],
-    [!entry.failedLabel || mode === "change", "failedLabel requires mode change"],
-    [(entry.maxSelfRepairs === undefined && !entry.exhaustedLabel) || trigger.kind === "low_grade", "maxSelfRepairs and exhaustedLabel are only allowed with kind low_grade"],
-    [(entry.startMessage === undefined && entry.maxRangeCommits === undefined && entry.branch === undefined) || trigger.source === "github_commits", "startMessage, maxRangeCommits and branch are only allowed with source github_commits"],
-    [entry.channel === undefined || trigger.source === "github_commits" || trigger.source === "schedule" || trigger.source === "shopify", "channel is only allowed with source github_commits, schedule or shopify"],
-    [(entry.browserSteps === undefined && entry.browserSeconds === undefined) || trigger.source === "schedule" || trigger.source === "storefront" || trigger.source === "shopify", "browserSteps and browserSeconds are only allowed with source schedule, storefront or shopify"],
-    [entry.rootInstructions === undefined || trigger.source === "schedule", "rootInstructions is only allowed with source schedule"],
-    [(entry.cron === undefined && entry.window === undefined) || trigger.source === "schedule", "cron and window are only allowed with source schedule"],
-    [(entry.targets === undefined && entry.issue_labels === undefined && entry.pr_labels === undefined) || trigger.kind === "item_labels", "targets, issue_labels and pr_labels require kind item_labels"],
-    [trigger.kind !== "item_labels" || Boolean(entry.targets?.length), "kind item_labels requires targets"],
-  ];
-  const problems = checks.filter(([ok]) => !ok).map(([, message]) => message);
+export function labelConfigProblems(entry: { targets?: ("issues" | "prs")[]; issue_labels?: LabelCategory[]; pr_labels?: LabelCategory[] }) {
+  const problems: string[] = [];
+  if (!entry.targets?.length) problems.push("kind item_labels requires targets");
   for (const target of ["issues", "prs"] as const) {
     const categories = (target === "issues" ? entry.issue_labels : entry.pr_labels) ?? [];
     if (entry.targets?.includes(target) && !categories.length) problems.push(`${target} target requires non-empty ${target === "issues" ? "issue_labels" : "pr_labels"}`);
@@ -105,119 +42,82 @@ export function entryProblems({ mode, agent, trigger }: Pick<Resolved, "mode" | 
   return problems;
 }
 
-function crossChecks(m: Resolved) {
-  const { trigger: t, mode, agent, publish, tools, files } = m;
-  const problems: string[] = [];
-  const need = (ok: boolean, message: string) => { if (!ok) problems.push(message); };
-  const any = (list: readonly string[], names: readonly string[]) => names.some((name) => list.includes(name));
-  const items = t.source === "github_items", commits = t.source === "github_commits", scheduled = t.source === "schedule", storefront = t.source === "storefront", shopify = t.source === "shopify", slack = [...m.start ?? [], ...publish];
-  need(triggerSource(t.kind) === t.source, `trigger.kind ${t.kind} does not belong to source ${t.source}`);
-  need(t.kind === "item_labels" ? t.item === undefined : items === (t.item !== undefined), "trigger.item is required for github_items except item_labels, which targets both kinds, and forbidden for other sources");
-  need((t.kind === "item_labels") === publish.includes("item_labels"), "the item_labels trigger and effect require each other");
-  need(t.kind !== "item_labels" || (mode === "review" && agent === "single" && publish.length === 1), "item_labels requires a single review publishing only item_labels");
-  need(!["pr_conflicts", "pr_feedback", "low_grade"].includes(t.kind) || (t.item === "pr" && t.author === "bot"), `trigger.kind ${t.kind} requires item: pr and author: bot`);
-  need(t.kind !== "label" || t.item === "issue", "trigger.kind label requires item: issue");
-  need(t.kind !== "item_changed" || t.item !== "pr" || publish.includes("pr_assessment"), "an item_changed trigger on prs must publish pr_assessment");
-  need(commits === (t.branch !== undefined), "trigger.branch is required for github_commits and forbidden for github_items");
-  need(t.author === undefined || (commits ? true : items && t.author === "bot"), 'trigger.author must be "bot" for github_items and is forbidden for schedule');
-  need((t.message === undefined && t.granularity === undefined) || commits, "trigger.message and trigger.granularity are only allowed with source github_commits");
-  need(scheduled === (t.cron !== undefined && t.window !== undefined) && (scheduled || (t.cron === undefined && t.window === undefined)), "trigger.cron and trigger.window are required for schedule and forbidden for other sources");
-  for (const key of ["cron", "window"] as const) {
-    const problem = t[key] === undefined ? undefined : scheduleProblem(key, t[key]);
-    if (scheduled && problem) problems.push(problem);
-  }
-  need(!scheduled || mode === "review", "a schedule trigger requires mode review");
-  need(!storefront || mode === "review", "a storefront trigger requires mode review");
-  need(!shopify || mode === "review", "a shopify trigger requires mode review");
-  need(storefront === publish.includes("site_map"), "the site_map effect and a storefront trigger require each other");
-  need(t.grades === undefined || t.kind === "low_grade", "trigger.grades is only allowed with kind low_grade");
-  need(t.kind !== "low_grade" || m.maxSelfRepairs !== undefined, "kind low_grade requires maxSelfRepairs");
-  need(!commits || m.maxRangeCommits !== undefined, "source github_commits requires maxRangeCommits");
-  need(!any(slack, ["slack_post"]) || commits, "the slack_post start effect requires source github_commits");
-  need(!publish.includes("slack_reply") || commits || scheduled || shopify, "the slack_reply effect requires source github_commits, schedule or shopify");
-  need(!(scheduled || shopify) || !publish.includes("slack_reply") || files.includes("storefront"), "the slack_reply effect on a schedule or shopify trigger requires files: storefront");
-  need(!publish.includes("issue") || !commits, "the issue effect requires source github_items or schedule");
-  need(!any(publish, ["labels", "comment"]) || items, "labels and comment effects require a github_items trigger");
-  need(!publish.includes("pr_assessment") || (t.item === "pr" && agent === "panel"), "pr_assessment requires item: pr and agent: panel");
-  problems.push(...entryProblems(m, m));
-  need(tools.includes("read"), "tools must include read");
-  need(tools.includes("http") === (m.http !== undefined), "the http tool and the http setting require each other");
-  need(tools.includes("browser") === (m.browser !== undefined) || (!m.browser && files.includes("storefront")), "the browser tool and the browser setting require each other, except that a manifest listing the storefront file may list browser alone");
-  for (const host of [...m.browser?.navigationHosts ?? [], ...m.browser?.resourceHosts ?? []]) { const problem = hostProblem(host); if (problem) problems.push(`browser: ${problem}`); }
-  need(!tools.includes("github_search") || mode === "review", "github_search requires mode review");
-  need(!tools.includes("read_base") || (mode === "review" && (agent === "panel" || m.context === "change")), "read_base requires a review with agent: panel or context: change");
-  if (mode === "change") {
-    need(m.acceptance !== undefined, "mode change requires acceptance");
-    need(items && agent === "single", "mode change requires source github_items and agent: single");
-    need(publish[0] === "push", "mode change must publish push first");
-    need(m.context !== "change", "mode change requires context all or feedback");
-    need(!any(tools, ["git", "read_base"]), "mode change forbids the git and read_base tools");
-  } else {
-    need(m.acceptance === undefined, "mode review forbids acceptance");
-    need(m.commitPrefix === undefined, "mode review forbids commitPrefix");
-    need(!any(publish, ["push", "pull_request"]), "mode review forbids the push and pull_request effects");
-    need(!any(tools, ["bash", "edit", "write"]), "mode review forbids the bash, edit and write tools");
-  }
-  need(!files.includes("review") || t.kind === "low_grade", "files: review requires trigger.kind low_grade");
-  need(!files.includes("previous_assessment") || publish.includes("pr_assessment") || (mode === "review" && publish.includes("comment")), "files: previous_assessment requires the pr_assessment effect or a review that publishes comment");
-  need(!files.includes("previous_repair") || publish.includes("pr_assessment"), "files: previous_repair requires the pr_assessment effect");
-  need(!files.includes("history") || !publish.includes("pr_assessment"), "files: history is not allowed with the pr_assessment effect");
-  need(!files.includes("triage") || t.item === "issue", "files: triage requires trigger.item issue");
-  need(!files.includes("issue") || t.item === "pr", "files: issue requires trigger.item pr");
-  need(!files.includes("storefront") || publish.includes("pr_assessment") || storefront || scheduled || shopify, "files: storefront requires the pr_assessment effect, a storefront trigger, a schedule trigger or a shopify trigger");
-  need(!files.includes("store_changes") || shopify, "files: store_changes requires a shopify trigger");
-  need(!files.includes("cloudflare") || t.item === "issue", "files: cloudflare requires trigger.item issue");
-  return problems;
-}
+export const httpSettings = Type.Object({ binding: Type.String(), methods: Type.Optional(list(Type.Enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]), 1)) }, strict);
+export const browserSettings = Type.Object({ navigationHosts: list(Type.String(), 1), resourceHosts: list(Type.String()), binding: Type.Optional(Type.String()) }, strict);
 
-function readManifest(root: string, path: string, label: string): Manifest {
-  let document: unknown;
-  try { document = parse(readFileSync(path, "utf8")); } catch (error) { throw new Error(`${label}: ${(error as Error).message}`); }
-  if (!Value.Check(schema, document)) {
-    const errors = [...Value.Errors(schema, document)], unknown = errors.find((error) => error.keyword === "additionalProperties");
-    const [error] = errors;
-    throw new Error(unknown
-      ? `${label}: ${unknown.instancePath}/${(unknown.params as { additionalProperties: string[] }).additionalProperties[0]}: unknown key`
-      : `${label}: ${error?.instancePath || "/"}: ${error?.message ?? "invalid manifest"}`);
-  }
-  const parsed = document as Parsed, agent = parsed.agent ?? "single", context = parsed.context ?? "all";
-  const resolved: Resolved = { ...parsed, agent, context, tools: parsed.tools ?? defaultTools({ mode: parsed.mode, agent, context }), files: parsed.files ?? [], reviewers: parsed.reviewers ?? [] };
-  const problems = crossChecks(resolved);
-  if (basename(path, ".yaml") !== parsed.name) problems.unshift(`name ${parsed.name} must equal the file name`);
-  if (parsed.name === "directory") problems.unshift("directory is not a legal action name");
-  if (problems.length) throw new Error(`${label}: ${problems.join("; ")}`);
-  return { ...resolved, file: label, root };
-}
+type Grade = (typeof prGrades)[number];
+type ModelEntry = Static<typeof modelSettings>;
 
-export function readManifests(root: string, directory?: string | null) {
-  const listing = (dir: string) => {
-    try { return readdirSync(dir).filter((file) => file.endsWith(".yaml")).sort().map((file) => resolve(dir, file)); }
-    catch (error) { throw new Error(`Cannot read manifests in ${dir}: ${(error as Error).message}`); }
-  };
-  const loaded = new Map<string, Manifest>();
-  for (const path of listing(resolve(root, "actions"))) {
-    const manifest = readManifest(root, path, `actions/${basename(path)}`);
-    loaded.set(manifest.name, manifest);
-  }
-  for (const path of directory ? listing(directory) : []) {
-    const manifest = readManifest(directory!, path, path);
-    loaded.set(manifest.name, manifest);
-  }
-  return [...loaded.values()];
-}
-
-type Grade = NonNullable<Manifest["trigger"]["grades"]>[number];
-export type Signal = {
-  source: Manifest["trigger"]["source"]; kind: Manifest["trigger"]["kind"]; item?: "issue" | "pr"; author?: "bot" | "other"; grade?: Grade;
+export type ActionTrigger = {
+  source: "github_items" | "github_commits" | "schedule" | "storefront" | "shopify";
+  kind: TriggerKind;
+  item?: "issue" | "pr";
+  author?: string;
+  grades?: Grade[];
+  manual?: boolean;
+  branch?: string;
+  granularity?: "range" | "commit";
+  message?: string;
+  cron?: string;
+  window?: string;
 };
 
-export function matches({ trigger: t }: Manifest, signal: Signal) {
-  return t.source === signal.source && t.kind === signal.kind && (t.item === undefined || t.item === signal.item)
-    && (t.author === undefined || t.author === signal.author) && (t.grades === undefined || signal.grade === undefined || t.grades.includes(signal.grade));
+export type Action = {
+  name: string;
+  trigger: ActionTrigger;
+  mode: "review" | "change";
+  agent: "single" | "panel";
+  reviewers: ModelEntry[];
+  context: "all" | "feedback" | "change";
+  tools: ToolName[];
+  http?: Static<typeof httpSettings>;
+  browser?: Static<typeof browserSettings>;
+  files: ContextFileName[];
+  acceptance?: "complete" | "nonempty_diff" | "conflict_free";
+  commitPrefix?: string;
+  start?: StartEffectName[];
+  publish: EffectName[];
+  enabled?: boolean;
+  priority: number;
+  skill: string;
+  provider: string;
+  model: string;
+  thinkingLevel: ThinkingLevel;
+  codemode?: boolean;
+  retry: { initialDelaySeconds: number; maxDelaySeconds: number } | null;
+  channel?: string;
+  maxRangeCommits?: number;
+  startMessage?: string;
+  browserSteps?: number;
+  browserSeconds?: number;
+  rootInstructions?: string;
+  maxSelfRepairs?: number;
+  exhaustedLabel?: string | null;
+  failedLabel?: string | null;
+  targets?: ("issues" | "prs")[];
+  issue_labels?: LabelCategory[];
+  pr_labels?: LabelCategory[];
+  branch?: string;
+  cron?: string;
+  window?: string;
+  file: string;
+  root: string;
+};
+
+export function scheduleProblem(key: "cron" | "window", value: string) {
+  try { if (key === "cron") nextTick(parseCron(value), new Date(0)); else parseWindow(value); } catch (error) { return (error as Error).message; }
 }
 
-export function findTriggerConflicts<T extends Pick<Manifest, "file" | "trigger">>(manifests: readonly T[], enabled: (manifest: T) => boolean) {
-  const live = manifests.filter(enabled), problems: string[] = [];
+export type Signal = {
+  source: ActionTrigger["source"];
+  kind: TriggerKind;
+  item?: "issue" | "pr";
+  author?: "bot" | "other";
+  grade?: Grade;
+};
+
+export function findTriggerConflicts<T extends { file: string; trigger: ActionTrigger }>(entries: readonly T[], enabled: (entry: T) => boolean) {
+  const live = entries.filter(enabled), problems: string[] = [];
   live.forEach((a, index) => live.slice(index + 1).forEach((b) => {
     const [x, y] = [a.trigger, b.trigger];
     const grades = !x.grades || !y.grades || x.grades.some((grade) => y.grades!.includes(grade));
@@ -227,15 +127,4 @@ export function findTriggerConflicts<T extends Pick<Manifest, "file" | "trigger"
     }
   }));
   return problems;
-}
-
-export const resolveAction = (manifest: Manifest, entry: ActionSettings) => ({ ...manifest, ...entry, skill: resolve(manifest.root, entry.skill), trigger: { ...manifest.trigger, branch: entry.branch, cron: entry.cron, window: entry.window } });
-export type Action = ReturnType<typeof resolveAction>;
-
-export function deploymentDefaults(m: Manifest) {
-  const optional = { targets: m.targets, issue_labels: m.issue_labels, pr_labels: m.pr_labels, codemode: m.codemode, branch: m.trigger.branch, cron: m.trigger.cron, window: m.trigger.window, channel: m.channel, maxRangeCommits: m.maxRangeCommits, startMessage: m.startMessage, browserSteps: m.browserSteps, browserSeconds: m.browserSeconds, rootInstructions: m.rootInstructions, maxSelfRepairs: m.maxSelfRepairs, exhaustedLabel: m.exhaustedLabel, failedLabel: m.failedLabel, retry: m.retry };
-  return {
-    enabled: m.enabled ?? true, priority: m.priority, skill: m.skill, ...m.model, reviewers: m.reviewers,
-    ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== undefined)),
-  };
 }

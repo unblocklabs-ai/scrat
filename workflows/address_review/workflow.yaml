@@ -1,0 +1,24 @@
+name: address_review
+description: Automatically repair a bot pull request after a low review grade and push the verified fix.
+enabled: true
+mode: change
+priority: 60
+on:
+  manual: false
+  event:
+    source: github_items
+    kind: low_grade
+    item: pr
+    author: bot
+    grades: [C, D, F]
+defaults:
+  provider: codex-lb
+  model: gpt-6.2-sol
+  thinkingLevel: high
+  tools: [read, grep, find, ls, bash, edit, write]
+permissions:
+  github: [read, comment, push, label]
+  workspace: [read, write]
+config:
+  maxSelfRepairs: 2
+  exhaustedLabel: Scrat repair exhausted

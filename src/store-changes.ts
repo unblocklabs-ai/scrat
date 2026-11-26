@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { resolve } from "node:path";
-import { config, getRepositoryPath, isActionEnabled } from "./config.ts";
+import { config, getRepositoryPath, isWorkflowEnabled } from "./config.ts";
 import { ifMissing } from "./errors.ts";
 import { git } from "./git.ts";
 import { upsertSubject } from "./items.ts";
@@ -259,7 +259,7 @@ async function flush(repository: string, action: string, state: State, end: stri
 }
 
 async function pollAction({ name: action }: Action, operation: OperationScope, repository: string, now: Date) {
-  if (!isActionEnabled(action)) {
+  if (!isWorkflowEnabled(action)) {
     await rm(statePath(stateFile), { force: true });
     await rm(statePath(snapshotFile), { force: true });
     return 0;

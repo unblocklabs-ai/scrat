@@ -13,7 +13,7 @@ import { getRun, updateRun } from "./run-history.ts";
 import type { Run } from "./schema.ts";
 import { footerRules, InterruptedError, parseResult, ResultFormatError, type Reviewer, storefrontProblem } from "./results.ts";
 import { gitList } from "./git.ts";
-import type { Manifest, ToolName } from "./manifests.ts";
+import type { Action, ToolName } from "./manifests.ts";
 import { createAgentTools } from "./tools.ts";
 import type { BrowserScope } from "./scoped-tools.ts";
 import { canonicalReviewPaths } from "./review-paths.ts";
@@ -38,7 +38,7 @@ export function saveReviewer(runId: string, index: number, patch: Partial<Review
 }
 
 export type PiOptions = {
-  run: Run; cwd: string; tools: readonly ToolName[]; scoped: Pick<Manifest, "mode" | "http" | "codemode"> & { browser?: BrowserScope };
+  run: Run; cwd: string; tools: readonly ToolName[]; scoped: Pick<Action, "mode" | "http" | "codemode"> & { browser?: BrowserScope };
   storefront?: boolean; contextDir?: string; revisions?: Record<string, string>; baseSha?: string;
   environment?: NodeJS.ProcessEnv; log: Logger; stop?: AbortSignal;
   getLiveToolCallIds?: () => Set<string>;

@@ -6,10 +6,11 @@ import type { Logger } from "pino";
 import { trustLocalWorkflowScripts } from "./config.ts";
 import type { EventReferences } from "./events.ts";
 import { git } from "./git.ts";
-import { updateRun } from "./run-history.ts";
+import type { Item } from "./items.ts";
+import { getRun, updateRun } from "./run-history.ts";
 import type { Run, Subject, Task } from "./schema.ts";
-import { parseTriggerInput } from "./triggers.ts";
-import { createWorkflowContext, type WorkflowContext } from "./workflow-ctx.ts";
+import { isManual, parseTriggerInput } from "./triggers.ts";
+import { createWorkflowContext, type WorkflowContext, type WorkflowPipelineRunner } from "./workflow-ctx.ts";
 import type { ResolvedWorkflow } from "./workflows.ts";
 
 type WorkflowFn = (ctx: WorkflowContext) => Promise<unknown>;
@@ -32,21 +33,27 @@ export async function runWorkflow({
   task,
   run,
   subject,
+  item,
   references,
   repositoryPath,
   operation,
   stop,
   cleanup,
+  onTargetObserved,
+  runPipeline,
 }: {
   workflow: ResolvedWorkflow;
   task: Task;
   run: Run;
   subject: Subject;
+  item?: Item;
   references: EventReferences;
   repositoryPath: string;
   operation: { log: Logger };
   stop: AbortSignal;
   cleanup: { reviewWorkspace?: { id: string } };
+  onTargetObserved?: (target: string) => void;
+  runPipeline?: WorkflowPipelineRunner;
 }) {
   if (workflow.local && workflow.scriptPath && !trustLocalWorkflowScripts) {
     throw new Error(`Refusing to execute local workflow script ${workflow.scriptPath}: it runs in-process as operator-trusted code; set workflows.trustLocalScripts: true in scrat.local.json to allow it`);
@@ -54,14 +61,22 @@ export async function runWorkflow({
   const parsed = parseTriggerInput(task.input);
   const dryRun = parsed.kind === "workflow_manual" && parsed.dryRun === true;
   const trigger: WorkflowContext["trigger"] = parsed.kind === "tick"
-    ? { kind: "cron", input: { start: parsed.start, end: parsed.end }, start: parsed.start, end: parsed.end }
-    : { kind: "manual", input: parsed.kind === "workflow_manual" ? (parsed.payload ?? {}) : {} };
+    ? { kind: "cron", manual: false, input: { start: parsed.start, end: parsed.end }, start: parsed.start, end: parsed.end }
+    : parsed.kind === "workflow_manual"
+      ? { kind: "manual", manual: true, input: parsed.payload ?? {} }
+      : {
+          kind: "event",
+          manual: isManual(parsed),
+          input: parsed as Record<string, unknown>,
+          ...(item ? { item: { id: item.id, kind: item.kind, number: item.payload.number, title: item.payload.title } } : {}),
+        };
 
-  const { ctx, hasPublishedEffects } = createWorkflowContext({
+  const { ctx, hasPublishedEffects, usedManagedPipeline } = createWorkflowContext({
     workflow,
     task,
     run,
     subject,
+    item,
     references,
     repositoryPath,
     log: operation.log,
@@ -70,9 +85,9 @@ export async function runWorkflow({
     trigger,
     onWorkspaceAcquired: (ws) => { cleanup.reviewWorkspace = ws; },
     onWorkspaceReleased: () => { cleanup.reviewWorkspace = undefined; },
+    onTargetObserved,
+    runPipeline,
   });
-
-  updateRun(run.id, { stage: "agent" });
 
   let output: unknown;
   if (workflow.scriptPath) {
@@ -100,6 +115,17 @@ export async function runWorkflow({
     }
   }
 
+  if (usedManagedPipeline()) {
+    if (dryRun) {
+      const latest = getRun(run.id);
+      if (latest && latest.publication.status === "pending") {
+        updateRun(run.id, { publication: { ...latest.publication, status: "not_needed" } });
+      }
+    }
+    return output;
+  }
+
+  const latest = getRun(run.id);
   const summary = typeof output === "string"
     ? output
     : output && typeof output === "object" && "text" in output && typeof (output as { text?: unknown }).text === "string"
@@ -107,8 +133,8 @@ export async function runWorkflow({
       : JSON.stringify(output ?? { ok: true }, null, 2);
 
   updateRun(run.id, {
-    result: { outcome: "complete", text: summary, paths: [], ready: false },
-    publication: { status: hasPublishedEffects() ? "published" : "not_needed" },
+    result: latest?.result ?? { outcome: "complete", text: summary, paths: [], ready: false },
+    publication: { ...(latest?.publication ?? {}), status: hasPublishedEffects() ? "published" : "not_needed" },
   });
   return output;
 }

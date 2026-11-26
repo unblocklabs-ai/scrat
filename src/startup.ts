@@ -1,9 +1,9 @@
 import { access, lstat, mkdir, readFile } from "node:fs/promises";
-import { manifests, workflows } from "./actions.ts";
+import { workflows } from "./actions.ts";
 import { type Resolver, publicAnswers, resolveHost, validateBindings } from "./bindings.ts";
 import { config, trustLocalWorkflowScripts } from "./config.ts";
 import { configError, type ScratConfig } from "./config-schema.ts";
-import { type ActionSettings, deploymentDefaults, entryProblems, resolveAction, scheduleProblem, type Manifest } from "./manifests.ts";
+import { scheduleProblem } from "./manifests.ts";
 import { slugOf } from "./identity.ts";
 import { logger } from "./logging.ts";
 import { errorMessage } from "./errors.ts";
@@ -11,7 +11,7 @@ import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 import { loadPlaywright } from "./scoped-tools.ts";
 import { authTest } from "./slack.ts";
 import { loadWorkflowScript } from "./workflow-runner.ts";
-import { resolveWorkflow, workflowDeploymentDefaults, type WorkflowDefinition } from "./workflows.ts";
+import { resolveWorkflow, validateWorkflowConfig, validateWorkflowItemLabels, workflowDeploymentDefaults, type WorkflowDefinition } from "./workflows.ts";
 
 const templateVariables = new Set(["sha", "short_sha", "author", "title", "url", "branch", "count", "bot", "change"]);
 
@@ -42,7 +42,7 @@ async function workflowScriptImportProblems(scriptPath: string): Promise<string[
 
 export async function validateWorkflowDefinition(
   wf: WorkflowDefinition,
-  settings: Omit<Partial<ScratConfig>, "actions"> & { actions: Record<string, Partial<ActionSettings>> } = config,
+  settings: Partial<ScratConfig> = config,
   options: { checkDisabled?: boolean; trustLocalScripts?: boolean; checkSlack?: boolean } = {},
 ) {
   const { checkDisabled = false, trustLocalScripts = trustLocalWorkflowScripts, checkSlack = false } = options;
@@ -55,6 +55,18 @@ export async function validateWorkflowDefinition(
     const value = override?.[key], problem = value === undefined ? undefined : scheduleProblem(key, value);
     if (problem) problems.push(`workflows.${wf.name}.${key}: ${problem}`);
   }
+  if (!wf.on.cron && (override?.cron !== undefined || override?.window !== undefined)) {
+    problems.push(`${wf.name}: cron and window are only allowed on scheduled workflows`);
+  }
+  if (entry.retry && entry.retry.maxDelaySeconds < entry.retry.initialDelaySeconds) {
+    problems.push(`${wf.name}: retry.maxDelaySeconds must be at least retry.initialDelaySeconds`);
+  }
+  for (const issue of validateWorkflowConfig(entry.config, entry.mode, entry.on.event)) {
+    problems.push(`${wf.name}: ${issue}`);
+  }
+  if (wf.on.event?.kind === "item_labels") {
+    problems.push(...validateWorkflowItemLabels(entry));
+  }
   if (entry.enabled || checkDisabled) {
     if (untrustedScript) {
       problems.push(`${wf.name}: local workflow run.ts requires workflows.trustLocalScripts: true in scrat.local.json`);
@@ -63,8 +75,8 @@ export async function validateWorkflowDefinition(
     if (!modelRuntime.getModel(provider, model)) {
       problems.push(`${wf.name}: no Pi model ${provider}/${model}${modelRuntime.getError() ? ` (${modelRuntime.getError()})` : ""}`);
     }
-    if (wf.skillPath && !await access(wf.skillPath).then(() => true, () => false)) {
-      problems.push(`${wf.name}: skill file not found: ${wf.skillPath}`);
+    if (entry.skillPath && !await access(entry.skillPath).then(() => true, () => false)) {
+      problems.push(`${wf.name}: skill file not found: ${entry.skillPath}`);
     }
     if (wf.scriptPath) {
       for (const issue of await workflowScriptImportProblems(wf.scriptPath).catch((error: unknown) => [errorMessage(error)])) {
@@ -76,16 +88,48 @@ export async function validateWorkflowDefinition(
         });
       }
     }
+    if (entry.retry && entry.mode !== "review") {
+      problems.push(`${wf.name}: retry requires mode review`);
+    }
+    if ((wf.defaults.reviewers.length > 0 || entry.defaults.reviewers.length > 0) && entry.defaults.reviewers.length !== 2) {
+      problems.push(`${wf.name}: reviewers must specify exactly two reviewers`);
+    }
+    entry.defaults.reviewers.forEach((reviewer, index) => {
+      if (!modelRuntime.getModel(reviewer.provider, reviewer.model)) {
+        problems.push(`${wf.name} reviewer ${index + 1}: no Pi model ${reviewer.provider}/${reviewer.model}${modelRuntime.getError() ? ` (${modelRuntime.getError()})` : ""}`);
+      }
+    });
+    const startMessage = typeof entry.config.startMessage === "string" ? entry.config.startMessage : "";
     const channel = typeof entry.config.channel === "string" ? entry.config.channel.trim() : "";
-    if ((entry.enabled || checkSlack) && wf.permissions.slack.includes("post") && channel) {
+    const usesSlack = (entry.enabled || checkSlack) && wf.permissions.slack.includes("post") && (Boolean(channel) || wf.on.event?.source === "github_commits" || wf.on.event?.source === "shopify" || (wf.on.cron !== undefined && wf.defaults.tools.includes("browser")));
+    if (usesSlack) {
       if (!process.env.SLACK_BOT_TOKEN) problems.push(`${wf.name}: SLACK_BOT_TOKEN is not set`);
-      else await authTest().catch((error: unknown) => { problems.push(`${wf.name}: Slack auth.test failed: ${errorMessage(error)}`); });
+      if (!channel) problems.push(`${wf.name}: channel must not be empty`);
+      if (wf.on.event?.source === "github_commits" && !startMessage.trim()) problems.push(`${wf.name}: startMessage must not be empty`);
+      if (wf.on.event?.source === "github_commits" && !entry.on.event?.branch?.trim()) problems.push(`${wf.name}: branch must not be empty`);
+      if (startMessage) {
+        const unknown = [...startMessage.matchAll(/\{\{(.*?)\}\}/g)].map((match) => match[1]).filter((name) => !templateVariables.has(name));
+        if (unknown.length) problems.push(`${wf.name}: unknown startMessage variable ${unknown.map((name) => `{{${name}}}`).join(", ")}`);
+      }
+      if (process.env.SLACK_BOT_TOKEN) await authTest().catch((error: unknown) => { problems.push(`${wf.name}: Slack auth.test failed: ${errorMessage(error)}`); });
+    }
+    const storefront = settings.storefront;
+    if (entry.enabled && (wf.on.cron !== undefined || wf.on.event?.source === "shopify") && wf.defaults.tools.includes("browser") && !wf.browser && !storefront?.enabled) {
+      problems.push(`${wf.name}: files: storefront requires storefront.enabled`);
+    }
+    if (entry.enabled && (wf.browser || (storefront?.enabled && wf.defaults.tools.includes("browser")))) {
+      await loadPlaywright().catch((error: unknown) => { problems.push(`${wf.name}: ${errorMessage(error)}`); });
+    }
+    if (entry.enabled && storefront?.enabled && wf.permissions.slack.includes("post") && (wf.on.event?.source === "github_commits" || wf.on.event?.source === "shopify" || (wf.on.cron !== undefined && wf.defaults.tools.includes("browser")))) {
+      for (const load of [loadPlaywright, (await import("./lighthouse.ts")).loadLighthouse]) {
+        await load().catch((error: unknown) => { problems.push(`${wf.name}: storefront: ${errorMessage(error)}`); });
+      }
     }
   }
   return problems;
 }
 
-export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, "actions"> & { resolve?: Resolver; actions: Record<string, Partial<ActionSettings>> } = config) {
+export async function validateStaticConfig(settings: Partial<ScratConfig> & { resolve?: Resolver } = config) {
   const modelRuntime = await sharedModelRuntime();
   const problems: string[] = [];
   if (settings.workspace?.sandbox) {
@@ -103,7 +147,6 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
     else if (await lstat(store).then((entry) => entry.isSymbolicLink(), () => false)) problems.push("workspace.packageStore must not be a symlink");
     else if (process.platform === "linux") await mkdir(store, { recursive: true, mode: 0o700 }).catch(() => { problems.push(`workspace.packageStore ${store} cannot be created`); });
   }
-  const resolvedEntry = (manifest: Manifest) => resolveAction(manifest, { ...deploymentDefaults(manifest), ...settings.actions[manifest.name] });
   const checkSlackAuth = (prefix: string) => authTest().catch((error: unknown) => { problems.push(`${prefix} auth.test failed: ${errorMessage(error)}`); });
   const checkEntry = (label: string, { provider, model }: Entry) => {
     if (!modelRuntime.getModel(provider, model)) problems.push(`${label}: no Pi model ${provider}/${model}${modelRuntime.getError() ? ` (${modelRuntime.getError()})` : ""}`);
@@ -120,12 +163,17 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
       try { new RegExp(pattern); } catch { problems.push(`${key}[${index}] is not a valid regular expression`); }
     });
   }
-  const reviewComments = manifests.filter((manifest) => manifest.mode === "review" && manifest.publish.includes("comment") && resolvedEntry(manifest).enabled !== false);
+  const reviewComments = workflows
+    .filter((wf) => wf.on.event?.source === "github_items" && wf.on.event.kind === "item_changed" && wf.permissions.github.includes("comment")
+      && resolveWorkflow(wf, { ...workflowDeploymentDefaults(wf), ...settings.workflows?.[wf.name] }).enabled)
+    .map((wf) => ({ name: wf.name, item: wf.on.event?.item }));
   for (const item of ["issue", "pr"] as const) {
-    const sharing = reviewComments.filter((manifest) => manifest.trigger.item === item).map((manifest) => manifest.name);
+    const sharing = reviewComments.filter((entry) => entry.item === item).map((entry) => entry.name);
     if (sharing.length > 1) problems.push(`${sharing.join(", ")} would share one review comment on each ${item}; enable only one`);
   }
-  const changeActions = manifests.filter((manifest) => manifest.mode === "change" && resolvedEntry(manifest).enabled !== false).map((manifest) => manifest.name);
+  const changeActions = workflows
+    .filter((wf) => wf.mode === "change" && resolveWorkflow(wf, { ...workflowDeploymentDefaults(wf), ...settings.workflows?.[wf.name] }).enabled)
+    .map((wf) => wf.name);
   if (changeActions.length && !settings.workspace?.validate?.length) {
     problems.push(`workspace.validate is empty but ${changeActions.join(", ")} publish commits; list the target repository's check commands, or use [["true"]] if it has nothing to check`);
   }
@@ -172,34 +220,6 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
   }
   for (const [name, { apiKey }] of Object.entries(settings.providers ?? {})) {
     if (apiKey && !/\$\{\w+\}/.test(apiKey)) logger.warn({ provider: name }, "Provider apiKey is not a ${VAR} placeholder; it will not be redacted from output");
-  }
-  for (const manifest of manifests) {
-    const action = manifest.name, entry = resolvedEntry(manifest);
-    checkEntry(action, entry);
-    problems.push(...entryProblems(manifest, entry).map((problem) => `${action}: ${problem}`));
-    for (const key of ["cron", "window"] as const) {
-      const override = settings.actions[action]?.[key], problem = override === undefined ? undefined : scheduleProblem(key, override);
-      if (problem) problems.push(`actions.${action}.${key}: ${problem}`);
-    }
-    entry.reviewers.forEach((reviewer, index) => checkEntry(`${action} reviewer ${index + 1}`, reviewer));
-    if (entry.enabled !== false) {
-      const slack = [...manifest.start ?? [], ...manifest.publish].some((effect) => effect.startsWith("slack_"));
-      if (slack) {
-        if (!process.env.SLACK_BOT_TOKEN) problems.push(`${action}: SLACK_BOT_TOKEN is not set`);
-        if (!entry.channel?.trim()) problems.push(`${action}: channel must not be empty`);
-        if (manifest.trigger.source === "github_commits" && !entry.startMessage?.trim()) problems.push(`${action}: startMessage must not be empty`);
-        if (manifest.trigger.source === "github_commits" && !entry.branch?.trim()) problems.push(`${action}: branch must not be empty`);
-        const unknown = [...(entry.startMessage ?? "").matchAll(/\{\{(.*?)\}\}/g)].map((match) => match[1]).filter((name) => !templateVariables.has(name));
-        if (unknown.length) problems.push(`${action}: unknown startMessage variable ${unknown.map((name) => `{{${name}}}`).join(", ")}`);
-      }
-      if (manifest.files.includes("storefront") && (manifest.trigger.source === "schedule" || manifest.trigger.source === "shopify") && !storefront?.enabled) problems.push(`${action}: files: storefront requires storefront.enabled`);
-      if (slack && process.env.SLACK_BOT_TOKEN) await checkSlackAuth(`${action}: Slack`);
-      if (manifest.browser || (storefront?.enabled && manifest.tools.includes("browser"))) await loadPlaywright().catch((error: unknown) => { problems.push(`${action}: ${errorMessage(error)}`); });
-      if (storefront?.enabled && manifest.publish.includes("slack_reply")) {
-        for (const load of [loadPlaywright, (await import("./lighthouse.ts")).loadLighthouse]) await load().catch((error: unknown) => { problems.push(`${action}: storefront: ${errorMessage(error)}`); });
-      }
-      if (!await access(entry.skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${entry.skill}`);
-    }
   }
   for (const wf of workflows) {
     problems.push(...await validateWorkflowDefinition(wf, settings));

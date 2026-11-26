@@ -1,22 +1,22 @@
-import { manifestOf } from "./actions.ts";
 import { db } from "./db.ts";
 import { applyEffects, type EffectContext } from "./effects.ts";
 import type { EventReferences } from "./events.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { bestEffort, logger } from "./logging.ts";
+import type { Action } from "./manifests.ts";
 import { updateRun } from "./run-history.ts";
 import type { Run, Task, Subject } from "./schema.ts";
 import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 
-export async function publishRun(github: GitHubRepository, subject: Subject, task: Task, run: Run, references: EventReferences, current?: GithubContext) {
+export async function publishRun(github: GitHubRepository, subject: Subject, task: Task, run: Run, references: EventReferences, current: GithubContext | undefined, actionSpec: Action) {
   const { result, context } = run;
   if (!result || !context) throw new Error("Run has no evaluated result to publish");
   if (result.outcome !== "complete") throw new Error("Incomplete agent work cannot be published");
-  const manifest = manifestOf(task.action);
+  const manifest = actionSpec;
   let publication = run.publication;
   const effectContext: EffectContext = {
-    references, github, subject, task, run: { ...run, result, context }, current,
+    references, github, subject, task, run: { ...run, result, context }, action: manifest, current,
     publication: () => publication,
     saveReceipt(patch, database = db) {
       publication = { ...publication, ...patch };

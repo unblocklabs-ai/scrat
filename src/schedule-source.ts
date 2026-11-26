@@ -1,10 +1,10 @@
 import { workflowOf, workflows } from "./actions.ts";
-import { config, isActionEnabled, isWorkflowEnabled } from "./config.ts";
+import { config, isWorkflowEnabled } from "./config.ts";
 import { type Cron, nextTick, parseCron, parseWindow } from "./cron.ts";
 import { type OperationScope, withOperationSync } from "./logging.ts";
 import { upsertSubject } from "./items.ts";
 import { assertConfiguredRepository } from "./repository.ts";
-import { enqueueOnce, pollSource, sourceCursor } from "./sources.ts";
+import { enqueueOnce, sourceCursor } from "./sources.ts";
 
 const cursorBranch = "schedule";
 
@@ -13,11 +13,8 @@ type StoredCursor = { next: string; cron?: string; window?: string };
 const readCursor = (value: string): StoredCursor => value.startsWith("{") ? JSON.parse(value) as StoredCursor : { next: value };
 
 export async function pollSchedules(repository = config.github.repository, now = new Date()) {
-  const actionQueued = await pollSource("schedule.poll", "schedule", repository, (manifest, operation) =>
-    pollScheduled(manifest.name, { cron: manifest.trigger.cron!, window: manifest.trigger.window! }, isActionEnabled(manifest.name), repository, now, operation));
   const scheduledWorkflows = workflows.map((wf) => workflowOf(wf.name)).filter((wf) => wf.on.cron);
-  if (!scheduledWorkflows.length) return actionQueued;
-  const workflowQueued = withOperationSync("workflow_schedule.poll", { repository }, (operation) => {
+  return withOperationSync("schedule.poll", { repository }, (operation) => {
     assertConfiguredRepository(repository);
     let queued = 0;
     for (const wf of scheduledWorkflows) {
@@ -26,7 +23,6 @@ export async function pollSchedules(repository = config.github.repository, now =
     operation.complete({ queued });
     return queued;
   });
-  return actionQueued + workflowQueued;
 }
 
 function pollScheduled(action: string, expression: { cron: string; window: string }, enabled: boolean, repository: string, now: Date, operation: OperationScope) {

@@ -1,0 +1,22 @@
+name: review_pr
+description: Review a pull request with a two-reviewer panel and publish a consolidated graded assessment.
+enabled: true
+mode: review
+priority: 100
+on:
+  event:
+    source: github_items
+    kind: item_changed
+    item: pr
+defaults:
+  provider: codex-lb
+  model: gpt-6.2-sol
+  thinkingLevel: high
+  reviewers:
+    - { provider: codex-lb, model: gpt-6.2-sol, thinkingLevel: high }
+    - { provider: codex-lb, model: deepseek/deepseek-v4.1-flash, thinkingLevel: high }
+  tools: [read, grep, find, ls, git, read_base, browser]
+  retry: { initialDelaySeconds: 60, maxDelaySeconds: 3600 }
+permissions:
+  github: [read, comment, label]
+  workspace: [read]

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { cp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { config, getRepositoryPath, isActionEnabled } from "./config.ts";
+import { config, getRepositoryPath, isWorkflowEnabled } from "./config.ts";
 import { ifMissing } from "./errors.ts";
 import { commitOf, gitList, shortSha } from "./git.ts";
 import { botName } from "./identity.ts";
@@ -38,7 +38,7 @@ async function structureChange(mapped: string | undefined) {
 
 export function pollSiteMap(repository = config.github.repository, now = new Date()) {
   return pollSource("site_map.poll", "storefront", repository, async ({ name: action, skill: skillPath }) => {
-    if (!isActionEnabled(action)) return 0;
+    if (!isWorkflowEnabled(action)) return 0;
     const [written, skill, mapped] = sourceCursor(repository, action, scope).value?.split(" ") ?? [];
     const due = !written ? "the store has no site map yet"
       : !existsSync(siteMapPath()) || now.getTime() - Date.parse(written) >= config.storefront.siteMapMaxAgeDays * dayMs ? `the site map written ${written} is due`

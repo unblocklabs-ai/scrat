@@ -113,7 +113,11 @@ await runCommand("Workflow command failed", async () => {
     }
     for (const def of workflows) {
       const wf = workflowOf(def.name);
-      const triggers = [wf.on.cron ? `cron(${wf.on.cron})` : null, wf.on.manual ? "manual" : null].filter(Boolean).join(",");
+      const triggers = [
+        wf.on.cron ? `cron(${wf.on.cron})` : null,
+        wf.on.event ? `event(${wf.on.event.source}:${wf.on.event.kind})` : null,
+        wf.on.manual ? "manual" : null,
+      ].filter(Boolean).join(",");
       const source = wf.local ? "local" : "bundled";
       const kind = wf.scriptPath ? "script" : "skill";
       console.log([
@@ -139,13 +143,15 @@ await runCommand("Workflow command failed", async () => {
     if (!compilerAvailable && targets.some((wf) => wf.scriptPath)) {
       console.error("WARN\tSkipping run.ts type checks: TypeScript compiler not installed (install dev dependencies)");
     }
-    for (const wf of targets) {
-      problems.push(...await validateWorkflowDefinition(wf, config, { checkDisabled: true }));
+    const checks = await Promise.all(targets.map(async (wf) => {
+      const wfProblems = await validateWorkflowDefinition(wf, config, { checkDisabled: true });
       if (wf.scriptPath && compilerAvailable) {
         const diagnostic = await checkScript(wf.scriptPath, wf.local);
-        if (diagnostic) problems.push(`${wf.name}: run.ts type check failed:\n${diagnostic}`);
+        if (diagnostic) wfProblems.push(`${wf.name}: run.ts type check failed:\n${diagnostic}`);
       }
-    }
+      return wfProblems;
+    }));
+    for (const wfProblems of checks) problems.push(...wfProblems);
     if (problems.length) {
       for (const problem of problems) console.error(`FAIL\t${problem}`);
       process.exitCode = 1;

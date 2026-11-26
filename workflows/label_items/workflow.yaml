@@ -1,0 +1,43 @@
+name: label_items
+description: Classify open GitHub issues or pull requests using deployment-configured label categories.
+enabled: false
+priority: 0
+on:
+  event:
+    source: github_items
+    kind: item_labels
+  manual: true
+permissions:
+  github:
+    - read
+    - label
+  workspace:
+    - read
+defaults:
+  provider: codex-lb
+  model: gpt-6.1-terra
+  thinkingLevel: low
+  codemode: false
+  retry:
+    initialDelaySeconds: 60
+    maxDelaySeconds: 3600
+  tools:
+    - read
+    - grep
+    - find
+    - ls
+    - git
+    - read_base
+config:
+  targets:
+    - prs
+  issue_labels: []
+  pr_labels:
+    - category: risk
+      choices:
+        - name: "risk: low"
+          description: "Docs, copy, internal-only features, additive changes behind a flag, and UI fixes."
+        - name: "risk: medium"
+          description: "Ordinary product changes."
+        - name: "risk: high"
+          description: "Highest-risk code, including security and authentication changes."

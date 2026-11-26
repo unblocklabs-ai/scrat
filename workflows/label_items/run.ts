@@ -24,7 +24,9 @@ export default async function labelItems(ctx: WorkflowContext) {
   }
   const current = await ctx.item.connect();
   await ctx.item.assertFreshForPublication(current, { labelKey: expectedKey, labelCategories: categories });
-  const desired = (result.labels ?? []).map(({ name }) => name);
+  const labels = result.labels;
+  ctx.item.assertLabelSelections(labels, categories);
+  const desired = labels.map(({ name }) => name);
   const managed = categories.flatMap(({ choices }) => choices.map(({ name }) => name));
   await ctx.item.reconcileLabels({ key: `labels-${expectedKey.slice(0, 32)}`, current, desired, managed });
   return result;

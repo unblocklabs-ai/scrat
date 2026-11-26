@@ -140,8 +140,8 @@ export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   const environment: Environment = observed ? { ...config.workspace.environment } : {};
   stopBefore(stop, "workspace preparation");
   const reviewPrepare = config.workspace.prepareReview ?? config.workspace.prepare;
-  if (observed?.pullRequest && !manifest.publish.includes("item_labels") && reviewPrepare.length) await prepareReviewCommands(ctx, observed, review, { ...childEnvironment(), ...environment }, reviewPrepare);
-  else if (observed) ctx.operation.log.info({ event: "workspace.prepare_skipped", reason: manifest.publish.includes("item_labels") ? "item labeling" : !observed.pullRequest ? "issue review" : "no review prepare commands configured" });
+  if (observed?.pullRequest && reviewPrepare.length) await prepareReviewCommands(ctx, observed, review, { ...childEnvironment(), ...environment }, reviewPrepare);
+  else if (observed) ctx.operation.log.info({ event: "workspace.prepare_skipped", reason: !observed.pullRequest ? "issue review" : "no review prepare commands configured" });
   if (observed) await refreshPreview(ctx, observed, review);
   stopBefore(stop, "the agent");
   const changeContext = manifest.context === "change";

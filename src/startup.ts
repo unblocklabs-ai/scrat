@@ -11,7 +11,7 @@ import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 import { loadPlaywright } from "./scoped-tools.ts";
 import { authTest } from "./slack.ts";
 import { loadWorkflowScript } from "./workflow-runner.ts";
-import { resolveWorkflow, validateWorkflowConfig, validateWorkflowItemLabels, workflowDeploymentDefaults, type WorkflowDefinition } from "./workflows.ts";
+import { pathPatternProblems, resolveWorkflow, validateWorkflowConfig, validateWorkflowItemLabels, workflowDeploymentDefaults, type WorkflowDefinition } from "./workflows.ts";
 
 const templateVariables = new Set(["sha", "short_sha", "author", "title", "url", "branch", "count", "bot", "change"]);
 
@@ -54,6 +54,10 @@ export async function validateWorkflowDefinition(
   for (const key of ["cron", "window"] as const) {
     const value = override?.[key], problem = value === undefined ? undefined : scheduleProblem(key, value);
     if (problem) problems.push(`workflows.${wf.name}.${key}: ${problem}`);
+  }
+  if (override?.paths !== undefined) {
+    if (wf.on.event?.role !== "advisory" || wf.on.event.item !== "pr") problems.push(`${wf.name}: paths requires role advisory and item pr`);
+    problems.push(...pathPatternProblems(`workflows.${wf.name}.paths`, override.paths));
   }
   if (!wf.on.cron && (override?.cron !== undefined || override?.window !== undefined)) {
     problems.push(`${wf.name}: cron and window are only allowed on scheduled workflows`);
@@ -164,7 +168,7 @@ export async function validateStaticConfig(settings: Partial<ScratConfig> & { re
     });
   }
   const reviewComments = workflows
-    .filter((wf) => wf.on.event?.source === "github_items" && wf.on.event.kind === "item_changed" && wf.permissions.github.includes("comment")
+    .filter((wf) => wf.on.event?.source === "github_items" && wf.on.event.kind === "item_changed" && wf.on.event.role !== "advisory" && wf.permissions.github.includes("comment")
       && resolveWorkflow(wf, { ...workflowDeploymentDefaults(wf), ...settings.workflows?.[wf.name] }).enabled)
     .map((wf) => ({ name: wf.name, item: wf.on.event?.item }));
   for (const item of ["issue", "pr"] as const) {

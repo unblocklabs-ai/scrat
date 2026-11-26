@@ -10,8 +10,6 @@ import { botSlug } from "./identity.ts";
 import type { Action, EffectName } from "./manifests.ts";
 import { upsertItem } from "./items.ts";
 import { reconcileLabels } from "./labels.ts";
-import { categoriesFor, itemLabelKey } from "./item-labels.ts";
-import { validateLabelSelections } from "./results.ts";
 import { fingerprintMarker, reviewMarker, taskMarker, withMarker } from "./markers.ts";
 import { observe } from "./observation.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
@@ -149,21 +147,6 @@ const prAssessment = {
     reconcilePrReview(github, task.subjectId, run.context.item.number, references, { run }),
 } satisfies Effect;
 
-const itemLabels = {
-  async apply(context) {
-    const { github, run, references } = context;
-    const observation = observed(context);
-    const categories = categoriesFor(context.action, observation.kind);
-    if (run.context.labeling?.key !== itemLabelKey(observation.item, categories)) throw new Error("GitHub item changed or label policy changed; enqueue a fresh labeling task");
-    validateLabelSelections(run.result.labels, categories);
-    await reconcileLabels(github, run.context.item.number, {
-      current: observation.labels,
-      desired: run.result.labels.map(({ name }) => name),
-      managed: categories.flatMap(({ choices }) => choices.map(({ name }) => name)),
-    }, references);
-  },
-} satisfies Effect;
-
 const issue = {
   async apply({ github, run, references, publication, saveReceipt }) {
     const reported = run.result.issues ?? [];
@@ -200,7 +183,7 @@ const siteMap = {
   apply: async (context) => (await import("./storefront-site.ts")).saveSiteMap(context),
 } satisfies Effect;
 
-const effects = { push, pull_request: pullRequest, comment, labels, item_labels: itemLabels, pr_assessment: prAssessment, issue, slack_reply: slackReply, site_map: siteMap } satisfies Record<EffectName, Effect>;
+const effects = { push, pull_request: pullRequest, comment, labels, pr_assessment: prAssessment, issue, slack_reply: slackReply, site_map: siteMap } satisfies Record<EffectName, Effect>;
 
 export async function applyEffects(names: readonly EffectName[], context: EffectContext) {
   const list: readonly Effect[] = names.map((name) => effects[name]);

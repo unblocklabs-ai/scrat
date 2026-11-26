@@ -14,7 +14,7 @@ import { priorReviewTexts } from "./pr-assessment.ts";
 import { completedRunsOfActionInRepository, getRun, issueOfPullRequest, latestCompletedRun, verificationOfCommit } from "./run-history.ts";
 import type { Run, Task } from "./schema.ts";
 import { parseTriggerInput } from "./triggers.ts";
-import { categoriesFor, itemLabelKey } from "./item-labels.ts";
+import { itemLabelKey } from "./item-labels.ts";
 import type { Action, LabelCategory } from "./manifests.ts";
 
 function historyReport(entries: ReturnType<typeof completedRunsOfActionInRepository>, action: string) {
@@ -62,7 +62,6 @@ export function evaluateItemContext(
 
 export function evaluateContext(run: Run, observation: ItemObservation, manifest: Action): NonNullable<Run["context"]> {
   return evaluateItemContext(run, observation, {
-    labelCategories: manifest.publish.includes("item_labels") ? categoriesFor(manifest, observation.kind) : undefined,
     filterFeedbackComments: manifest.context === "feedback",
   });
 }

@@ -1,6 +1,6 @@
 import { isWorkflowEnabled, config, loadedWorkflows } from "./config.ts";
 import type { Signal } from "./manifests.ts";
-import { matchesWorkflowSignal, resolveWorkflow } from "./workflows.ts";
+import { isAdvisory, matchesWorkflowSignal, resolveWorkflow } from "./workflows.ts";
 
 export const workflows = loadedWorkflows;
 
@@ -14,13 +14,13 @@ export function workflowOf(name: string) {
 
 export const defaultPriorityOf = (name: string) => workflowOf(name).priority;
 
-export const workflowsPublishing = (effect: "labels" | "pr_assessment") => (
-  effect === "labels"
-    ? workflows.filter((wf) => wf.on.event?.kind === "item_changed" && wf.on.event.item === "issue" && wf.permissions.github.includes("label")).map((wf) => wf.name)
-    : workflows.filter((wf) => wf.on.event?.kind === "item_changed" && wf.on.event.item === "pr").map((wf) => wf.name)
-);
+export const workflowsPublishing = (effect: "labels" | "pr_assessment") => workflows.filter((wf) => !isAdvisory(wf) && wf.on.event?.kind === "item_changed" && (
+  effect === "labels" ? wf.on.event.item === "issue" && wf.permissions.github.includes("label") : wf.on.event.item === "pr"
+)).map((wf) => wf.name);
 
 export const matchingWorkflows = (signal: Signal) =>
   workflows.filter((wf) => matchesWorkflowSignal(workflowOf(wf.name), signal)).map((wf) => wf.name);
 
-export const routeFor = (signal: Signal) => matchingWorkflows(signal).find((name) => isWorkflowEnabled(name));
+export const routeFor = (signal: Signal) => matchingWorkflows(signal).find((name) => !isAdvisory(workflowOf(name)) && isWorkflowEnabled(name));
+
+export const advisoryFor = (signal: Signal) => matchingWorkflows(signal).filter((name) => isAdvisory(workflowOf(name)));

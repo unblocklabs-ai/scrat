@@ -1,6 +1,6 @@
 import { workflowOf } from "./workflow-registry.ts";
 import { runWorkflow } from "./workflow-runner.ts";
-import { toWorkflowSpec, type WorkflowPipelineSpec } from "./workflows.ts";
+import { isAdvisory, toWorkflowSpec, type WorkflowPipelineSpec } from "./workflows.ts";
 import { refreshChangePublication } from "./change-publication.ts";
 import { getRepositoryPath } from "./config.ts";
 import { branchConflictCode, CompetingImplementation, ImplementationEnded, SupersededError, WorkflowPushRejected } from "./errors.ts";
@@ -66,7 +66,7 @@ async function checkPublicationContext({ run, task, manifest }: Ctx, observed: O
   const currentMainSha = review ? async () => run.stage === "publishing" ? mainSha
     : await github.fetchBranch(current.baseBranch) : undefined;
   if (manifest.publish.includes("pr_assessment")) await currentMainSha?.();
-  else if (!manifest.publish.includes("item_labels")) {
+  else {
     const state = await freshness(savedEvaluation(evaluatedRun), { ...current, mainSha: currentMainSha }, "relevant-paths", true);
     if (state.kind === "stale") throw new Error(state.reason === "context"
       ? "GitHub task context changed; enqueue a fresh task instead of retrying publication"
@@ -138,7 +138,7 @@ async function executeManagedPipeline(
         } else if (state.kind === "blocked") {
           staleReason = "PR conflicts with its base branch; waiting for a new head";
         }
-      } else if (item?.kind === "issue" && ctx.manifest.mode === "review" && !ctx.manifest.publish.includes("item_labels")) {
+      } else if (item?.kind === "issue" && ctx.manifest.mode === "review") {
         const completed = latestCompletedRun(item.id, task.action);
         if (completed && (await freshness(savedEvaluation(completed), { ...observed.observation, mainSha: observed.mainSha }, "relevant-paths")).kind === "current") {
           staleReason = "No observed relevant changes since the last review";
@@ -259,7 +259,7 @@ export async function runNextTask(stop?: AbortSignal, taskId?: string) {
     }
     const failed = finishRun(run.id, { status: "failed", error });
     operation.fail(error, { heapUsedMb: heapUsed() });
-    const publishesPrAssessment = workflow.on.event?.kind === "item_changed" && workflow.on.event.item === "pr";
+    const publishesPrAssessment = workflow.on.event?.kind === "item_changed" && workflow.on.event.item === "pr" && !isAdvisory(workflow);
     if (item?.kind === "pr" && publishesPrAssessment && failed.stage !== "publishing" && failed.error?.code !== branchConflictCode) {
       await bestEffort(operation.log, "github.review_reconciliation_pending", references,
         () => reconcilePrReview(new GitHubRepository(subject.repository), subject.id, item.payload.number, references));

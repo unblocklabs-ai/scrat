@@ -7,7 +7,7 @@ type TriggerKind = (typeof triggerKinds)[number];
 const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const toolNames = ["read", "grep", "find", "ls", "git", "read_base", "bash", "edit", "write", "http", "browser", "github_search"] as const;
 export const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "history", "validation", "triage", "issue", "storefront", "cloudflare", "store_changes"] as const;
-const effectNames = ["push", "pull_request", "comment", "labels", "item_labels", "pr_assessment", "issue", "slack_reply", "site_map"] as const;
+const effectNames = ["push", "pull_request", "comment", "labels", "pr_assessment", "issue", "slack_reply", "site_map"] as const;
 export const startEffectNames = ["slack_post"] as const;
 export type ThinkingLevel = (typeof thinkingLevels)[number];
 export type ToolName = (typeof toolNames)[number];
@@ -28,7 +28,9 @@ export const labelCategories = Type.Array(Type.Object({
 }, strict));
 export type LabelCategory = Static<typeof labelCategories>[number];
 
-export function labelConfigProblems(entry: { targets?: ("issues" | "prs")[]; issue_labels?: LabelCategory[]; pr_labels?: LabelCategory[] }) {
+export type LabelSettings = { targets?: ("issues" | "prs")[]; issue_labels?: LabelCategory[]; pr_labels?: LabelCategory[] };
+
+export function labelConfigProblems(entry: LabelSettings) {
   const problems: string[] = [];
   if (!entry.targets?.length) problems.push("kind item_labels requires targets");
   for (const target of ["issues", "prs"] as const) {
@@ -87,9 +89,6 @@ export type Action = {
   browserSteps?: number;
   browserSeconds?: number;
   rootInstructions?: string;
-  targets?: ("issues" | "prs")[];
-  issue_labels?: LabelCategory[];
-  pr_labels?: LabelCategory[];
 };
 
 export function scheduleProblem(key: "cron" | "window", value: string) {
@@ -105,11 +104,11 @@ export type Signal = {
 };
 
 export function findTriggerConflicts<T extends { file: string; trigger: ActionTrigger }>(entries: readonly T[], enabled: (entry: T) => boolean) {
-  const live = entries.filter(enabled), problems: string[] = [];
+  const live = entries.filter((entry) => enabled(entry) && entry.trigger.role !== "advisory" && entry.trigger.source !== "schedule" && entry.trigger.source !== "workflow"), problems: string[] = [];
   live.forEach((a, index) => live.slice(index + 1).forEach((b) => {
     const [x, y] = [a.trigger, b.trigger];
     const grades = !x.grades || !y.grades || x.grades.some((grade) => y.grades!.includes(grade));
-    if (x.source !== "schedule" && x.source === y.source && x.kind === y.kind && x.item === y.item && x.branch === y.branch && grades && (x.source !== "github_commits" || (x.author === y.author && x.message === y.message))) {
+    if (x.source === y.source && x.kind === y.kind && x.item === y.item && x.branch === y.branch && grades && (x.source !== "github_commits" || (x.author === y.author && x.message === y.message))) {
       const shown = [`source: ${x.source}`, `kind: ${x.kind}`, ...x.item ? [`item: ${x.item}`] : [], ...x.branch ? [`branch: ${x.branch}`] : [], ...x.source === "github_commits" && x.author ? [`author: ${x.author}`] : [], ...x.message ? [`message: ${x.message}`] : []].join(", ");
       problems.push(`${a.file} and ${b.file} both match {${shown}}; disable one`);
     }

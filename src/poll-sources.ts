@@ -4,11 +4,13 @@ import { config } from "./config.ts";
 import { syncGitHub } from "./github-sync.ts";
 import { pollSchedules } from "./schedule-source.ts";
 import { signalWork } from "./work-signal.ts";
+import { pollWorkflowCompletions } from "./workflow-source.ts";
 
 export async function pollSources() {
   await attempt(async () => { await syncGitHub(); signalWork(); });
   await attempt(async () => { if (await pollCommits()) signalWork(); });
   await attempt(async () => { if (await pollSchedules()) signalWork(); });
+  await attempt(async () => { if (await pollWorkflowCompletions()) signalWork(); });
   if (config.storefront.enabled) {
     const site = await import("./storefront-site.ts");
     await attempt(async () => { if (await site.pollSiteMap()) signalWork(); });

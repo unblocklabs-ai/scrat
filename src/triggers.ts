@@ -8,6 +8,7 @@ const items = <K extends string, F extends Record<string, TSchema>>(kind: K, fie
 const itemChanged = items("item_changed", {
   triggerKey: text, revision: text, mainSha: text, changedPaths: Type.Optional(Type.Array(text)), baseOnly: Type.Optional(Type.Boolean()),
   previousMainSha: Type.Optional(Type.Union([text, Type.Null()])), previousHeadSha: Type.Optional(Type.Union([text, Type.Null()])),
+  pathsMatched: Type.Optional(Type.Boolean()),
 });
 const label = items("label", { triggerKey: text, mainSha: text, freshOpening: Type.Optional(Type.Literal(true)) });
 const prConflicts = items("pr_conflicts", { triggerKey: text, mainSha: text, headSha: text, githubCi: Type.Optional(Type.Literal(true)) });
@@ -30,6 +31,14 @@ const workflowManual = Type.Object({
   payload: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 });
 
+const workflowCompleted = Type.Object({
+  source: Type.Literal("workflow"), kind: Type.Literal("workflow_completed"),
+  triggerKey: text, workflow: text, runId: text, taskId: text,
+  subject: Type.Object({ kind: text, key: text }),
+  item: Type.Optional(Type.Object({ kind: Type.Union([Type.Literal("issue"), Type.Literal("pr")]), number: Type.Number() })),
+  outcome: text, publication: text,
+});
+
 const members = {
   item_changed: { source: "github_items", schema: itemChanged },
   label: { source: "github_items", schema: label },
@@ -43,10 +52,11 @@ const members = {
   site_map: { source: "storefront", schema: siteMap },
   store_change: { source: "shopify", schema: storeChange },
   workflow_manual: { source: "workflow", schema: workflowManual },
+  workflow_completed: { source: "workflow", schema: workflowCompleted },
 } as const;
 
 export type TriggerInput = Static<typeof itemChanged> | Static<typeof label> | Static<typeof prConflicts> | Static<typeof prFeedback>
-  | Static<typeof lowGrade> | Static<typeof manual> | Static<typeof itemLabels> | Static<typeof commit> | Static<typeof tick> | Static<typeof siteMap> | Static<typeof storeChange> | Static<typeof workflowManual>;
+  | Static<typeof lowGrade> | Static<typeof manual> | Static<typeof itemLabels> | Static<typeof commit> | Static<typeof tick> | Static<typeof siteMap> | Static<typeof storeChange> | Static<typeof workflowManual> | Static<typeof workflowCompleted>;
 export type KeyedTriggerInput = Extract<TriggerInput, { triggerKey: string }>;
 type Kind = keyof typeof members;
 type ManifestKind = Exclude<Kind, "manual" | "workflow_manual">;

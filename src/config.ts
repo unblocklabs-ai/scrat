@@ -5,7 +5,7 @@ import settings from "../scrat.config.json" with { type: "json" };
 import { buildConfig, isObject, type Json } from "./config-merge.ts";
 import { configError, validateConfig } from "./config-schema.ts";
 import { findTriggerConflicts } from "./manifests.ts";
-import { readWorkflows, resolveWorkflow, workflowDeploymentDefaults } from "./workflows.ts";
+import { findCompletionCycles, readWorkflows, resolveWorkflow, workflowDeploymentDefaults } from "./workflows.ts";
 
 const configUrl = new URL("../scrat.config.json", import.meta.url);
 const localConfigUrl = new URL("../scrat.local.json", import.meta.url);
@@ -56,6 +56,9 @@ const conflicts = findTriggerConflicts(
   (entry) => entry.enabled,
 );
 if (conflicts.length) throw configError(conflicts);
+
+const cycles = findCompletionCycles(loadedWorkflows);
+if (cycles.length) throw configError(cycles);
 
 const unbound = loadedWorkflows.flatMap((wf) => [wf.http?.binding, wf.browser?.binding]
   .filter((name): name is string => name !== undefined && !Object.hasOwn(config.bindings, name))

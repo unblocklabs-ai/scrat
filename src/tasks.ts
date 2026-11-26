@@ -55,6 +55,9 @@ const modeOf = (action: string) => isWorkflow(action) ? workflowOf(action).mode 
 const workflowNames = workflows.map(({ name }) => name);
 
 function checkClaimable({ task, subject }: { task: Task; subject: Subject }, database: Pick<typeof db, "select">) {
+  if ("replayOf" in task.input && task.input.replayOf !== undefined) {
+    return { ok: false as const, reason: "Replay tasks run only in the replay CLI" };
+  }
   if (!isWorkflow(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   let trigger;
   try { trigger = parseTriggerInput(task.input); }

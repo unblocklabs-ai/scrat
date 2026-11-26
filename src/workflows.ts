@@ -34,7 +34,7 @@ const permissionsSchema = Type.Object({
 }, strict);
 
 const eventTriggerSchema = Type.Object({
-  source: Type.Enum(["github_items", "github_commits", "storefront", "shopify"]),
+  source: Type.Enum(["github_items", "github_commits", "storefront", "shopify", "workflow"]),
   kind: Type.Enum(triggerKinds),
   item: Type.Optional(Type.Enum(["issue", "pr"])),
   author: Type.Optional(Type.String({ minLength: 1 })),
@@ -42,6 +42,9 @@ const eventTriggerSchema = Type.Object({
   branch: Type.Optional(Type.String({ minLength: 1 })),
   granularity: Type.Optional(Type.Enum(["range", "commit"])),
   message: Type.Optional(Type.String({ minLength: 1 })),
+  role: Type.Optional(Type.Enum(["canonical", "advisory"])),
+  paths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, uniqueItems: true })),
+  workflow: Type.Optional(Type.String({ minLength: 1 })),
 }, strict);
 
 type WorkflowEventTrigger = Static<typeof eventTriggerSchema>;
@@ -67,6 +70,7 @@ const workflowYamlSchema = Type.Object({
   enabled: Type.Optional(Type.Boolean()),
   priority: Type.Optional(Type.Integer()),
   mode: Type.Optional(Type.Enum(["review", "change"])),
+  override: Type.Optional(Type.Boolean()),
   on: triggerSchema,
   permissions: Type.Optional(permissionsSchema),
   http: Type.Optional(httpSettings),
@@ -81,6 +85,7 @@ export const workflowSettings = Type.Object({
   cron: Type.Optional(Type.String({ minLength: 1 })),
   window: Type.Optional(Type.String({ minLength: 1 })),
   branch: Type.Optional(Type.String({ minLength: 1 })),
+  paths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, uniqueItems: true })),
   provider: Type.Optional(Type.String()),
   model: Type.Optional(Type.String()),
   thinkingLevel: Type.Optional(modelSettings.properties.thinkingLevel),
@@ -131,6 +136,8 @@ export type WorkflowDefinition = {
   skillPath?: string;
   scriptPath?: string;
   local: boolean;
+  origin: string;
+  override?: boolean;
   hash: string;
 };
 
@@ -239,7 +246,7 @@ function readWorkflowDir(dir: string, label: string, local: boolean): WorkflowDe
   const tools = parsed.defaults.tools ?? (mode === "change" ? [...defaultChangeWorkflowTools] : [...defaultReviewWorkflowTools]);
   const problems: string[] = [];
   if (parsed.name !== folder) problems.push(`name ${parsed.name} must equal folder name ${folder}`);
-  if (parsed.name === "directory") problems.push(`${parsed.name} is not a legal workflow name`);
+  if (parsed.name === "directory" || parsed.name === "repo") problems.push(`${parsed.name} is not a legal workflow name`);
   if (mode === "review" && tools.some((t) => t === "bash" || t === "edit" || t === "write")) {
     problems.push("mode review forbids the bash, edit and write tools");
   }
@@ -339,8 +346,14 @@ function readWorkflowDir(dir: string, label: string, local: boolean): WorkflowDe
     skillPath,
     scriptPath,
     local,
+    origin: local ? "directory" : "builtin",
+    ...(parsed.override ? { override: true } : {}),
     hash: hashDirectory(dir),
   };
+}
+
+export function findCompletionCycles(_defs: readonly WorkflowDefinition[]): string[] {
+  return [];
 }
 
 export function readWorkflows(root: string, directory?: string | null): WorkflowDefinition[] {

@@ -49,7 +49,7 @@ type Grade = (typeof prGrades)[number];
 type ModelEntry = Static<typeof modelSettings>;
 
 export type ActionTrigger = {
-  source: "github_items" | "github_commits" | "schedule" | "storefront" | "shopify";
+  source: "github_items" | "github_commits" | "schedule" | "storefront" | "shopify" | "workflow";
   kind: TriggerKind;
   item?: "issue" | "pr";
   author?: string;
@@ -57,6 +57,9 @@ export type ActionTrigger = {
   branch?: string;
   granularity?: "range" | "commit";
   message?: string;
+  role?: "canonical" | "advisory";
+  paths?: string[];
+  workflow?: string;
 };
 
 export type Action = {

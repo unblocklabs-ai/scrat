@@ -243,6 +243,7 @@ export type CreateWorkflowContextInput = {
   onWorkspaceReleased?: () => void;
   onTargetObserved?: (target: string) => void;
   runPipeline?: WorkflowPipelineRunner;
+  replay?: { frozen: ReadonlySet<string>; baseSha?: string };
 };
 
 export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx: WorkflowContext; hasPublishedEffects: () => boolean; usedManagedPipeline: () => boolean } {
@@ -319,9 +320,15 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
     usedStepNames.add(name);
     const inputHash = hashJson(stepInput ?? null);
     const existing = findStep(name);
-    if (existing && existing.status === "completed" && existing.inputHash === inputHash && existing.workflowHash === workflow.hash) {
-      log.info({ event: "workflow.step_replayed", workflow: workflow.name, step: name });
-      return existing.output as T;
+    if (existing && existing.status === "completed") {
+      if (input.replay?.frozen.has(name)) {
+        log.info({ event: "workflow.step_frozen", workflow: workflow.name, step: name, inputDrift: existing.inputHash !== inputHash });
+        return existing.output as T;
+      }
+      if (existing.inputHash === inputHash && existing.workflowHash === workflow.hash) {
+        log.info({ event: "workflow.step_replayed", workflow: workflow.name, step: name });
+        return existing.output as T;
+      }
     }
     return recordStep(name, inputHash, fn);
   }
@@ -512,7 +519,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         "workspace.withCheckout",
         "Overlapping workspace.withCheckout calls are not supported in a single workflow run",
         async () => {
-          const baseRef = await github.fetchBranch(ref);
+          const baseRef = input.replay?.baseSha ?? await github.fetchBranch(ref);
           return createWorkspace({ repositoryPath, baseRef }, references);
         },
         (ws) => {

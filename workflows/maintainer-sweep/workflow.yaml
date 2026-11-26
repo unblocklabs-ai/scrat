@@ -28,6 +28,7 @@ defaults:
     - find
     - ls
     - git
+    - github_search
 config:
   channel: ""
   issueLabels:

@@ -5,9 +5,10 @@ import { type Static, Type } from "typebox";
 import Value from "typebox/value";
 import { parse } from "yaml";
 import { hostProblem } from "./bindings.ts";
+import { isObject } from "./config-merge.ts";
 import {
-  browserSettings, contextFileNames, httpSettings, labelCategories, labelConfigProblems, modelSettings, scheduleProblem, startEffectNames,
-  type Action, type ContextFileName, type EffectName, type LabelCategory, type Signal, type StartEffectName, type ToolName,
+  browserSettings, contextFileNames, httpSettings, labelCategories, labelConfigProblems, modelSettings, scheduleProblem, startEffectNames, thinkingLevels,
+  type Action, type ContextFileName, type EffectName, type LabelCategory, type Signal, type StartEffectName, type ThinkingLevel, type ToolName,
 } from "./manifests.ts";
 import { prGrades } from "./results.ts";
 import { triggerKinds, triggerSource } from "./triggers.ts";
@@ -34,7 +35,7 @@ const permissionsSchema = Type.Object({
 }, strict);
 
 const eventTriggerSchema = Type.Object({
-  source: Type.Enum(["github_items", "github_commits", "storefront", "shopify"]),
+  source: Type.Enum(["github_items", "github_commits", "storefront", "shopify", "workflow"]),
   kind: Type.Enum(triggerKinds),
   item: Type.Optional(Type.Enum(["issue", "pr"])),
   author: Type.Optional(Type.String({ minLength: 1 })),
@@ -42,6 +43,9 @@ const eventTriggerSchema = Type.Object({
   branch: Type.Optional(Type.String({ minLength: 1 })),
   granularity: Type.Optional(Type.Enum(["range", "commit"])),
   message: Type.Optional(Type.String({ minLength: 1 })),
+  role: Type.Optional(Type.Enum(["canonical", "advisory"])),
+  paths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, uniqueItems: true })),
+  workflow: Type.Optional(Type.String({ minLength: 1 })),
 }, strict);
 
 type WorkflowEventTrigger = Static<typeof eventTriggerSchema>;
@@ -67,6 +71,7 @@ const workflowYamlSchema = Type.Object({
   enabled: Type.Optional(Type.Boolean()),
   priority: Type.Optional(Type.Integer()),
   mode: Type.Optional(Type.Enum(["review", "change"])),
+  override: Type.Optional(Type.Boolean()),
   on: triggerSchema,
   permissions: Type.Optional(permissionsSchema),
   http: Type.Optional(httpSettings),
@@ -81,6 +86,7 @@ export const workflowSettings = Type.Object({
   cron: Type.Optional(Type.String({ minLength: 1 })),
   window: Type.Optional(Type.String({ minLength: 1 })),
   branch: Type.Optional(Type.String({ minLength: 1 })),
+  paths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, uniqueItems: true })),
   provider: Type.Optional(Type.String()),
   model: Type.Optional(Type.String()),
   thinkingLevel: Type.Optional(modelSettings.properties.thinkingLevel),
@@ -131,6 +137,8 @@ export type WorkflowDefinition = {
   skillPath?: string;
   scriptPath?: string;
   local: boolean;
+  origin: string;
+  override?: boolean;
   hash: string;
 };
 
@@ -180,6 +188,23 @@ function hashDirectory(dir: string) {
 }
 
 const validContextFiles = new Set<string>(contextFileNames);
+const validThinkingLevels = new Set<string>(thinkingLevels);
+
+export type CritiqueSettings = { provider?: string; model?: string; thinkingLevel?: ThinkingLevel };
+export const workflowCritique = (cfg: Record<string, unknown>) => (cfg.critique ?? {}) as CritiqueSettings;
+
+export function critiqueProblems(value: unknown) {
+  if (!isObject(value)) return ["config.critique must be an object"];
+  const problems = Object.keys(value).filter((key) => !["provider", "model", "thinkingLevel"].includes(key)).map((key) => `config.critique.${key}: unknown key`);
+  for (const key of ["provider", "model"] as const) {
+    if (value[key] !== undefined && (typeof value[key] !== "string" || !value[key].trim())) problems.push(`config.critique.${key} must be a non-empty string`);
+  }
+  if (value.thinkingLevel !== undefined && (typeof value.thinkingLevel !== "string" || !validThinkingLevels.has(value.thinkingLevel))) {
+    problems.push(`config.critique.thinkingLevel must be one of: ${thinkingLevels.join(", ")}`);
+  }
+  return problems;
+}
+
 const validStartEffects = new Set<string>(startEffectNames);
 
 export function validateWorkflowConfig(cfg: Record<string, unknown>, mode: "review" | "change", event?: WorkflowEventTrigger) {
@@ -194,7 +219,8 @@ export function validateWorkflowConfig(cfg: Record<string, unknown>, mode: "revi
   if (cfg.maxSelfRepairs !== undefined && (!Number.isInteger(cfg.maxSelfRepairs) || (cfg.maxSelfRepairs as number) < 0)) {
     problems.push("config.maxSelfRepairs must be a non-negative integer");
   }
-  for (const key of ["maxRangeCommits", "browserSteps", "browserSeconds"] as const) {
+  if (cfg.critique !== undefined) problems.push(...critiqueProblems(cfg.critique));
+  for (const key of ["maxRangeCommits", "browserSteps", "browserSeconds", "maxFindings", "maxCommentChars"] as const) {
     const val = cfg[key];
     if (val !== undefined && (!Number.isInteger(val) || (val as number) < 1)) {
       problems.push(`config.${key} must be a positive integer`);
@@ -239,7 +265,7 @@ function readWorkflowDir(dir: string, label: string, local: boolean): WorkflowDe
   const tools = parsed.defaults.tools ?? (mode === "change" ? [...defaultChangeWorkflowTools] : [...defaultReviewWorkflowTools]);
   const problems: string[] = [];
   if (parsed.name !== folder) problems.push(`name ${parsed.name} must equal folder name ${folder}`);
-  if (parsed.name === "directory") problems.push(`${parsed.name} is not a legal workflow name`);
+  if (parsed.name === "directory" || parsed.name === "repo") problems.push(`${parsed.name} is not a legal workflow name`);
   if (mode === "review" && tools.some((t) => t === "bash" || t === "edit" || t === "write")) {
     problems.push("mode review forbids the bash, edit and write tools");
   }
@@ -257,7 +283,7 @@ function readWorkflowDir(dir: string, label: string, local: boolean): WorkflowDe
     problems.push("the http tool and the http setting require each other");
   }
   const storefrontBrowser = parsed.on.event?.source === "storefront" || parsed.on.event?.source === "shopify"
-    || parsed.on.cron !== undefined || (parsed.on.event?.kind === "item_changed" && parsed.on.event.item === "pr");
+    || parsed.on.cron !== undefined || (parsed.on.event?.kind === "item_changed" && parsed.on.event.item === "pr" && parsed.on.event.role !== "advisory");
   if ((tools.includes("browser") && !storefrontBrowser) && !parsed.browser) {
     problems.push("the browser tool and the browser setting require each other");
   }
@@ -287,6 +313,25 @@ function readWorkflowDir(dir: string, label: string, local: boolean): WorkflowDe
     if (ev.source !== "github_commits" && (ev.message !== undefined || ev.granularity !== undefined)) {
       problems.push("on.event.message and on.event.granularity are only allowed with source github_commits");
     }
+    if (ev.kind === "workflow_completed") {
+      if (!ev.workflow) problems.push("on.event.workflow is required for kind workflow_completed");
+      const forbidden = (["item", "author", "grades", "branch", "paths", "role"] as const).filter((key) => ev[key] !== undefined);
+      if (forbidden.length) problems.push(`kind workflow_completed forbids on.event.${forbidden.join(", on.event.")}`);
+    } else if (ev.workflow !== undefined) problems.push("on.event.workflow requires kind workflow_completed");
+    if (ev.role === "advisory") {
+      if (ev.source !== "github_items" || ev.kind !== "item_changed") problems.push("role advisory requires source github_items and kind item_changed");
+      if (mode !== "review") problems.push("role advisory requires mode review");
+      const github = (parsed.permissions?.github ?? []).filter((permission) => permission !== "read" && permission !== "comment" && permission !== "issue");
+      if (github.length) problems.push(`role advisory forbids permissions.github: ${github.join(", ")}`);
+      const workspace = (parsed.permissions?.workspace ?? []).filter((permission) => permission !== "read");
+      if (workspace.length) problems.push(`role advisory forbids permissions.workspace: ${workspace.join(", ")}`);
+      const disallowed = tools.filter((tool) => !(workflowAllowedTools as readonly string[]).includes(tool));
+      if (disallowed.length) problems.push(`role advisory forbids defaults.tools: ${disallowed.join(", ")}`);
+    }
+    if (ev.paths) {
+      if (ev.role !== "advisory" || ev.item !== "pr") problems.push("on.event.paths requires role advisory and item pr");
+      problems.push(...pathPatternProblems("on.event.paths", ev.paths));
+    }
   }
   if (parsed.on.cron) {
     if (mode !== "review") problems.push("a schedule trigger requires mode review");
@@ -303,6 +348,7 @@ function readWorkflowDir(dir: string, label: string, local: boolean): WorkflowDe
   const skillPath = existsSync(join(dir, "SKILL.md")) ? join(dir, "SKILL.md") : undefined;
   const scriptPath = existsSync(join(dir, "run.ts")) ? join(dir, "run.ts") : undefined;
   if (!skillPath && !scriptPath) problems.push("workflow folder must contain SKILL.md or run.ts");
+  if (parsed.on.event?.role === "advisory" && !scriptPath) problems.push("role advisory requires run.ts");
   if (problems.length) throw new Error(`${label}: ${problems.join("; ")}`);
 
   return {
@@ -339,28 +385,86 @@ function readWorkflowDir(dir: string, label: string, local: boolean): WorkflowDe
     skillPath,
     scriptPath,
     local,
+    origin: local ? "directory" : "builtin",
+    ...(parsed.override ? { override: true } : {}),
     hash: hashDirectory(dir),
   };
 }
 
-export function readWorkflows(root: string, directory?: string | null): WorkflowDefinition[] {
+export function findCompletionCycles(defs: readonly WorkflowDefinition[]): string[] {
+  const byName = new Map(defs.map((wf) => [wf.name, wf]));
+  const parentOf = (wf: WorkflowDefinition) => wf.on.event?.kind === "workflow_completed" ? wf.on.event.workflow : undefined;
+  const problems: string[] = [];
+  for (const wf of defs) {
+    const parent = parentOf(wf);
+    if (parent !== undefined && !byName.has(parent)) problems.push(`${wf.file}: on.event.workflow ${parent} is not a loaded workflow`);
+  }
+  const reported = new Set<string>();
+  for (const wf of defs) {
+    const chain = [wf.name];
+    let parent = parentOf(wf);
+    while (parent !== undefined && byName.has(parent) && !chain.includes(parent)) {
+      chain.push(parent);
+      parent = parentOf(byName.get(parent)!);
+    }
+    if (parent === undefined || !chain.includes(parent)) continue;
+    const cycle = chain.slice(chain.indexOf(parent));
+    const key = [...cycle].sort().join(",");
+    if (reported.has(key)) continue;
+    reported.add(key);
+    problems.push(cycle.length === 1
+      ? `${byName.get(parent)!.file}: workflow_completed must not follow itself`
+      : `workflow_completed cycle: ${[...cycle, parent].join(" -> ")}`);
+  }
+  return problems;
+}
+
+type WorkflowLayer = { dir: string; origin: string; strict: boolean; local: boolean };
+
+export function readWorkflowRepo(value: unknown, harness: unknown) {
+  if (value === undefined) return undefined;
+  const invalid = (message: string): never => { throw new Error(`Invalid scrat.local.json: workflows.repo${message}`); };
+  if (!isObject(value)) return invalid(" must be an object");
+  for (const key of Object.keys(value)) {
+    if (!["url", "ref", "layers", "keepCheckouts", "checkTimeoutSeconds"].includes(key)) invalid(`.${key}: unknown setting`);
+  }
+  const defaults = isObject(harness) && isObject(harness.workflowSync) ? harness.workflowSync : {};
+  const { url, ref, layers, keepCheckouts = defaults.keepCheckouts, checkTimeoutSeconds = defaults.checkTimeoutSeconds } = value;
+  if (typeof url !== "string" || !url.trim()) return invalid(".url must be a non-empty string");
+  if (typeof ref !== "string" || !/^[0-9a-f]{40}$/i.test(ref)) return invalid(".ref must be a full 40-character Git SHA");
+  const safeLayer = (layer: unknown): layer is string => typeof layer === "string" && layer.trim().length > 0
+    && !isAbsolute(layer) && !/^[a-z]:|[\\\0]/i.test(layer) && !layer.split("/").includes("..");
+  if (!Array.isArray(layers) || !layers.length || !layers.every(safeLayer)) return invalid(".layers must be a non-empty array of safe relative paths");
+  if (typeof keepCheckouts !== "number" || !Number.isSafeInteger(keepCheckouts) || keepCheckouts < 1) return invalid(".keepCheckouts must be a positive integer");
+  if (typeof checkTimeoutSeconds !== "number" || !Number.isSafeInteger(checkTimeoutSeconds) || checkTimeoutSeconds < 1) return invalid(".checkTimeoutSeconds must be a positive integer");
+  return { url, ref: ref.toLowerCase(), layers, keepCheckouts, checkTimeoutSeconds };
+}
+
+export function readWorkflows(root: string, layers?: readonly WorkflowLayer[] | string | null): WorkflowDefinition[] {
   const loaded = new Map<string, WorkflowDefinition>();
-  const scan = (baseDir: string, local: boolean) => {
-    if (!existsSync(baseDir)) {
-      if (local) throw new Error(`Cannot read workflows in ${baseDir}: directory does not exist`);
+  const scan = ({ dir, origin, strict, local }: WorkflowLayer) => {
+    if (!existsSync(dir)) {
+      if (local || strict) throw new Error(`Cannot read workflows in ${dir}: directory does not exist`);
       return;
     }
-    for (const entry of readdirSync(baseDir).sort()) {
-      const full = resolve(baseDir, entry);
+    for (const entry of readdirSync(dir).sort()) {
+      const full = resolve(dir, entry);
       if (!statSync(full).isDirectory()) continue;
       if (!existsSync(join(full, "workflow.yaml"))) continue;
       const label = local ? join(full, "workflow.yaml") : `workflows/${entry}/workflow.yaml`;
       const wf = readWorkflowDir(full, label, local);
-      loaded.set(wf.name, wf);
+      const lower = loaded.get(wf.name);
+      if (strict && lower && !wf.override) throw new Error(`${wf.file} shadows ${lower.file}; set override: true to replace it`);
+      if (strict && !lower && wf.override) throw new Error(`${wf.file}: override: true requires a workflow in a lower layer`);
+      loaded.set(wf.name, { ...wf, origin });
     }
   };
-  scan(resolve(root, "workflows"), false);
-  if (directory) scan(directory, true);
+  scan({ dir: resolve(root, "workflows"), origin: "builtin", strict: false, local: false });
+  if (typeof layers === "string") {
+    if (layers) scan({ dir: layers, origin: "directory", strict: false, local: true });
+  } else {
+    for (const layer of layers ?? []) scan(layer);
+  }
   return [...loaded.values()];
 }
 
@@ -371,6 +475,7 @@ export function workflowDeploymentDefaults(wf: WorkflowDefinition): WorkflowSett
     ...(wf.on.cron ? { cron: wf.on.cron } : {}),
     ...(wf.on.window ? { window: wf.on.window } : {}),
     ...(wf.on.event?.branch ? { branch: wf.on.event.branch } : {}),
+    ...(wf.on.event?.paths ? { paths: wf.on.event.paths } : {}),
     provider: wf.defaults.provider,
     model: wf.defaults.model,
     thinkingLevel: wf.defaults.thinkingLevel,
@@ -384,7 +489,7 @@ export function workflowDeploymentDefaults(wf: WorkflowDefinition): WorkflowSett
 export function resolveWorkflow(wf: WorkflowDefinition, entry?: WorkflowSettings): ResolvedWorkflow {
   const cron = entry?.cron ?? wf.on.cron;
   const window = entry?.window ?? wf.on.window ?? (cron ? "24h" : undefined);
-  const event = wf.on.event ? { ...wf.on.event, ...(entry?.branch ? { branch: entry.branch } : {}) } : undefined;
+  const event = wf.on.event ? { ...wf.on.event, ...(entry?.branch ? { branch: entry.branch } : {}), ...(entry?.paths ? { paths: entry.paths } : {}) } : undefined;
   const defaults = {
     ...wf.defaults,
     provider: entry?.provider ?? wf.defaults.provider,
@@ -428,7 +533,6 @@ export function toWorkflowSpec(wf: ResolvedWorkflow, spec: WorkflowPipelineSpec)
   const trigger: Action["trigger"] = wf.on.event
     ? { ...wf.on.event }
     : { source: "schedule", kind: "tick" };
-  const labelSettings = workflowItemLabelSettings(wf);
   const configFiles = Array.isArray(wf.config.files)
     ? wf.config.files.filter((entry): entry is ContextFileName => typeof entry === "string")
     : undefined;
@@ -457,10 +561,15 @@ export function toWorkflowSpec(wf: ResolvedWorkflow, spec: WorkflowPipelineSpec)
     browserSteps: cfgNumber(wf.config, "browserSteps"),
     browserSeconds: cfgNumber(wf.config, "browserSeconds"),
     rootInstructions: cfgString(wf.config, "rootInstructions"),
-    targets: labelSettings.targets,
-    issue_labels: labelSettings.issue_labels,
-    pr_labels: labelSettings.pr_labels,
   };
+}
+
+export const isAdvisory = (wf: Pick<ResolvedWorkflow, "on">) => wf.on.event?.role === "advisory";
+
+export function pathPatternProblems(label: string, patterns: readonly string[]) {
+  return patterns.flatMap((pattern, index) => {
+    try { new RegExp(pattern); return []; } catch { return [`${label}[${index}] is not a valid regular expression`]; }
+  });
 }
 
 export function matchesWorkflowSignal(wf: Pick<ResolvedWorkflow, "on">, signal: Signal) {

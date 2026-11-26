@@ -41,6 +41,7 @@ export async function runWorkflow({
   cleanup,
   onTargetObserved,
   runPipeline,
+  replay,
 }: {
   workflow: ResolvedWorkflow;
   task: Task;
@@ -54,12 +55,14 @@ export async function runWorkflow({
   cleanup: { reviewWorkspace?: { id: string } };
   onTargetObserved?: (target: string) => void;
   runPipeline?: WorkflowPipelineRunner;
+  replay?: { frozen: ReadonlySet<string>; baseSha?: string };
 }) {
   if (workflow.local && workflow.scriptPath && !trustLocalWorkflowScripts) {
     throw new Error(`Refusing to execute local workflow script ${workflow.scriptPath}: it runs in-process as operator-trusted code; set workflows.trustLocalScripts: true in scrat.local.json to allow it`);
   }
   const parsed = parseTriggerInput(task.input);
-  const dryRun = parsed.kind === "workflow_manual" && parsed.dryRun === true;
+  const dryRun = replay !== undefined || ("replayOf" in task.input && task.input.replayOf !== undefined)
+    || (parsed.kind === "workflow_manual" && parsed.dryRun === true);
   const trigger: WorkflowContext["trigger"] = parsed.kind === "tick"
     ? { kind: "cron", manual: false, input: { start: parsed.start, end: parsed.end }, start: parsed.start, end: parsed.end }
     : parsed.kind === "workflow_manual"
@@ -87,6 +90,7 @@ export async function runWorkflow({
     onWorkspaceReleased: () => { cleanup.reviewWorkspace = undefined; },
     onTargetObserved,
     runPipeline,
+    replay,
   });
 
   let output: unknown;

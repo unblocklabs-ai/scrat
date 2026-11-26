@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { execFileSync, spawnSync } from "node:child_process";
 import fs, { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { basename, dirname, resolve } from "node:path";
@@ -4294,6 +4294,213 @@ fi
     assert.equal(repair.error, null); assert.equal(repair.publication.status, "published");
     assert.match(probe(base, { mismatch: named("other_name", "priority", "10") }), /mismatch\/workflow\.yaml: name other_name must equal folder name mismatch/);
   } },
+  advisory_workflows: { title: "an advisory workflow runs beside the canonical review without touching its history or maintenance, gates on changed paths, supersedes and retracts per head, triggers workflow_completed followers, and label replays are validated", configure: [(config) => {
+    const directory = resolve("deployment");
+    mkdirSync(resolve(directory, "advisory_digest"), { recursive: true });
+    writeFileSync(resolve(directory, "advisory_digest/workflow.yaml"), [
+      "name: advisory_digest", "enabled: true", "on:", "  event:", "    source: workflow", "    kind: workflow_completed", "    workflow: breaking-change-check",
+      "defaults:", "  provider: fixture", "  model: gpt-6.2-sol", "  thinkingLevel: low", "",
+    ].join("\n"));
+    writeFileSync(resolve(directory, "advisory_digest/run.ts"), "export default async function (ctx) { return { parent: ctx.trigger.input.runId, item: ctx.trigger.input.item, publication: ctx.trigger.input.publication }; }\n");
+    config.workflows.directory = directory;
+    config.workflows.trustLocalScripts = true;
+    config.workflows.advisory_digest = { provider: "fixture" };
+    Object.assign(config.workflows["breaking-change-check"], { enabled: true, paths: ["^db/"] });
+  }], run: async () => {
+    const { routeFor, advisoryFor } = await f.app("workflow-registry.ts");
+    const { validateStaticConfig } = await f.app("startup.ts");
+    const { config: live } = await f.app("config.ts");
+    const { pollWorkflowCompletions } = await f.app("workflow-source.ts");
+    const { prReviewHistory } = await f.app("pr-assessment.ts");
+    await validateStaticConfig(f.config);
+    const signal = { source: "github_items", kind: "item_changed", item: "pr", author: "bot" };
+    assert.equal(routeFor(signal), "review_pr", "the canonical review still owns item_changed");
+    assert.deepEqual(advisoryFor(signal), ["breaking-change-check"]);
+    assert.equal(await pollWorkflowCompletions(), 0, "enabling a follower seeds its cursor and queues nothing");
+
+    const check = "breaking-change-check";
+    const ofAction = (action, status) => all(s.tasks).filter((t) => t.action === action && (!status || t.status === status));
+    const numberOf = (task) => all(s.items).find((item) => item.id === task.subjectId).payload.number;
+    const findings = [{ path: "db/001.sql", line: 1, title: "Drops the users table", detail: "Every user row is deleted with no copy.", remedy: "Copy the rows before dropping the table." }];
+    const assess = (number, payload, text = "Assessment done.") => { f.reset(number, "normal"); f.script = [{ name: "submit_result", args: payload }, text]; };
+    const runTask = async (task) => { const r = await f.runNextTask(undefined, task.id); assert.ok(r); return r; };
+    const verdicts = () => f.botComments(201).filter((comment) => comment.body.includes(`<!-- scrat-workflow:${check}:verdict -->`));
+
+    mkdirSync(resolve("seed/db"), { recursive: true }); branchOff("migrate", "db/001.sql", "DROP TABLE users;\n");
+    branchOff("plain", "src/app.ts", "export const value = 2;\n");
+    f.addPr(201, "migrate", f.config.github.botLogin); f.addPr(202, "plain", "human");
+    const pr201 = f.prs.find((pr) => pr.number === 201);
+    await route();
+    assert.deepEqual(ofAction("review_pr", "queued").map(numberOf).sort(), [201, 202]);
+    const [first, ...others] = ofAction(check);
+    assert.equal(others.length, 0, "a PR whose changed paths do not match queues nothing");
+    assert.equal(numberOf(first), 201); assert.equal(first.priority, 0); assert.equal(first.input.pathsMatched, true);
+    assert.equal(f.calls.filter((call) => /\/pulls\/\d+\/files/.test(call.path)).length, 0, "changed paths come from local git");
+
+    assess(201, { status: "complete", findings });
+    const flagged = await runTask(first);
+    assert.equal(flagged.error, null, JSON.stringify(flagged.error));
+    assert.equal(flagged.publication.status, "published");
+    assert.equal(verdicts().length, 1); assert.match(verdicts()[0].body, /Drops the users table/);
+    assert.deepEqual(pr201.labels, [], "advisory writes no grade or ready labels");
+    assert.equal(prReviewHistory(first.subjectId).length, 0, "advisory runs never enter PR review history");
+
+    assert.equal(await pollWorkflowCompletions(), 1);
+    const [digestTask] = ofAction("advisory_digest", "queued");
+    assert.equal(digestTask.input.runId, flagged.id); assert.deepEqual(digestTask.input.item, { kind: "pr", number: 201 }); assert.equal(digestTask.input.publication, "published");
+    const digest = await runTask(digestTask);
+    assert.equal(digest.error, null, JSON.stringify(digest.error)); assert.equal(JSON.parse(digest.result.text).parent, flagged.id);
+    assert.equal(await pollWorkflowCompletions(), 0, "a follower's own completion does not re-trigger it");
+
+    f.script = undefined; f.reset(201, "normal"); f.reset(202, "normal");
+    await success(); await success();
+    assert.deepEqual(prReviewHistory(first.subjectId).map(({ task }) => task.action), ["review_pr"]);
+    assert.equal(verdicts().length, 1, "the canonical review comment and the advisory comment coexist");
+    await route();
+    assert.equal(ofAction(check).length, 1, "the evaluated head is covered");
+    assert.equal(ofAction("address_review", "queued").length + ofAction("resolve_conflicts", "queued").length, 0);
+
+    changeMain("unrelated.txt", "Base moved\n");
+    const manual = tasks.enqueueManualTasks(check, ["201"])[0];
+    assess(201, { status: "needs_decision", findings: [] }, "Unsure.");
+    const failed = await runTask(ofAction(check, "queued")[0]);
+    assert.ok(failed.error); assert.equal(failed.taskId, manual.taskId); assert.equal(failed.headSha, pr201.head.sha);
+    db.update(s.runs).set({ stage: "preparing" }).where(eq(s.runs.id, failed.id)).run();
+    await route();
+    assert.equal(ofAction("resolve_conflicts", "queued").length, 0, "a failed advisory run never reads as a failed branch preparation");
+    assert.equal(ofAction(check, "queued").length, 0, "a manual run covers its head");
+    assert.equal(prReviewHistory(first.subjectId).length, 1);
+
+    pr201.head.sha = pushFile("migrate", "db/002.sql", "ALTER TABLE orders DROP COLUMN total;\n");
+    await route();
+    const [moved] = ofAction(check, "queued");
+    assert.ok(moved); assert.equal(JSON.parse(moved.input.triggerKey).head, pr201.head.sha);
+    f.reset(201, "stall"); f.script = [{ name: "submit_result", args: { status: "complete", findings } }, "Stalled."];
+    let pushed;
+    f.onModel = (context) => {
+      if (pushed || context.action !== check) return;
+      pushed = (async () => { pr201.head.sha = pushFile("migrate", "db/003.sql", "TRUNCATE sessions;\n"); await route(); })();
+    };
+    const superseded = await runTask(moved); f.onModel = undefined; await pushed;
+    assert.equal(superseded.error?.code, "RUN_SUPERSEDED"); assert.equal(superseded.error?.message, "Newer PR head observed");
+    assert.equal(f.row(s.tasks, moved.id).status, "cancelled");
+    const [requeued] = ofAction(check, "queued");
+    assert.equal(JSON.parse(requeued.input.triggerKey).head, pr201.head.sha, "the new head re-queues the advisory");
+    assess(201, { status: "complete", findings });
+    assert.equal((await runTask(requeued)).error, null);
+    assert.equal(verdicts().length, 1, "later heads edit the same comment");
+
+    const verdictWrites = () => verdicts().length + f.written("comment_update", (w) => w.id === verdicts()[0].id).length;
+    pr201.head.sha = pushFile("migrate", "db/004.sql", "DROP TABLE carts;\n");
+    await route();
+    const [drifting] = ofAction(check, "queued");
+    assert.equal(drifting.input.pathsMatched, true);
+    pr201.head.sha = pushFile("migrate", "db/005.sql", "DROP TABLE wishlists;\n");
+    let verdictCount = verdictWrites(), modelRequests = f.requests.length;
+    const drifted = await runTask(drifting);
+    assert.equal(drifted.error?.code, "RUN_SUPERSEDED"); assert.equal(drifted.error?.message, "PR head or base moved after routing");
+    assert.equal(drifted.context, null, "a head pushed after routing is never assessed under the stale path decision");
+    assert.equal(verdictWrites(), verdictCount); assert.equal(f.requests.length, modelRequests);
+    await route();
+    const [driftRequeued] = ofAction(check, "queued");
+    assert.equal(JSON.parse(driftRequeued.input.triggerKey).head, pr201.head.sha, "the superseded run does not cover the moved head");
+
+    assess(201, { status: "needs_decision", findings: [] }, "Unsure.");
+    const undecided = await runTask(driftRequeued);
+    assert.ok(undecided.error); assert.equal(f.row(s.tasks, driftRequeued.id).status, "failed");
+    tasks.retryTask(driftRequeued.id);
+    f.reset(201, "stall"); f.script = [{ name: "submit_result", args: { status: "complete", findings } }, "Stalled."];
+    pushed = undefined;
+    f.onModel = (context) => {
+      if (pushed || context.action !== check) return;
+      pushed = (async () => { pr201.head.sha = pushFile("migrate", "db/006.sql", "DROP TABLE coupons;\n"); await route(); })();
+    };
+    verdictCount = verdictWrites();
+    const retried = await runTask(driftRequeued); f.onModel = undefined; await pushed;
+    assert.equal(retried.retryOfRunId, undecided.id);
+    assert.equal(retried.error?.message, "Newer PR head observed", "a retry that replays its connect step still registers its head for supersession");
+    assert.equal(verdictWrites(), verdictCount);
+
+    const [stale] = ofAction(check, "queued");
+    assess(201, { status: "needs_decision", findings: [] }, "Unsure.");
+    assert.ok((await runTask(stale)).error);
+    pr201.head.sha = pushFile("migrate", "db/007.sql", "DROP TABLE refunds;\n");
+    tasks.retryTask(stale.id);
+    assess(201, { status: "complete", findings });
+    verdictCount = verdictWrites(); modelRequests = f.requests.length;
+    const overtaken = await runTask(stale);
+    assert.ok(f.requests.length > modelRequests, "the stale retry assessed its cached head");
+    assert.equal(overtaken.error?.code, "RUN_SUPERSEDED"); assert.equal(overtaken.error?.message, "PR head or base moved before publication");
+    assert.equal(verdictWrites(), verdictCount, "a stale retry never overwrites the verdict after the head moved");
+
+    f.script = undefined; f.reset(201, "normal");
+    while (ofAction("review_pr", "queued").length) await success();
+
+    for (const path of ["db/001.sql", "db/002.sql", "db/003.sql", "db/004.sql", "db/005.sql", "db/006.sql", "db/007.sql"]) pr201.head.sha = pushFile("migrate", path, null);
+    await route();
+    const retractions = ofAction(check, "queued");
+    assert.equal(retractions.length, 1); assert.equal(retractions[0].input.pathsMatched, false);
+    const requestsBefore = f.requests.length;
+    const retracted = await runTask(retractions[0]);
+    assert.equal(retracted.error, null, JSON.stringify(retracted.error));
+    assert.equal(f.requests.length, requestsBefore, "retraction runs no agent");
+    assert.match(verdicts()[0].body, new RegExp(`Resolved at \`${pr201.head.sha.slice(0, 12)}\``));
+    assert.ok(verdicts()[0].body.includes("<!-- scrat-advisory-state:resolved -->"));
+    f.script = undefined; f.reset(201, "normal");
+    while (ofAction("review_pr", "queued").length) await success();
+    touchPr(201); await route();
+    assert.equal(ofAction(check, "queued").length, 0, "one retraction per published verdict");
+    assert.equal(ofAction(check).filter((task) => numberOf(task) === 202).length, 0);
+    db.update(s.subjects).set({ repository: "Fixture/Project" }).where(eq(s.subjects.id, first.subjectId)).run();
+    await pollWorkflowCompletions();
+    db.update(s.subjects).set({ repository: "fixture/project" }).where(eq(s.subjects.id, first.subjectId)).run();
+    const completedChecks = all(s.runs).filter((r) => r.finishedAt && !r.error && f.row(s.tasks, r.taskId).action === check).length;
+    assert.equal(ofAction("advisory_digest").length, completedChecks, "every completed parent run queues exactly one follower, whatever the repository case");
+
+    const labels = live.workflows.label_items;
+    labels.enabled = true;
+    await route();
+    const labelTask = ofAction("label_items", "queued").find((task) => numberOf(task) === 202);
+    f.reset(202, "normal"); f.script = ["Classified.\nSCRAT_LABELS: [{\"category\":\"risk\",\"name\":\"risk: low\"}]\nSCRAT_STATUS: complete"];
+    f.faults.label.add(202);
+    const unpublished = await runTask(labelTask);
+    assert.ok(unpublished.error); assert.equal(unpublished.stage, "publishing");
+    db.update(s.runs).set({ result: { ...unpublished.result, labels: undefined } }).where(eq(s.runs.id, unpublished.id)).run();
+    const labelWrites = f.written("label", (w) => w.number === 202).length, modelCalls = f.requests.length;
+    tasks.retryTask(labelTask.id);
+    const replayed = await runTask(labelTask);
+    assert.match(replayed.error?.message ?? "", /SCRAT_LABELS must select exactly one allowed label/);
+    assert.equal(replayed.inferenceFromRunId, unpublished.id, "claimTask alone selects the saved snapshot");
+    assert.equal(f.requests.length, modelCalls); assert.equal(f.written("label", (w) => w.number === 202).length, labelWrites, "an invalid saved classification changes no labels");
+
+    const { validateWorkflowDefinition } = await f.app("startup.ts"), { workflows: loaded } = await f.app("workflow-registry.ts");
+    const critiqueProblems = (critique) => validateWorkflowDefinition(loaded.find((wf) => wf.name === "maintainer-sweep"),
+      { ...live, workflows: { ...live.workflows, "maintainer-sweep": { provider: "fixture", config: { critique } } } }, { checkDisabled: true });
+    assert.deepEqual(await critiqueProblems({ model: "gpt-6.1-terra", thinkingLevel: "low" }), []);
+    const badCritique = (await critiqueProblems({ thinkingLevel: "huge", extra: 1 })).join("\n");
+    assert.match(badCritique, /config\.critique\.extra: unknown key/); assert.match(badCritique, /config\.critique\.thinkingLevel must be one of/);
+    assert.match((await critiqueProblems({ model: "gpt-typo" })).join("\n"), /maintainer-sweep critique: no Pi model fixture\/gpt-typo/);
+
+    const local = resolve("app/scrat.local.json"), directory = resolve("deployment");
+    const probe = (bundles) => {
+      for (const [name, event] of Object.entries(bundles)) {
+        mkdirSync(resolve(directory, name), { recursive: true });
+        writeFileSync(resolve(directory, name, "run.ts"), "export default async function () { return {}; }\n");
+        writeFileSync(resolve(directory, name, "workflow.yaml"), `name: ${name}\non:\n  event: ${event}\ndefaults:\n  provider: fixture\n  model: gpt-6.2-sol\n  thinkingLevel: low\n`);
+      }
+      writeFileSync(local, JSON.stringify({ workflows: f.config.workflows }));
+      try { return execFileSync(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(resolve("app/src/config.ts"))});`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); }
+      catch (error) { return error.stderr; }
+      finally { for (const name of Object.keys(bundles)) rmSync(resolve(directory, name), { recursive: true, force: true }); }
+    };
+    const follows = (parent) => `{ source: workflow, kind: workflow_completed, workflow: ${parent} }`;
+    assert.doesNotMatch(probe({ second_digest: follows("advisory_digest") }), /Error/);
+    assert.match(probe({ loop_a: follows("loop_b"), loop_b: follows("loop_a") }), /workflow_completed cycle: loop_a -> loop_b -> loop_a/);
+    assert.match(probe({ loop_self: follows("loop_self"), orphan: follows("missing") }), /loop_self\/workflow\.yaml: workflow_completed must not follow itself[\s\S]*orphan\/workflow\.yaml: on\.event\.workflow missing is not a loaded workflow|orphan[\s\S]*missing is not a loaded workflow[\s\S]*loop_self/);
+    assert.match(probe({ scoped: "{ source: workflow, kind: workflow_completed, workflow: advisory_digest, item: pr }" }), /kind workflow_completed forbids on\.event\.item/);
+    assert.match(probe({ loud: "{ source: github_items, kind: item_changed, item: pr, role: advisory, paths: ['[db'] }" }), /on\.event\.paths\[0\] is not a valid regular expression/);
+    assert.match(probe({ greedy: "{ source: github_items, kind: item_changed, item: issue, paths: ['^db/'] }" }), /on\.event\.paths requires role advisory and item pr/);
+  } },
   manifest_tools_files: { title: "workflow tools and files lists decide which tools and context files reach the agent session, and cross-field rules reject unsafe combinations", configure: [configureManifestDirectory], run: async () => {
     const { readWorkflows } = await f.app("workflows.ts");
     const toolsOf = (request) => request.request.tools.map((tool) => tool.function.name).filter((name) => name !== "codemode");
@@ -6596,6 +6803,306 @@ fi
       const cronRun = await f.runNextTask(undefined, cronTask.id);
       assert.ok(cronRun && !cronRun.error, `cron-triggered workflow run failed: ${cronRun?.error?.message}`);
       assert.equal(JSON.parse(cronRun.result.text).status, "no_rfc");
+    },
+  },
+  workflow_replay: {
+    title: "workflow replay freezes journaled model calls across prompt edits, pins the checkout and previews effects on a CLI-only task",
+    configure: [(config) => {
+      config.harness.maxConcurrency = 1;
+      config.workflows["maintainer-sweep"].config = { channel: "C-REPLAY", minLinkedIssues: 3 };
+      process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
+    }],
+    run: async () => {
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const execute = promisify(execFile);
+      const modelOrigin = new URL(f.config.providers.fixture.baseUrl).origin;
+      const outbound = resolve("replay-outbound.jsonl");
+      const preload = resolve("replay-transport.mjs");
+      writeFileSync(preload, `import { appendFileSync } from "node:fs";
+        const fixtureFetch = globalThis.fetch;
+        globalThis.fetch = (input, options) => {
+          const url = new URL(typeof input === "string" ? input : input.url);
+          if (url.origin !== ${JSON.stringify(modelOrigin)}) {
+            appendFileSync(${JSON.stringify(outbound)}, JSON.stringify({ url: url.href, method: options?.method }) + "\\n");
+            throw new Error("Unexpected outbound workflow request");
+          }
+          return fixtureFetch(input, options);
+        };`);
+      const cli = (...args) => execute(process.execPath, ["--import", preload, resolve("app/src/workflow-cli.ts"), ...args]);
+      const rowsFor = (taskId) => all(s.steps).filter((step) => step.taskId === taskId);
+      const parseInspection = async (...args) => JSON.parse((await cli("inspect", ...args, "--json")).stdout);
+      const proposal = { name: "submit_result", args: { status: "complete", found: true, slug: "replay-retry", title: "RFC: Retry handling",
+        linkedNumbers: [10, 11, 12], proposal: "Use one retry policy for requests to upstream services." } };
+      const approve = { name: "submit_result", args: { status: "complete", approved: true, reason: "Verified all three issues." } };
+      const fail = { name: "submit_result", args: { status: "needs_decision", approved: false, reason: "Need maintainer decision." } };
+      for (const number of proposal.args.linkedNumbers) f.addIssue(number, ["bug"], `Retry failure ${number}`);
+      const task = tasks.enqueueWorkflowRun("maintainer-sweep", { input: { topic: "original", keep: true } });
+      f.script = [proposal, "Proposal submitted.", fail, "Cannot finish critique."];
+      const first = await f.runNextTask(undefined, task.id);
+      assert.match(first.error?.message, /Critique agent did not complete/);
+      assert.match((await cli("replay", first.id, "--from", "critique", "--plan")).stdout, /FROZEN\tgather, propose\nFRESH\tcritique/);
+
+      tasks.retryTask(task.id);
+      f.reset(0, "normal");
+      f.script = [approve, "Critique approved."];
+      const original = await f.runNextTask(undefined, task.id);
+      assert.equal(original.error, null, original.error?.message);
+      assert.equal(original.publication.status, "published");
+      assert.ok(original.headSha);
+      assert.equal(f.written("issue").length, 1);
+      assert.equal(f.slack.calls.filter((call) => call.method === "chat.postMessage" && call.body.channel === "C-REPLAY").length, 1);
+      const earlier = await cli("inspect", first.id, "--json");
+      assert.match(earlier.stderr, /journal reflects run/);
+      assert.equal(JSON.parse(earlier.stdout).latestRunId, original.id);
+      assert.equal(JSON.parse(earlier.stdout).status, "failed");
+
+      const state = all(s.workflowState);
+      assert.ok(state.some((row) => row.workflow === "maintainer-sweep"));
+      const later = new Date(Date.parse(original.finishedAt) + 1000).toISOString();
+      db.update(s.steps).set({ startedAt: later, finishedAt: later }).where(and(eq(s.steps.taskId, task.id), eq(s.steps.name, "gather"))).run();
+      const originalRows = rowsFor(task.id);
+      const baseline = await parseInspection(task.id);
+      assert.equal(baseline.runId, original.id);
+      assert.equal(baseline.triggerKind, "workflow_manual");
+      assert.deepEqual(baseline.steps.map((step) => step.name), ["gather", "propose", "critique"]);
+      assert.equal(baseline.effects.length, 2);
+      assert.ok(baseline.steps.every((step) => step.drift === false && step.durationMs >= 0 && step.outputBytes > 0));
+      assert.deepEqual(JSON.parse((await cli("inspect", task.id, "--step", "propose")).stdout), originalRows.find((step) => step.name === "propose").output);
+      const critiquePath = resolve("app/workflows/maintainer-sweep/CRITIQUE.md");
+      writeFileSync(critiquePath, readFileSync(critiquePath, "utf8") + "\nReplay-specific critique instructions.\n");
+      changeMain("src/app.ts", "export const value = 101;\n");
+      assert.notEqual(git(resolve("remote.git"), "rev-parse", "main"), original.headSha);
+      assert.match((await cli("inspect", original.id)).stdout, /propose\tcompleted\t\d+ms\t\w{8}\t\w{8}\tDRIFT/);
+
+      const counts = () => [all(s.tasks).length, all(s.runs).length, f.requests.length, f.writes.length, f.slack.calls.length];
+      const beforePlan = counts();
+      await assert.rejects(cli("replay", first.id), { stderr: new RegExp(`not the latest run.*replay ${original.id}`) });
+      assert.match((await cli("replay", original.id, "--plan")).stdout, /FROZEN\tgather, propose, critique\nFRESH\t\(none\)/);
+      await assert.rejects(cli("replay", original.id, "--from", "unknown", "--plan"), { stderr: /available: gather, propose, critique/ });
+      await assert.rejects(cli("replay", original.id, "--input", "[]", "--plan"), { stderr: /--input must be a JSON object/ });
+      await assert.rejects(cli("replay", original.id, "--live"), { stderr: /Unknown option '--live'/ });
+      assert.deepEqual(counts(), beforePlan);
+
+      const manual = tasks.enqueueWorkflowRun("maintainer-sweep");
+      let cliOwner, claimed;
+      f.onModel = () => {
+        const running = all(s.tasks).find((row) => row.input.replayOf === original.id && row.status === "running");
+        const pidFile = running && resolve("data/cli-tasks", `${running.id}.pid`);
+        if (pidFile && existsSync(pidFile)) {
+          cliOwner = { id: running.id, pid: Number(readFileSync(pidFile, "utf8")) };
+          claimed ??= tasks.claimTask(manual.id);
+        }
+      };
+      f.reset(0, "normal");
+      f.script = [approve, "Critique reran."];
+      const completed = await cli("replay", original.id, "--from", "critique", "--dry-run", "--input", '{"topic":"updated","replayOf":"not-a-run","dryRun":false}');
+      f.onModel = undefined;
+      const replayId = /^COMPLETED\t([^\t\n]+)\t/m.exec(completed.stdout)?.[1];
+      assert.ok(replayId, completed.stdout);
+      const replay = f.row(s.runs, replayId), replayTask = f.row(s.tasks, replay.taskId);
+      assert.equal(claimed?.task.id, manual.id, "a running replay neither occupies the only slot nor blocks its workflow");
+      tasks.finishRun(claimed.run.id, { status: "completed" });
+      assert.equal(replay.sequence, original.sequence + 1);
+      assert.equal(replay.headSha, original.headSha);
+      assert.equal(replay.publication.status, "not_needed");
+      assert.ok(cliOwner?.pid > 0 && cliOwner.id === replayTask.id, "CLI owns the running task through its PID file");
+      assert.equal(existsSync(resolve("data/cli-tasks", `${replayTask.id}.pid`)), false);
+      assert.equal(replayTask.status, "completed");
+      assert.deepEqual(replayTask.input, { ...task.input, replayOf: original.id,
+        payload: { topic: "updated", keep: true, replayOf: "not-a-run", dryRun: false } });
+      assert.notEqual(replayTask.subjectId, task.subjectId);
+      assert.equal(f.row(s.subjects, replayTask.subjectId).kind, "workflow");
+      assert.match(f.row(s.subjects, replayTask.subjectId).key, /^maintainer-sweep:replay:/);
+      const modelRequests = f.requests.slice(beforePlan[2]);
+      assert.ok(modelRequests.length > 0);
+      assert.ok(modelRequests.every((request) => JSON.stringify(request.request.messages).includes("Replay-specific critique instructions.")), "only the edited critique reached the model");
+      assert.match(completed.stderr, /"event":"workflow.step_frozen".*"step":"propose"/);
+      const replayInspection = await parseInspection(replayId, "--step", "critique");
+      assert.equal(replayInspection.step.output.data.approved, true);
+      assert.equal(replayInspection.step.drift, false);
+      assert.equal(replayInspection.effects.length, 0);
+      const replayRows = rowsFor(replayTask.id);
+      for (const name of ["gather", "propose"]) {
+        assert.deepEqual(replayRows.find((step) => step.name === name), { ...originalRows.find((step) => step.name === name), taskId: replayTask.id });
+      }
+      assert.notEqual(replayInspection.step.workflowHash, baseline.steps.find((step) => step.name === "critique").workflowHash);
+      const preview = /^PREVIEW\t(.+)$/m.exec(completed.stdout)?.[1];
+      assert.equal(preview, resolve("data/workflow-dry-runs", `maintainer-sweep-${replayId.slice(0, 8)}`));
+      const result = JSON.parse(replay.result.text);
+      assert.deepEqual([result.issue.previewPath, result.slack.previewPath].map((path) => JSON.parse(readFileSync(path, "utf8")).runId), [replayId, replayId]);
+
+      f.reset(0, "normal");
+      f.script = [fail, "Critique did not complete."];
+      const failed = await cli("replay", replayId, "--from", "critique").then(() => assert.fail("Replay unexpectedly succeeded"), (error) => error);
+      const failedId = /^FAILED\t([^\t\n]+)\t/m.exec(failed.stderr)?.[1];
+      assert.ok(failedId, failed.stderr);
+      const failedRun = f.row(s.runs, failedId), failedTask = f.row(s.tasks, failedRun.taskId);
+      assert.equal(failedTask.status, "failed");
+      assert.equal(f.row(s.subjects, failedTask.subjectId).state, "closed");
+      assert.match(failed.stderr, /"operation":"workflow.replay".*"event":"operation.failed"/);
+      assert.ok(failedRun.finishedAt);
+      assert.equal(existsSync(resolve("data/cli-tasks", `${failedTask.id}.pid`)), false);
+      assert.throws(() => tasks.retryTask(failedTask.id), /only in the replay CLI/);
+      assert.equal(tasks.claimTask(failedTask.id), undefined);
+      assert.equal(f.row(s.tasks, failedTask.id).status, "failed");
+      assert.deepEqual(rowsFor(task.id), originalRows);
+      assert.deepEqual(all(s.workflowState), state);
+      assert.deepEqual([f.writes.length, f.slack.calls.length], beforePlan.slice(3));
+      assert.equal(existsSync(outbound), false, "replay process attempted no GitHub or Slack calls");
+
+      f.script = undefined;
+      const managedTask = f.enqueue(10);
+      const managed = await f.runNextTask(undefined, managedTask.id);
+      assert.ok(managed && !managed.error);
+      await assert.rejects(cli("replay", managed.id, "--plan"), { stderr: /managed-pipeline workflows are not replayable/ });
+    },
+  },
+  workflow_repo_sync: {
+    title: "workflow sync verifies pinned Git bundles and overlays before switching current, with safe offline reuse and retention",
+    run: async () => {
+      const local = resolve("app/scrat.local.json");
+      const base = JSON.parse(readFileSync(local, "utf8"));
+      const source = resolve("workflow-source");
+      execFileSync("git", ["init", "-b", "main", source], { stdio: "ignore" });
+      const pointer = resolve("data/workflows-repo/current");
+      const checkout = (sha) => resolve("data/workflows-repo/checkouts", sha);
+      const cli = (...args) => {
+        const result = spawnSync(process.execPath, [resolve("app/src/workflow-cli.ts"), ...args], { encoding: "utf8" });
+        assert.ifError(result.error);
+        return result;
+      };
+      const ok = (...args) => {
+        const result = cli(...args);
+        assert.equal(result.status, 0, result.stderr);
+        return result.stdout;
+      };
+      const reject = (...args) => {
+        const result = cli(...args);
+        assert.equal(result.status, 1, result.stdout + result.stderr);
+        return result.stdout + result.stderr;
+      };
+      const setRepo = (repo, extra = {}) => writeFileSync(local, JSON.stringify({ ...base, workflows: { ...base.workflows, repo, trustLocalScripts: true, ...extra } }));
+      const pin = (ref, extra, repo = {}) => setRepo({ url: source, ref, layers: ["shared", "clients/x"], keepCheckouts: 1, ...repo }, extra);
+      const workflow = (layer, name, label, override, script) => {
+        const dir = resolve(layer, name);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(resolve(dir, "workflow.yaml"), [
+          `name: ${name}`, `description: ${label}`, "mode: review", "on: {manual: true}",
+          "defaults: {provider: fixture, model: gpt-6.2-sol, thinkingLevel: high}", ...(override ? ["override: true"] : []), "",
+        ].join("\n"));
+        if (script === undefined) writeFileSync(resolve(dir, "SKILL.md"), `# ${label}\n`);
+        else writeFileSync(resolve(dir, "run.ts"), `import type { WorkflowContext } from "scrat";\nexport default async (ctx: WorkflowContext) => ${script};\n`);
+      };
+      const save = (label) => {
+        git(source, "add", ".");
+        commit(source, label);
+        return git(source, "rev-parse", "HEAD");
+      };
+      const shared = resolve(source, "shared"), client = resolve(source, "clients/x");
+      const listed = (name) => ok("list").split("\n").find((line) => line.startsWith(`${name}\t`)).split("\t");
+      assert.match(ok("sync"), /No workflows.repo configured/);
+      assert.equal(listed("review_issue").at(-1), "builtin");
+      workflow(shared, "review_issue", "Shared review", true);
+      workflow(shared, "shared_only", "Shared only");
+      workflow(client, "review_issue", "Client review", true, "ctx.workflow.name");
+      writeFileSync(resolve(client, "package.json"), '\uFEFF{"type":"module"}\n');
+      const first = save("Valid shared and client layers");
+      for (const [repo, field] of [[{ url: " " }, "url"], [{ ref: "main" }, "ref"], [{ layers: [] }, "layers"],
+        [{ layers: ["shared/../clients/x"] }, "layers"], [{ layers: ["/shared"] }, "layers"], [{ layers: ["C:\\shared"] }, "layers"],
+        [{ keepCheckouts: 0 }, "keepCheckouts"], [{ keepCheckouts: 1.5 }, "keepCheckouts"], [{ unknown: true }, "unknown"]]) {
+        pin(first, {}, repo);
+        assert.ok(reject("sync").includes(`workflows.repo.${field}`));
+        assert.ok(reject("list").includes(`workflows.repo.${field}`));
+      }
+      pin(first.toUpperCase());
+      assert.match(reject("list"), /run "npm run workflow -- sync"/);
+      assert.match(ok("sync"), new RegExp(`\\(none\\) -> ${first}.*Restart scrat.service`));
+      assert.equal(fs.readlinkSync(pointer), `checkouts/${first}`);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(first)));
+      assert.deepEqual(listed("review_issue").slice(-2), ["Client review", "repo:clients/x"]);
+      assert.deepEqual(listed("shared_only").slice(-2), ["Shared only", "repo:shared"]);
+      const localDir = resolve("local-workflows");
+      workflow(localDir, "review_issue", "Local review");
+      pin(first, { directory: localDir });
+      assert.deepEqual(listed("review_issue").slice(-2), ["Local review", "directory"]);
+      pin(first, { trustLocalScripts: false });
+      assert.match(reject("sync"), /requires workflows.trustLocalScripts: true/);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(first)));
+      pin(first);
+      fs.renameSync(source, `${source}-offline`);
+      assert.match(ok("sync"), new RegExp(`already synced at ${first}`));
+      fs.renameSync(`${source}-offline`, source);
+      const pidFile = resolve("data/serve.pid");
+      const checkoutFile = resolve("data/serve.workflows-checkout");
+      writeFileSync(pidFile, `${process.pid}\n`);
+      writeFileSync(checkoutFile, `${realpathSync(checkout(first))}\n`);
+
+      workflow(client, "review_issue", "Missing override", false, "ctx.workflow.name");
+      const duplicate = save("Duplicate without override");
+      pin(duplicate);
+      assert.match(reject("list"), new RegExp(`expected ${duplicate}; run "npm run workflow -- sync"`));
+      const duplicateError = reject("sync");
+      assert.ok(duplicateError.includes(`${checkout(duplicate)}/shared/review_issue/workflow.yaml`));
+      assert.ok(duplicateError.includes(`${checkout(duplicate)}/clients/x/review_issue/workflow.yaml`));
+      assert.match(duplicateError, /set override: true/);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(first)));
+
+      workflow(client, "review_issue", "Broken script", true, "ctx.doesNotExist");
+      workflow(client, "stale_override", "Stale override", true);
+      const stale = save("Stale override");
+      pin(stale);
+      assert.match(reject("sync"), /stale_override\/workflow.yaml: override: true requires a workflow in a lower layer/);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(first)));
+      rmSync(resolve(client, "stale_override"), { recursive: true });
+      const broken = save("Script type error");
+      pin(broken);
+      assert.match(reject("sync"), /Property 'doesNotExist' does not exist on type 'WorkflowContext'/);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(first)));
+
+      workflow(client, "review_issue", "Second client review", true, "ctx.workflow.name");
+      symlinkSync("../../shared/shared_only/SKILL.md", resolve(client, "review_issue", "linked-skill.md"));
+      const linked = save("Symlink inside a bundle");
+      pin(linked);
+      assert.match(reject("sync"), /contains a symlink: .*linked-skill.md/);
+      assert.equal(existsSync(checkout(linked)), false);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(first)));
+      unlinkSync(resolve(client, "review_issue", "linked-skill.md"));
+      const second = save("Second valid client layer");
+      pin(second);
+      assert.match(ok("sync"), new RegExp(`${first} -> ${second}.*Restart scrat.service`));
+      assert.equal(fs.readlinkSync(pointer), `checkouts/${second}`);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(second)));
+      assert.equal(existsSync(checkout(first)), true, "retention protects the previous checkout even at keepCheckouts=1");
+      assert.deepEqual(listed("review_issue").slice(-2), ["Second client review", "repo:clients/x"]);
+      assert.equal(existsSync(checkout(broken)), false);
+      assert.match(ok("sync"), /already synced/);
+      assert.equal(existsSync(checkout(first)), true, "idempotent sync still protects the previous checkout");
+
+      const lock = resolve("data/workflows-repo/sync.lock");
+      const startedAt = new Date().toISOString();
+      writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt }));
+      assert.match(reject("sync"), /Another workflow sync holds/);
+      assert.equal(JSON.parse(readFileSync(lock, "utf8")).pid, process.pid);
+      workflow(client, "review_issue", "Third client review", true, "ctx.workflow.name");
+      const third = save("Third valid client layer");
+      pin(third);
+      const deadOwner = spawnSync(process.execPath, ["-e", ""]);
+      assert.equal(deadOwner.status, 0);
+      writeFileSync(lock, JSON.stringify({ pid: deadOwner.pid, startedAt }));
+      assert.match(ok("sync"), new RegExp(`${second} -> ${third}`));
+      assert.equal(existsSync(lock), false);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(third)));
+      assert.equal(existsSync(checkout(second)), true);
+      assert.equal(existsSync(checkout(first)), true, "retention protects the live daemon's checkout after two syncs");
+
+      const script = resolve(client, "review_issue/run.ts");
+      writeFileSync(script, readFileSync(script, "utf8") + 'import { writeFileSync } from "node:fs";\nwriteFileSync("validation-started", "");\nawait new Promise((resolve) => setTimeout(resolve, 60_000));\n');
+      pin(save("Hanging validation"), {}, { checkTimeoutSeconds: 5 });
+      assert.match(reject("sync"), /validation timed out after 5s; current was not changed/);
+      assert.equal(existsSync("validation-started"), true);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(third)));
+      assert.equal(existsSync(lock), false);
     },
   },
 };

@@ -19,7 +19,7 @@ import { categoriesFor, itemLabelKey } from "./item-labels.ts";
 import { items, runs, type Run, subjects, tasks, type Task, type Subject, workspaces } from "./schema.ts";
 import { isBaseOnly, isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
 import { signalWork } from "./work-signal.ts";
-import { workflowItemLabelSettings } from "./workflows.ts";
+import { isAdvisory, workflowItemLabelSettings } from "./workflows.ts";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -53,8 +53,12 @@ export function latestTask(subjectId: string, action: string, database: Pick<typ
 
 const modeOf = (action: string) => isWorkflow(action) ? workflowOf(action).mode : undefined;
 const workflowNames = workflows.map(({ name }) => name);
+const replayTaskReason = "Replay tasks run only in the replay CLI";
 
 function checkClaimable({ task, subject }: { task: Task; subject: Subject }, database: Pick<typeof db, "select">) {
+  if ("replayOf" in task.input && task.input.replayOf !== undefined) {
+    return { ok: false as const, reason: replayTaskReason };
+  }
   if (!isWorkflow(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   let trigger;
   try { trigger = parseTriggerInput(task.input); }
@@ -176,7 +180,7 @@ export function enqueueManualTasks(action: string, targets: string[], priority?:
 export function enqueueWorkflowRun(name: string, options: { input?: Record<string, unknown>; dryRun?: boolean; priority?: number; reason?: string } = {}) {
   const wf = workflowOf(name);
   if (!wf.on.manual) throw new Error(`Workflow ${name} does not allow manual runs (on.manual is false)`);
-  if (wf.on.event) {
+  if (wf.on.event && wf.on.event.source !== "workflow") {
     const hint = wf.on.event.source === "github_items" ? ` Use "npm run enqueue -- ${name} <number>" for item-based workflows.` : "";
     throw new Error(`Workflow ${name} is event-triggered (${wf.on.event.source}:${wf.on.event.kind}) and cannot run via "workflow run".${hint}`);
   }
@@ -200,7 +204,8 @@ export function enqueueWorkflowRun(name: string, options: { input?: Record<strin
 
 export function claimTask(taskId?: string) {
   return db.transaction((transaction) => {
-    const active = transaction.select({ count: count() }).from(tasks).where(eq(tasks.status, "running")).get()!;
+    const active = transaction.select({ count: count() }).from(tasks)
+      .where(and(eq(tasks.status, "running"), sql`json_extract(${tasks.input}, '$.replayOf') is null`)).get()!;
     if (active.count >= config.harness.maxConcurrency) return;
     const busyTasks = alias(tasks, "busy_tasks");
     const busySubjects = alias(subjects, "busy_subjects");
@@ -209,7 +214,7 @@ export function claimTask(taskId?: string) {
       .where(and(taskId ? eq(tasks.id, taskId) : undefined, eq(tasks.status, "queued"), eq(subjects.state, "open"), or(isNull(tasks.availableAt), lte(tasks.availableAt, new Date().toISOString())), notExists(
         transaction.select({ id: busyTasks.id }).from(busyTasks)
           .innerJoin(busySubjects, eq(busyTasks.subjectId, busySubjects.id))
-          .where(and(eq(busyTasks.status, "running"), or(
+          .where(and(eq(busyTasks.status, "running"), sql`json_extract(${busyTasks.input}, '$.replayOf') is null`, or(
             eq(busyTasks.subjectId, tasks.subjectId),
             and(isNotNull(subjects.workspaceId), eq(busySubjects.workspaceId, subjects.workspaceId)),
             workflowNames.length ? and(eq(subjects.kind, "workflow"), inArray(busyTasks.action, workflowNames), eq(busyTasks.action, tasks.action)) : undefined,
@@ -247,7 +252,7 @@ export function claimTask(taskId?: string) {
       skill,
       provider, model, thinkingLevel, reviewers,
       workspaceId: resume?.workspaceId ?? (review ? null : next.subject.workspaceId),
-      publication: publicationResume ? { ...publicationResume.publication, status: "pending" } : { status: "pending" },
+      publication: { ...publicationResume?.publication, status: "pending", ...isWorkflow(task.action) && isAdvisory(workflowOf(task.action)) && { advisory: true } },
       stage,
       ...(resume ? {
         context: resume.context, result: resume.result, mainSha: resume.mainSha, headSha: resume.headSha,
@@ -282,6 +287,7 @@ export function retryTask(taskId: string, mode: Task["retryMode"] = "repair") {
       }
       const failed = transaction.select().from(tasks).where(and(eq(tasks.id, taskId), eq(tasks.status, "failed"))).get();
       if (!failed) throw new Error(`Task is not failed: ${taskId}`);
+      if (failed.input.replayOf !== undefined) throw new Error(replayTaskReason);
       const queued = pendingTaskOf(transaction, failed.subjectId, failed.action);
       if (queued) throw new Error(`A queued task already exists for this subject/action: ${queued.id}`);
       if (mode === "validation") {

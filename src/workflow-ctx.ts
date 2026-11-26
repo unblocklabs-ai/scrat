@@ -10,25 +10,25 @@ import { db } from "./db.ts";
 import { describeError, errorCode, SupersededError, transientInferenceCode } from "./errors.ts";
 import type { EventReferences } from "./events.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
+import { git } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubIssue, GithubPullRequest } from "./github-types.ts";
-import { botSlug } from "./identity.ts";
 import { categoriesFor, itemLabelKey } from "./item-labels.ts";
 import type { Item } from "./items.ts";
 import { reconcileLabels } from "./labels.ts";
-import type { LabelCategory, ThinkingLevel, ToolName } from "./manifests.ts";
-import { fingerprintMarker, reviewMarker, withMarker } from "./markers.ts";
+import { effectNames, startEffectNames, type LabelCategory, type ThinkingLevel, type ToolName } from "./manifests.ts";
+import { advisoryResolvedMarker, fingerprintMarker, withMarker, workflowCommentMarker } from "./markers.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { executePi, type SubmitResultSpec } from "./pi.ts";
-import { assertComplete, hasPublicationSnapshot, InterruptedError, SecretLeakError } from "./results.ts";
+import { assertComplete, hasPublicationSnapshot, InterruptedError, SecretLeakError, validateLabelSelections } from "./results.ts";
 import { retainReviewScope } from "./review-paths.ts";
-import { getRun, latestCompletedRun, latestPriorRunOfTask, updateRun } from "./run-history.ts";
+import { getRun, latestCompletedRun, updateRun } from "./run-history.ts";
 import { steps, workflowState, type Run, type Subject, type Task } from "./schema.ts";
-import { assertPublishable } from "./secrets.ts";
+import { assertPublishable, childEnvironment } from "./secrets.ts";
 import { postMessage } from "./slack.ts";
 import { parseTriggerInput } from "./triggers.ts";
 import {
-  type GithubPermission, hashJson, type ResolvedWorkflow, type SlackPermission, workflowAllowedTools,
+  type GithubPermission, hashJson, isAdvisory, type ResolvedWorkflow, type SlackPermission, workflowAllowedTools,
   workflowItemLabelSettings, type WorkflowPipelineSpec, type WorkspacePermission,
 } from "./workflows.ts";
 import { createWorkspace, removeWorkspace } from "./workspaces.ts";
@@ -134,7 +134,7 @@ export type WorkflowContext = {
     listOpenIssues: () => Promise<GithubIssue[]>;
     listOpenPrs: () => Promise<GithubPullRequest[]>;
     listRecentMergedPrs: (sinceDays: number, limit?: number) => Promise<WorkflowMergedPr[]>;
-    comment: (args: { key: string; number: number; body: string }) => Promise<{ commentId: number; dryRun?: boolean; previewPath?: string }>;
+    comment: (args: { key: string; number: number; body: string; resolved?: boolean }) => Promise<{ commentId: number; dryRun?: boolean; previewPath?: string }>;
     issue: (args: { key: string; title: string; body: string; labels?: string[] }) => Promise<{ number: number; created: boolean; dryRun?: boolean; previewPath?: string }>;
   };
   slack: {
@@ -142,10 +142,13 @@ export type WorkflowContext = {
   };
   item: {
     connect: () => Promise<WorkflowItemObserved>;
+    observeTarget: (observed: WorkflowItemObserved) => void;
+    assertExpectedTarget: (observed: WorkflowItemObserved) => void;
+    assertLiveTarget: (observed: WorkflowItemObserved) => Promise<void>;
+    ownComment: (observed: WorkflowItemObserved, key: string) => { body: string; resolved: boolean } | undefined;
     savedResult: () => { result: WorkflowAgentResult; labelingKey?: string } | undefined;
     labelCategories: () => LabelCategory[];
     labelKey: (observed: WorkflowItemObserved, categories: readonly LabelCategory[]) => string;
-    isFresh: (observed: WorkflowItemObserved) => Promise<boolean>;
     skipAsUnchanged: (reason: string) => never;
     withCheckout: <T>(
       observed: WorkflowItemObserved,
@@ -161,12 +164,12 @@ export type WorkflowContext = {
         skill?: string;
         tools?: readonly ToolName[];
         codemode?: boolean;
+        submitResult?: SubmitResultSpec;
       },
     ) => Promise<WorkflowAgentResult>;
+    assertLabelSelections: (labels: unknown, categories: readonly LabelCategory[]) => asserts labels is Array<{ category: string; name: string }>;
     assertFreshForPublication: (current: WorkflowItemObserved, options?: { labelKey?: string; labelCategories?: readonly LabelCategory[] }) => Promise<void>;
-    upsertReviewComment: (args: { key: string; current: WorkflowItemObserved; body: string }) => Promise<{ commentId: number; dryRun?: boolean; previewPath?: string }>;
     reconcileLabels: (args: { key: string; current: WorkflowItemObserved; desired: string[]; managed: string[] }) => Promise<{ desired: string[]; dryRun?: boolean; previewPath?: string }>;
-    addReadyLabel: (args: { key: string; current: WorkflowItemObserved }) => Promise<{ desired: string[]; dryRun?: boolean; previewPath?: string }>;
   };
   review: {
     run: (spec: Omit<WorkflowPipelineSpec, "acceptance" | "commitPrefix">) => Promise<WorkflowPipelineOutcome>;
@@ -209,6 +212,8 @@ function assertPermission<T extends string>(allowed: readonly T[], needed: T, sc
 }
 
 const allowedToolSet = new Set<string>(workflowAllowedTools);
+const validEffects = new Set<string>(effectNames);
+const validStartEffects = new Set<string>(startEffectNames);
 
 function safeIdempotencyKey(key: string, workflowName: string) {
   const maxKeyLength = 128 - `workflow:${workflowName}:`.length;
@@ -243,6 +248,7 @@ export type CreateWorkflowContextInput = {
   onWorkspaceReleased?: () => void;
   onTargetObserved?: (target: string) => void;
   runPipeline?: WorkflowPipelineRunner;
+  replay?: { frozen: ReadonlySet<string>; baseSha?: string };
 };
 
 export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx: WorkflowContext; hasPublishedEffects: () => boolean; usedManagedPipeline: () => boolean } {
@@ -319,9 +325,15 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
     usedStepNames.add(name);
     const inputHash = hashJson(stepInput ?? null);
     const existing = findStep(name);
-    if (existing && existing.status === "completed" && existing.inputHash === inputHash && existing.workflowHash === workflow.hash) {
-      log.info({ event: "workflow.step_replayed", workflow: workflow.name, step: name });
-      return existing.output as T;
+    if (existing && existing.status === "completed") {
+      if (input.replay?.frozen.has(name)) {
+        log.info({ event: "workflow.step_frozen", workflow: workflow.name, step: name, inputDrift: existing.inputHash !== inputHash });
+        return existing.output as T;
+      }
+      if (existing.inputHash === inputHash && existing.workflowHash === workflow.hash) {
+        log.info({ event: "workflow.step_replayed", workflow: workflow.name, step: name });
+        return existing.output as T;
+      }
     }
     return recordStep(name, inputHash, fn);
   }
@@ -512,7 +524,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         "workspace.withCheckout",
         "Overlapping workspace.withCheckout calls are not supported in a single workflow run",
         async () => {
-          const baseRef = await github.fetchBranch(ref);
+          const baseRef = input.replay?.baseSha ?? await github.fetchBranch(ref);
           return createWorkspace({ repositoryPath, baseRef }, references);
         },
         (ws) => {
@@ -604,20 +616,20 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       assertPermission<GithubPermission>(workflow.permissions.github, "read", "github", workflow.name);
       return github.fetchRecentMergedPullRequests(sinceDays, limit);
     },
-    async comment({ key, number, body }) {
+    async comment({ key, number, body, resolved = false }) {
       assertNotAborted(signal, "github.comment");
       assertPermission<GithubPermission>(workflow.permissions.github, "comment", "github", workflow.name);
       const safeKey = safeIdempotencyKey(key, workflow.name);
       assertPublishable(body);
       if (dryRun) {
-        const previewPath = await writeDryRunPreview("github-comment", safeKey, { number, body });
+        const previewPath = await writeDryRunPreview("github-comment", safeKey, { number, body, resolved });
         return { commentId: 0, dryRun: true, previewPath };
       }
-      return runEffectStep("github.comment", safeKey, { number, body }, async () => {
-        const marker = `<!-- scrat-workflow:${workflow.name}:${safeKey} -->`;
+      return runEffectStep("github.comment", safeKey, { number, body, resolved }, async () => {
+        const marker = workflowCommentMarker(workflow.name, safeKey);
         const ctx = await github.fetchItemContext("issue", number);
         const existing = findBotMarkedComment(ctx.comments, marker);
-        const commentId = await upsertComment(github, number, existing, withMarker(body, marker), references);
+        const commentId = await upsertComment(github, number, existing, withMarker(body, ...resolved ? [advisoryResolvedMarker] : [], marker), references);
         return { commentId };
       });
     },
@@ -676,28 +688,44 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       if (pullRequest) input.onTargetObserved?.(`${pullRequest.head.sha}@${observation.baseBranch}`);
       return { context, observation, pullRequest, mainSha };
     },
+    observeTarget(observed) {
+      if (observed.pullRequest) input.onTargetObserved?.(`${observed.pullRequest.head.sha}@${observed.observation.baseBranch}`);
+    },
+    assertExpectedTarget(observed) {
+      const key = trigger.input.triggerKey;
+      if (typeof key !== "string" || !observed.pullRequest) return;
+      let expected: unknown;
+      try { expected = JSON.parse(key); } catch { return; }
+      if (!expected || typeof expected !== "object" || !("head" in expected) || !("base" in expected)) return;
+      if (expected.head !== observed.pullRequest.head.sha || expected.base !== observed.observation.baseBranch) {
+        throw new SupersededError("PR head or base moved after routing");
+      }
+    },
+    async assertLiveTarget(observed) {
+      assertNotAborted(signal, "item.assertLiveTarget");
+      if (dryRun || requireItem().kind !== "pr" || !observed.pullRequest) return;
+      const { item: live } = await github.fetchItemContext("pr", observed.pullRequest.number, { comments: false });
+      if (!("head" in live) || live.head.sha !== observed.pullRequest.head.sha || live.base.ref !== observed.observation.baseBranch) {
+        throw new SupersededError("PR head or base moved before publication");
+      }
+    },
+    ownComment(observed, key) {
+      const existing = findBotMarkedComment(observed.context.comments, workflowCommentMarker(workflow.name, safeIdempotencyKey(key, workflow.name)));
+      return existing && { body: existing.body, resolved: existing.body.includes(advisoryResolvedMarker) };
+    },
     savedResult() {
-      const prior = run.retryOfRunId ? getRun(run.retryOfRunId) : latestPriorRunOfTask(task.id, run.id);
-      if (!hasPublicationSnapshot(prior)) return undefined;
-      updateRun(run.id, {
-        context: prior.context,
-        result: prior.result,
-        mainSha: prior.mainSha,
-        headSha: prior.headSha,
-        piSessionId: prior.piSessionId,
-        piSessionFile: prior.piSessionFile,
-      });
+      if (!hasPublicationSnapshot(run)) return undefined;
       return {
         result: {
-          text: prior.result.text,
-          outcome: prior.result.outcome,
-          ready: prior.result.ready,
-          labels: prior.result.labels,
-          paths: prior.result.paths,
-          sessionId: prior.piSessionId ?? undefined,
-          sessionFile: prior.piSessionFile ?? undefined,
+          text: run.result.text,
+          outcome: run.result.outcome,
+          ready: run.result.ready,
+          labels: run.result.labels,
+          paths: run.result.paths,
+          sessionId: run.piSessionId ?? undefined,
+          sessionFile: run.piSessionFile ?? undefined,
         },
-        labelingKey: prior.context.labeling?.key,
+        labelingKey: run.context.labeling?.key,
       };
     },
     labelCategories() {
@@ -706,14 +734,6 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
     },
     labelKey(observed, categories) {
       return itemLabelKey(observed.observation.item, categories);
-    },
-    async isFresh(observed) {
-      assertNotAborted(signal, "item.isFresh");
-      const currentItem = requireItem();
-      const completed = latestCompletedRun(currentItem.id, workflow.name);
-      if (!completed) return false;
-      const state = await freshness(savedEvaluation(completed), { ...observed.observation, mainSha: observed.mainSha }, "relevant-paths");
-      return state.kind === "current";
     },
     skipAsUnchanged(reason) {
       throw new SupersededError(reason);
@@ -727,7 +747,15 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         "item.withCheckout",
         "Overlapping workspace checkout calls are not supported in a single workflow run",
         async () => {
-          headSha = observed.pullRequest ? await github.fetchPullRequestHead(observed.pullRequest) : observed.mainSha;
+          const hasCommit = (sha: string) => git(repositoryPath, ["cat-file", "-e", `${sha}^{commit}`],
+            { ...childEnvironment(), GIT_NO_LAZY_FETCH: "1" }).then(() => true, () => false);
+          if (input.replay && !await hasCommit(observed.mainSha)) {
+            await github.fetchBranch(observed.observation.baseBranch);
+            if (!await hasCommit(observed.mainSha)) throw new Error(`Frozen base commit ${observed.mainSha} is unavailable`);
+          }
+          const pr = observed.pullRequest;
+          headSha = !pr ? observed.mainSha : input.replay && await hasCommit(pr.head.sha) ? pr.head.sha : await github.fetchPullRequestHead(pr);
+          if (observed.pullRequest) input.onTargetObserved?.(`${headSha}@${observed.observation.baseBranch}`);
           evaluated = evaluateItemContext(run, observed.observation, { labelCategories: options.labelingCategories });
           ({ diffBaseSha, diffPaths } = await readDiffScope(repositoryPath, observed.mainSha, headSha, Boolean(observed.pullRequest)));
           return createWorkspace({ repositoryPath, baseRef: headSha }, references);
@@ -790,6 +818,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       }, {
         context: prompt,
         labelCategories: options.labelCategories ? [...options.labelCategories] : labelCategories,
+        submitResult: options.submitResult,
         onSession: (details) => {
           sessionInfo = { id: details.piSessionId, file: details.piSessionFile };
           updateRun(run.id, { piSessionId: details.piSessionId, piSessionFile: details.piSessionFile });
@@ -798,7 +827,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       const combined = [...new Set([...ws.diffPaths, ...res.paths])];
       const parsedTrigger = parseTriggerInput(run.input);
       let retained = combined;
-      if (parsedTrigger.kind === "item_changed") {
+      if (parsedTrigger.kind === "item_changed" && !isAdvisory(workflow)) {
         const previous = latestCompletedRun(currentItem.id, workflow.name);
         if (previous && previous.context?.revision === ws.evaluated.revision) {
           retained = await retainReviewScope({
@@ -816,9 +845,10 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       const finalResult = { ...res, paths: retained };
       updateRun(run.id, { result: finalResult, stage: "validating" });
       assertComplete(finalResult);
-      updateRun(run.id, { stage: "publishing" });
+      updateRun(run.id, { stage: isAdvisory(workflow) ? "agent" : "publishing" });
       return {
         text: finalResult.text,
+        data: res.data as Record<string, unknown> | undefined,
         outcome: finalResult.outcome,
         ready: finalResult.ready,
         labels: finalResult.labels,
@@ -843,23 +873,6 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
           : "Reviewed code changed; enqueue a fresh review instead of retrying publication");
       }
     },
-    async upsertReviewComment({ key, current, body }) {
-      assertNotAborted(signal, "item.upsertReviewComment");
-      assertPermission<GithubPermission>(workflow.permissions.github, "comment", "github", workflow.name);
-      const safeKey = safeIdempotencyKey(key, workflow.name);
-      assertPublishable(body);
-      if (dryRun) {
-        const previewPath = await writeDryRunPreview("github-review-comment", safeKey, { number: current.observation.item.number, body });
-        return { commentId: 0, dryRun: true, previewPath };
-      }
-      return runEffectStep("github.review_comment", safeKey, { number: current.observation.item.number, body }, async () => {
-        const existing = findBotMarkedComment(current.observation.own, reviewMarker);
-        const commentId = await upsertComment(github, current.observation.item.number, existing, withMarker(`${body}\n\n`, reviewMarker), references);
-        const currentPub = getRun(run.id)?.publication ?? { status: "pending" as const };
-        updateRun(run.id, { publication: { ...currentPub, commentId } });
-        return { commentId };
-      });
-    },
     async reconcileLabels({ key, current, desired, managed }) {
       assertNotAborted(signal, "item.reconcileLabels");
       assertPermission<GithubPermission>(workflow.permissions.github, "label", "github", workflow.name);
@@ -873,13 +886,16 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         return { desired };
       });
     },
-    async addReadyLabel({ key, current }) {
-      return itemHelper.reconcileLabels({ key, current, desired: [botSlug], managed: [] });
+    assertLabelSelections(labels, categories) {
+      validateLabelSelections(labels, categories);
     },
   };
 
   const runManaged = async (expectedMode: "review" | "change", spec: WorkflowPipelineSpec) => {
     assertNotAborted(signal, `${expectedMode}.run`);
+    if (isAdvisory(workflow)) {
+      throw new Error(`Workflow ${workflow.name} has role advisory and cannot call ctx.${expectedMode}.run()`);
+    }
     if (workflow.mode !== expectedMode) {
       throw new Error(`Workflow ${workflow.name} has mode "${workflow.mode}" and cannot call ctx.${expectedMode}.run()`);
     }
@@ -887,12 +903,14 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       throw new Error(`Workflow ${workflow.name} change pipeline must publish "push" first`);
     }
     assertPermission<WorkspacePermission>(workflow.permissions.workspace, expectedMode === "change" ? "write" : "read", "workspace", workflow.name);
+    const unknownEffects = [...(spec.start ?? []).filter((effect) => !validStartEffects.has(effect)), ...spec.publish.filter((effect) => !validEffects.has(effect))];
+    if (unknownEffects.length) throw new Error(`Workflow ${workflow.name} requested unknown effects: ${unknownEffects.join(", ")}`);
     for (const effect of spec.start ?? []) {
       if (effect === "slack_post") assertPermission<SlackPermission>(workflow.permissions.slack, "post", "slack", workflow.name);
     }
     for (const effect of spec.publish) {
       if (effect === "comment") assertPermission<GithubPermission>(workflow.permissions.github, "comment", "github", workflow.name);
-      else if (effect === "labels" || effect === "item_labels") assertPermission<GithubPermission>(workflow.permissions.github, "label", "github", workflow.name);
+      else if (effect === "labels") assertPermission<GithubPermission>(workflow.permissions.github, "label", "github", workflow.name);
       else if (effect === "pr_assessment") {
         assertPermission<GithubPermission>(workflow.permissions.github, "comment", "github", workflow.name);
         assertPermission<GithubPermission>(workflow.permissions.github, "label", "github", workflow.name);

@@ -1,25 +1,26 @@
+import { createHash } from "node:crypto";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Logger } from "pino";
-import { matchingWorkflows, routeFor, workflowOf, workflows } from "./workflow-registry.ts";
+import { advisoryFor, matchingWorkflows, routeFor, workflowOf, workflows } from "./workflow-registry.ts";
 import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import type { Signal } from "./manifests.ts";
-import { workflowItemLabelSettings } from "./workflows.ts";
+import { isAdvisory, workflowItemLabelSettings } from "./workflows.ts";
 import { botSlug } from "./identity.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
-import { acknowledgedTaskIds, commentKey } from "./markers.ts";
+import { acknowledgedTaskIds, commentKey, hasOpenWorkflowComment } from "./markers.ts";
 import type { Item } from "./items.ts";
 import { categoriesFor, itemLabelKey } from "./item-labels.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { labelName, reconcileLabels } from "./labels.ts";
 import { db } from "./db.ts";
 import { UnpublishedWorkspaceError } from "./errors.ts";
-import { prepareTarget } from "./git.ts";
+import { changedPaths, prepareTarget } from "./git.ts";
 import { rateLimitLow, rateLimitState } from "./github-http.ts";
 import { mapConcurrent, type GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubPullRequest } from "./github-types.ts";
 import { items, runs, subjects, tasks, type Run } from "./schema.ts";
 import { cancelPendingTasks, enqueueTask, latestTask, reconcileIssueImplementation } from "./tasks.ts";
-import { isManual, parseTriggerInput } from "./triggers.ts";
+import { isManual, parseTriggerInput, triggerKeyOf } from "./triggers.ts";
 import { getWorkspace, pruneIdleWorkspaceCaches, removeWorkspace, retainWorkspace, stripWorkspaceCaches } from "./workspaces.ts";
 import { bestEffort } from "./logging.ts";
 import { reconcileObserved, serializePr, type ResolvedReview } from "./pr-review-publication.ts";
@@ -81,7 +82,7 @@ async function cleanupClosedItem({ github, log }: SyncContext, item: Item) {
 async function gatherPrMaintenanceFacts(ctx: SyncContext, item: Item, observation: ItemObservation, pr: GithubPullRequest, mainSha: string, routes: Routes): Promise<PrMaintenanceFacts> {
   const { github } = ctx, repositoryPath = getRepositoryPath();
   const { headSha, conflicts, behind } = await prepareTarget(repositoryPath, mainSha, await github.fetchPullRequestHead(pr));
-  const lastRun = latestFinishedRun(item.id);
+  const lastRun = latestFinishedRun(item.id, workflows.filter((wf) => !isAdvisory(wf)).map((wf) => wf.name));
   const preparationFailed = behind && !conflicts && Boolean(lastRun?.error) && lastRun?.stage === "preparing" && lastRun.headSha === headSha;
   const ciBlocker = routes.conflicts && behind && !conflicts && !preparationFailed
     ? await bestEffort(ctx.log, "github.pr_ci_unavailable", { subjectId: item.id }, () => github.prCiBlocker(pr, mainSha)) : undefined;
@@ -185,6 +186,65 @@ function routeItemLabels(item: Item) {
   return queued;
 }
 
+const advisoryPaths = new Map<string, Promise<string[]>>();
+
+function changedPathsBetween(baseSha: string, headSha: string) {
+  const key = `${headSha}:${baseSha}`;
+  const cached = advisoryPaths.get(key);
+  if (cached) return cached;
+  const pending = changedPaths(getRepositoryPath(), `${baseSha}...${headSha}`);
+  advisoryPaths.set(key, pending);
+  pending.catch(() => { if (advisoryPaths.get(key) === pending) advisoryPaths.delete(key); });
+  while (advisoryPaths.size > config.harness.reviewCacheLimit) advisoryPaths.delete(advisoryPaths.keys().next().value!);
+  return pending;
+}
+
+const advisoryKey = (target: { headSha?: string; baseBranch: string; title: string; body?: string | null }) => target.headSha
+  ? JSON.stringify({ head: target.headSha, base: target.baseBranch })
+  : createHash("sha256").update(JSON.stringify({ title: target.title, body: target.body ?? "" })).digest("hex");
+
+async function routeAdvisory({ github }: SyncContext, item: Item, observation: ItemObservation, mainSha: string) {
+  let queued = 0;
+  const pr = "head" in observation.item ? observation.item : undefined;
+  const target = pr && `${pr.head.sha}@${observation.baseBranch}`;
+  for (const action of advisoryFor(signalFor(item, item.payload.user?.login, "item_changed"))) {
+    const resolved = workflowOf(action);
+    if (!resolved.enabled) {
+      cancelPendingTasks(item.id, "Advisory workflow disabled", action);
+      supersedeRunningReviews(item.id, "Advisory workflow disabled", { action });
+      continue;
+    }
+    const triggerKey = advisoryKey({ headSha: pr?.head.sha, baseBranch: observation.baseBranch, title: observation.item.title, body: observation.item.body });
+    const latest = latestTask(item.id, action);
+    const latestRun = latest && latest.status !== "queued" ? latestRunOfTask(latest.id) : undefined;
+    const evaluated = latestRun?.context;
+    const coveredKey = evaluated
+      ? advisoryKey({ headSha: evaluated.headSha, baseBranch: evaluated.baseBranch, title: evaluated.item.title, body: evaluated.item.body })
+      : latest && triggerKeyOf(latest.input);
+    if (target) supersedeRunningReviews(item.id, "Newer PR head observed", { action, keepManual: true, unlessTarget: target });
+    if (latest && latest.status !== "cancelled" && coveredKey === triggerKey) continue;
+    const patterns = pr ? resolved.on.event?.paths?.map((pattern) => new RegExp(pattern)) : undefined;
+    let pathsMatched: boolean | undefined;
+    if (pr && patterns) {
+      const changed = await changedPathsBetween(mainSha, await github.fetchPullRequestHead(pr));
+      pathsMatched = changed.some((path) => patterns.some((pattern) => pattern.test(path)));
+    }
+    if (pathsMatched === false) {
+      const completed = latestCompletedRun(item.id, action);
+      const published = completed?.publication.status === "published" && completed.input.pathsMatched !== false;
+      if (!published && !hasOpenWorkflowComment(observation.own, action)) {
+        cancelPendingTasks(item.id, "Changed paths do not match", action, true);
+        continue;
+      }
+    }
+    queued += applyDecisions(item.id, planKeyedTask(latest, action, pathsMatched === false ? "Advisory paths no longer match" : latest ? "New PR head or item content" : "Initial advisory check", {
+      source: "github_items", kind: "item_changed", triggerKey, revision: observation.revision, mainSha,
+      ...pathsMatched !== undefined && { pathsMatched },
+    }, coveredKey));
+  }
+  return queued;
+}
+
 async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObservation, mainSha: string, routes: Routes) {
   const action = routes.review;
   if (!action) return { added: 0 };
@@ -228,8 +288,8 @@ async function routeIssueReview(item: Item, observation: ItemObservation, mainSh
   return applyDecisions(item.id, planReview({ kind: "issue", action, completed, freshness: state, latest, attempt, revision, mainSha }));
 }
 
-async function routeObserved(ctx: SyncContext, item: Item, context: GithubContext, defaultBaseSha: string) {
-  if (context.item.state !== "open") return 0;
+async function routeObserved(ctx: SyncContext, item: Item, context: GithubContext, defaultBaseSha: string): Promise<{ added: number; advise?: () => Promise<number> }> {
+  if (context.item.state !== "open") return { added: 0 };
   const { github, log } = ctx;
   const observation = observe(context);
   const mainSha = observation.kind === "pr" && observation.baseBranch !== config.github.baseBranch
@@ -243,10 +303,11 @@ async function routeObserved(ctx: SyncContext, item: Item, context: GithubContex
     repairs: item.kind === "pr" ? matchingWorkflows(signal("low_grade")) : [],
     repairFor: (grade) => grade ? routeFor({ ...signal("low_grade"), grade }) : undefined,
   };
+  const advise = async () => await bestEffort(log, "github.advisory_routing_skipped", { subjectId: item.id }, () => routeAdvisory(ctx, item, observation, mainSha)) ?? 0;
   let added = 0;
   if ((routes.conflicts || routes.feedback || routes.repairs.length) && "head" in context.item) {
     const pullRequest = context.item;
-    if (pullRequest.head.repo?.full_name !== github.repository) return added;
+    if (pullRequest.head.repo?.full_name !== github.repository) return { added, advise };
     if (routes.conflicts || routes.feedback) {
       added += await bestEffort(log, "github.pr_maintenance_skipped", { subjectId: item.id }, async () => applyDecisions(item.id, planPrMaintenance(await gatherPrMaintenanceFacts(ctx, item, observation, pullRequest, mainSha, routes)))) ?? 0;
     }
@@ -261,7 +322,7 @@ async function routeObserved(ctx: SyncContext, item: Item, context: GithubContex
   } finally {
     if (item.kind === "pr") await bestEffort(log, "github.review_reconciliation_pending", { subjectId: item.id }, () => reconcileObserved(github, item.id, item.payload.number, { subjectId: item.id }, context, resolved));
   }
-  return added;
+  return { added, advise };
 }
 
 export async function routeGithubTasks(github: GitHubRepository, current: Item[], previous: Map<string, Item>, log: Logger) {
@@ -296,9 +357,11 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       const latest = latestOf(item.id, labelAction);
       if (labelAction && (selected || latest?.status === "blocked" && isManual(latest.input))) {
         const reviewAction = routeFor(issueSignal(item, "item_changed"));
-        if (selected && reviewAction) {
-          cancelPendingTasks(item.id, "Issue selected for implementation", reviewAction, true);
-          supersedeRunningReviews(item.id, "Issue selected for implementation", { action: reviewAction, keepManual: true });
+        if (selected) {
+          for (const action of [...reviewAction ? [reviewAction] : [], ...advisoryFor(issueSignal(item, "item_changed"))]) {
+            cancelPendingTasks(item.id, "Issue selected for implementation", action, true);
+            supersedeRunningReviews(item.id, "Issue selected for implementation", { action, keepManual: true });
+          }
         }
         const newlySelected = previousItem !== undefined && !hasScratLabel(previousItem);
         const settled = latest && latest.status !== "queued" && latest.status !== "blocked" && latest.status !== "cancelled";
@@ -320,15 +383,15 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       if (labelAction) cancelPendingTasks(item.id, `${botSlug} label removed`, labelAction, true);
       const context = issueContexts.get(item.id);
       if (context) {
-        const added = await routeObserved(ctx, item, context, defaultBaseSha);
-        queued += added;
+        const routed = await routeObserved(ctx, item, context, defaultBaseSha);
+        queued += routed.added + (await routed.advise?.() ?? 0);
       } else deferred++;
     } else {
-      const added = await serializePr(github, item.payload.number, async () => {
-        if (rateLimitLow()) { deferred++; return 0; }
+      const routed = await serializePr(github, item.payload.number, async () => {
+        if (rateLimitLow()) { deferred++; return undefined; }
         return routeObserved(ctx, item, await github.fetchItemContext("pr", item.payload.number), defaultBaseSha);
       });
-      queued += added;
+      if (routed) queued += routed.added + (await routed.advise?.() ?? 0);
     }
   };
   const closed = ordered.filter((item) => item.state === "closed");

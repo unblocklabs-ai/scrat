@@ -1,4 +1,6 @@
+import type { GithubIssue } from "../../src/github-types.ts";
 import type { WorkflowContext } from "../../src/workflow-ctx.ts";
+import type { CritiqueSettings } from "../../src/workflows.ts";
 
 type ProposalResult = {
   status: "complete" | "incomplete" | "needs_decision";
@@ -69,6 +71,7 @@ type ProposedRfc = { slug: string; title: string; issueNumber?: number; proposed
 
 const str = (value: unknown, fallback = "") => typeof value === "string" ? value : fallback;
 const strList = (value: unknown, fallback: string[]) => Array.isArray(value) && value.every((v) => typeof v === "string") ? value : fallback;
+const labelOf = (label: string | { name?: string | null }) => typeof label === "string" ? label : (label.name ?? "");
 const trimBody = (text: string | null | undefined, max: number) => {
   const clean = (text ?? "").trim();
   if (clean.length <= max) return clean;
@@ -94,8 +97,12 @@ export default async function maintainerSweep(ctx: WorkflowContext) {
   const maxProposedHistory = count("maxProposedHistory");
   const channel = str(cfg.channel).trim();
   const issueLabels = strList(cfg.issueLabels, ["maintainer-rfc"]);
+  const critiqueModel = (cfg.critique ?? {}) as CritiqueSettings;
+  const rfcLabels = new Set(issueLabels.map((label) => label.toLowerCase()));
+  const rfcMarker = `<!-- scrat-fingerprint:workflow:${ctx.workflow.name}:`;
+  const isRfc = (issue: GithubIssue) => issue.labels.some((label) => rfcLabels.has(labelOf(label).toLowerCase())) || (issue.body ?? "").includes(rfcMarker);
 
-  const gathered = await ctx.step("gather", { maxOpenIssues, maxOpenPrs, recentMergedDays, maxMergedPrs, maxIssueBodyChars, maxPrBodyChars }, async () => {
+  const gathered = await ctx.step("gather", { maxOpenIssues, maxOpenPrs, recentMergedDays, maxMergedPrs, maxIssueBodyChars, maxPrBodyChars, issueLabels }, async () => {
     const previouslyProposed = ctx.state.get<ProposedRfc[]>("proposed") ?? [];
     const { open, merged } = await ctx.parallel({
       open: () => ctx.github.listOpenItems(),
@@ -104,17 +111,17 @@ export default async function maintainerSweep(ctx: WorkflowContext) {
     return {
       previouslyProposed,
       backlog: {
-        openIssues: open.issues.slice(0, maxOpenIssues).map((i) => ({
+        openIssues: open.issues.filter((i) => !isRfc(i)).slice(0, maxOpenIssues).map((i) => ({
           number: i.number,
           title: i.title,
-          labels: i.labels.map((l) => typeof l === "string" ? l : (l.name ?? "")).filter(Boolean),
+          labels: i.labels.map(labelOf).filter(Boolean),
           updatedAt: i.updated_at,
           body: trimBody(i.body, maxIssueBodyChars),
         })),
         openPrs: open.pullRequests.slice(0, maxOpenPrs).map((p) => ({
           number: p.number,
           title: p.title,
-          labels: p.labels.map((l) => typeof l === "string" ? l : (l.name ?? "")).filter(Boolean),
+          labels: p.labels.map(labelOf).filter(Boolean),
           updatedAt: p.updated_at,
           body: trimBody(p.body, maxPrBodyChars),
         })),
@@ -175,6 +182,7 @@ export default async function maintainerSweep(ctx: WorkflowContext) {
       const res = await ctx.agent.run<CritiqueResult>({
         cwd: ws.path,
         skill: "CRITIQUE.md",
+        ...critiqueModel,
         input: critiqueInput,
         submitResult: {
           schema: critiqueSchema,

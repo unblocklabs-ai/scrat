@@ -77,9 +77,9 @@ export const verificationOfCommit = (headSha: string) =>
   db.select({ verification: runs.verification }).from(runs)
     .where(and(eq(runs.headSha, headSha), isNotNull(runs.verification))).orderBy(desc(runs.sequence)).limit(1).get()?.verification ?? undefined;
 
-export const latestFinishedRun = (subjectId: string) =>
+export const latestFinishedRun = (subjectId: string, actions: readonly string[]) =>
   db.select({ error: runs.error, stage: runs.stage, headSha: runs.headSha }).from(runs).innerJoin(tasks, eq(runs.taskId, tasks.id))
-    .where(and(eq(tasks.subjectId, subjectId), isNotNull(runs.finishedAt))).orderBy(desc(runs.sequence)).limit(1).get();
+    .where(and(eq(tasks.subjectId, subjectId), inArray(tasks.action, [...actions]), isNotNull(runs.finishedAt))).orderBy(desc(runs.sequence)).limit(1).get();
 
 export const latestSessionRun = (workspaceId: string, taskId: string, excludeRunId: string) =>
   db.select().from(runs).where(and(

@@ -9,7 +9,8 @@ Your job is to inspect the repository's open issues, open PRs, and recently merg
 1. **Triage the staged backlog efficiently.**
    - Use `codemode` (or `read`) to load and group the staged JSON input (`openIssues`, `openPrs`, `recentMergedPrs`, `previouslyProposed`, `minLinkedIssues`).
    - Cluster items by *underlying mechanism or invariant* — not superficial keywords.
-   - Ignore anything already covered by `previouslyProposed` or already being solved by an open PR.
+   - Ignore anything already covered by `previouslyProposed` or already being solved by an open PR. Open issues carrying this sweep's RFC labels are left out of `openIssues` on purpose: earlier RFCs are listed only in `previouslyProposed` and never count toward `minLinkedIssues`.
+   - Before proposing, use `github_search` to check that no open or closed issue or PR already tracks the same primitive.
 
 2. **Verify against the real codebase.**
    - Do **not** speculate from issue titles alone.

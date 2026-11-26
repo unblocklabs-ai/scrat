@@ -179,7 +179,7 @@ export function enqueueManualTasks(action: string, targets: string[], priority?:
 export function enqueueWorkflowRun(name: string, options: { input?: Record<string, unknown>; dryRun?: boolean; priority?: number; reason?: string } = {}) {
   const wf = workflowOf(name);
   if (!wf.on.manual) throw new Error(`Workflow ${name} does not allow manual runs (on.manual is false)`);
-  if (wf.on.event) {
+  if (wf.on.event && wf.on.event.source !== "workflow") {
     const hint = wf.on.event.source === "github_items" ? ` Use "npm run enqueue -- ${name} <number>" for item-based workflows.` : "";
     throw new Error(`Workflow ${name} is event-triggered (${wf.on.event.source}:${wf.on.event.kind}) and cannot run via "workflow run".${hint}`);
   }

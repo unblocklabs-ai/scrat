@@ -1,0 +1,38 @@
+name: breaking-change-check
+description: Advisory PR check that flags irreversible or data-destructive changes such as destructive migrations, dropped columns or tables, broken auth or session invariants, and incompatible persisted state.
+enabled: false
+priority: 0
+on:
+  event:
+    source: github_items
+    kind: item_changed
+    item: pr
+    role: advisory
+    paths:
+      - "migrations?/"
+      - "\\.sql$"
+      - "schema\\.ts$"
+      - "auth"
+  manual: true
+mode: review
+permissions:
+  github:
+    - read
+    - comment
+  workspace:
+    - read
+defaults:
+  provider: codex-lb
+  model: gpt-6.2-sol
+  thinkingLevel: high
+  codemode: true
+  retry:
+    initialDelaySeconds: 60
+    maxDelaySeconds: 3600
+  tools:
+    - read
+    - grep
+    - find
+    - ls
+    - git
+    - read_base

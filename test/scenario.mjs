@@ -6750,6 +6750,273 @@ fi
       assert.equal(JSON.parse(cronRun.result.text).status, "no_rfc");
     },
   },
+  workflow_replay: {
+    title: "workflow replay freezes journaled model calls across prompt edits, pins the checkout and previews effects on a CLI-only task",
+    configure: [(config) => {
+      config.workflows["maintainer-sweep"].config = { channel: "C-REPLAY", minLinkedIssues: 3 };
+      process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
+    }],
+    run: async () => {
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const execute = promisify(execFile);
+      const modelOrigin = new URL(f.config.providers.fixture.baseUrl).origin;
+      const outbound = resolve("replay-outbound.jsonl");
+      const preload = resolve("replay-transport.mjs");
+      writeFileSync(preload, `import { appendFileSync } from "node:fs";
+        const fixtureFetch = globalThis.fetch;
+        globalThis.fetch = (input, options) => {
+          const url = new URL(typeof input === "string" ? input : input.url);
+          if (url.origin !== ${JSON.stringify(modelOrigin)}) {
+            appendFileSync(${JSON.stringify(outbound)}, JSON.stringify({ url: url.href, method: options?.method }) + "\\n");
+            throw new Error("Unexpected outbound workflow request");
+          }
+          return fixtureFetch(input, options);
+        };`);
+      const cli = (...args) => execute(process.execPath, ["--import", preload, resolve("app/src/workflow-cli.ts"), ...args]);
+      const rowsFor = (taskId) => all(s.steps).filter((step) => step.taskId === taskId);
+      const parseInspection = async (...args) => JSON.parse((await cli("inspect", ...args, "--json")).stdout);
+      const proposal = { name: "submit_result", args: { status: "complete", found: true, slug: "replay-retry", title: "RFC: Retry handling",
+        linkedNumbers: [10, 11, 12], proposal: "Use one retry policy for requests to upstream services." } };
+      const approve = { name: "submit_result", args: { status: "complete", approved: true, reason: "Verified all three issues." } };
+      const fail = { name: "submit_result", args: { status: "needs_decision", approved: false, reason: "Need maintainer decision." } };
+      for (const number of proposal.args.linkedNumbers) f.addIssue(number, ["bug"], `Retry failure ${number}`);
+      const task = tasks.enqueueWorkflowRun("maintainer-sweep", { input: { topic: "original", keep: true } });
+      f.script = [proposal, "Proposal submitted.", fail, "Cannot finish critique."];
+      const first = await f.runNextTask(undefined, task.id);
+      assert.match(first.error?.message, /Critique agent did not complete/);
+      assert.match((await cli("replay", first.id, "--from", "critique", "--plan")).stdout, /FROZEN\tgather, propose\nFRESH\tcritique/);
+
+      tasks.retryTask(task.id);
+      f.reset(0, "normal");
+      f.script = [approve, "Critique approved."];
+      const original = await f.runNextTask(undefined, task.id);
+      assert.equal(original.error, null, original.error?.message);
+      assert.equal(original.publication.status, "published");
+      assert.ok(original.headSha);
+      assert.equal(f.written("issue").length, 1);
+      assert.equal(f.slack.calls.filter((call) => call.method === "chat.postMessage" && call.body.channel === "C-REPLAY").length, 1);
+      const earlier = await cli("inspect", first.id, "--json");
+      assert.match(earlier.stderr, /journal reflects run/);
+      assert.equal(JSON.parse(earlier.stdout).latestRunId, original.id);
+      assert.equal(JSON.parse(earlier.stdout).status, "failed");
+
+      const state = all(s.workflowState);
+      assert.ok(state.some((row) => row.workflow === "maintainer-sweep"));
+      const originalRows = rowsFor(task.id);
+      const baseline = await parseInspection(task.id);
+      assert.equal(baseline.runId, original.id);
+      assert.equal(baseline.triggerKind, "workflow_manual");
+      assert.deepEqual(baseline.steps.map((step) => step.name), ["gather", "propose", "critique"]);
+      assert.equal(baseline.effects.length, 2);
+      assert.ok(baseline.steps.every((step) => step.drift === false && step.durationMs >= 0 && step.outputBytes > 0));
+      assert.deepEqual(JSON.parse((await cli("inspect", task.id, "--step", "propose")).stdout), originalRows.find((step) => step.name === "propose").output);
+      const critiquePath = resolve("app/workflows/maintainer-sweep/CRITIQUE.md");
+      writeFileSync(critiquePath, readFileSync(critiquePath, "utf8") + "\nReplay-specific critique instructions.\n");
+      changeMain("src/app.ts", "export const value = 101;\n");
+      assert.notEqual(git(resolve("remote.git"), "rev-parse", "main"), original.headSha);
+      assert.match((await cli("inspect", original.id)).stdout, /propose\tcompleted\t\d+ms\t\w{8}\t\w{8}\tDRIFT/);
+
+      const counts = () => [all(s.tasks).length, all(s.runs).length, f.requests.length, f.writes.length, f.slack.calls.length];
+      const beforePlan = counts();
+      assert.match((await cli("replay", original.id, "--plan")).stdout, /FROZEN\tgather, propose, critique\nFRESH\t\(none\)/);
+      await assert.rejects(cli("replay", original.id, "--from", "unknown", "--plan"), { stderr: /available: gather, propose, critique/ });
+      await assert.rejects(cli("replay", original.id, "--input", "[]", "--plan"), { stderr: /--input must be a JSON object/ });
+      await assert.rejects(cli("replay", original.id, "--live"), { stderr: /Unknown option '--live'/ });
+      assert.deepEqual(counts(), beforePlan);
+
+      let cliOwner;
+      f.onModel = () => {
+        const running = all(s.tasks).find((row) => row.input.replayOf === original.id && row.status === "running");
+        const pidFile = running && resolve("data/cli-tasks", `${running.id}.pid`);
+        if (pidFile && existsSync(pidFile)) cliOwner = { id: running.id, pid: Number(readFileSync(pidFile, "utf8")) };
+      };
+      f.reset(0, "normal");
+      f.script = [approve, "Critique reran."];
+      const completed = await cli("replay", original.id, "--from", "critique", "--dry-run", "--input", '{"topic":"updated","replayOf":"not-a-run","dryRun":false}');
+      f.onModel = undefined;
+      const replayId = /^COMPLETED\t([^\t\n]+)\t/m.exec(completed.stdout)?.[1];
+      assert.ok(replayId, completed.stdout);
+      const replay = f.row(s.runs, replayId), replayTask = f.row(s.tasks, replay.taskId);
+      assert.equal(replay.sequence, original.sequence + 1);
+      assert.equal(replay.headSha, original.headSha);
+      assert.equal(replay.publication.status, "not_needed");
+      assert.ok(cliOwner?.pid > 0 && cliOwner.id === replayTask.id, "CLI owns the running task through its PID file");
+      assert.equal(existsSync(resolve("data/cli-tasks", `${replayTask.id}.pid`)), false);
+      assert.equal(replayTask.status, "completed");
+      assert.deepEqual(replayTask.input, { ...task.input, replayOf: original.id,
+        payload: { topic: "updated", keep: true, replayOf: "not-a-run", dryRun: false } });
+      assert.notEqual(replayTask.subjectId, task.subjectId);
+      assert.equal(f.row(s.subjects, replayTask.subjectId).kind, "workflow");
+      assert.match(f.row(s.subjects, replayTask.subjectId).key, /^maintainer-sweep:replay:/);
+      const modelRequests = f.requests.slice(beforePlan[2]);
+      assert.ok(modelRequests.length > 0);
+      assert.ok(modelRequests.every((request) => JSON.stringify(request.request.messages).includes("Replay-specific critique instructions.")), "only the edited critique reached the model");
+      assert.match(completed.stderr, /"event":"workflow.step_frozen".*"step":"propose"/);
+      const replayInspection = await parseInspection(replayId, "--step", "critique");
+      assert.equal(replayInspection.step.output.data.approved, true);
+      assert.equal(replayInspection.step.drift, false);
+      assert.equal(replayInspection.effects.length, 0);
+      const replayRows = rowsFor(replayTask.id);
+      for (const name of ["gather", "propose"]) {
+        assert.deepEqual(replayRows.find((step) => step.name === name), { ...originalRows.find((step) => step.name === name), taskId: replayTask.id });
+      }
+      assert.notEqual(replayInspection.step.workflowHash, baseline.steps.find((step) => step.name === "critique").workflowHash);
+      const preview = /^PREVIEW\t(.+)$/m.exec(completed.stdout)?.[1];
+      assert.equal(preview, resolve("data/workflow-dry-runs", `maintainer-sweep-${replayId.slice(0, 8)}`));
+      const result = JSON.parse(replay.result.text);
+      assert.deepEqual([result.issue.previewPath, result.slack.previewPath].map((path) => JSON.parse(readFileSync(path, "utf8")).runId), [replayId, replayId]);
+
+      f.reset(0, "normal");
+      f.script = [fail, "Critique did not complete."];
+      const failed = await cli("replay", replayId, "--from", "critique").then(() => assert.fail("Replay unexpectedly succeeded"), (error) => error);
+      const failedId = /^FAILED\t([^\t\n]+)\t/m.exec(failed.stderr)?.[1];
+      assert.ok(failedId, failed.stderr);
+      const failedRun = f.row(s.runs, failedId), failedTask = f.row(s.tasks, failedRun.taskId);
+      assert.equal(failedTask.status, "failed");
+      assert.ok(failedRun.finishedAt);
+      assert.equal(existsSync(resolve("data/cli-tasks", `${failedTask.id}.pid`)), false);
+      tasks.retryTask(failedTask.id);
+      assert.equal(tasks.claimTask(failedTask.id), undefined);
+      assert.equal(f.row(s.tasks, failedTask.id).status, "failed");
+      assert.ok(all(s.events).some((event) => event.taskId === failedTask.id && event.type === "task.rejected" && /replay CLI/.test(event.data.reason)));
+      assert.deepEqual(rowsFor(task.id), originalRows);
+      assert.deepEqual(all(s.workflowState), state);
+      assert.deepEqual([f.writes.length, f.slack.calls.length], beforePlan.slice(3));
+      assert.equal(existsSync(outbound), false, "replay process attempted no GitHub or Slack calls");
+
+      f.script = undefined;
+      const managedTask = f.enqueue(10);
+      const managed = await f.runNextTask(undefined, managedTask.id);
+      assert.ok(managed && !managed.error);
+      await assert.rejects(cli("replay", managed.id, "--plan"), { stderr: /managed-pipeline workflows are not replayable/ });
+    },
+  },
+  workflow_repo_sync: {
+    title: "workflow sync verifies pinned Git bundles and overlays before switching current, with safe offline reuse and retention",
+    run: async () => {
+      const local = resolve("app/scrat.local.json");
+      const base = JSON.parse(readFileSync(local, "utf8"));
+      const source = resolve("workflow-source");
+      execFileSync("git", ["init", "-b", "main", source], { stdio: "ignore" });
+      const pointer = resolve("data/workflows-repo/current");
+      const checkout = (sha) => resolve("data/workflows-repo/checkouts", sha);
+      const cli = (...args) => {
+        const result = spawnSync(process.execPath, [resolve("app/src/workflow-cli.ts"), ...args], { encoding: "utf8" });
+        assert.ifError(result.error);
+        return result;
+      };
+      const ok = (...args) => {
+        const result = cli(...args);
+        assert.equal(result.status, 0, result.stderr);
+        return result.stdout;
+      };
+      const reject = (...args) => {
+        const result = cli(...args);
+        assert.equal(result.status, 1, result.stdout + result.stderr);
+        return result.stdout + result.stderr;
+      };
+      const setRepo = (repo, extra = {}) => writeFileSync(local, JSON.stringify({ ...base, workflows: { ...base.workflows, repo, trustLocalScripts: true, ...extra } }));
+      const pin = (ref, extra, repo = {}) => setRepo({ url: source, ref, layers: ["shared", "clients/x"], keepCheckouts: 1, ...repo }, extra);
+      const workflow = (layer, name, label, override, script) => {
+        const dir = resolve(layer, name);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(resolve(dir, "workflow.yaml"), [
+          `name: ${name}`, `description: ${label}`, "mode: review", "on: {manual: true}",
+          "defaults: {provider: fixture, model: gpt-6.2-sol, thinkingLevel: high}", ...(override ? ["override: true"] : []), "",
+        ].join("\n"));
+        if (script === undefined) writeFileSync(resolve(dir, "SKILL.md"), `# ${label}\n`);
+        else writeFileSync(resolve(dir, "run.ts"), `import type { WorkflowContext } from "scrat";\nexport default async (ctx: WorkflowContext) => ${script};\n`);
+      };
+      const save = (label) => {
+        git(source, "add", ".");
+        commit(source, label);
+        return git(source, "rev-parse", "HEAD");
+      };
+      const shared = resolve(source, "shared"), client = resolve(source, "clients/x");
+      const listed = (name) => ok("list").split("\n").find((line) => line.startsWith(`${name}\t`)).split("\t");
+      assert.match(ok("sync"), /No workflows.repo configured/);
+      assert.equal(listed("review_issue").at(-1), "builtin");
+      workflow(shared, "review_issue", "Shared review", true);
+      workflow(shared, "shared_only", "Shared only");
+      workflow(client, "review_issue", "Client review", true, "ctx.workflow.name");
+      const first = save("Valid shared and client layers");
+      for (const [repo, field] of [[{ url: " " }, "url"], [{ ref: "main" }, "ref"], [{ layers: [] }, "layers"],
+        [{ layers: ["shared/../clients/x"] }, "layers"], [{ layers: ["/shared"] }, "layers"], [{ layers: ["C:\\shared"] }, "layers"],
+        [{ keepCheckouts: 0 }, "keepCheckouts"], [{ keepCheckouts: 1.5 }, "keepCheckouts"], [{ unknown: true }, "unknown"]]) {
+        pin(first, {}, repo);
+        assert.ok(reject("sync").includes(`workflows.repo.${field}`));
+        assert.ok(reject("list").includes(`workflows.repo.${field}`));
+      }
+      pin(first.toUpperCase());
+      assert.match(reject("list"), /run "npm run workflow -- sync"/);
+      assert.match(ok("sync"), new RegExp(`\\(none\\) -> ${first}.*Restart scrat.service`));
+      assert.equal(fs.readlinkSync(pointer), `checkouts/${first}`);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(first)));
+      assert.deepEqual(listed("review_issue").slice(-2), ["Client review", "repo:clients/x"]);
+      assert.deepEqual(listed("shared_only").slice(-2), ["Shared only", "repo:shared"]);
+      const localDir = resolve("local-workflows");
+      workflow(localDir, "review_issue", "Local review");
+      pin(first, { directory: localDir });
+      assert.deepEqual(listed("review_issue").slice(-2), ["Local review", "directory"]);
+      pin(first, { trustLocalScripts: false });
+      assert.match(reject("sync"), /requires workflows.trustLocalScripts: true/);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(first)));
+      pin(first);
+      fs.renameSync(source, `${source}-offline`);
+      assert.match(ok("sync"), new RegExp(`already synced at ${first}`));
+      fs.renameSync(`${source}-offline`, source);
+
+      workflow(client, "review_issue", "Missing override", false, "ctx.workflow.name");
+      const duplicate = save("Duplicate without override");
+      pin(duplicate);
+      assert.match(reject("list"), new RegExp(`expected ${duplicate}; run "npm run workflow -- sync"`));
+      const duplicateError = reject("sync");
+      assert.ok(duplicateError.includes(`${checkout(duplicate)}/shared/review_issue/workflow.yaml`));
+      assert.ok(duplicateError.includes(`${checkout(duplicate)}/clients/x/review_issue/workflow.yaml`));
+      assert.match(duplicateError, /set override: true/);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(first)));
+
+      workflow(client, "review_issue", "Broken script", true, "ctx.doesNotExist");
+      workflow(client, "stale_override", "Stale override", true);
+      const stale = save("Stale override");
+      pin(stale);
+      assert.match(reject("sync"), /stale_override\/workflow.yaml: override: true requires a workflow in a lower layer/);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(first)));
+      rmSync(resolve(client, "stale_override"), { recursive: true });
+      const broken = save("Script type error");
+      pin(broken);
+      assert.match(reject("sync"), /Property 'doesNotExist' does not exist on type 'WorkflowContext'/);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(first)));
+
+      workflow(client, "review_issue", "Second client review", true, "ctx.workflow.name");
+      symlinkSync("../../shared/shared_only/SKILL.md", resolve(client, "review_issue", "linked-skill.md"));
+      const linked = save("Symlink inside a bundle");
+      pin(linked);
+      assert.match(reject("sync"), /contains a symlink: .*linked-skill.md/);
+      assert.equal(existsSync(checkout(linked)), false);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(first)));
+      unlinkSync(resolve(client, "review_issue", "linked-skill.md"));
+      const second = save("Second valid client layer");
+      pin(second);
+      assert.match(ok("sync"), new RegExp(`${first} -> ${second}.*Restart scrat.service`));
+      assert.equal(fs.readlinkSync(pointer), `checkouts/${second}`);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(second)));
+      assert.equal(existsSync(checkout(first)), true, "retention protects the previous checkout even at keepCheckouts=1");
+      assert.deepEqual(listed("review_issue").slice(-2), ["Second client review", "repo:clients/x"]);
+      assert.equal(existsSync(checkout(broken)), false);
+      assert.match(ok("sync"), /already synced/);
+      assert.equal(existsSync(checkout(first)), true, "idempotent sync still protects the previous checkout");
+
+      workflow(client, "review_issue", "Third client review", true, "ctx.workflow.name");
+      const third = save("Third valid client layer");
+      pin(third);
+      assert.match(ok("sync"), new RegExp(`${second} -> ${third}`));
+      assert.equal(realpathSync(pointer), realpathSync(checkout(third)));
+      assert.equal(existsSync(checkout(second)), true);
+      assert.equal(existsSync(checkout(first)), false);
+    },
+  },
 };
 
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -368,6 +368,39 @@ priority: 20
 - `on.cron` has five UTC fields (minute, hour, day-of-month, month, day-of-week; 0 and 7 are Sunday), each a `*`, a number, a range `a-b`, a step `*/n` or `a-b/n`, or a comma list of those. When both day fields are restricted, either one matching is enough. `on.window` is a number of minutes, hours or days: `90m`, `6h`, `1d` (defaults to `24h`). A scheduled workflow must be `mode: review`, and several may be enabled at once.
 - Each scheduled workflow keeps its own cursor: the next tick. The first poll after enabling records the next tick and queues nothing; disabling deletes the cursor. The cursor also records the `cron` and `window` it was computed from; changing either (in `workflow.yaml` or under `workflows.<name>` in `scrat.local.json`, validated at startup) re-seeds the schedule from the next poll: Scrat logs `schedule.reseeded` and queues nothing for the old expression. When a tick is due, Scrat queues one task on a `window` subject keyed `<workflow>:<tick>` with `start` (the tick minus `window`) and `end` (the tick) in its metadata. Ticks missed while the service was down fire once, for the latest one.
 - The agent gets the base branch checked out read-only, the window as `input.start` and `input.end`, and no GitHub issue or PR. Workflows with `run.ts` can also run custom deterministic checks, open issues or post to Slack within their declared `permissions`, and inspect history.
+### Replay
+
+```sh
+npm run workflow -- inspect <runId|taskId>
+npm run --silent workflow -- inspect <runId|taskId> --step critique --json
+npm run workflow -- replay <runId|taskId> --from critique --plan
+npm run workflow -- replay <runId|taskId> --from critique --input '{"topic":"retries"}'
+```
+
+Inspect shows the task's latest journal, flags steps whose workflow hash changed, and puts the selected step's full result under `step.output` with `--json`. Replay runs the current bundle and freezes completed steps before `--from` by journal order. Omit `--from` to freeze all completed steps. `--input` merges into the manual payload or the stored event input.
+
+Replay always uses a separate task and writes effect previews to `data/workflow-dry-runs/`. It does not replay managed pipelines or write workflow state. Reads outside frozen steps see current state, and item workflows should journal their GitHub reads and agent calls if they want to reuse them. Workspace checkouts use the original run's recorded SHA when available.
+
+### Shared Workflows Repo
+
+```json
+{
+  "workflows": {
+    "repo": {
+      "url": "git@github.com:example/scrat-workflows.git",
+      "ref": "0123456789abcdef0123456789abcdef01234567",
+      "layers": ["shared", "clients/pearl"],
+      "keepCheckouts": 3
+    },
+    "trustLocalScripts": true
+  }
+}
+```
+
+Layers load after built-ins, in order, with `workflows.directory` last. A repo layer replacing a lower bundle must set `override: true`; an override without a lower bundle is an error. Repo scripts require `trustLocalScripts: true` and can use `import type { WorkflowContext } from "scrat"`.
+
+After changing the pin, run `npm run workflow -- sync`, then restart `scrat.service`. Sync verifies the exact Git commit, rejects symlinks and checks every bundle before switching `current`. The current and previous checkouts are retained even if `keepCheckouts` is `1`. `workflow list` shows each bundle's origin. Use a read-only SSH deploy key or `SCRAT_WORKFLOWS_TOKEN` for HTTPS; otherwise GitHub HTTPS uses the configured PAT or App if it can access the repo.
+
 ### Scoped tools
 
 No shipped workflow lists `http` (and only `maintainer-sweep` uses `github_search`), and the only shipped `browser` is the storefront browser of `storefront_discover`, `review_pr`, `store_audit`, and `review_store_change`; a deployment workflow opts in by naming the tool in `defaults.tools` and, for `http` or non-storefront `browser`, adding the matching setting. Each tool is built only for a workflow that lists it.

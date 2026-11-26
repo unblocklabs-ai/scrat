@@ -5,17 +5,13 @@ import { findPackageJSON } from "node:module";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { promisify } from "node:util";
+import { parseArgs, promisify } from "node:util";
 import { workflowOf, workflows } from "./workflow-registry.ts";
-import { runCommand } from "./cli.ts";
 import { config } from "./config.ts";
-import { describeError, SupersededError } from "./errors.ts";
-import { getRun, getTask, latestRunOfTask } from "./run-history.ts";
-import { runNextTask } from "./runner.ts";
+import { isObject } from "./config-merge.ts";
+import { describeError, redactSecrets, SupersededError } from "./errors.ts";
 import type { Run } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
-import { validateStaticConfig, validateWorkflowDefinition } from "./startup.ts";
-import { enqueueWorkflowRun } from "./tasks.ts";
 
 const executeFile = promisify(execFile);
 const appRoot = resolve(import.meta.dirname, "..");
@@ -53,7 +49,7 @@ async function checkScripts(scriptPaths: string[], standalone: boolean) {
       "--moduleResolution", standalone ? "Bundler" : "NodeNext",
       "--strict", "--allowImportingTsExtensions", "--resolveJsonModule",
       "--verbatimModuleSyntax", "--erasableSyntaxOnly", "--skipLibCheck", "--types", "node", "--pretty", "false",
-      ...scriptPaths,
+      resolve(appRoot, "src/workflow-types.d.ts"), ...scriptPaths,
     ], { cwd: appRoot, env: childEnvironment() });
   } catch (error) {
     const { stdout, stderr, message } = describeError(error);
@@ -94,6 +90,9 @@ function usage(): never {
     "  npm run workflow -- list",
     "  npm run workflow -- check [name]",
     "  npm run workflow -- run <name> [--input '<json>'] [--dry-run] [--now] [--priority N]",
+    "  npm run workflow -- inspect <runId|taskId> [--step <name>] [--json]",
+    "  npm run workflow -- replay <runId|taskId> [--from <step>] [--input '<json>'] [--plan] [--dry-run]",
+    "  npm run workflow -- sync",
   ].join("\n"));
 }
 
@@ -132,9 +131,43 @@ function parseFlags(args: string[]) {
   return { positional, input, dryRun, now, priority };
 }
 
-await runCommand("Workflow command failed", async () => {
-  const [command, ...rest] = process.argv.slice(2);
+const [command, ...rest] = process.argv.slice(2);
+
+async function main() {
   if (!command) usage();
+
+  if (command === "inspect") {
+    const { positionals, values } = parseArgs({ args: rest, allowPositionals: true, options: {
+      step: { type: "string" }, json: { type: "boolean" },
+    } });
+    const [id] = positionals;
+    if (!id || positionals.length !== 1) usage();
+    const { inspectWorkflow } = await import("./workflow-replay.ts");
+    inspectWorkflow(id, values.step, values.json);
+    return;
+  }
+
+  if (command === "replay") {
+    const { positionals, values } = parseArgs({ args: rest, allowPositionals: true, options: {
+      from: { type: "string" }, input: { type: "string" }, plan: { type: "boolean" }, "dry-run": { type: "boolean" },
+    } });
+    const [id] = positionals;
+    if (!id || positionals.length !== 1) usage();
+    const input: unknown = values.input === undefined ? undefined : JSON.parse(values.input);
+    if (input !== undefined && !isObject(input)) throw new Error("--input must be a JSON object");
+    const { printReplayPlan, replayWorkflow } = await import("./workflow-replay.ts");
+    if (values.plan) {
+      printReplayPlan(id, values.from);
+      return;
+    }
+    const { runCommand } = await import("./cli.ts");
+    await runCommand("Workflow replay failed", async () => {
+      const replay = await replayWorkflow(id, values.from, input);
+      reportRunOutcome(replay.run, replay.run.id, replay.status);
+      if (replay.status === "completed") console.log(`PREVIEW\t${replay.preview}`);
+    });
+    return;
+  }
 
   if (command === "list") {
     if (!workflows.length) {
@@ -157,12 +190,14 @@ await runCommand("Workflow command failed", async () => {
         triggers || "-",
         `${wf.defaults.provider}/${wf.defaults.model}`,
         wf.description ?? "",
+        wf.origin,
       ].join("\t"));
     }
     return;
   }
 
   if (command === "check") {
+    const { validateWorkflowDefinition } = await import("./startup.ts");
     const [target] = rest;
     const targets = target ? workflows.filter((wf) => wf.name === target) : workflows;
     if (target && !targets.length) {
@@ -171,7 +206,9 @@ await runCommand("Workflow command failed", async () => {
     const problems: string[] = [];
     const compilerAvailable = existsSync(compiler);
     if (!compilerAvailable && targets.some((wf) => wf.scriptPath)) {
-      console.error("WARN\tSkipping run.ts type checks: TypeScript compiler not installed (install dev dependencies)");
+      const diagnostic = "TypeScript compiler not installed (install dev dependencies)";
+      if (process.env.SCRAT_WORKFLOWS_CHECKOUT !== undefined) problems.push(`Cannot check run.ts scripts: ${diagnostic}`);
+      else console.error(`WARN\tSkipping run.ts type checks: ${diagnostic}`);
     }
     const standardScripts: { name: string; scriptPath: string }[] = [];
     const standaloneScripts: { name: string; scriptPath: string }[] = [];
@@ -208,6 +245,10 @@ await runCommand("Workflow command failed", async () => {
   }
 
   if (command === "run") {
+    const { getRun, getTask, latestRunOfTask } = await import("./run-history.ts");
+    const { runNextTask } = await import("./runner.ts");
+    const { validateStaticConfig, validateWorkflowDefinition } = await import("./startup.ts");
+    const { enqueueWorkflowRun } = await import("./tasks.ts");
     const { positional, input, dryRun, now, priority } = parseFlags(rest);
     const [name] = positional;
     if (!name) usage();
@@ -284,4 +325,15 @@ await runCommand("Workflow command failed", async () => {
   }
 
   usage();
-});
+}
+
+if (command === "run" || command === "check") {
+  const { runCommand } = await import("./cli.ts");
+  await runCommand("Workflow command failed", main);
+} else {
+  try { await main(); }
+  catch (error) {
+    console.error(redactSecrets(error instanceof Error ? error.message : String(error)));
+    process.exitCode = 1;
+  }
+}

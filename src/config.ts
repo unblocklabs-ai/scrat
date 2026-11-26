@@ -1,11 +1,11 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { isAbsolute, resolve } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 import settings from "../scrat.config.json" with { type: "json" };
 import { buildConfig, isObject, type Json } from "./config-merge.ts";
 import { configError, validateConfig } from "./config-schema.ts";
 import { findTriggerConflicts } from "./manifests.ts";
-import { findCompletionCycles, readWorkflows, resolveWorkflow, workflowDeploymentDefaults } from "./workflows.ts";
+import { findCompletionCycles, readWorkflowRepo, readWorkflows, resolveWorkflow, workflowDeploymentDefaults } from "./workflows.ts";
 
 const configUrl = new URL("../scrat.config.json", import.meta.url);
 const localConfigUrl = new URL("../scrat.local.json", import.meta.url);
@@ -33,14 +33,30 @@ if (trustLocalScripts !== undefined && typeof trustLocalScripts !== "boolean") {
 }
 export const trustLocalWorkflowScripts = trustLocalScripts === true;
 const repoRoot = fileURLToPath(new URL(".", configUrl));
-export const loadedWorkflows = readWorkflows(repoRoot, workflowDirectory);
+const workflowRepo = readWorkflowRepo(workflowOverrides?.repo);
+const layers = [];
+if (workflowRepo) {
+  let checkout = process.env.SCRAT_WORKFLOWS_CHECKOUT;
+  if (checkout === undefined) {
+    const instruction = 'run "npm run workflow -- sync"';
+    try { checkout = realpathSync(resolve("data/workflows-repo/current")); }
+    catch (error) { throw new Error(`Cannot resolve the active workflows checkout; ${instruction}`, { cause: error }); }
+    if (basename(checkout) !== workflowRepo.ref) throw new Error(`Active workflows checkout is ${basename(checkout)}, expected ${workflowRepo.ref}; ${instruction}`);
+  } else {
+    checkout = realpathSync(checkout);
+  }
+  for (const layer of workflowRepo.layers) layers.push({ dir: resolve(checkout, layer), origin: `repo:${layer}`, strict: true, local: true });
+}
+if (workflowDirectory) layers.push({ dir: workflowDirectory, origin: "directory", strict: false, local: true });
+export const loadedWorkflows = readWorkflows(repoRoot, layers);
 
-const workflowDefaults = { ...Object.fromEntries(loadedWorkflows.map((wf) => [wf.name, workflowDeploymentDefaults(wf)])), directory: null, trustLocalScripts: false };
+const workflowDefaults = { ...Object.fromEntries(loadedWorkflows.map((wf) => [wf.name, workflowDeploymentDefaults(wf)])), directory: null, trustLocalScripts: false, repo: null };
 
 const merged = buildConfig({ ...settings, workflows: workflowDefaults }, overrides);
 if (isObject(merged.workflows)) {
   delete merged.workflows.directory;
   delete merged.workflows.trustLocalScripts;
+  delete merged.workflows.repo;
 }
 const unknownWorkflows = isObject(merged.workflows)
   ? Object.keys(merged.workflows as Json).filter((name) => !loadedWorkflows.some((wf) => wf.name === name))

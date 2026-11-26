@@ -18,10 +18,10 @@ install    Set up a new host: apt packages, AppArmor profiles and linger through
            a host set up before the CLI (one with a release or a scrat unit).
 --force    Let install take over such a host and rewrite its units.
 update     Install release <version> (a tag such as v2.0.47; default: the latest
-           release), upgrading or downgrading. Everything is checked before the
-           running service is stopped. It runs detached, so an ssh drop does not
-           stop it, and logs to ~/.local/share/scrat-v2/update.log, which each
-           run overwrites; reattach with tail -n +1 -f on that file.
+           release), upgrading or downgrading. Pinned workflows are synced and
+           checked before stopping the service. It runs detached and logs to
+           ~/.local/share/scrat-v2/update.log, which each run overwrites;
+           reattach with tail -n +1 -f on that file.
 --dry-run  Print the script the command would run instead of running it.
 
 Downloads give up after 30 s without a connection or 60 s below 1 KB/s.
@@ -147,6 +147,8 @@ deploy_release() {
   log "Installing dependencies"
   npm ci --no-audit --no-fund --no-update-notifier
   node --env-file=.env deploy/prepare-tools.mjs
+  log "Syncing workflows"
+  npm run --silent workflow -- sync
   log "Checking the config"
   node src/config.ts
   check_sandbox

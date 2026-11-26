@@ -5,6 +5,7 @@ import { type Static, Type } from "typebox";
 import Value from "typebox/value";
 import { parse } from "yaml";
 import { hostProblem } from "./bindings.ts";
+import { isObject } from "./config-merge.ts";
 import {
   browserSettings, contextFileNames, httpSettings, labelCategories, labelConfigProblems, modelSettings, scheduleProblem, startEffectNames,
   type Action, type ContextFileName, type EffectName, type LabelCategory, type Signal, type StartEffectName, type ToolName,
@@ -356,24 +357,50 @@ export function findCompletionCycles(_defs: readonly WorkflowDefinition[]): stri
   return [];
 }
 
-export function readWorkflows(root: string, directory?: string | null): WorkflowDefinition[] {
+type WorkflowLayer = { dir: string; origin: string; strict: boolean; local: boolean };
+
+export function readWorkflowRepo(value: unknown) {
+  if (value === undefined) return undefined;
+  const invalid = (message: string): never => { throw new Error(`Invalid scrat.local.json: workflows.repo${message}`); };
+  if (!isObject(value)) return invalid(" must be an object");
+  for (const key of Object.keys(value)) {
+    if (!["url", "ref", "layers", "keepCheckouts"].includes(key)) invalid(`.${key}: unknown setting`);
+  }
+  const { url, ref, layers, keepCheckouts = 3 } = value;
+  if (typeof url !== "string" || !url.trim()) return invalid(".url must be a non-empty string");
+  if (typeof ref !== "string" || !/^[0-9a-f]{40}$/i.test(ref)) return invalid(".ref must be a full 40-character Git SHA");
+  const safeLayer = (layer: unknown): layer is string => typeof layer === "string" && layer.trim().length > 0
+    && !isAbsolute(layer) && !/^[a-z]:|[\\\0]/i.test(layer) && !layer.split("/").includes("..");
+  if (!Array.isArray(layers) || !layers.length || !layers.every(safeLayer)) return invalid(".layers must be a non-empty array of safe relative paths");
+  if (typeof keepCheckouts !== "number" || !Number.isSafeInteger(keepCheckouts) || keepCheckouts < 1) return invalid(".keepCheckouts must be a positive integer");
+  return { url, ref: ref.toLowerCase(), layers, keepCheckouts };
+}
+
+export function readWorkflows(root: string, layers?: readonly WorkflowLayer[] | string | null): WorkflowDefinition[] {
   const loaded = new Map<string, WorkflowDefinition>();
-  const scan = (baseDir: string, local: boolean) => {
-    if (!existsSync(baseDir)) {
-      if (local) throw new Error(`Cannot read workflows in ${baseDir}: directory does not exist`);
+  const scan = ({ dir, origin, strict, local }: WorkflowLayer) => {
+    if (!existsSync(dir)) {
+      if (local || strict) throw new Error(`Cannot read workflows in ${dir}: directory does not exist`);
       return;
     }
-    for (const entry of readdirSync(baseDir).sort()) {
-      const full = resolve(baseDir, entry);
+    for (const entry of readdirSync(dir).sort()) {
+      const full = resolve(dir, entry);
       if (!statSync(full).isDirectory()) continue;
       if (!existsSync(join(full, "workflow.yaml"))) continue;
       const label = local ? join(full, "workflow.yaml") : `workflows/${entry}/workflow.yaml`;
       const wf = readWorkflowDir(full, label, local);
-      loaded.set(wf.name, wf);
+      const lower = loaded.get(wf.name);
+      if (strict && lower && !wf.override) throw new Error(`${wf.file} shadows ${lower.file}; set override: true to replace it`);
+      if (strict && !lower && wf.override) throw new Error(`${wf.file}: override: true requires a workflow in a lower layer`);
+      loaded.set(wf.name, { ...wf, origin });
     }
   };
-  scan(resolve(root, "workflows"), false);
-  if (directory) scan(directory, true);
+  scan({ dir: resolve(root, "workflows"), origin: "builtin", strict: false, local: false });
+  if (typeof layers === "string") {
+    if (layers) scan({ dir: layers, origin: "directory", strict: false, local: true });
+  } else {
+    for (const layer of layers ?? []) scan(layer);
+  }
   return [...loaded.values()];
 }
 

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { execFileSync, spawnSync } from "node:child_process";
 import fs, { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { basename, dirname, resolve } from "node:path";
@@ -6808,6 +6808,7 @@ fi
   workflow_replay: {
     title: "workflow replay freezes journaled model calls across prompt edits, pins the checkout and previews effects on a CLI-only task",
     configure: [(config) => {
+      config.harness.maxConcurrency = 1;
       config.workflows["maintainer-sweep"].config = { channel: "C-REPLAY", minLinkedIssues: 3 };
       process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
     }],
@@ -6858,6 +6859,8 @@ fi
 
       const state = all(s.workflowState);
       assert.ok(state.some((row) => row.workflow === "maintainer-sweep"));
+      const later = new Date(Date.parse(original.finishedAt) + 1000).toISOString();
+      db.update(s.steps).set({ startedAt: later, finishedAt: later }).where(and(eq(s.steps.taskId, task.id), eq(s.steps.name, "gather"))).run();
       const originalRows = rowsFor(task.id);
       const baseline = await parseInspection(task.id);
       assert.equal(baseline.runId, original.id);
@@ -6874,17 +6877,22 @@ fi
 
       const counts = () => [all(s.tasks).length, all(s.runs).length, f.requests.length, f.writes.length, f.slack.calls.length];
       const beforePlan = counts();
+      await assert.rejects(cli("replay", first.id), { stderr: new RegExp(`not the latest run.*replay ${original.id}`) });
       assert.match((await cli("replay", original.id, "--plan")).stdout, /FROZEN\tgather, propose, critique\nFRESH\t\(none\)/);
       await assert.rejects(cli("replay", original.id, "--from", "unknown", "--plan"), { stderr: /available: gather, propose, critique/ });
       await assert.rejects(cli("replay", original.id, "--input", "[]", "--plan"), { stderr: /--input must be a JSON object/ });
       await assert.rejects(cli("replay", original.id, "--live"), { stderr: /Unknown option '--live'/ });
       assert.deepEqual(counts(), beforePlan);
 
-      let cliOwner;
+      const manual = tasks.enqueueWorkflowRun("maintainer-sweep");
+      let cliOwner, claimed;
       f.onModel = () => {
         const running = all(s.tasks).find((row) => row.input.replayOf === original.id && row.status === "running");
         const pidFile = running && resolve("data/cli-tasks", `${running.id}.pid`);
-        if (pidFile && existsSync(pidFile)) cliOwner = { id: running.id, pid: Number(readFileSync(pidFile, "utf8")) };
+        if (pidFile && existsSync(pidFile)) {
+          cliOwner = { id: running.id, pid: Number(readFileSync(pidFile, "utf8")) };
+          claimed ??= tasks.claimTask(manual.id);
+        }
       };
       f.reset(0, "normal");
       f.script = [approve, "Critique reran."];
@@ -6893,6 +6901,8 @@ fi
       const replayId = /^COMPLETED\t([^\t\n]+)\t/m.exec(completed.stdout)?.[1];
       assert.ok(replayId, completed.stdout);
       const replay = f.row(s.runs, replayId), replayTask = f.row(s.tasks, replay.taskId);
+      assert.equal(claimed?.task.id, manual.id, "a running replay neither occupies the only slot nor blocks its workflow");
+      tasks.finishRun(claimed.run.id, { status: "completed" });
       assert.equal(replay.sequence, original.sequence + 1);
       assert.equal(replay.headSha, original.headSha);
       assert.equal(replay.publication.status, "not_needed");
@@ -6929,12 +6939,13 @@ fi
       assert.ok(failedId, failed.stderr);
       const failedRun = f.row(s.runs, failedId), failedTask = f.row(s.tasks, failedRun.taskId);
       assert.equal(failedTask.status, "failed");
+      assert.equal(f.row(s.subjects, failedTask.subjectId).state, "closed");
+      assert.match(failed.stderr, /"operation":"workflow.replay".*"event":"operation.failed"/);
       assert.ok(failedRun.finishedAt);
       assert.equal(existsSync(resolve("data/cli-tasks", `${failedTask.id}.pid`)), false);
-      tasks.retryTask(failedTask.id);
+      assert.throws(() => tasks.retryTask(failedTask.id), /only in the replay CLI/);
       assert.equal(tasks.claimTask(failedTask.id), undefined);
       assert.equal(f.row(s.tasks, failedTask.id).status, "failed");
-      assert.ok(all(s.events).some((event) => event.taskId === failedTask.id && event.type === "task.rejected" && /replay CLI/.test(event.data.reason)));
       assert.deepEqual(rowsFor(task.id), originalRows);
       assert.deepEqual(all(s.workflowState), state);
       assert.deepEqual([f.writes.length, f.slack.calls.length], beforePlan.slice(3));
@@ -6995,6 +7006,7 @@ fi
       workflow(shared, "review_issue", "Shared review", true);
       workflow(shared, "shared_only", "Shared only");
       workflow(client, "review_issue", "Client review", true, "ctx.workflow.name");
+      writeFileSync(resolve(client, "package.json"), '\uFEFF{"type":"module"}\n');
       const first = save("Valid shared and client layers");
       for (const [repo, field] of [[{ url: " " }, "url"], [{ ref: "main" }, "ref"], [{ layers: [] }, "layers"],
         [{ layers: ["shared/../clients/x"] }, "layers"], [{ layers: ["/shared"] }, "layers"], [{ layers: ["C:\\shared"] }, "layers"],
@@ -7021,6 +7033,10 @@ fi
       fs.renameSync(source, `${source}-offline`);
       assert.match(ok("sync"), new RegExp(`already synced at ${first}`));
       fs.renameSync(`${source}-offline`, source);
+      const pidFile = resolve("data/serve.pid");
+      const checkoutFile = resolve("data/serve.workflows-checkout");
+      writeFileSync(pidFile, `${process.pid}\n`);
+      writeFileSync(checkoutFile, `${realpathSync(checkout(first))}\n`);
 
       workflow(client, "review_issue", "Missing override", false, "ctx.workflow.name");
       const duplicate = save("Duplicate without override");
@@ -7063,13 +7079,30 @@ fi
       assert.match(ok("sync"), /already synced/);
       assert.equal(existsSync(checkout(first)), true, "idempotent sync still protects the previous checkout");
 
+      const lock = resolve("data/workflows-repo/sync.lock");
+      const startedAt = new Date().toISOString();
+      writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt }));
+      assert.match(reject("sync"), /Another workflow sync holds/);
+      assert.equal(JSON.parse(readFileSync(lock, "utf8")).pid, process.pid);
       workflow(client, "review_issue", "Third client review", true, "ctx.workflow.name");
       const third = save("Third valid client layer");
       pin(third);
+      const deadOwner = spawnSync(process.execPath, ["-e", ""]);
+      assert.equal(deadOwner.status, 0);
+      writeFileSync(lock, JSON.stringify({ pid: deadOwner.pid, startedAt }));
       assert.match(ok("sync"), new RegExp(`${second} -> ${third}`));
+      assert.equal(existsSync(lock), false);
       assert.equal(realpathSync(pointer), realpathSync(checkout(third)));
       assert.equal(existsSync(checkout(second)), true);
-      assert.equal(existsSync(checkout(first)), false);
+      assert.equal(existsSync(checkout(first)), true, "retention protects the live daemon's checkout after two syncs");
+
+      const script = resolve(client, "review_issue/run.ts");
+      writeFileSync(script, readFileSync(script, "utf8") + 'import { writeFileSync } from "node:fs";\nwriteFileSync("validation-started", "");\nawait new Promise((resolve) => setTimeout(resolve, 60_000));\n');
+      pin(save("Hanging validation"), {}, { checkTimeoutSeconds: 5 });
+      assert.match(reject("sync"), /validation timed out after 5s; current was not changed/);
+      assert.equal(existsSync("validation-started"), true);
+      assert.equal(realpathSync(pointer), realpathSync(checkout(third)));
+      assert.equal(existsSync(lock), false);
     },
   },
 };

@@ -22,7 +22,7 @@ function readJournal(database: Database, id: string) {
   if (!latest) throw new Error(`Task ${task.id} has no runs`);
   const run = requestedRun ?? latest;
   const subject = database.select().from(subjects).where(eq(subjects.id, task.subjectId)).get()!;
-  const journal = database.select().from(steps).where(eq(steps.taskId, task.id)).orderBy(steps.startedAt, sql`rowid`).all();
+  const journal = database.select().from(steps).where(eq(steps.taskId, task.id)).orderBy(sql`rowid`).all();
   const warning = run.id !== latest.id ? `Run ${run.id} is not the latest run of task ${task.id}; the journal reflects run ${latest.id}` : undefined;
   return { run, task, subject, journal, warning, latestRunId: latest.id };
 }
@@ -72,6 +72,7 @@ export function inspectWorkflow(id: string, name?: string, json = false) {
 
 function planReplay(database: Database, id: string, from?: string) {
   const original = readJournal(database, id);
+  if (original.warning) throw new Error(`Run ${original.run.id} is not the latest run of task ${original.task.id}; replay ${original.latestRunId} instead`);
   const journal = original.journal.filter((step) => !isEffect(step.name));
   if (!journal.length) throw new Error("managed-pipeline workflows are not replayable");
   const start = from === undefined ? journal.length : journal.findIndex((step) => step.name === from);
@@ -83,7 +84,6 @@ function planReplay(database: Database, id: string, from?: string) {
 
 export function printReplayPlan(id: string, from?: string) {
   const plan = readOnly((database) => planReplay(database, id, from));
-  if (plan.warning) console.error(`WARN\t${plan.warning}`);
   console.log(`FROZEN\t${plan.frozen.map((step) => step.name).join(", ") || "(none)"}`);
   console.log(`FRESH\t${plan.fresh.map((step) => step.name).join(", ") || "(none)"}`);
 }
@@ -117,8 +117,9 @@ export async function replayWorkflow(id: string, from?: string, overrides?: Reco
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
   let pidWritten = false;
+  let subjectId: string | undefined;
   try {
-    const { original, workflow, task, run, subject, item } = db.transaction((transaction) => {
+    const { workflow, task, run, subject, item, replay } = db.transaction((transaction) => {
       const original = planReplay(transaction, id, from);
       const workflow = workflowOf(original.task.action);
       const baseline = original.run.input;
@@ -133,7 +134,7 @@ export async function replayWorkflow(id: string, from?: string, overrides?: Reco
       const { provider, model, thinkingLevel } = workflow.defaults;
       const skill = workflow.skillPath ?? workflow.scriptPath ?? workflow.file;
       const run = transaction.insert(runs).values({ taskId, input, skill, provider, model, thinkingLevel,
-        headSha: original.run.headSha, startedAt: new Date().toISOString(),
+        mainSha: original.run.mainSha, headSha: original.run.headSha, startedAt: new Date().toISOString(),
         sequence: sql`(select coalesce(max(${runs.sequence}), 0) + 1 from ${runs})`,
       }).returning().get()!;
       for (const step of original.frozen) transaction.insert(steps).values({ ...step, taskId }).run();
@@ -141,17 +142,19 @@ export async function replayWorkflow(id: string, from?: string, overrides?: Reco
       mkdirSync(pidDirectory, { recursive: true });
       writeFileSync(pidFile, `${process.pid}\n`, { flag: "wx" });
       pidWritten = true;
-      return { original, workflow, task, run, subject, item: prior.item && asItem(prior.item, prior.subject) };
+      const baseSha = original.run.mainSha ?? (prior.subject.kind === "item" ? undefined : original.run.headSha ?? undefined);
+      return { workflow, task, run, subject, item: prior.item && asItem(prior.item, prior.subject), replay: { frozen: original.names, baseSha } };
     }, { behavior: "immediate" });
-    if (original.warning) console.error(`WARN\t${original.warning}`);
+    subjectId = subject.id;
     const references = { subjectId: subject.id, taskId, runId: run.id };
     const operation = startOperation("workflow.replay", { ...references, action: workflow.name });
     try {
       stop.signal.throwIfAborted();
       await runWorkflow({ workflow, task, run, subject, item, references, repositoryPath: getRepositoryPath(), operation, stop: stop.signal,
-        cleanup: {}, replay: { frozen: original.names, baseSha: original.run.headSha ?? undefined } });
+        cleanup: {}, replay });
       stop.signal.throwIfAborted();
     } catch (error) {
+      operation.fail(error);
       const superseded = error instanceof SupersededError ? error : stop.signal.reason instanceof SupersededError ? stop.signal.reason : undefined;
       const status = superseded ? "cancelled" : "failed";
       const failed = finishRun(run.id, { status, error: superseded ?? error });
@@ -163,6 +166,10 @@ export async function replayWorkflow(id: string, from?: string, overrides?: Reco
   } finally {
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
-    if (pidWritten) rmSync(pidFile, { force: true });
+    try {
+      if (subjectId) db.update(subjects).set({ state: "closed" }).where(eq(subjects.id, subjectId)).run();
+    } finally {
+      if (pidWritten) rmSync(pidFile, { force: true });
+    }
   }
 }

@@ -7,6 +7,7 @@
     "distillReadBytes": 2097152,
     "maxOutputBytes": 16777216,
     "gitNetworkTimeoutSeconds": 600,
+    "workflowSync": { "keepCheckouts": 3, "checkTimeoutSeconds": 120 },
     "idlePollSeconds": 30,
     "agentTimeoutSeconds": 3600,
     "drainTimeoutSeconds": 900,

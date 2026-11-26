@@ -421,21 +421,23 @@ export function findCompletionCycles(defs: readonly WorkflowDefinition[]): strin
 
 type WorkflowLayer = { dir: string; origin: string; strict: boolean; local: boolean };
 
-export function readWorkflowRepo(value: unknown) {
+export function readWorkflowRepo(value: unknown, harness: unknown) {
   if (value === undefined) return undefined;
   const invalid = (message: string): never => { throw new Error(`Invalid scrat.local.json: workflows.repo${message}`); };
   if (!isObject(value)) return invalid(" must be an object");
   for (const key of Object.keys(value)) {
-    if (!["url", "ref", "layers", "keepCheckouts"].includes(key)) invalid(`.${key}: unknown setting`);
+    if (!["url", "ref", "layers", "keepCheckouts", "checkTimeoutSeconds"].includes(key)) invalid(`.${key}: unknown setting`);
   }
-  const { url, ref, layers, keepCheckouts = 3 } = value;
+  const defaults = isObject(harness) && isObject(harness.workflowSync) ? harness.workflowSync : {};
+  const { url, ref, layers, keepCheckouts = defaults.keepCheckouts, checkTimeoutSeconds = defaults.checkTimeoutSeconds } = value;
   if (typeof url !== "string" || !url.trim()) return invalid(".url must be a non-empty string");
   if (typeof ref !== "string" || !/^[0-9a-f]{40}$/i.test(ref)) return invalid(".ref must be a full 40-character Git SHA");
   const safeLayer = (layer: unknown): layer is string => typeof layer === "string" && layer.trim().length > 0
     && !isAbsolute(layer) && !/^[a-z]:|[\\\0]/i.test(layer) && !layer.split("/").includes("..");
   if (!Array.isArray(layers) || !layers.length || !layers.every(safeLayer)) return invalid(".layers must be a non-empty array of safe relative paths");
   if (typeof keepCheckouts !== "number" || !Number.isSafeInteger(keepCheckouts) || keepCheckouts < 1) return invalid(".keepCheckouts must be a positive integer");
-  return { url, ref: ref.toLowerCase(), layers, keepCheckouts };
+  if (typeof checkTimeoutSeconds !== "number" || !Number.isSafeInteger(checkTimeoutSeconds) || checkTimeoutSeconds < 1) return invalid(".checkTimeoutSeconds must be a positive integer");
+  return { url, ref: ref.toLowerCase(), layers, keepCheckouts, checkTimeoutSeconds };
 }
 
 export function readWorkflows(root: string, layers?: readonly WorkflowLayer[] | string | null): WorkflowDefinition[] {

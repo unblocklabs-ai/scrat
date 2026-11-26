@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import settings from "../scrat.config.json" with { type: "json" };
 import { buildConfig, isObject } from "./config-merge.ts";
+import { isProcessAlive, readOptionalText } from "./process-status.ts";
 import { readWorkflowRepo } from "./workflows.ts";
 
 const root = resolve("data/workflows-repo");
@@ -13,12 +14,8 @@ const marker = ".scrat-checkout-complete";
 const appAuthHelp = "Set SCRAT_WORKFLOWS_TOKEN or use an SSH deploy key";
 
 function localOverrides() {
-  let body;
-  try { body = readFileSync(new URL("../scrat.local.json", import.meta.url), "utf8"); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw error;
-  }
+  const body = readOptionalText(new URL("../scrat.local.json", import.meta.url));
+  if (body === undefined) return {};
   const parsed: unknown = JSON.parse(body);
   if (!isObject(parsed)) throw new Error("Invalid scrat.local.json: expected a JSON object");
   return parsed;
@@ -26,6 +23,29 @@ function localOverrides() {
 
 function stat(path: string) {
   return lstatSync(path, { throwIfNoEntry: false });
+}
+
+function acquireLock(path: string) {
+  const data = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }) + "\n";
+  const acquire = () => writeFileSync(path, data, { flag: "wx" });
+  try { acquire(); return; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  const existing = stat(path);
+  if (existing?.isFile()) {
+    const body = readOptionalText(path);
+    let owner: unknown;
+    try { owner = body === undefined ? undefined : JSON.parse(body); }
+    catch { }
+    if (isObject(owner) && typeof owner.pid === "number" && Number.isSafeInteger(owner.pid) && owner.pid > 0 && !isProcessAlive(owner.pid)) {
+      const currentLock = stat(path);
+      if (currentLock?.ino === existing.ino && currentLock.dev === existing.dev) rmSync(path, { force: true });
+    }
+  }
+  try { acquire(); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    throw new Error(`Another workflow sync holds ${path}; remove it only if that sync is no longer running`);
+  }
 }
 
 function ensureDirectory(path: string) {
@@ -78,12 +98,12 @@ async function fetchAuth(url: string, github: unknown) {
 async function sync() {
   if (process.argv.length !== 3) throw new Error("Usage: npm run workflow -- sync");
   const merged = buildConfig(settings, localOverrides());
-  const repo = readWorkflowRepo(isObject(merged.workflows) ? merged.workflows.repo : undefined);
+  const repo = readWorkflowRepo(isObject(merged.workflows) ? merged.workflows.repo : undefined, merged.harness);
   if (!repo) {
     console.log("No workflows.repo configured.");
     return;
   }
-  const { ref: sha, url, keepCheckouts } = repo;
+  const { ref: sha, url, keepCheckouts, checkTimeoutSeconds } = repo;
   const checkout = join(checkouts, sha);
   const harness = isObject(merged.harness) ? merged.harness : settings.harness;
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
@@ -107,12 +127,11 @@ async function sync() {
 
   ensureDirectory(root);
   const lock = join(root, "sync.lock");
-  try { mkdirSync(lock); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`Another workflow sync holds ${lock}; remove it only if that sync is no longer running`);
-    throw error;
-  }
+  const work = join(root, "sync.work");
+  acquireLock(lock);
   try {
+    rmSync(work, { recursive: true, force: true });
+    mkdirSync(work);
     ensureDirectory(checkouts);
     const pointer = stat(current);
     if (pointer && !pointer.isSymbolicLink()) throw new Error(`Not a workflow checkout symlink: ${current}`);
@@ -134,14 +153,15 @@ async function sync() {
       if (git([...gitArgs, "rev-parse", "FETCH_HEAD"]) !== sha) throw new Error(`Git did not fetch the requested workflow commit ${sha}`);
       if (git([...gitArgs, "cat-file", "-t", sha]) !== "commit") throw new Error(`Workflows pin ${sha} is not a Git commit`);
 
-      const temporary = mkdtempSync(join(lock, "checkout-"));
+      const temporary = join(work, "checkout");
+      mkdirSync(temporary);
       const treeArgs = [...gitArgs, `--work-tree=${temporary}`];
-      const indexEnv = { GIT_INDEX_FILE: join(lock, "index") };
+      const indexEnv = { GIT_INDEX_FILE: join(work, "index") };
       git([...treeArgs, "read-tree", sha], {}, indexEnv);
       git([...treeArgs, "checkout-index", "--all"], {}, indexEnv);
       rejectSymlinks(temporary);
       writeFileSync(join(temporary, marker), "", { flag: "wx" });
-      if (cached) renameSync(checkout, join(lock, "incomplete"));
+      if (cached) renameSync(checkout, join(work, "incomplete"));
       renameSync(temporary, checkout);
     } else {
       rejectSymlinks(checkout);
@@ -149,32 +169,39 @@ async function sync() {
 
     const validation = spawnSync(process.execPath, [
       ...(existsSync(".env") ? ["--env-file=.env"] : []), resolve(import.meta.dirname, "workflow-commands.ts"), "check",
-    ], { env: { ...process.env, SCRAT_WORKFLOWS_CHECKOUT: checkout }, stdio: "inherit" });
+    ], { env: { ...process.env, SCRAT_WORKFLOWS_CHECKOUT: checkout }, stdio: "inherit", timeout: checkTimeoutSeconds * 1000, killSignal: "SIGKILL" });
+    if ((validation.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") throw new Error(`Workflow checkout ${sha} validation timed out after ${checkTimeoutSeconds}s; current was not changed`);
     if (validation.status !== 0) throw new Error(`Workflow checkout ${sha} failed validation; current was not changed`, { cause: validation.error });
 
     if (previous === realpathSync(checkout)) {
       console.log(`Workflows already synced at ${sha}.`);
       return;
     }
-    const next = join(lock, "current");
+    const next = join(work, "current");
     symlinkSync(join("checkouts", sha), next, "dir");
     renameSync(next, current);
     console.log(`Workflows synced: ${previous ? basename(previous) : "(none)"} -> ${sha}. Restart scrat.service to apply.`);
 
     try {
-      const protectedPaths = new Set([realpathSync(checkout), previous]);
+      const protectedPaths = new Set([realpathSync(checkout)]);
+      if (previous) protectedPaths.add(previous);
+      if (isProcessAlive(Number(readOptionalText("data/serve.pid")))) {
+        const loaded = readOptionalText("data/serve.workflows-checkout")?.replace(/\n$/, "");
+        if (loaded) protectedPaths.add(loaded);
+      }
       const old = readdirSync(checkouts, { withFileTypes: true })
         .filter((entry) => entry.isDirectory() && /^[0-9a-f]{40}$/.test(entry.name))
         .map((entry) => join(checkouts, entry.name))
         .filter((dir) => !protectedPaths.has(realpathSync(dir)) && stat(join(dir, marker))?.isFile())
         .map((dir) => ({ dir, modified: stat(dir)!.mtimeMs }))
         .sort((a, b) => b.modified - a.modified || a.dir.localeCompare(b.dir));
-      for (const { dir } of old.slice(Math.max(0, keepCheckouts - (previous ? 2 : 1)))) rmSync(dir, { recursive: true });
+      for (const { dir } of old.slice(Math.max(0, keepCheckouts - protectedPaths.size))) rmSync(dir, { recursive: true });
     } catch (error) {
       console.warn(`Workflow checkout pruning failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   } finally {
-    rmSync(lock, { recursive: true });
+    try { rmSync(work, { recursive: true, force: true }); }
+    finally { rmSync(lock, { force: true }); }
   }
 }
 

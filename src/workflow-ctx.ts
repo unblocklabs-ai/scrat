@@ -10,6 +10,7 @@ import { db } from "./db.ts";
 import { describeError, errorCode, SupersededError, transientInferenceCode } from "./errors.ts";
 import type { EventReferences } from "./events.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
+import { git } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubIssue, GithubPullRequest } from "./github-types.ts";
 import { categoriesFor, itemLabelKey } from "./item-labels.ts";
@@ -23,7 +24,7 @@ import { assertComplete, hasPublicationSnapshot, InterruptedError, SecretLeakErr
 import { retainReviewScope } from "./review-paths.ts";
 import { getRun, latestCompletedRun, updateRun } from "./run-history.ts";
 import { steps, workflowState, type Run, type Subject, type Task } from "./schema.ts";
-import { assertPublishable } from "./secrets.ts";
+import { assertPublishable, childEnvironment } from "./secrets.ts";
 import { postMessage } from "./slack.ts";
 import { parseTriggerInput } from "./triggers.ts";
 import {
@@ -746,7 +747,14 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         "item.withCheckout",
         "Overlapping workspace checkout calls are not supported in a single workflow run",
         async () => {
-          headSha = observed.pullRequest ? await github.fetchPullRequestHead(observed.pullRequest) : observed.mainSha;
+          const hasCommit = (sha: string) => git(repositoryPath, ["cat-file", "-e", `${sha}^{commit}`],
+            { ...childEnvironment(), GIT_NO_LAZY_FETCH: "1" }).then(() => true, () => false);
+          if (input.replay && !await hasCommit(observed.mainSha)) {
+            await github.fetchBranch(observed.observation.baseBranch);
+            if (!await hasCommit(observed.mainSha)) throw new Error(`Frozen base commit ${observed.mainSha} is unavailable`);
+          }
+          const pr = observed.pullRequest;
+          headSha = !pr ? observed.mainSha : input.replay && await hasCommit(pr.head.sha) ? pr.head.sha : await github.fetchPullRequestHead(pr);
           if (observed.pullRequest) input.onTargetObserved?.(`${headSha}@${observed.observation.baseBranch}`);
           evaluated = evaluateItemContext(run, observed.observation, { labelCategories: options.labelingCategories });
           ({ diffBaseSha, diffPaths } = await readDiffScope(repositoryPath, observed.mainSha, headSha, Boolean(observed.pullRequest)));

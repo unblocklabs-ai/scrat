@@ -12,6 +12,7 @@ const schema = Type.Object({
   harness: Type.Object({
     maxConcurrency: positive, maxConcurrentValidations: positive, commandTimeoutSeconds: positive, commandOutputTailBytes: positive, distillReadBytes: positive, maxOutputBytes: positive, gitNetworkTimeoutSeconds: positive, idlePollSeconds: positive, agentTimeoutSeconds: positive, drainTimeoutSeconds: positive, maxStderrBytes: positive, logTargetChars: positive, logErrorChars: positive, reviewCacheLimit: positive, treeCacheLimit: positive, databaseHealthRetries: positive, databaseHealthIntervalSeconds: positive, databaseHealthTimeoutSeconds: positive, databaseLogTailLines: positive, sqliteBusyTimeoutMs: positive, workerErrorDelaySeconds: positive, sandboxPreflightSeconds: positive,
     retryJitter: Type.Number({ minimum: 0, maximum: 1 }), crashRequeues: Type.Integer({ minimum: 0 }),
+    workflowSync: Type.Object({ keepCheckouts: positive, checkTimeoutSeconds: positive }, strict),
     corrections: Type.Object({ incomplete: Type.Integer({ minimum: 0 }), validation: Type.Integer({ minimum: 0 }), format: Type.Integer({ minimum: 0 }) }, strict),
     agentRetry: Type.Object({ maxRetries: Type.Integer({ minimum: 0 }), baseDelayMs: Type.Integer({ minimum: 0 }) }, strict),
     transientErrors: Type.Array(Type.String()),

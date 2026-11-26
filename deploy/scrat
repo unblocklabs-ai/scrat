@@ -130,9 +130,25 @@ fetch_release() {
 }
 
 deploy_release() {
-  local previous='' load_state state
+  local previous='' load_state state prior_checkout next_checkout loaded_checkout
   if [[ -e $root/current ]]; then previous=$(readlink -f "$root/current"); fi
   if [[ -d $release && $previous == "$(readlink -f "$release")" ]]; then
+    cd "$release"
+    prior_checkout=$(readlink -e data/workflows-repo/current || true)
+    log "Syncing workflows"
+    npm run --silent workflow -- sync
+    next_checkout=$(readlink -e data/workflows-repo/current || true)
+    loaded_checkout=''
+    if [[ -f data/serve.workflows-checkout ]]; then IFS= read -r loaded_checkout < data/serve.workflows-checkout || true; fi
+    state=$(scrat_unit is-active || true)
+    if [[ $state == active || $state == activating || $state == reloading ]]; then
+      if [[ $prior_checkout != "$next_checkout" || ( -n $loaded_checkout && $loaded_checkout != "$next_checkout" ) ]]; then
+        log "Restarting scrat.service to load synced workflows"
+        stopped=stopping
+        scrat_unit restart
+        stopped=false
+      fi
+    fi
     refresh_cli "$release"
     log "Already deployed $sha"
     return

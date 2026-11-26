@@ -23,6 +23,7 @@ if (overrides.actions !== undefined) {
   throw configError(["actions: unknown setting; use workflows instead"]);
 }
 const workflowOverrides = isObject(overrides.workflows) ? overrides.workflows : undefined;
+const merged = buildConfig(settings, overrides);
 const workflowDirectory = workflowOverrides?.directory;
 if (workflowDirectory !== undefined && workflowDirectory !== null && (typeof workflowDirectory !== "string" || !isAbsolute(workflowDirectory))) {
   throw new Error("Invalid scrat.local.json: workflows.directory must be an absolute path");
@@ -33,26 +34,30 @@ if (trustLocalScripts !== undefined && typeof trustLocalScripts !== "boolean") {
 }
 export const trustLocalWorkflowScripts = trustLocalScripts === true;
 const repoRoot = fileURLToPath(new URL(".", configUrl));
-const workflowRepo = readWorkflowRepo(workflowOverrides?.repo);
+const workflowRepo = readWorkflowRepo(workflowOverrides?.repo, merged.harness);
+function resolveWorkflowsCheckout(ref: string) {
+  const override = process.env.SCRAT_WORKFLOWS_CHECKOUT;
+  if (override !== undefined) return realpathSync(override);
+  const instruction = 'run "npm run workflow -- sync"';
+  let checkout: string;
+  try { checkout = realpathSync(resolve("data/workflows-repo/current")); }
+  catch (error) { throw new Error(`Cannot resolve the active workflows checkout; ${instruction}`, { cause: error }); }
+  if (basename(checkout) !== ref) throw new Error(`Active workflows checkout is ${basename(checkout)}, expected ${ref}; ${instruction}`);
+  return checkout;
+}
+export const activeWorkflowsCheckout = workflowRepo && resolveWorkflowsCheckout(workflowRepo.ref);
 const layers = [];
-if (workflowRepo) {
-  let checkout = process.env.SCRAT_WORKFLOWS_CHECKOUT;
-  if (checkout === undefined) {
-    const instruction = 'run "npm run workflow -- sync"';
-    try { checkout = realpathSync(resolve("data/workflows-repo/current")); }
-    catch (error) { throw new Error(`Cannot resolve the active workflows checkout; ${instruction}`, { cause: error }); }
-    if (basename(checkout) !== workflowRepo.ref) throw new Error(`Active workflows checkout is ${basename(checkout)}, expected ${workflowRepo.ref}; ${instruction}`);
-  } else {
-    checkout = realpathSync(checkout);
-  }
-  for (const layer of workflowRepo.layers) layers.push({ dir: resolve(checkout, layer), origin: `repo:${layer}`, strict: true, local: true });
+if (workflowRepo && activeWorkflowsCheckout) {
+  for (const layer of workflowRepo.layers) layers.push({ dir: resolve(activeWorkflowsCheckout, layer), origin: `repo:${layer}`, strict: true, local: true });
 }
 if (workflowDirectory) layers.push({ dir: workflowDirectory, origin: "directory", strict: false, local: true });
 export const loadedWorkflows = readWorkflows(repoRoot, layers);
 
 const workflowDefaults = { ...Object.fromEntries(loadedWorkflows.map((wf) => [wf.name, workflowDeploymentDefaults(wf)])), directory: null, trustLocalScripts: false, repo: null };
 
-const merged = buildConfig({ ...settings, workflows: workflowDefaults }, overrides);
+if (merged.workflows === undefined || isObject(merged.workflows)) {
+  merged.workflows = buildConfig(workflowDefaults, merged.workflows ?? {}, "workflows.");
+}
 if (isObject(merged.workflows)) {
   delete merged.workflows.directory;
   delete merged.workflows.trustLocalScripts;

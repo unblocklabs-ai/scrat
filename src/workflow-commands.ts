@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { findPackageJSON } from "node:module";
 import { resolve } from "node:path";
@@ -10,6 +10,7 @@ import { workflowOf, workflows } from "./workflow-registry.ts";
 import { config } from "./config.ts";
 import { isObject } from "./config-merge.ts";
 import { describeError, redactSecrets, SupersededError } from "./errors.ts";
+import { isProcessAlive, readOptionalText } from "./process-status.ts";
 import type { Run } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 
@@ -17,26 +18,14 @@ const executeFile = promisify(execFile);
 const appRoot = resolve(import.meta.dirname, "..");
 const compiler = resolve(appRoot, "node_modules/typescript/bin/tsc");
 
-function isProcessAlive(pid: number) {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
 function isServeRunning() {
-  const pidFile = resolve("data/serve.pid");
-  if (!existsSync(pidFile)) return false;
-  return isProcessAlive(Number(readFileSync(pidFile, "utf8").trim()));
+  return isProcessAlive(Number(readOptionalText("data/serve.pid")));
 }
 
 async function isStandaloneScript(scriptPath: string, local: boolean) {
   if (!local) return false;
   const packageFile = findPackageJSON(pathToFileURL(scriptPath));
-  const packageType = packageFile ? (JSON.parse(await readFile(packageFile, "utf8")) as { type?: unknown }).type : undefined;
+  const packageType = packageFile ? (JSON.parse(new TextDecoder().decode(await readFile(packageFile))) as { type?: unknown }).type : undefined;
   return packageType !== "module" && packageType !== "commonjs";
 }
 

@@ -53,10 +53,11 @@ export function latestTask(subjectId: string, action: string, database: Pick<typ
 
 const modeOf = (action: string) => isWorkflow(action) ? workflowOf(action).mode : undefined;
 const workflowNames = workflows.map(({ name }) => name);
+const replayTaskReason = "Replay tasks run only in the replay CLI";
 
 function checkClaimable({ task, subject }: { task: Task; subject: Subject }, database: Pick<typeof db, "select">) {
   if ("replayOf" in task.input && task.input.replayOf !== undefined) {
-    return { ok: false as const, reason: "Replay tasks run only in the replay CLI" };
+    return { ok: false as const, reason: replayTaskReason };
   }
   if (!isWorkflow(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   let trigger;
@@ -203,7 +204,8 @@ export function enqueueWorkflowRun(name: string, options: { input?: Record<strin
 
 export function claimTask(taskId?: string) {
   return db.transaction((transaction) => {
-    const active = transaction.select({ count: count() }).from(tasks).where(eq(tasks.status, "running")).get()!;
+    const active = transaction.select({ count: count() }).from(tasks)
+      .where(and(eq(tasks.status, "running"), sql`json_extract(${tasks.input}, '$.replayOf') is null`)).get()!;
     if (active.count >= config.harness.maxConcurrency) return;
     const busyTasks = alias(tasks, "busy_tasks");
     const busySubjects = alias(subjects, "busy_subjects");
@@ -212,7 +214,7 @@ export function claimTask(taskId?: string) {
       .where(and(taskId ? eq(tasks.id, taskId) : undefined, eq(tasks.status, "queued"), eq(subjects.state, "open"), or(isNull(tasks.availableAt), lte(tasks.availableAt, new Date().toISOString())), notExists(
         transaction.select({ id: busyTasks.id }).from(busyTasks)
           .innerJoin(busySubjects, eq(busyTasks.subjectId, busySubjects.id))
-          .where(and(eq(busyTasks.status, "running"), or(
+          .where(and(eq(busyTasks.status, "running"), sql`json_extract(${busyTasks.input}, '$.replayOf') is null`, or(
             eq(busyTasks.subjectId, tasks.subjectId),
             and(isNotNull(subjects.workspaceId), eq(busySubjects.workspaceId, subjects.workspaceId)),
             workflowNames.length ? and(eq(subjects.kind, "workflow"), inArray(busyTasks.action, workflowNames), eq(busyTasks.action, tasks.action)) : undefined,
@@ -285,6 +287,7 @@ export function retryTask(taskId: string, mode: Task["retryMode"] = "repair") {
       }
       const failed = transaction.select().from(tasks).where(and(eq(tasks.id, taskId), eq(tasks.status, "failed"))).get();
       if (!failed) throw new Error(`Task is not failed: ${taskId}`);
+      if (failed.input.replayOf !== undefined) throw new Error(replayTaskReason);
       const queued = pendingTaskOf(transaction, failed.subjectId, failed.action);
       if (queued) throw new Error(`A queued task already exists for this subject/action: ${queued.id}`);
       if (mode === "validation") {

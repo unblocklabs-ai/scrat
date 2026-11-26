@@ -39,10 +39,15 @@ function isServeRunning() {
   return isProcessAlive(Number(readFileSync(pidFile, "utf8").trim()));
 }
 
-async function checkScript(scriptPath: string, local: boolean) {
-  const packageFile = local ? findPackageJSON(pathToFileURL(scriptPath)) : undefined;
+async function isStandaloneScript(scriptPath: string, local: boolean) {
+  if (!local) return false;
+  const packageFile = findPackageJSON(pathToFileURL(scriptPath));
   const packageType = packageFile ? (JSON.parse(await readFile(packageFile, "utf8")) as { type?: unknown }).type : undefined;
-  const standalone = local && packageType !== "module" && packageType !== "commonjs";
+  return packageType !== "module" && packageType !== "commonjs";
+}
+
+async function checkScripts(scriptPaths: string[], standalone: boolean) {
+  if (!scriptPaths.length) return undefined;
   try {
     await executeFile(process.execPath, [compiler,
       "--noEmit", "--target", "ES2023",
@@ -50,12 +55,17 @@ async function checkScript(scriptPath: string, local: boolean) {
       "--moduleResolution", standalone ? "Bundler" : "NodeNext",
       "--strict", "--allowImportingTsExtensions", "--resolveJsonModule",
       "--verbatimModuleSyntax", "--erasableSyntaxOnly", "--skipLibCheck", "--types", "node", "--pretty", "false",
-      scriptPath,
+      ...scriptPaths,
     ], { cwd: appRoot, env: childEnvironment() });
   } catch (error) {
     const { stdout, stderr, message } = describeError(error);
     return [stdout, stderr].filter(Boolean).join("\n").trim() || message;
   }
+}
+
+function isSqliteBusy(error: unknown) {
+  const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  return /SQLITE_BUSY|database is locked/i.test(text);
 }
 
 function usage(): never {
@@ -143,15 +153,28 @@ await runCommand("Workflow command failed", async () => {
     if (!compilerAvailable && targets.some((wf) => wf.scriptPath)) {
       console.error("WARN\tSkipping run.ts type checks: TypeScript compiler not installed (install dev dependencies)");
     }
-    const checks = await Promise.all(targets.map(async (wf) => {
-      const wfProblems = await validateWorkflowDefinition(wf, config, { checkDisabled: true });
+    const standardScripts: { name: string; scriptPath: string }[] = [];
+    const standaloneScripts: { name: string; scriptPath: string }[] = [];
+    for (const wf of targets) {
+      problems.push(...await validateWorkflowDefinition(wf, config, { checkDisabled: true }));
       if (wf.scriptPath && compilerAvailable) {
-        const diagnostic = await checkScript(wf.scriptPath, wf.local);
-        if (diagnostic) wfProblems.push(`${wf.name}: run.ts type check failed:\n${diagnostic}`);
+        if (await isStandaloneScript(wf.scriptPath, wf.local)) standaloneScripts.push({ name: wf.name, scriptPath: wf.scriptPath });
+        else standardScripts.push({ name: wf.name, scriptPath: wf.scriptPath });
       }
-      return wfProblems;
-    }));
-    for (const wfProblems of checks) problems.push(...wfProblems);
+    }
+    for (const [group, standalone] of [[standardScripts, false], [standaloneScripts, true]] as const) {
+      if (!group.length) continue;
+      const batchError = await checkScripts(group.map((entry) => entry.scriptPath), standalone);
+      if (!batchError) continue;
+      if (group.length === 1) {
+        problems.push(`${group[0]!.name}: run.ts type check failed:\n${batchError}`);
+        continue;
+      }
+      for (const entry of group) {
+        const diagnostic = await checkScripts([entry.scriptPath], standalone);
+        if (diagnostic) problems.push(`${entry.name}: run.ts type check failed:\n${diagnostic}`);
+      }
+    }
     if (problems.length) {
       for (const problem of problems) console.error(`FAIL\t${problem}`);
       process.exitCode = 1;
@@ -184,10 +207,28 @@ await runCommand("Workflow command failed", async () => {
       if (isServeRunning()) {
         console.log(`WAITING\t${task.id}\tDaemon is running; waiting for daemon to execute task`);
         while (!stop.signal.aborted) {
-          const row = db.select().from(tasks).where(eq(tasks.id, task.id)).get();
+          let row;
+          try {
+            row = db.select().from(tasks).where(eq(tasks.id, task.id)).get();
+          } catch (error) {
+            if (isSqliteBusy(error)) {
+              await delay(500, undefined, { signal: stop.signal }).catch(() => {});
+              continue;
+            }
+            throw error;
+          }
           if (!row) throw new Error(`Workflow task ${task.id} disappeared`);
           if (row.status === "completed" || row.status === "failed" || row.status === "cancelled") {
-            const latest = db.select().from(runs).where(eq(runs.taskId, task.id)).orderBy(desc(runs.sequence)).limit(1).get();
+            let latest;
+            try {
+              latest = db.select().from(runs).where(eq(runs.taskId, task.id)).orderBy(desc(runs.sequence)).limit(1).get();
+            } catch (error) {
+              if (isSqliteBusy(error)) {
+                await delay(500, undefined, { signal: stop.signal }).catch(() => {});
+                continue;
+              }
+              throw error;
+            }
             if (row.status !== "completed" || latest?.error) {
               console.error(`FAILED\t${latest?.id ?? task.id}\t${latest?.error?.message ?? row.status}`);
               process.exitCode = 1;

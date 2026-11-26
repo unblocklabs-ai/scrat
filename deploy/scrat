@@ -211,7 +211,7 @@ rehearse_schema_push() {
 }
 
 copy_database() {
-  node --input-type=module -e 'import { DatabaseSync, backup } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); await backup(db, process.argv[2]); db.close();' "$1" "$2"
+  node --input-type=module -e 'import { DatabaseSync, backup } from "node:sqlite"; const db = new DatabaseSync(process.argv[1], { timeout: 15000 }); await backup(db, process.argv[2]); db.close();' "$1" "$2"
 }
 
 list_backup_files() {

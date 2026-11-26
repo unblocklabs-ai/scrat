@@ -19,7 +19,7 @@
     "databaseHealthIntervalSeconds": 1,
     "databaseHealthTimeoutSeconds": 3,
     "databaseLogTailLines": 50,
-    "sqliteBusyTimeoutMs": 5000,
+    "sqliteBusyTimeoutMs": 15000,
     "workerErrorDelaySeconds": 1,
     "sandboxPreflightSeconds": 30,
     "retryJitter": 0.1,

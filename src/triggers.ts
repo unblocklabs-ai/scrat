@@ -22,6 +22,13 @@ const commit = Type.Object({
 const tick = Type.Object({ source: Type.Literal("schedule"), kind: Type.Literal("tick"), triggerKey: text, start: text, end: text });
 const siteMap = Type.Object({ source: Type.Literal("storefront"), kind: Type.Literal("site_map"), triggerKey: text });
 const storeChange = Type.Object({ source: Type.Literal("shopify"), kind: Type.Literal("store_change"), triggerKey: text });
+const workflowManual = Type.Object({
+  source: Type.Literal("workflow"),
+  kind: Type.Literal("workflow_manual"),
+  manual: Type.Literal(true),
+  dryRun: Type.Optional(Type.Boolean()),
+  payload: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+});
 
 const members = {
   item_changed: { source: "github_items", schema: itemChanged },
@@ -35,15 +42,16 @@ const members = {
   tick: { source: "schedule", schema: tick },
   site_map: { source: "storefront", schema: siteMap },
   store_change: { source: "shopify", schema: storeChange },
+  workflow_manual: { source: "workflow", schema: workflowManual },
 } as const;
 
 export type TriggerInput = Static<typeof itemChanged> | Static<typeof label> | Static<typeof prConflicts> | Static<typeof prFeedback>
-  | Static<typeof lowGrade> | Static<typeof manual> | Static<typeof itemLabels> | Static<typeof commit> | Static<typeof tick> | Static<typeof siteMap> | Static<typeof storeChange>;
+  | Static<typeof lowGrade> | Static<typeof manual> | Static<typeof itemLabels> | Static<typeof commit> | Static<typeof tick> | Static<typeof siteMap> | Static<typeof storeChange> | Static<typeof workflowManual>;
 export type KeyedTriggerInput = Extract<TriggerInput, { triggerKey: string }>;
 type Kind = keyof typeof members;
-type ManifestKind = Exclude<Kind, "manual">;
+type ManifestKind = Exclude<Kind, "manual" | "workflow_manual">;
 
-export const triggerKinds = Object.keys(members).filter((kind) => kind !== "manual") as ManifestKind[];
+export const triggerKinds = Object.keys(members).filter((kind) => kind !== "manual" && kind !== "workflow_manual") as ManifestKind[];
 export const triggerSource = (kind: ManifestKind) => members[kind].source;
 
 function classify(input: Record<string, unknown>): Kind {

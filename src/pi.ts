@@ -1,7 +1,9 @@
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { isContextOverflow, isRetryableAssistantError } from "@earendil-works/pi-ai";
-import { createAgentSession, createCodemodeExtension, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager, type CodemodeToolDetails } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, createCodemodeExtension, DefaultResourceLoader, defineTool, getAgentDir, SessionManager, SettingsManager, type CodemodeToolDetails } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import Value from "typebox/value";
 import type { Logger } from "pino";
 import { config } from "./config.ts";
 import type { LabelCategory, ThinkingLevel } from "./manifests.ts";
@@ -66,7 +68,12 @@ function createScratCodemodeExtension(options: Parameters<typeof createCodemodeE
   };
 }
 
-export async function executePi(options: PiOptions, { context, sessionFile, reviewerIndex, onSession, requireGrade = false, labelCategories, followUp }: {
+export type SubmitResultSpec = {
+  schema: Record<string, unknown>;
+  description?: string;
+};
+
+export async function executePi(options: PiOptions, { context, sessionFile, reviewerIndex, onSession, requireGrade = false, labelCategories, followUp, skillPath, submitResult }: {
   context: string;
   sessionFile?: string;
   reviewerIndex?: number;
@@ -74,6 +81,8 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
   requireGrade?: boolean;
   labelCategories?: readonly LabelCategory[];
   followUp?: string;
+  skillPath?: string;
+  submitResult?: SubmitResultSpec;
 }) {
   const { run, cwd, tools, scoped, storefront = false, baseSha, log, stop } = options;
   const readOnly = scoped.mode === "review";
@@ -95,6 +104,44 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
     reviewerIndex,
   );
   const browsing = names.includes("browser"), graded = storefront && requireGrade;
+  let submittedData: Record<string, unknown> | undefined;
+  const extraTools: NonNullable<Parameters<typeof createAgentSession>[0]>["customTools"] = [...customTools];
+  const toolNames: string[] = [...names];
+  if (submitResult) {
+    const rawProps = (typeof submitResult.schema.properties === "object" && submitResult.schema.properties !== null
+      ? submitResult.schema.properties : {}) as Record<string, unknown>;
+    if (Object.hasOwn(rawProps, "status")) {
+      throw new Error('submit_result schema must not define reserved property "status"');
+    }
+    const rawReq = Array.isArray(submitResult.schema.required) ? submitResult.schema.required.filter((k): k is string => typeof k === "string") : [];
+    const wrappedSchema = {
+      type: "object",
+      additionalProperties: false,
+      ...submitResult.schema,
+      properties: {
+        status: { type: "string", enum: ["complete", "incomplete", "needs_decision"], description: "Completion status of the assigned task." },
+        ...rawProps,
+      },
+      required: [...new Set(["status", ...rawReq])],
+    };
+    const submitToolSchema = Type.Unsafe<Record<string, unknown>>(wrappedSchema);
+    const submitTool = defineTool({
+      name: "submit_result",
+      label: "Submit structured result",
+      description: submitResult.description ?? "Record your structured result payload before sending your final Markdown response.",
+      parameters: submitToolSchema,
+      async execute(_id, params) {
+        if (!Value.Check(submitToolSchema, params)) {
+          const [err] = Value.Errors(submitToolSchema, params);
+          throw new Error(`Invalid submit_result payload${err ? ` at ${err.instancePath || "/"}: ${err.message}` : ""}`);
+        }
+        submittedData = params as Record<string, unknown>;
+        return { content: [{ type: "text", text: "Structured result recorded. Now send your concise Markdown report as your final response." }], details: { recorded: true } };
+      },
+    });
+    extraTools.push(submitTool);
+    toolNames.push("submit_result");
+  }
   const codemodeEnabled = (scoped.codemode ?? (readOnly ? config.tools.codemode.review : config.tools.codemode.change)) && names.length > 0;
   if (codemodeEnabled) process.env.PI_CODEMODE_MAX_WORKERS = String(config.tools.codemode.maxWorkers);
   const settingsManager = SettingsManager.inMemory({ retry: config.harness.agentRetry });
@@ -129,7 +176,9 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
         ? "- `grep` is Rust regex: no lookahead or backreferences; set `literal: true` for exact text and `mode: \"files\"` for broad inventories. Counts cover the stated search scope; reduced output is for navigation and a partial scan cannot establish absence — narrow or read the spill file when missing results matter."
         : "- `grep` is Rust regex: no lookahead or backreferences; set `literal: true` for exact text.",
       ...codemodeEnabled ? ["- `codemode` runs JavaScript in a QuickJS sandbox against your available tools; intermediate tool outputs stay inside the script, so use it to batch parallel reads/greps/git diffs (`Promise.allSettled`) or filter large outputs before returning concise findings."] : [],
-      "End your final Markdown response with exactly one line: SCRAT_STATUS: complete, SCRAT_STATUS: incomplete, or SCRAT_STATUS: needs_decision. Complete means the assigned work is finished, not merely that this session ended. For reviews, a complete assessment may contain defects or find the issue unready; use incomplete only if the assessment itself cannot be completed. For implementation, partial work or unresolved blockers are not complete. The harness withholds incomplete implementations from publication. Put an issue's SCRAT_READY marker before the status line, only when warranted.",
+      submitResult
+        ? "Before ending your final response, call the `submit_result` tool with your complete structured payload (including `status`: complete, incomplete, or needs_decision), then return your concise Markdown report as your final response."
+        : "End your final Markdown response with exactly one line: SCRAT_STATUS: complete, SCRAT_STATUS: incomplete, or SCRAT_STATUS: needs_decision. Complete means the assigned work is finished, not merely that this session ended. For reviews, a complete assessment may contain defects or find the issue unready; use incomplete only if the assessment itself cannot be completed. For implementation, partial work or unresolved blockers are not complete. The harness withholds incomplete implementations from publication. Put an issue's SCRAT_READY marker before the status line, only when warranted.",
     ],
   });
   await resourceLoader.reload();
@@ -140,7 +189,7 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
     : SessionManager.create(cwd, sessionDir);
   const { session } = await createAgentSession({
     cwd, modelRuntime, model, thinkingLevel, settingsManager, sessionManager, resourceLoader,
-    tools: codemodeEnabled ? [...names, "codemode"] : names, customTools,
+    tools: codemodeEnabled ? [...toolNames, "codemode"] : toolNames, customTools: extraTools,
   });
   liveToolCallIds = () => {
     const ids = new Set<string>();
@@ -199,7 +248,7 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
       if (timedOut) throw Object.assign(new Error(`Agent turn exceeded ${config.harness.agentTimeoutSeconds} seconds and was aborted after ${Math.round((performance.now() - started) / 1000)} seconds`), { code: "AGENT_TIMEOUT" });
       if (drained) throw new InterruptedError(`Agent turn was still running ${config.harness.drainTimeoutSeconds} seconds after the worker was told to stop and was aborted`);
     };
-    await prompt(followUp ?? `${withStorefront(withBotName(await readFile(run.skill, "utf8")), storefront)}\n\n${context}`);
+    await prompt(followUp ?? `${withStorefront(withBotName(await readFile(skillPath ?? run.skill, "utf8")), storefront)}\n\n${context}`);
     let continuations = 0, regressionReported = false;
     for (let corrections = 0; ; corrections++) {
       const last = session.messages.findLast((message) => message.role === "assistant");
@@ -216,16 +265,30 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
         });
       }
       try {
-        const output = session.getLastAssistantText()?.trim();
-        if (!output) throw new ResultFormatError("Pi returned an empty response");
-        const result = parseResult(output, [], { requireGrade, labelCategories });
+        const output = session.getLastAssistantText()?.trim() ?? "";
+        let result: ReturnType<typeof parseResult> & { data?: Record<string, unknown> };
+        if (submitResult) {
+          if (!submittedData) {
+            throw new ResultFormatError("Call the submit_result tool with a valid structured payload before ending your response");
+          }
+          const outcome = submittedData.status as "complete" | "incomplete" | "needs_decision";
+          const text = output || (typeof submittedData.markdown === "string" ? submittedData.markdown.trim() : "");
+          if (!text) throw new ResultFormatError("Provide a non-empty Markdown report in your final response after calling submit_result");
+          result = { outcome, text, paths: [], ready: false, data: submittedData };
+        } else {
+          if (!output) throw new ResultFormatError("Pi returned an empty response");
+          result = parseResult(output, [], { requireGrade, labelCategories });
+        }
         const problem = graded && result.outcome === "complete" ? storefrontProblem(result, config.storefront.limits.regressionMaxGrade, regressionReported) : undefined;
         regressionReported ||= result.storefront === "regression";
         if (problem) throw new ResultFormatError(problem);
         if (readOnly && result.outcome === "incomplete" && continuations < config.harness.corrections.incomplete) {
           continuations++;
           log.warn({ event: "pi.incomplete_continue", attempt: continuations });
-          await prompt(continuationMessage(requireGrade, graded, labelCategories !== undefined));
+          submittedData = undefined;
+          await prompt(submitResult
+            ? "Your assessment was returned incomplete. Finish the remaining inspection, call `submit_result` with the final payload, and return the full Markdown report."
+            : continuationMessage(requireGrade, graded, labelCategories !== undefined));
           corrections--;
           continue;
         }
@@ -240,7 +303,13 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
       } catch (error) {
         if (!(error instanceof ResultFormatError) || corrections >= config.harness.corrections.format) throw error;
         log.warn({ event: "pi.format_retry", attempt: corrections + 1, err: error });
-        await prompt(correctionMessage(error.message, requireGrade, graded, labelCategories !== undefined));
+        const keepValidPayload = Boolean(submitResult && submittedData && error.message.includes("Markdown report"));
+        if (!keepValidPayload) submittedData = undefined;
+        await prompt(submitResult
+          ? keepValidPayload
+            ? `Your previous final answer was not accepted: ${error.message}. Your structured payload is already recorded; now return your complete Markdown report.`
+            : `Your previous final answer was not accepted: ${error.message}. Call \`submit_result\` with a valid payload and return your complete Markdown report.`
+          : correctionMessage(error.message, requireGrade, graded, labelCategories !== undefined));
       }
     }
   } finally {

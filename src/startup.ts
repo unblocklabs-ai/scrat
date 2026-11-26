@@ -1,7 +1,7 @@
-import { access, lstat, mkdir } from "node:fs/promises";
-import { manifests } from "./actions.ts";
+import { access, lstat, mkdir, readFile } from "node:fs/promises";
+import { manifests, workflows } from "./actions.ts";
 import { type Resolver, publicAnswers, resolveHost, validateBindings } from "./bindings.ts";
-import { config } from "./config.ts";
+import { config, trustLocalWorkflowScripts } from "./config.ts";
 import { configError, type ScratConfig } from "./config-schema.ts";
 import { type ActionSettings, deploymentDefaults, entryProblems, resolveAction, scheduleProblem, type Manifest } from "./manifests.ts";
 import { slugOf } from "./identity.ts";
@@ -10,10 +10,80 @@ import { errorMessage } from "./errors.ts";
 import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 import { loadPlaywright } from "./scoped-tools.ts";
 import { authTest } from "./slack.ts";
+import { loadWorkflowScript } from "./workflow-runner.ts";
+import { resolveWorkflow, workflowDeploymentDefaults, type WorkflowDefinition } from "./workflows.ts";
 
 const templateVariables = new Set(["sha", "short_sha", "author", "title", "url", "branch", "count", "bot", "change"]);
 
 type Entry = { provider: string; model: string };
+
+const staticImportPattern = /(?:^|[;\n])\s*(?:import|export)\s+(?!type\b)(?:[^;'"]*?\s+from\s+)?["']([^"']+)["']/g;
+const dynamicImportPattern = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
+const createRequirePattern = /\bcreateRequire\s*\(/;
+
+async function workflowScriptImportProblems(scriptPath: string): Promise<string[]> {
+  const source = await readFile(scriptPath, "utf8");
+  const stripped = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const problems: string[] = [];
+  if (createRequirePattern.test(stripped)) {
+    problems.push("run.ts must not call createRequire (use import type, node:* built-ins, or ctx helpers)");
+  }
+  for (const pattern of [staticImportPattern, dynamicImportPattern]) {
+    pattern.lastIndex = 0;
+    for (const match of stripped.matchAll(pattern)) {
+      const spec = match[1]!;
+      if (!spec.startsWith("node:") && !spec.startsWith("./") && !spec.startsWith("../") && !spec.startsWith("/") && !spec.startsWith("file:")) {
+        problems.push(`run.ts must not import bare npm specifier "${spec}" at runtime (use import type or ctx helpers)`);
+      }
+    }
+  }
+  return problems;
+}
+
+export async function validateWorkflowDefinition(
+  wf: WorkflowDefinition,
+  settings: Omit<Partial<ScratConfig>, "actions"> & { actions: Record<string, Partial<ActionSettings>> } = config,
+  options: { checkDisabled?: boolean; trustLocalScripts?: boolean; checkSlack?: boolean } = {},
+) {
+  const { checkDisabled = false, trustLocalScripts = trustLocalWorkflowScripts, checkSlack = false } = options;
+  const untrustedScript = wf.local && wf.scriptPath !== undefined && !trustLocalScripts;
+  const modelRuntime = await sharedModelRuntime();
+  const problems: string[] = [];
+  const override = settings.workflows?.[wf.name];
+  const entry = resolveWorkflow(wf, { ...workflowDeploymentDefaults(wf), ...override });
+  for (const key of ["cron", "window"] as const) {
+    const value = override?.[key], problem = value === undefined ? undefined : scheduleProblem(key, value);
+    if (problem) problems.push(`workflows.${wf.name}.${key}: ${problem}`);
+  }
+  if (entry.enabled || checkDisabled) {
+    if (untrustedScript) {
+      problems.push(`${wf.name}: local workflow run.ts requires workflows.trustLocalScripts: true in scrat.local.json`);
+    }
+    const { provider, model } = entry.defaults;
+    if (!modelRuntime.getModel(provider, model)) {
+      problems.push(`${wf.name}: no Pi model ${provider}/${model}${modelRuntime.getError() ? ` (${modelRuntime.getError()})` : ""}`);
+    }
+    if (wf.skillPath && !await access(wf.skillPath).then(() => true, () => false)) {
+      problems.push(`${wf.name}: skill file not found: ${wf.skillPath}`);
+    }
+    if (wf.scriptPath) {
+      for (const issue of await workflowScriptImportProblems(wf.scriptPath).catch((error: unknown) => [errorMessage(error)])) {
+        problems.push(`${wf.name}: ${issue}`);
+      }
+      if (!untrustedScript) {
+        await loadWorkflowScript(wf.scriptPath).catch((error: unknown) => {
+          problems.push(`${wf.name}: failed to load run.ts: ${errorMessage(error)}`);
+        });
+      }
+    }
+    const channel = typeof entry.config.channel === "string" ? entry.config.channel.trim() : "";
+    if ((entry.enabled || checkSlack) && wf.permissions.slack.includes("post") && channel) {
+      if (!process.env.SLACK_BOT_TOKEN) problems.push(`${wf.name}: SLACK_BOT_TOKEN is not set`);
+      else await authTest().catch((error: unknown) => { problems.push(`${wf.name}: Slack auth.test failed: ${errorMessage(error)}`); });
+    }
+  }
+  return problems;
+}
 
 export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, "actions"> & { resolve?: Resolver; actions: Record<string, Partial<ActionSettings>> } = config) {
   const modelRuntime = await sharedModelRuntime();
@@ -130,6 +200,9 @@ export async function validateStaticConfig(settings: Omit<Partial<ScratConfig>, 
       }
       if (!await access(entry.skill).then(() => true, () => false)) problems.push(`${action}: skill file not found: ${entry.skill}`);
     }
+  }
+  for (const wf of workflows) {
+    problems.push(...await validateWorkflowDefinition(wf, settings));
   }
   if (problems.length) {
     if (modelRuntime.getError()) dropModelRuntime();

@@ -1,6 +1,7 @@
 import { type Static, Type } from "typebox";
 import Value from "typebox/value";
 import { actionSettings, modelSettings, nullable } from "./manifests.ts";
+import { workflowSettings } from "./workflows.ts";
 import { prGrades } from "./results.ts";
 
 const strict = { additionalProperties: false } as const;
@@ -119,6 +120,7 @@ const schema = Type.Object({
     }, open))),
   }, open)),
   actions: Type.Record(Type.String(), actionSettings),
+  workflows: Type.Optional(Type.Record(Type.String(), workflowSettings)),
 }, strict);
 
 export type ScratConfig = Static<typeof schema>;

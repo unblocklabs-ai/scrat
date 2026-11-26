@@ -1,4 +1,5 @@
-import { manifestOf } from "./actions.ts";
+import { isWorkflow, manifestOf, workflowOf } from "./actions.ts";
+import { runWorkflow } from "./workflow-runner.ts";
 import { refreshChangePublication } from "./change-publication.ts";
 import { getRepositoryPath } from "./config.ts";
 import { branchConflictCode, CompetingImplementation, ImplementationEnded, SupersededError, WorkflowPushRejected } from "./errors.ts";
@@ -134,18 +135,19 @@ export function supersedeRunningReviews(
   return count;
 }
 
-export async function runNextTask(stop?: AbortSignal) {
-  const claimed = claimTask();
+export async function runNextTask(stop?: AbortSignal, taskId?: string) {
+  const claimed = claimTask(taskId);
   if (!claimed) return;
   const { task, run, subject, item, resumingDeferred } = claimed;
-  const manifest = manifestOf(task.action);
+  const workflow = isWorkflow(task.action) ? workflowOf(task.action) : undefined;
+  const manifest = workflow ? undefined : manifestOf(task.action);
   const trigger = parseTriggerInput(task.input);
   const superseder = new AbortController();
   const runStop = stop ? AbortSignal.any([stop, superseder.signal]) : superseder.signal;
   const active: ActiveRun = {
     subjectId: subject.id,
     action: task.action,
-    mode: manifest.mode,
+    mode: manifest?.mode ?? "review",
     manual: isManual(trigger),
     supersede(reason) {
       if (superseder.signal.aborted || getRun(run.id)?.stage === "publishing") return false;
@@ -157,8 +159,16 @@ export async function runNextTask(stop?: AbortSignal) {
   const references = { subjectId: subject.id, taskId: task.id, runId: run.id };
   const operation = startOperation("run.execute", { ...references, action: task.action });
   const cleanup: Ctx["cleanup"] = { databaseRequested: false };
-  const ctx: Ctx = { task, run, subject, item, references, operation, manifest, repositoryPath: getRepositoryPath(), stop: runStop, cleanup };
   try {
+    if (workflow) {
+      await runWorkflow({
+        workflow, task, run, subject, references, repositoryPath: getRepositoryPath(), operation, stop: runStop, cleanup,
+      });
+      const finished = finishRun(run.id, { status: "completed" });
+      operation.complete({ heapUsedMb: heapUsed() });
+      return finished;
+    }
+    const ctx: Ctx = { task, run, subject, item, references, operation, manifest: manifest!, repositoryPath: getRepositoryPath(), stop: runStop, cleanup };
     const observed = await connect(ctx);
     if (observed?.pullRequest) active.target = `${observed.pullRequest.head.sha}@${observed.observation.baseBranch}`;
     if (observed && resumingDeferred) await restartStaleDeferredPublication(ctx, observed);
@@ -236,7 +246,7 @@ export async function runNextTask(stop?: AbortSignal) {
     }
     const failed = finishRun(run.id, { status: "failed", error });
     operation.fail(error, { heapUsedMb: heapUsed() });
-    if (item?.kind === "pr" && ctx.manifest.publish.includes("pr_assessment") && failed.stage !== "publishing" && failed.error?.code !== branchConflictCode) {
+    if (item?.kind === "pr" && manifest?.publish.includes("pr_assessment") && failed.stage !== "publishing" && failed.error?.code !== branchConflictCode) {
       await bestEffort(operation.log, "github.review_reconciliation_pending", references,
         () => reconcilePrReview(new GitHubRepository(subject.repository), subject.id, item.payload.number, references));
     }

@@ -5,10 +5,10 @@ import settings from "../scrat.config.json" with { type: "json" };
 import { buildConfig, isObject, type Json } from "./config-merge.ts";
 import { configError, validateConfig } from "./config-schema.ts";
 import { deploymentDefaults, findTriggerConflicts, readManifests, resolveAction } from "./manifests.ts";
+import { readWorkflows, workflowDeploymentDefaults } from "./workflows.ts";
 
 const configUrl = new URL("../scrat.config.json", import.meta.url);
 const localConfigUrl = new URL("../scrat.local.json", import.meta.url);
-
 
 function loadOverrides(): Json {
   try { writeFileSync(localConfigUrl, "{}\n", { flag: "wx" }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
@@ -23,13 +23,37 @@ const directory = isObject(overrides.actions) ? overrides.actions.directory : un
 if (directory !== undefined && directory !== null && (typeof directory !== "string" || !isAbsolute(directory))) {
   throw new Error("Invalid scrat.local.json: actions.directory must be an absolute path");
 }
-export const loadedManifests = readManifests(fileURLToPath(new URL(".", configUrl)), directory);
-const actionDefaults = { ...Object.fromEntries(loadedManifests.map((manifest) => [manifest.name, deploymentDefaults(manifest)])), directory: null };
+const workflowOverrides = isObject(overrides.workflows) ? overrides.workflows : undefined;
+const workflowDirectory = workflowOverrides?.directory;
+if (workflowDirectory !== undefined && workflowDirectory !== null && (typeof workflowDirectory !== "string" || !isAbsolute(workflowDirectory))) {
+  throw new Error("Invalid scrat.local.json: workflows.directory must be an absolute path");
+}
+const trustLocalScripts = workflowOverrides?.trustLocalScripts;
+if (trustLocalScripts !== undefined && typeof trustLocalScripts !== "boolean") {
+  throw new Error("Invalid scrat.local.json: workflows.trustLocalScripts must be a boolean");
+}
+export const trustLocalWorkflowScripts = trustLocalScripts === true;
+const repoRoot = fileURLToPath(new URL(".", configUrl));
+export const loadedManifests = readManifests(repoRoot, directory);
+export const loadedWorkflows = readWorkflows(repoRoot, workflowDirectory);
+const collidingNames = loadedWorkflows.filter((wf) => loadedManifests.some((manifest) => manifest.name === wf.name)).map((wf) => wf.name);
+if (collidingNames.length) throw configError(collidingNames.map((name) => `workflows.${name}: collides with existing action name`));
 
-const merged = buildConfig({ ...settings, actions: actionDefaults }, overrides);
+const actionDefaults = { ...Object.fromEntries(loadedManifests.map((manifest) => [manifest.name, deploymentDefaults(manifest)])), directory: null };
+const workflowDefaults = { ...Object.fromEntries(loadedWorkflows.map((wf) => [wf.name, workflowDeploymentDefaults(wf)])), directory: null };
+
+const merged = buildConfig({ ...settings, actions: actionDefaults, workflows: workflowDefaults }, overrides);
 delete (merged.actions as Json).directory;
+if (isObject(merged.workflows)) {
+  delete merged.workflows.directory;
+  delete merged.workflows.trustLocalScripts;
+}
 const unknownActions = Object.keys(merged.actions as Json).filter((name) => !loadedManifests.some((manifest) => manifest.name === name));
 if (unknownActions.length) throw configError(unknownActions.map((name) => `actions.${name}: unknown action`));
+const unknownWorkflows = isObject(merged.workflows)
+  ? Object.keys(merged.workflows as Json).filter((name) => !loadedWorkflows.some((wf) => wf.name === name))
+  : [];
+if (unknownWorkflows.length) throw configError(unknownWorkflows.map((name) => `workflows.${name}: unknown workflow`));
 export const config = validateConfig(merged);
 
 const conflicts = findTriggerConflicts(loadedManifests.map((manifest) => resolveAction(manifest, config.actions[manifest.name]!)), (action) => action.enabled !== false);
@@ -46,3 +70,4 @@ export function getRepositoryPath() {
 export const isBotLogin = (login: string | null | undefined) => login?.toLowerCase() === config.github.botLogin.toLowerCase();
 
 export const isActionEnabled = (action: string) => config.actions[action] !== undefined && config.actions[action].enabled !== false;
+export const isWorkflowEnabled = (name: string) => config.workflows?.[name] !== undefined && config.workflows[name].enabled !== false;

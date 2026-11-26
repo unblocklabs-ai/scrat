@@ -1,8 +1,9 @@
-import { config, isActionEnabled } from "./config.ts";
+import { workflowOf, workflows } from "./actions.ts";
+import { config, isActionEnabled, isWorkflowEnabled } from "./config.ts";
 import { type Cron, nextTick, parseCron, parseWindow } from "./cron.ts";
-import { type OperationScope } from "./logging.ts";
-import type { Action } from "./manifests.ts";
+import { type OperationScope, withOperationSync } from "./logging.ts";
 import { upsertSubject } from "./items.ts";
+import { assertConfiguredRepository } from "./repository.ts";
 import { enqueueOnce, pollSource, sourceCursor } from "./sources.ts";
 
 const cursorBranch = "schedule";
@@ -11,18 +12,29 @@ type StoredCursor = { next: string; cron?: string; window?: string };
 
 const readCursor = (value: string): StoredCursor => value.startsWith("{") ? JSON.parse(value) as StoredCursor : { next: value };
 
-export function pollSchedules(repository = config.github.repository, now = new Date()) {
-  return pollSource("schedule.poll", "schedule", repository, (manifest, operation) => pollAction(manifest, repository, now, operation));
+export async function pollSchedules(repository = config.github.repository, now = new Date()) {
+  const actionQueued = await pollSource("schedule.poll", "schedule", repository, (manifest, operation) =>
+    pollScheduled(manifest.name, { cron: manifest.trigger.cron!, window: manifest.trigger.window! }, isActionEnabled(manifest.name), repository, now, operation));
+  const scheduledWorkflows = workflows.map((wf) => workflowOf(wf.name)).filter((wf) => wf.on.cron);
+  if (!scheduledWorkflows.length) return actionQueued;
+  const workflowQueued = withOperationSync("workflow_schedule.poll", { repository }, (operation) => {
+    assertConfiguredRepository(repository);
+    let queued = 0;
+    for (const wf of scheduledWorkflows) {
+      queued += pollScheduled(wf.name, { cron: wf.on.cron!, window: wf.on.window ?? "24h" }, isWorkflowEnabled(wf.name), repository, now, operation);
+    }
+    operation.complete({ queued });
+    return queued;
+  });
+  return actionQueued + workflowQueued;
 }
 
-function pollAction(manifest: Action, repository: string, now: Date, operation: OperationScope) {
-  const { name: action, trigger } = manifest;
+function pollScheduled(action: string, expression: { cron: string; window: string }, enabled: boolean, repository: string, now: Date, operation: OperationScope) {
   const cursor = sourceCursor(repository, action, cursorBranch);
-  if (!isActionEnabled(action)) {
+  if (!enabled) {
     cursor.clear();
     return 0;
   }
-  const expression = { cron: trigger.cron!, window: trigger.window! };
   const cron: Cron = parseCron(expression.cron);
   const save = (next: Date) => cursor.save(JSON.stringify({ next: next.toISOString(), ...expression }));
   const stored = cursor.value ? readCursor(cursor.value) : undefined;

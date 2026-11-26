@@ -1,0 +1,42 @@
+name: maintainer-sweep
+description: Weekly architectural sweep of open issues and recent merged PRs to propose one high-leverage primitive or refactor that removes a shared root cause.
+enabled: false
+priority: 5
+on:
+  cron: "0 13 * * 1"
+  window: "168h"
+  manual: true
+permissions:
+  github:
+    - read
+    - issue
+  slack:
+    - post
+  workspace:
+    - read
+defaults:
+  provider: codex-lb
+  model: gpt-6.2-sol
+  thinkingLevel: xhigh
+  codemode: true
+  retry:
+    initialDelaySeconds: 60
+    maxDelaySeconds: 3600
+  tools:
+    - read
+    - grep
+    - find
+    - ls
+    - git
+config:
+  channel: ""
+  issueLabels:
+    - maintainer-rfc
+  maxOpenIssues: 80
+  maxOpenPrs: 40
+  recentMergedDays: 14
+  maxMergedPrs: 40
+  minLinkedIssues: 2
+  maxIssueBodyChars: 1200
+  maxPrBodyChars: 800
+  maxProposedHistory: 50

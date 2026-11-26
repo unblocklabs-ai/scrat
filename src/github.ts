@@ -222,6 +222,37 @@ export class GitHubRepository {
     };
   }
 
+  async fetchRecentMergedPullRequests(sinceDays: number, limit?: number) {
+    const { github, owner, repo } = await this.read();
+    const cutoffMs = Date.now() - Math.max(1, sinceDays) * 86_400_000;
+    const perPage = 100;
+    type PullRequest = Awaited<ReturnType<typeof github.rest.pulls.list>>["data"][number];
+    const merged: Array<{ pr: PullRequest; mergedAt: string; mergedAtMs: number }> = [];
+    for (let page = 1; ; page++) {
+      const { data } = await github.rest.pulls.list({
+        owner, repo, state: "closed", sort: "updated", direction: "desc", per_page: perPage, page,
+      });
+      for (const pr of data) {
+        if (!pr.merged_at) continue;
+        const mergedAtMs = Date.parse(pr.merged_at);
+        if (mergedAtMs >= cutoffMs) merged.push({ pr, mergedAt: pr.merged_at, mergedAtMs });
+      }
+      if (data.length < perPage || Date.parse(data.at(-1)!.updated_at) < cutoffMs) break;
+    }
+    return merged
+      .sort((a, b) => b.mergedAtMs - a.mergedAtMs)
+      .slice(0, limit)
+      .map(({ pr, mergedAt }) => ({
+        number: pr.number,
+        title: pr.title,
+        body: pr.body ?? "",
+        url: pr.html_url,
+        mergedAt,
+        labels: pr.labels.map((label) => label.name).filter((name): name is string => Boolean(name)),
+        author: pr.user?.login ?? "",
+      }));
+  }
+
   async fetchItemContext(kind: "issue" | "pr", number: number, { comments: withComments = true, item: known }: { comments?: boolean; item?: GithubItem } = {}): Promise<GithubContext> {
     const { github, owner, repo } = await this.read();
     const when = <T>(enabled: boolean, read: () => Promise<T[]>) => enabled ? read() : Promise.resolve([] as T[]);

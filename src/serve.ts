@@ -1,3 +1,5 @@
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { runCommand } from "./cli.ts";
 import { config } from "./config.ts";
@@ -34,7 +36,16 @@ async function worker() {
 }
 await runCommand("Serve failed", async () => {
   await validateStaticConfig();
-  logger.info({ event: "worker.started", concurrency: config.harness.maxConcurrency });
-  await pollSources();
-  await Promise.all([poll(), ...Array.from({ length: config.harness.maxConcurrency }, worker)]);
+  const pidFile = resolve("data/serve.pid");
+  mkdirSync(resolve("data"), { recursive: true });
+  writeFileSync(pidFile, `${process.pid}\n`);
+  try {
+    logger.info({ event: "worker.started", concurrency: config.harness.maxConcurrency });
+    await pollSources();
+    await Promise.all([poll(), ...Array.from({ length: config.harness.maxConcurrency }, worker)]);
+  } finally {
+    if (existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() === String(process.pid)) {
+      rmSync(pidFile, { force: true });
+    }
+  }
 }, { event: "serve.failed" });

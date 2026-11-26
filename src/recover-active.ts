@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { resolve } from "node:path";
 import { db } from "./db.ts";
 import { desc, eq, isNull } from "drizzle-orm";
 import { config } from "./config.ts";
@@ -18,9 +20,31 @@ const consecutiveCrashes = (taskId: string) => {
   return count;
 };
 
+function hasLiveCliOwner(taskId: string) {
+  const pidFile = resolve("data/cli-tasks", `${taskId}.pid`);
+  if (!existsSync(pidFile)) return false;
+  const pid = Number(readFileSync(pidFile, "utf8").trim());
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    rmSync(pidFile, { force: true });
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return true;
+    rmSync(pidFile, { force: true });
+    return false;
+  }
+}
+
 await runCommand("Run recovery failed", async () => {
   for (const run of db.select().from(runs).where(isNull(runs.finishedAt)).all()) {
     try {
+      if (hasLiveCliOwner(run.taskId)) {
+        logger.info({ event: "run.recovery_skipped_live_cli", runId: run.id, taskId: run.taskId });
+        continue;
+      }
       const crashes = consecutiveCrashes(run.taskId) + 1;
       if (crashes > config.harness.crashRequeues) finishRun(run.id, { status: "failed", error: new InterruptedError(workerStoppedMessage) });
       else interruptRun(run.id);

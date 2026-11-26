@@ -26,7 +26,9 @@ function schemaTemplate(repository) {
 export async function fixture(scenario, spec) {
   const repository = fileURLToPath(new URL("..", import.meta.url));
   const root = mkdtempSync(resolve(tmpdir(), "scrat-integration-"));
-  for (const path of ["src", "skills", "actions", "scrat.config.json", "package.json"]) cpSync(resolve(repository, path), resolve(root, "app", path), { recursive: true });
+  for (const path of ["src", "skills", "actions", "workflows", "scrat.config.json", "package.json"]) {
+    if (existsSync(resolve(repository, path))) cpSync(resolve(repository, path), resolve(root, "app", path), { recursive: true });
+  }
   symlinkSync(resolve(repository, "node_modules"), resolve(root, "app/node_modules"));
   process.chdir(root);
   const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -52,7 +54,7 @@ export async function fixture(scenario, spec) {
   if (patMode || scenario === "isolation") process.env.GITHUB_PAT = pat;
   const scoped = ["scoped_http", "scoped_github_search", "scoped_browser", "bindings_startup"].includes(scenario);
   if (scoped) process.env.SCOUT_TOKEN = "scout-" + "k9Xq2LmPz7".repeat(3);
-  if (scenario.startsWith("commit_review") || scenario === "store_audit" || scenario === "store_changes" || scenario === "recovery" || scenario === "isolation" || scenario.startsWith("slack_status") || scenario === "publish_effects") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
+  if (scenario.startsWith("commit_review") || scenario === "store_audit" || scenario === "store_changes" || scenario === "recovery" || scenario === "isolation" || scenario.startsWith("slack_status") || scenario === "publish_effects" || scenario === "workflows") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
   const verdicts = {}, modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), checkRuns = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [], deployments = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set(), permissions: new Set(), commitComment: new Set() };
@@ -170,9 +172,9 @@ export async function fixture(scenario, spec) {
     const corrected = texts.at(-1).startsWith("Your previous final answer was not accepted");
     const continued = texts.at(-1).startsWith("Your assessment was returned incomplete");
     const feedback = texts.at(-1).startsWith(`${config.github.botName}'s validation failed`), turnStart = request.messages.at(-1).role === "user";
-    const start = text.indexOf('{\n  "action"');
-    const context = JSON.parse(text.slice(start, text.indexOf("\n}", start) + 2));
-    const consolidating = text.includes("Consolidate the two independent reviews below");
+    const start = text ? text.indexOf('{\n  "action"') : -1;
+    const context = start >= 0 ? JSON.parse(text.slice(start, text.indexOf("\n}", start) + 2)) : { action: "workflow", item: { number: 0 } };
+    const consolidating = Boolean(text?.includes("Consolidate the two independent reviews below"));
     const mode = modes.get(context.item.number) ?? "normal";
     const seen = transient.seen.get(request.model) ?? 0;
     if ((mode === "transient" || (mode === "transient-mixed" && !request.model.includes("deepseek"))) && seen < transient.failures) {
@@ -283,7 +285,7 @@ export async function fixture(scenario, spec) {
       + (mode === "issues-bad" ? '\nSCRAT_ISSUE_BEGIN\ntitle: Bad\nfingerprint: a --> <!-- b\n\nBad fingerprint.\nSCRAT_ISSUE_END' : "")
       + (mode === "revised" ? "\nRevised after the latest changes." : "")
       + (mode === "ready" ? "\nSCRAT_READY" : "")
-      + (text.includes("\n## Storefront preview\n") && storefrontLine ? `\nSCRAT_STOREFRONT: ${storefrontLine}` : "")
+      + (text?.includes("\n## Storefront preview\n") && storefrontLine ? `\nSCRAT_STOREFRONT: ${storefrontLine}` : "")
       + (["review_pr", "my_pr_review"].includes(context.action) && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : storefrontGrade ?? (["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : mode === "grade-C" ? "C" : "B")}` : "")
       + (verdict ? `\nSCRAT_VERDICT: ${verdict}` : "")
       + (mode === "no-status" || (fumble && mode === "format-once" && !review) ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
@@ -316,9 +318,9 @@ export async function fixture(scenario, spec) {
   config.actions = Object.fromEntries(readdirSync("app/actions").map((file) => parseYaml(readFileSync("app/actions/" + file, "utf8")))
     .map(({ name, reviewers = [] }) => [name, { provider: "fixture", ...reviewers.length && { reviewers: reviewers.map((reviewer) => ({ ...reviewer, provider: "fixture" })) } }]));
   for (const configure of spec.configure ?? []) configure(config);
-  const { actions, ...fileSettings } = config;
+  const { actions, workflows, ...fileSettings } = config;
   writeFileSync("app/scrat.config.json", JSON.stringify(fileSettings));
-  writeFileSync("app/scrat.local.json", JSON.stringify({ actions }));
+  writeFileSync("app/scrat.local.json", JSON.stringify({ actions, ...(workflows && { workflows }) }));
   mkdirSync("data");
   copyFileSync(schemaTemplate(repository), "data/scrat.sqlite");
   const app = async (path) => import(pathToFileURL(resolve("app/src", path)));
@@ -483,7 +485,17 @@ export async function fixture(scenario, spec) {
     }
     match = path.match(/\/commits\/([0-9a-f]+)\/check-runs$/);
     if (match) { if (tokens.get(credential)?.checks !== "read") return reply({ message: "Resource not accessible by integration" }, 403); const runs = checkRuns.get(match[1]) ?? []; return Object.defineProperty(reply({ total_count: runs.length, check_runs: runs }), "url", { value: url.href }); }
-    if (path.endsWith("/pulls") && method === "GET") return reply(prs.filter((pr) => (!url.searchParams.get("head") || pr.head.ref === url.searchParams.get("head").split(":").slice(1).join(":")) && (url.searchParams.get("state") !== "open" || pr.state === "open")));
+    if (path.endsWith("/pulls") && method === "GET") {
+      const stateParam = url.searchParams.get("state");
+      const matched = prs.filter((pr) => (!url.searchParams.get("head") || pr.head.ref === url.searchParams.get("head").split(":").slice(1).join(":"))
+        && (!stateParam || stateParam === "all" || pr.state === stateParam));
+      const size = Number(url.searchParams.get("per_page") ?? 0), page = Number(url.searchParams.get("page") ?? 1);
+      if (size <= 0) return reply(matched);
+      const next = page * size < matched.length
+        ? { link: `<https://api.github.com${path}?${new URLSearchParams({ ...Object.fromEntries(url.searchParams), page: String(page + 1) })}>; rel="next"` }
+        : {};
+      return reply(matched.slice((page - 1) * size, page * size), 200, next);
+    }
     if (path.endsWith("/pulls") && method === "POST") {
       if (!can("pull_requests") || !["read", "write"].includes(tokens.get(credential)?.contents)) {
         return reply({ message: "Validation Failed", errors: [{ resource: "PullRequest", code: "custom", message: "not all refs are readable" }] }, 422);

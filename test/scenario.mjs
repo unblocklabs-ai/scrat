@@ -6207,6 +6207,374 @@ fi
     const labelTools = labelReqs[0].request.tools.map((t) => t.function?.name ?? t.name);
     assert.ok(!labelTools.includes("codemode"), `label_items must omit codemode, got ${labelTools.join(",")}`);
   } },
+  workflows: {
+    title: "workflows enforce trustLocalScripts, preserve effect receipts across hash changes, guard uncertain Slack delivery, isolate skill-only runs, gate outcomes, serialize concurrency, paginate merged PRs, and typecheck scripts",
+    seed: () => {
+      mkdirSync("app/workflows/checkpoint-demo", { recursive: true });
+      writeFileSync("app/workflows/checkpoint-demo/workflow.yaml", [
+        "name: checkpoint-demo",
+        "description: Tests step checkpointing, effect receipts, state null/update, and parallel sync throws",
+        "enabled: false",
+        "on:",
+        "  manual: true",
+        "permissions:",
+        "  slack:",
+        "    - post",
+        "defaults:",
+        "  provider: fixture",
+        "  model: gpt-6.2-sol",
+        "  thinkingLevel: low",
+      ].join("\n") + "\n");
+      writeFileSync("app/workflows/checkpoint-demo/run.ts", [
+        'import { existsSync, readFileSync, writeFileSync } from "node:fs";',
+        'import type { WorkflowContext } from "../../src/workflow-ctx.ts";',
+        'export default async function (ctx: WorkflowContext) {',
+        '  if (ctx.trigger.input.mode === "state-and-parallel") {',
+        '    ctx.state.set("nullable", null);',
+        '    const gotNull = ctx.state.get("nullable");',
+        '    const updated = ctx.state.update<number[]>("nums", (prev = []) => [...prev, 1]);',
+        '    let siblingSettled = false;',
+        '    let caughtSync = false;',
+        '    try {',
+        '      await ctx.parallel({',
+        '        asyncSibling: async () => { await new Promise((r) => setTimeout(r, 20)); siblingSettled = true; return 1; },',
+        '        syncBoom: () => { throw new Error("sync boom"); },',
+        '      });',
+        '    } catch (err) {',
+        '      caughtSync = err instanceof Error && err.message === "sync boom";',
+        '    }',
+        '    return { gotNull, updated, siblingSettled, caughtSync };',
+        '  }',
+        '  if (ctx.trigger.input.mode === "uncertain-slack") {',
+        '    return await ctx.slack.post({ key: "uncertain-key", channel: "C-WF", text: "Maybe sent" });',
+        '  }',
+        '  if (ctx.trigger.input.mode === "dup-effect") {',
+        '    return await ctx.parallel({',
+        '      a: () => ctx.slack.post({ key: "race-key", channel: "C-WF", text: "A" }),',
+        '      b: () => ctx.slack.post({ key: "race-key", channel: "C-WF", text: "B" }),',
+        '    });',
+        '  }',
+        '  const counterFile = String(ctx.trigger.input.counterFile);',
+        '  const failFile = String(ctx.trigger.input.failFile);',
+        '  const fetched = await ctx.step("fetch", { v: 1 }, async () => {',
+        '    const prev = existsSync(counterFile) ? Number(readFileSync(counterFile, "utf8")) : 0;',
+        '    writeFileSync(counterFile, String(prev + 1));',
+        '    return { count: prev + 1 };',
+        '  });',
+        '  const posted = await ctx.slack.post({ key: "notify-once", channel: "C-WF", text: "Checkpoint hello" });',
+        '  const done = await ctx.step("finish", { fetched }, async () => {',
+        '    if (existsSync(failFile)) throw new Error("Simulated transient crash after step 1");',
+        '    return { ok: true, count: fetched.count, ts: posted.ts };',
+        '  });',
+        '  return done;',
+        '}',
+      ].join("\n") + "\n");
+
+      mkdirSync("local-workflows/skill-only", { recursive: true });
+      writeFileSync("local-workflows/skill-only/workflow.yaml", [
+        "name: skill-only",
+        "description: Single-agent local workflow with workspace read",
+        "enabled: false",
+        "on:",
+        "  manual: true",
+        "permissions:",
+        "  workspace:",
+        "    - read",
+        "defaults:",
+        "  provider: fixture",
+        "  model: gpt-6.2-sol",
+        "  thinkingLevel: low",
+        "  codemode: false",
+      ].join("\n") + "\n");
+      writeFileSync("local-workflows/skill-only/SKILL.md", "# Skill Only\nInspect src/app.ts and report SCRAT_STATUS: complete.\n");
+
+      mkdirSync("local-workflows/no-workspace", { recursive: true });
+      writeFileSync("local-workflows/no-workspace/workflow.yaml", [
+        "name: no-workspace",
+        "description: Single-agent local workflow without workspace read permission",
+        "enabled: false",
+        "on:",
+        "  manual: true",
+        "defaults:",
+        "  provider: fixture",
+        "  model: gpt-6.2-sol",
+        "  thinkingLevel: low",
+        "  codemode: false",
+      ].join("\n") + "\n");
+      writeFileSync("local-workflows/no-workspace/SKILL.md", "# No Workspace\nDo not read repository files.\n");
+
+      mkdirSync("local-workflows/bad-local", { recursive: true });
+      writeFileSync("local-workflows/bad-local/workflow.yaml", [
+        "name: bad-local",
+        "enabled: false",
+        "on:",
+        "  manual: true",
+        "defaults:",
+        "  provider: fixture",
+        "  model: gpt-6.2-sol",
+        "  thinkingLevel: low",
+      ].join("\n") + "\n");
+      writeFileSync("local-workflows/bad-local/run.ts", 'import { parse } from "yaml";\nexport default async function () { return parse("a: 1"); }\n');
+
+      mkdirSync("app/workflows/type-error-demo", { recursive: true });
+      writeFileSync("app/workflows/type-error-demo/workflow.yaml", [
+        "name: type-error-demo",
+        "enabled: false",
+        "on:",
+        "  manual: true",
+        "defaults:",
+        "  provider: fixture",
+        "  model: gpt-6.2-sol",
+        "  thinkingLevel: low",
+      ].join("\n") + "\n");
+      writeFileSync("app/workflows/type-error-demo/run.ts", [
+        'import type { WorkflowContext } from "../../src/workflow-ctx.ts";',
+        'export default async function (ctx: WorkflowContext) { return ctx.doesNotExist(); }',
+      ].join("\n") + "\n");
+    },
+    configure: [(config) => {
+      config.workflows = {
+        directory: resolve("local-workflows"),
+        "maintainer-sweep": {
+          enabled: false,
+          provider: "fixture",
+          model: "gpt-6.2-sol",
+          thinkingLevel: "low",
+          codemode: false,
+          config: { channel: "C-MAINT", minLinkedIssues: 2, issueLabels: ["maintainer-rfc"] },
+        },
+      };
+    }],
+    run: async () => {
+      const { workflows } = await f.app("actions.ts");
+      const { validateWorkflowDefinition } = await f.app("startup.ts");
+      const { pollSchedules } = await f.app("schedule-source.ts");
+      const { config: liveConfig } = await f.app("config.ts");
+      const { GitHubRepository } = await f.app("github.ts");
+
+      const msDef = workflows.find((w) => w.name === "maintainer-sweep");
+      const skillDef = workflows.find((w) => w.name === "skill-only");
+      const badDef = workflows.find((w) => w.name === "bad-local");
+      assert.ok(msDef && !msDef.local, "maintainer-sweep should load as bundled workflow");
+      assert.ok(skillDef && skillDef.local, "skill-only should load from local workflows.directory");
+      assert.ok(badDef && badDef.local, "bad-local should load from local workflows.directory");
+      assert.deepEqual(await validateWorkflowDefinition(msDef, liveConfig, { checkDisabled: true }), []);
+      assert.deepEqual(await validateWorkflowDefinition(skillDef, liveConfig, { checkDisabled: true }), []);
+      const badProblems = await validateWorkflowDefinition(badDef, liveConfig, { checkDisabled: true });
+      assert.ok(badProblems.some((p) => /requires workflows\.trustLocalScripts: true/.test(p)), `expected trustLocalScripts error, got: ${badProblems.join("; ")}`);
+      assert.ok(badProblems.some((p) => /must not import bare npm specifier "yaml"/.test(p)), `expected bare import error, got: ${badProblems.join("; ")}`);
+
+      const checkError = (() => {
+        try {
+          execFileSync(process.execPath, [resolve("app/src/workflow-cli.ts"), "check", "type-error-demo"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+          return "";
+        } catch (err) {
+          return String(err.stderr ?? "") + String(err.stdout ?? "");
+        }
+      })();
+      assert.match(checkError, /doesNotExist/, "workflow check must fail on TypeScript error in run.ts");
+
+      const counterFile = resolve("step1.count");
+      const failFile = resolve("fail-step2.flag");
+      writeFileSync(failFile, "1");
+      const cpTask = tasks.enqueueWorkflowRun("checkpoint-demo", { input: { counterFile, failFile } });
+      const firstRun = await f.runNextTask(undefined, cpTask.id);
+      assert.ok(firstRun?.error, "first attempt should fail in step 2");
+      assert.equal(f.row(s.subjects, cpTask.subjectId).state, "open", "failed workflow subject stays open for retry");
+      assert.equal(readFileSync(counterFile, "utf8"), "1", "step 1 should have executed once");
+      assert.equal(f.slack.calls.filter((c) => c.method === "chat.postMessage" && c.body.channel === "C-WF").length, 1);
+
+      db.update(s.steps).set({ workflowHash: "stale-prior-deploy-hash" }).where(eq(s.steps.taskId, cpTask.id)).run();
+      rmSync(failFile);
+      tasks.retryTask(cpTask.id);
+      const secondRun = await f.runNextTask(undefined, cpTask.id);
+      assert.ok(secondRun && !secondRun.error, `retry should succeed, got ${secondRun?.error?.message}`);
+      assert.equal(readFileSync(counterFile, "utf8"), "2", "compute step re-runs when workflowHash changes");
+      assert.equal(f.slack.calls.filter((c) => c.method === "chat.postMessage" && c.body.channel === "C-WF").length, 1, "effect receipt MUST ignore workflowHash and never double-post Slack");
+      assert.equal(secondRun.publication.status, "published");
+      assert.equal(f.row(s.subjects, cpTask.subjectId).state, "closed", "completed workflow subject is closed");
+
+      f.slack.down = true;
+      const uncertainTask = tasks.enqueueWorkflowRun("checkpoint-demo", { input: { mode: "uncertain-slack" } });
+      const uncertainRun1 = await f.runNextTask(undefined, uncertainTask.id);
+      assert.ok(uncertainRun1?.error && /HTTP 503/.test(uncertainRun1.error.message));
+      f.slack.down = false;
+      tasks.retryTask(uncertainTask.id);
+      const uncertainRun2 = await f.runNextTask(undefined, uncertainTask.id);
+      assert.ok(uncertainRun2?.error && /Uncertain Slack delivery/.test(uncertainRun2.error.message), `expected uncertain Slack error on retry 1, got ${uncertainRun2?.error?.message}`);
+      tasks.retryTask(uncertainTask.id);
+      const uncertainRun3 = await f.runNextTask(undefined, uncertainTask.id);
+      assert.ok(uncertainRun3?.error && /Uncertain Slack delivery/.test(uncertainRun3.error.message), `uncertain Slack must stay blocked on retry 2, got ${uncertainRun3?.error?.message}`);
+      assert.equal(f.slack.calls.filter((c) => c.body.text === "Maybe sent").length, 1, "must never double-post after uncertain 503");
+
+      const dupEffTask = tasks.enqueueWorkflowRun("checkpoint-demo", { input: { mode: "dup-effect" } });
+      const dupEffRun = await f.runNextTask(undefined, dupEffTask.id);
+      assert.ok(dupEffRun?.error && /Concurrent effect call with duplicate key/.test(dupEffRun.error.message), `expected duplicate effect key rejection, got ${dupEffRun?.error?.message}`);
+
+      const spDry = tasks.enqueueWorkflowRun("checkpoint-demo", { input: { mode: "state-and-parallel" }, dryRun: true });
+      const spDryRun = await f.runNextTask(undefined, spDry.id);
+      assert.ok(spDryRun && !spDryRun.error, spDryRun?.error?.message);
+      assert.deepEqual(JSON.parse(spDryRun.result.text), { gotNull: null, updated: [1], siblingSettled: true, caughtSync: true });
+      assert.equal(all(s.workflowState).length, 0, "dry-run state.set/update must not write SQLite");
+
+      const spLive = tasks.enqueueWorkflowRun("checkpoint-demo", { input: { mode: "state-and-parallel" } });
+      const spLiveRun = await f.runNextTask(undefined, spLive.id);
+      assert.ok(spLiveRun && !spLiveRun.error, spLiveRun?.error?.message);
+      assert.deepEqual(JSON.parse(spLiveRun.result.text), { gotNull: null, updated: [1], siblingSettled: true, caughtSync: true });
+      assert.equal(spLiveRun.publication.status, "not_needed", "workflow with no effects records not_needed");
+
+      const serialA = tasks.enqueueWorkflowRun("checkpoint-demo", { input: { mode: "state-and-parallel" } });
+      const serialB = tasks.enqueueWorkflowRun("checkpoint-demo", { input: { mode: "state-and-parallel" } });
+      db.update(s.tasks).set({ status: "running" }).where(eq(s.tasks.id, serialA.id)).run();
+      assert.equal(tasks.claimTask(serialB.id), undefined, "same workflow must not run concurrently");
+      db.update(s.tasks).set({ status: "cancelled" }).where(eq(s.tasks.id, serialA.id)).run();
+      db.update(s.tasks).set({ status: "cancelled" }).where(eq(s.tasks.id, serialB.id)).run();
+
+      f.reset(0, "normal");
+      f.script = [
+        { name: "read", args: { path: "src/app.ts" } },
+        "Inspected src/app.ts successfully.\nSCRAT_STATUS: complete",
+      ];
+      const skillTask = tasks.enqueueWorkflowRun("skill-only", { input: { note: "hello" } });
+      const skillRun = await f.runNextTask(undefined, skillTask.id);
+      assert.ok(skillRun && !skillRun.error, `skill-only workflow failed: ${skillRun?.error?.message}`);
+      assert.match(skillRun.result.text, /Inspected src\/app\.ts/);
+      assert.equal(skillRun.publication.status, "not_needed");
+
+      f.reset(0, "normal");
+      const reqBeforeNoWs = f.requests.length;
+      f.script = [
+        { name: "read", args: { path: "src/app.ts" } },
+        "No repo access confirmed.\nSCRAT_STATUS: complete",
+      ];
+      const noWsTask = tasks.enqueueWorkflowRun("no-workspace");
+      const noWsRun = await f.runNextTask(undefined, noWsTask.id);
+      assert.ok(noWsRun && !noWsRun.error, noWsRun?.error?.message);
+      const noWsToolOutput = f.requests.slice(reqBeforeNoWs).at(-1).request.messages.filter((m) => m.role === "tool").map((m) => String(m.content)).join("\n");
+      assert.doesNotMatch(noWsToolOutput, /export const value = 1/, "skill-only workflow without workspace:read must not see repositoryPath");
+
+      branchOff("merged-fix", "src/app.ts", "export const value = 42;\n");
+      const oldClosed = new Date().toISOString();
+      for (let i = 0; i < 105; i++) {
+        f.addPr(300 + i, "merged-fix", "human", { state: "closed", merged_at: null, updated_at: oldClosed });
+      }
+      f.addPr(12, "merged-fix", "human", { state: "closed", merged_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+      const pagedMerged = await new GitHubRepository("fixture/project").fetchRecentMergedPullRequests(7, 10);
+      assert.ok(pagedMerged.some((pr) => pr.number === 12), "fetchRecentMergedPullRequests must paginate past page 1 unmerged closed PRs");
+
+      f.addIssue(10, ["bug"], "Retry loop hangs on 503");
+      f.addIssue(11, ["bug"], "Slack retry duplicates messages");
+
+      const proposalPayload = {
+        status: "complete",
+        found: true,
+        slug: "unified-retry",
+        title: "RFC: Unified retry primitive",
+        linkedNumbers: [10, 11, 12],
+        summary: "Both issues duplicate backoff and idempotency handling.",
+        evidence: [{ path: "src/app.ts", detail: "Duplicated retry loop" }],
+        proposal: "## Problem\nDuplicated retry loops in #10 and #11.\n\n## Primitive\nAdd `withRetry()`.",
+      };
+      const critiquePayload = {
+        status: "complete",
+        approved: true,
+        reason: "Verified src/app.ts and linked issues #10, #11.",
+      };
+
+      f.reset(0, "normal");
+      f.script = [
+        { name: "submit_result", args: { ...proposalPayload, status: "needs_decision" } },
+        "Needs human decision.",
+      ];
+      const ndTask = tasks.enqueueWorkflowRun("maintainer-sweep");
+      const ndRun = await f.runNextTask(undefined, ndTask.id);
+      assert.ok(ndRun?.error, "needs_decision proposal must fail step and not publish");
+      assert.equal(f.written("issue").length, 0);
+
+      f.reset(0, "normal");
+      f.script = [
+        { name: "submit_result", args: { ...proposalPayload, linkedNumbers: [999, 998] } },
+        "Submitted with bogus IDs.",
+      ];
+      const bogusTask = tasks.enqueueWorkflowRun("maintainer-sweep");
+      const bogusRun = await f.runNextTask(undefined, bogusTask.id);
+      assert.ok(bogusRun && !bogusRun.error);
+      assert.equal(JSON.parse(bogusRun.result.text).status, "rejected_threshold", "hallucinated linkedNumbers must be rejected");
+
+      f.reset(0, "normal");
+      const reqBeforeDry = f.requests.length;
+      f.script = [
+        { name: "submit_result", args: { status: "complete", found: true, slug: "BAD_SLUG" } },
+        "Malformed found:true submission.",
+        { name: "submit_result", args: { ...proposalPayload, status: "incomplete" } },
+        "Partial draft.",
+        "Forgot to call submit_result on continuation!",
+        { name: "submit_result", args: proposalPayload },
+        "Draft RFC submitted for critique.",
+        { name: "read", args: { path: "src/app.ts" } },
+        { name: "submit_result", args: critiquePayload },
+        "Critique approved the RFC.",
+      ];
+      const dryTask = tasks.enqueueWorkflowRun("maintainer-sweep", { dryRun: true });
+      const dryRun = await f.runNextTask(undefined, dryTask.id);
+      assert.ok(dryRun && !dryRun.error, `maintainer-sweep dry-run failed: ${dryRun?.error?.message}`);
+      const dryOut = JSON.parse(dryRun.result.text);
+      assert.equal(dryOut.status, "dry_run");
+      assert.ok(dryOut.issue.previewPath && existsSync(dryOut.issue.previewPath));
+      assert.ok(dryOut.slack.previewPath && existsSync(dryOut.slack.previewPath));
+      assert.equal(f.written("issue").length, 0);
+      assert.equal(f.slack.calls.filter((c) => c.body.channel === "C-MAINT").length, 0);
+      const dryReqs = f.requests.slice(reqBeforeDry);
+      assert.ok(dryReqs.some((r) => JSON.stringify(r.request.messages).includes("Call the submit_result tool")), "stale submittedData must be cleared on continuation so omitting submit_result triggers correction");
+      assert.ok(dryReqs.some((r) => JSON.stringify(r.request.messages).includes("Retry loop hangs on 503") && JSON.stringify(r.request.messages).includes("Maintainer RFC Critique")), "critic must receive linked issues");
+
+      f.reset(0, "normal");
+      f.script = [
+        { name: "submit_result", args: proposalPayload },
+        "Draft RFC submitted.",
+        { name: "submit_result", args: critiquePayload },
+        "Critique approved.",
+      ];
+      const liveTask = tasks.enqueueWorkflowRun("maintainer-sweep");
+      const liveRun = await f.runNextTask(undefined, liveTask.id);
+      assert.ok(liveRun && !liveRun.error, `maintainer-sweep live run failed: ${liveRun?.error?.message}`);
+      const liveOut = JSON.parse(liveRun.result.text);
+      assert.equal(liveOut.status, "opened");
+      assert.equal(liveRun.publication.status, "published");
+      assert.equal(f.written("issue").length, 1);
+      const openedIssue = f.issues.get(liveOut.issue.number);
+      assert.ok(openedIssue.labels.some((l) => l.name === "maintainer-rfc"));
+      assert.match(openedIssue.body, /<!-- scrat-fingerprint:workflow:maintainer-sweep:rfc-unified-retry -->/);
+      assert.equal(f.slack.calls.filter((c) => c.body.channel === "C-MAINT").length, 1);
+
+      f.reset(0, "normal");
+      f.script = [
+        { name: "submit_result", args: proposalPayload },
+        "Same RFC again.",
+      ];
+      const dupTask = tasks.enqueueWorkflowRun("maintainer-sweep");
+      const dupRun = await f.runNextTask(undefined, dupTask.id);
+      assert.ok(dupRun && !dupRun.error);
+      assert.equal(JSON.parse(dupRun.result.text).status, "already_proposed");
+      assert.equal(f.written("issue").length, 1);
+
+      liveConfig.workflows["maintainer-sweep"].enabled = true;
+      const before = new Date("2026-10-18T12:00:00Z");
+      const after = new Date("2026-10-19T14:00:00Z");
+      assert.equal(await pollSchedules("fixture/project", before), 0);
+      assert.equal(await pollSchedules("fixture/project", after), 1);
+      const cronTask = all(s.tasks).find((t) => t.action === "maintainer-sweep" && t.status === "queued" && t.input.kind === "tick");
+      assert.ok(cronTask, "cron tick must be enqueued");
+      f.reset(0, "normal");
+      f.script = [
+        { name: "submit_result", args: { status: "complete", found: false, summary: "No new shared root cause." } },
+        "No RFC this week.",
+      ];
+      const cronRun = await f.runNextTask(undefined, cronTask.id);
+      assert.ok(cronRun && !cronRun.error, `cron-triggered workflow run failed: ${cronRun?.error?.message}`);
+      assert.equal(JSON.parse(cronRun.result.text).status, "no_rfc");
+    },
+  },
 };
 
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {

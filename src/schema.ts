@@ -9,7 +9,7 @@ import type { LabelCategory } from "./manifests.ts";
 export const subjects = sqliteTable("subjects", {
   id: text("id").primaryKey().$defaultFn(randomUUID),
   repository: text("repository").notNull(),
-  kind: text("kind", { enum: ["item", "commit", "window"] }).notNull(),
+  kind: text("kind", { enum: ["item", "commit", "window", "workflow"] }).notNull(),
   key: text("key").notNull(),
   state: text("state", { enum: ["open", "closed"] }).notNull().default("open"),
   workspaceId: text("workspace_id").references(() => workspaces.id),
@@ -172,9 +172,29 @@ export const events = sqliteTable("events", {
   data: text("data", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
 });
 
+export const steps = sqliteTable("steps", {
+  taskId: text("task_id").notNull().references(() => tasks.id),
+  name: text("name").notNull(),
+  inputHash: text("input_hash").notNull(),
+  workflowHash: text("workflow_hash").notNull(),
+  status: text("status", { enum: ["running", "completed", "failed"] }).notNull(),
+  output: text("output", { mode: "json" }).$type<unknown>(),
+  error: text("error", { mode: "json" }).$type<ErrorDetails>(),
+  startedAt: text("started_at").notNull().$defaultFn(() => new Date().toISOString()),
+  finishedAt: text("finished_at"),
+}, (table) => [primaryKey({ columns: [table.taskId, table.name] })]);
+
+export const workflowState = sqliteTable("workflow_state", {
+  workflow: text("workflow").notNull(),
+  key: text("key").notNull(),
+  value: text("value", { mode: "json" }).$type<unknown>().notNull(),
+  updatedAt: text("updated_at").notNull().$defaultFn(() => new Date().toISOString()),
+}, (table) => [primaryKey({ columns: [table.workflow, table.key] })]);
+
 export type Run = typeof runs.$inferSelect;
 export type Task = typeof tasks.$inferSelect;
 export type Subject = typeof subjects.$inferSelect;
 export type Item = typeof items.$inferSelect;
 export type Workspace = typeof workspaces.$inferSelect;
 export type ThemePreview = typeof themePreviews.$inferSelect;
+export type StepRow = typeof steps.$inferSelect;

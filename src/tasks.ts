@@ -1,8 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, lte, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
-import { manifestOf, manifests } from "./actions.ts";
-import { config, isActionEnabled } from "./config.ts";
+import { defaultPriorityOf, isWorkflow, manifestOf, manifests, workflowOf, workflows } from "./actions.ts";
+import { config, isActionEnabled, isWorkflowEnabled } from "./config.ts";
 import { findItem, sameRepository } from "./repository.ts";
 import { db } from "./db.ts";
 import { CompetingImplementation, competingImplementationCode, describeError, type ErrorDetails, errorCode, errorMessage, ImplementationEnded, transientInferenceCode } from "./errors.ts";
@@ -13,7 +14,7 @@ import { recordEvent, type JournalEvent } from "./events.ts";
 import { withOperationSync } from "./logging.ts";
 import { entryStage, hasPublicationSnapshot, hasReviewCheckpoint, hasValidationCheckpoint, InterruptedError, workerStoppedMessage } from "./results.ts";
 import { getRun, getTask, latestRunOfTask } from "./run-history.ts";
-import { asItem } from "./items.ts";
+import { asItem, upsertSubject } from "./items.ts";
 import { categoriesFor, itemLabelKey } from "./item-labels.ts";
 import { items, runs, type Run, subjects, tasks, type Task, type Subject, workspaces } from "./schema.ts";
 import { isBaseOnly, isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
@@ -50,12 +51,17 @@ export function latestTask(subjectId: string, action: string, database: Pick<typ
 }
 
 const modeOf = (action: string) => manifests.find(({ name }) => name === action)?.mode;
+const workflowNames = workflows.map(({ name }) => name);
 
 function checkClaimable({ task, subject }: { task: Task; subject: Subject }, database: Pick<typeof db, "select">) {
-  if (!isActionEnabled(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
+  const wf = isWorkflow(task.action);
+  if (!wf && !isActionEnabled(task.action)) return { ok: false as const, reason: `Unknown action: ${task.action}` };
   let trigger;
   try { trigger = parseTriggerInput(task.input); }
   catch (error) { return { ok: false as const, reason: `Invalid trigger input for ${task.action}: ${errorMessage(error)}` }; }
+  if (wf && !isWorkflowEnabled(task.action) && !isManual(task.input)) {
+    return { ok: false as const, reason: `Workflow ${task.action} is disabled` };
+  }
   const { repository } = subject;
   if (!sameRepository(repository, config.github.repository)) return { ok: false as const, reason: `Subject belongs to ${repository}, not ${config.github.repository}` };
   const previousRun = latestRunOfTask(task.id, database);
@@ -65,11 +71,24 @@ function checkClaimable({ task, subject }: { task: Task; subject: Subject }, dat
 function sameRunInput(previous: Run, task: Task) {
   // For issue implementation, manual intent changes admission, not the evaluated work.
   return isDeepStrictEqual(previous.input, task.input)
-    || isManual(task.input) && manifestOf(task.action).publish.includes("pull_request")
+    || !isWorkflow(task.action) && isManual(task.input) && manifestOf(task.action).publish.includes("pull_request")
       && isDeepStrictEqual({ ...previous.input, manual: true }, task.input);
 }
 
 function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run | undefined; trigger: TriggerInput }) {
+  if (isWorkflow(task.action)) {
+    const wf = workflowOf(task.action);
+    const retry = previousRun?.error && sameRunInput(previousRun, task) ? previousRun : undefined;
+    const interrupted = retry?.error?.name === "InterruptedError";
+    const prior = interrupted ? undefined : retry;
+    const resumeReason = !interrupted ? "retry" as const : retry?.error?.message === workerStoppedMessage ? "crash" as const : "drain" as const;
+    return {
+      prior, resume: undefined, publicationResume: undefined, review: true, reviewers: [] as Run["reviewers"],
+      skill: wf.skillPath ?? wf.scriptPath ?? wf.file,
+      provider: wf.defaults.provider, model: wf.defaults.model, thinkingLevel: wf.defaults.thinkingLevel,
+      resumeReason, resumingDeferred: false, stage: "preparing" as const,
+    };
+  }
   const retry = previousRun?.error && sameRunInput(previousRun, task) ? previousRun : undefined;
   const action = manifestOf(task.action);
   const resumingDeferred = task.lastCompetingPullRequest !== null;
@@ -92,7 +111,8 @@ function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run |
 
 export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | "action" | "priority" | "reason"> & { input: TriggerInput }) {
   return withOperationSync("task.enqueue", { subjectId: task.subjectId, action: task.action }, (operation) => {
-    manifestOf(task.action);
+    if (isWorkflow(task.action)) workflowOf(task.action);
+    else manifestOf(task.action);
     const queued = db.transaction((transaction) => {
       const previous = pendingTaskOf(transaction, task.subjectId, task.action);
       if (previous?.status === "blocked" && !isManual(task.input)) return previous;
@@ -100,7 +120,7 @@ export function enqueueTask(task: Pick<typeof tasks.$inferInsert, "subjectId" | 
         : previous && isManual(previous.input) ? { ...task.input, manual: true } : task.input;
       const queuedTask = previous?.status === "blocked"
         ? transaction.update(tasks).set({ input, priority: task.priority ?? previous.priority }).where(eq(tasks.id, previous.id)).returning().get()!
-        : transaction.insert(tasks).values({ ...task, input, priority: task.priority ?? config.actions[task.action].priority }).onConflictDoUpdate({
+        : transaction.insert(tasks).values({ ...task, input, priority: task.priority ?? defaultPriorityOf(task.action) }).onConflictDoUpdate({
           target: [tasks.subjectId, tasks.action],
           targetWhere: sql`${tasks.status} in ('queued', 'blocked')`,
           set: {
@@ -158,7 +178,28 @@ export function enqueueManualTasks(action: string, targets: string[], priority?:
   });
 }
 
-export function claimTask() {
+export function enqueueWorkflowRun(name: string, options: { input?: Record<string, unknown>; dryRun?: boolean; priority?: number; reason?: string } = {}) {
+  const wf = workflowOf(name);
+  if (!wf.on.manual) throw new Error(`Workflow ${name} does not allow manual runs (on.manual is false)`);
+  const key = `${name}:${randomUUID()}`;
+  const subject = upsertSubject({ repository: config.github.repository, kind: "workflow", key });
+  const triggerInput: TriggerInput = {
+    source: "workflow",
+    kind: "workflow_manual",
+    manual: true,
+    ...(options.dryRun ? { dryRun: true } : {}),
+    ...(options.input && Object.keys(options.input).length ? { payload: options.input } : {}),
+  };
+  return enqueueTask({
+    subjectId: subject.id,
+    action: name,
+    priority: options.priority ?? wf.priority,
+    reason: options.reason ?? (options.dryRun ? "Manual workflow dry-run" : "Manual workflow run"),
+    input: triggerInput,
+  });
+}
+
+export function claimTask(taskId?: string) {
   return db.transaction((transaction) => {
     const active = transaction.select({ count: count() }).from(tasks).where(eq(tasks.status, "running")).get()!;
     if (active.count >= config.harness.maxConcurrency) return;
@@ -166,12 +207,13 @@ export function claimTask() {
     const busySubjects = alias(subjects, "busy_subjects");
     const select = () => transaction.select({ task: tasks, subject: subjects }).from(tasks)
       .innerJoin(subjects, eq(tasks.subjectId, subjects.id))
-      .where(and(eq(tasks.status, "queued"), eq(subjects.state, "open"), or(isNull(tasks.availableAt), lte(tasks.availableAt, new Date().toISOString())), notExists(
+      .where(and(taskId ? eq(tasks.id, taskId) : undefined, eq(tasks.status, "queued"), eq(subjects.state, "open"), or(isNull(tasks.availableAt), lte(tasks.availableAt, new Date().toISOString())), notExists(
         transaction.select({ id: busyTasks.id }).from(busyTasks)
           .innerJoin(busySubjects, eq(busyTasks.subjectId, busySubjects.id))
           .where(and(eq(busyTasks.status, "running"), or(
             eq(busyTasks.subjectId, tasks.subjectId),
             and(isNotNull(subjects.workspaceId), eq(busySubjects.workspaceId, subjects.workspaceId)),
+            workflowNames.length ? and(inArray(busyTasks.action, workflowNames), eq(busyTasks.action, tasks.action)) : undefined,
           ))),
       )))
       .orderBy(desc(tasks.priority), asc(tasks.createdAt), asc(tasks.id)).limit(1).get();
@@ -273,11 +315,18 @@ function closeRun(transaction: Transaction, runId: string, error: ErrorDetails |
 
 export function finishRun(runId: string, outcome: { status: "completed" } | { status: "failed" | "cancelled"; error: unknown }) {
   const error = outcome.status === "completed" ? null : describeError(outcome.error);
-  const finished = db.transaction((transaction) => closeRun(transaction, runId, error, (run) => ({
-    set: { status: outcome.status, lastCompetingPullRequest: null, ...outcome.status === "completed" ? { retryCount: null, availableAt: null } : {} },
-    event: outcome.status === "cancelled" ? cancelled(getTask(run.taskId, transaction)!, error!.message)
-      : error ? { type: "run.failed", data: { stage: run.stage, error } } : { type: "run.completed", data: { stage: run.stage } },
-  })), { behavior: "immediate" });
+  const finished = db.transaction((transaction) => {
+    const run = closeRun(transaction, runId, error, (run) => ({
+      set: { status: outcome.status, lastCompetingPullRequest: null, ...outcome.status === "completed" ? { retryCount: null, availableAt: null } : {} },
+      event: outcome.status === "cancelled" ? cancelled(getTask(run.taskId, transaction)!, error!.message)
+        : error ? { type: "run.failed", data: { stage: run.stage, error } } : { type: "run.completed", data: { stage: run.stage } },
+    }));
+    if (outcome.status !== "failed") {
+      const { subjectId } = getTask(run.taskId, transaction)!;
+      transaction.update(subjects).set({ state: "closed" }).where(and(eq(subjects.id, subjectId), eq(subjects.kind, "workflow"))).run();
+    }
+    return run;
+  }, { behavior: "immediate" });
   signalWork();
   return finished;
 }
@@ -348,7 +397,9 @@ export function reconcileIssueImplementation({ subjectId, action, observedTask, 
 export function retryTransientFailure(runId: string, error: unknown) {
   const run = getRun(runId);
   const task = run && getTask(run.taskId);
-  const retry = task && modeOf(task.action) === "review" ? config.actions[task.action]?.retry : undefined;
+  const retry = !task ? undefined
+    : isWorkflow(task.action) ? workflowOf(task.action).retry
+      : modeOf(task.action) === "review" ? config.actions[task.action]?.retry : undefined;
   if (!run || !retry || run.stage !== "agent" || errorCode(error) !== transientInferenceCode) return false;
   interruptRun(runId, error, retry);
   return true;

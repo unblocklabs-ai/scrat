@@ -1,4 +1,3 @@
-import { desc, eq } from "drizzle-orm";
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -10,11 +9,10 @@ import { promisify } from "node:util";
 import { workflowOf, workflows } from "./workflow-registry.ts";
 import { runCommand } from "./cli.ts";
 import { config } from "./config.ts";
-import { db } from "./db.ts";
 import { describeError, SupersededError } from "./errors.ts";
-import { getRun } from "./run-history.ts";
+import { getRun, getTask, latestRunOfTask } from "./run-history.ts";
 import { runNextTask } from "./runner.ts";
-import { runs, tasks } from "./schema.ts";
+import type { Run } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { validateStaticConfig, validateWorkflowDefinition } from "./startup.ts";
 import { enqueueWorkflowRun } from "./tasks.ts";
@@ -66,6 +64,28 @@ async function checkScripts(scriptPaths: string[], standalone: boolean) {
 function isSqliteBusy(error: unknown) {
   const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
   return /SQLITE_BUSY|database is locked/i.test(text);
+}
+
+async function readWithBusyRetry<T>(read: () => T, signal: AbortSignal): Promise<{ ok: true; value: T } | { ok: false }> {
+  while (!signal.aborted) {
+    try { return { ok: true, value: read() }; }
+    catch (error) {
+      if (!isSqliteBusy(error)) throw error;
+      await delay(500, undefined, { signal }).catch(() => {});
+    }
+  }
+  return { ok: false };
+}
+
+function reportRunOutcome(run: Run | undefined, fallbackId: string, status: "completed" | "failed" | "cancelled") {
+  if (status !== "completed" || run?.error) {
+    const label = status === "cancelled" || run?.error?.name === "SupersededError" ? "CANCELLED" : "FAILED";
+    console.error(`${label}\t${run?.id ?? fallbackId}\t${run?.error?.message ?? status}`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`COMPLETED\t${run?.id ?? fallbackId}\t${run?.publication.status ?? "unknown"}`);
+  if (run?.result?.text) console.log(run.result.text);
 }
 
 function usage(): never {
@@ -207,35 +227,16 @@ await runCommand("Workflow command failed", async () => {
       if (isServeRunning()) {
         console.log(`WAITING\t${task.id}\tDaemon is running; waiting for daemon to execute task`);
         while (!stop.signal.aborted) {
-          let row;
-          try {
-            row = db.select().from(tasks).where(eq(tasks.id, task.id)).get();
-          } catch (error) {
-            if (isSqliteBusy(error)) {
-              await delay(500, undefined, { signal: stop.signal }).catch(() => {});
-              continue;
-            }
-            throw error;
-          }
+          const fetched = await readWithBusyRetry(() => {
+            const row = getTask(task.id);
+            const terminal = row && (row.status === "completed" || row.status === "failed" || row.status === "cancelled");
+            return { row, latest: terminal ? latestRunOfTask(task.id) : undefined };
+          }, stop.signal);
+          if (!fetched.ok) break;
+          const { row, latest } = fetched.value;
           if (!row) throw new Error(`Workflow task ${task.id} disappeared`);
           if (row.status === "completed" || row.status === "failed" || row.status === "cancelled") {
-            let latest;
-            try {
-              latest = db.select().from(runs).where(eq(runs.taskId, task.id)).orderBy(desc(runs.sequence)).limit(1).get();
-            } catch (error) {
-              if (isSqliteBusy(error)) {
-                await delay(500, undefined, { signal: stop.signal }).catch(() => {});
-                continue;
-              }
-              throw error;
-            }
-            if (row.status !== "completed" || latest?.error) {
-              console.error(`FAILED\t${latest?.id ?? task.id}\t${latest?.error?.message ?? row.status}`);
-              process.exitCode = 1;
-              return;
-            }
-            console.log(`COMPLETED\t${latest?.id ?? task.id}\t${latest?.publication.status ?? "unknown"}`);
-            if (latest?.result?.text) console.log(latest.result.text);
+            reportRunOutcome(latest, task.id, row.status);
             return;
           }
           if (!isServeRunning()) {
@@ -259,7 +260,7 @@ await runCommand("Workflow command failed", async () => {
         rmSync(cliPidFile, { force: true });
       }
       if (!finished) {
-        const row = db.select().from(tasks).where(eq(tasks.id, task.id)).get();
+        const row = getTask(task.id);
         switch (row?.status) {
           case "queued":
             console.log(`QUEUED\t${task.id}\tWorker slots busy; task remains queued (do not re-run)`);
@@ -274,15 +275,7 @@ await runCommand("Workflow command failed", async () => {
             throw new Error(`Workflow task ${task.id} is ${row?.status ?? "missing"}`);
         }
       }
-      const latest = getRun(finished.id);
-      if (finished.error) {
-        const status = finished.error.name === "SupersededError" ? "CANCELLED" : "FAILED";
-        console.error(`${status}\t${finished.id}\t${finished.error.message}`);
-        process.exitCode = 1;
-        return;
-      }
-      console.log(`COMPLETED\t${finished.id}\t${latest?.publication.status ?? "unknown"}`);
-      if (latest?.result?.text) console.log(latest.result.text);
+      reportRunOutcome(getRun(finished.id) ?? finished, finished.id, finished.error ? "failed" : "completed");
       return;
     } finally {
       process.off("SIGINT", onSignal);

@@ -1,5 +1,5 @@
 import { isWorkflowEnabled, config, loadedWorkflows } from "./config.ts";
-import type { EffectName, Signal } from "./manifests.ts";
+import type { Signal } from "./manifests.ts";
 import { matchesWorkflowSignal, resolveWorkflow } from "./workflows.ts";
 
 export const workflows = loadedWorkflows;
@@ -14,14 +14,10 @@ export function workflowOf(name: string) {
 
 export const defaultPriorityOf = (name: string) => workflowOf(name).priority;
 
-export const workflowsPublishing = (effect: EffectName) => (
+export const workflowsPublishing = (effect: "labels" | "pr_assessment") => (
   effect === "labels"
     ? workflows.filter((wf) => wf.on.event?.kind === "item_changed" && wf.on.event.item === "issue" && wf.permissions.github.includes("label")).map((wf) => wf.name)
-    : effect === "pr_assessment"
-      ? workflows.filter((wf) => wf.on.event?.kind === "item_changed" && wf.on.event.item === "pr").map((wf) => wf.name)
-      : effect === "pull_request"
-        ? workflows.filter((wf) => wf.mode === "change" && wf.on.event?.kind === "label" && wf.permissions.github.includes("pull_request")).map((wf) => wf.name)
-        : []
+    : workflows.filter((wf) => wf.on.event?.kind === "item_changed" && wf.on.event.item === "pr").map((wf) => wf.name)
 );
 
 export const matchingWorkflows = (signal: Signal) =>

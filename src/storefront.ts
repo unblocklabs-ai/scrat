@@ -4,8 +4,8 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { and, eq, isNotNull, isNull } from "drizzle-orm";
-import { upsertComment } from "./comments.ts";
-import { config, isBotLogin } from "./config.ts";
+import { findBotMarkedComment, upsertComment } from "./comments.ts";
+import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { errorMessage, ifMissing } from "./errors.ts";
 import type { EventReferences } from "./events.ts";
@@ -13,7 +13,7 @@ import { blobBytes, changedPaths, gitList } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubComment, GithubItem } from "./github-types.ts";
 import { bestEffort, logger } from "./logging.ts";
-import { endsWithMarker, isIssueComment, previewMarker, withMarker } from "./markers.ts";
+import { previewMarker, withMarker } from "./markers.ts";
 import { themePreviews, type ThemePreview } from "./schema.ts";
 import { loggie } from "./loggie.ts";
 
@@ -253,7 +253,7 @@ async function publish(target: Target, preview: ThemePreview, outcome: Outcome) 
   const repeated = "headSha" in outcome && preview.headSha === outcome.headSha && JSON.stringify(preview.problems) === JSON.stringify(outcome.problems);
   if (!repeated) await deploy(target, preview, outcome);
   const { github, number, comments, references } = target;
-  const existing = comments.findLast((comment) => isBotLogin(comment.author) && isIssueComment(comment) && endsWithMarker(comment.body, previewMarker));
+  const existing = findBotMarkedComment(comments, previewMarker);
   if (existing || !("closed" in outcome)) await upsertComment(github, number, existing, withMarker(previewBody(preview, outcome), previewMarker), references);
   if ("headSha" in outcome) savePreview(preview, outcome);
 }

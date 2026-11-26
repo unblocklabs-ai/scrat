@@ -73,7 +73,7 @@ export type SubmitResultSpec = {
   description?: string;
 };
 
-export async function executePi(options: PiOptions, { context, sessionFile, reviewerIndex, onSession, requireGrade = false, labelCategories, followUp, skillPath, submitResult }: {
+export async function executePi(options: PiOptions, { context, sessionFile, reviewerIndex, onSession, requireGrade = false, labelCategories, followUp, submitResult }: {
   context: string;
   sessionFile?: string;
   reviewerIndex?: number;
@@ -81,7 +81,6 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
   requireGrade?: boolean;
   labelCategories?: readonly LabelCategory[];
   followUp?: string;
-  skillPath?: string;
   submitResult?: SubmitResultSpec;
 }) {
   const { run, cwd, tools, scoped, storefront = false, baseSha, log, stop } = options;
@@ -248,12 +247,12 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
       if (timedOut) throw Object.assign(new Error(`Agent turn exceeded ${config.harness.agentTimeoutSeconds} seconds and was aborted after ${Math.round((performance.now() - started) / 1000)} seconds`), { code: "AGENT_TIMEOUT" });
       if (drained) throw new InterruptedError(`Agent turn was still running ${config.harness.drainTimeoutSeconds} seconds after the worker was told to stop and was aborted`);
     };
-    await prompt(followUp ?? `${withStorefront(withBotName(await readFile(skillPath ?? run.skill, "utf8")), storefront)}\n\n${context}`);
+    await prompt(followUp ?? `${withStorefront(withBotName(await readFile(run.skill, "utf8")), storefront)}\n\n${context}`);
     let continuations = 0, regressionReported = false;
     for (let corrections = 0; ; corrections++) {
       const last = session.messages.findLast((message) => message.role === "assistant");
-      if (!last || last.role !== "assistant" || last.stopReason !== "stop") {
-        if (last?.role !== "assistant") throw new Error("Pi returned no assistant response");
+      if (!last || last.stopReason !== "stop") {
+        if (!last) throw new Error("Pi returned no assistant response");
         const transient = !isContextOverflow(last, model.contextWindow) && (isRetryableAssistantError(last)
           || last.stopReason === "error" && config.harness.transientErrors.some((pattern) => new RegExp(pattern, "i").test(last.errorMessage ?? "")));
         const error = new Error(last.errorMessage || `Pi stopped: ${last.stopReason}`);

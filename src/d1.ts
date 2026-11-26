@@ -12,8 +12,6 @@ type D1Response = {
   infer_ms?: number;
 };
 
-type D1Requester = (payload: { model: string; state: string; questions: Record<string, { type: "noul"; instructions: string }> }, signal?: AbortSignal) => Promise<D1Response>;
-
 type Chunk = { start: number; end: number; text: string };
 
 const ansiRe = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
@@ -189,6 +187,7 @@ async function writeAll(handle: Awaited<ReturnType<typeof open>>, buf: Buffer) {
   }
 }
 
+/** @public */
 export async function copyRedactedFile(srcPath: string, destPath: string, maxBytes: number): Promise<{ path: string; truncated: boolean } | undefined> {
   const src = await open(srcPath, "r").catch(() => undefined);
   if (!src) return undefined;
@@ -246,7 +245,7 @@ export async function copyRedactedFile(srcPath: string, destPath: string, maxByt
   }
 }
 
-async function persistCommandArtifact(artifactPath: string | undefined, content: string, sourceArtifactPath: string | undefined, existingArtifactPath: string | undefined, partialSource: boolean) {
+export async function persistCommandArtifact(artifactPath: string | undefined, content: string, sourceArtifactPath: string | undefined, existingArtifactPath: string | undefined, partialSource: boolean) {
   if (artifactPath && sourceArtifactPath) {
     const copied = await copyRedactedFile(sourceArtifactPath, artifactPath, config.harness.maxOutputBytes);
     if (copied) return { savedPath: copied.path, isPartial: copied.truncated };
@@ -529,6 +528,12 @@ function preselectChunksByPriority(chunks: Chunk[], query: string, maxCandidates
   return [...pinned, ...scored.slice(0, slots).map(([, idx]) => idx)];
 }
 
+function trimAtNewline(text: string, maxChars: number, minNewline = 60) {
+  const cut = text.slice(0, maxChars);
+  const nl = cut.lastIndexOf("\n");
+  return `${(nl > minNewline ? cut.slice(0, nl) : cut).trimEnd()}\n[trimmed]`;
+}
+
 function mergeSelectedChunks(text: string, chunks: Chunk[], ranked: Array<[number, number]>, maxTotalChars: number) {
   if (!ranked.length) return { text: "", kept: 0 };
   const picked: number[] = [];
@@ -561,9 +566,7 @@ function mergeSelectedChunks(text: string, chunks: Chunk[], ranked: Array<[numbe
   if (prevEnd < text.length && text.length - prevEnd > 80) parts.push(`... [omitted ${text.length - prevEnd} chars] ...`);
   let joined = parts.join("\n\n");
   if (joined.length > maxTotalChars && maxTotalChars > 32) {
-    const cut = joined.slice(0, maxTotalChars - 12);
-    const nl = cut.lastIndexOf("\n");
-    joined = `${(nl > 60 ? cut.slice(0, nl) : cut).trimEnd()}\n[trimmed]`;
+    joined = trimAtNewline(joined, maxTotalChars - 12);
   }
   return { text: joined, kept: picked.length };
 }
@@ -575,14 +578,13 @@ function retryAfterMs(header: string | null): number | undefined {
   return undefined;
 }
 
-function defaultRequester(sharedDeadline?: number): D1Requester | undefined {
+function defaultRequester(deadline: number) {
   const token = process.env[config.d1.tokenEnv]?.trim();
   const url = (process.env.D1_URL ?? config.d1.url).trim();
   if (!token || !url) return undefined;
   const certPath = process.env.D1_CERT_PATH ?? config.d1.certPath;
   const dispatcher = url.startsWith("https://") && certPath ? getDispatcher(certPath) : undefined;
-  return async (payload, signal) => {
-    const deadline = sharedDeadline ?? (Date.now() + config.d1.timeoutMs);
+  return async (payload: { model: string; state: string; questions: Record<string, { type: "noul"; instructions: string }> }, signal?: AbortSignal): Promise<D1Response> => {
     const maxAttempts = 1 + config.d1.maxRetries;
     let lastError: Error | undefined;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -637,14 +639,14 @@ function defaultRequester(sharedDeadline?: number): D1Requester | undefined {
   };
 }
 
-async function extractRelevantChunks({ text, query, instructionTemplate, maxTotalChars, maxChunks = 8, maxCandidateChunks = config.d1.maxCandidateChunks, targetChunkChars = 1000, maxChunkChars = 1800, threshold = config.d1.scoreThreshold, signal, requester }: {
+async function extractRelevantChunks({ text, query, instructionTemplate, maxTotalChars, maxChunks = 8, maxCandidateChunks = config.d1.maxCandidateChunks, targetChunkChars = 1000, maxChunkChars = 1800, threshold = config.d1.scoreThreshold, signal }: {
   text: string; query: string; instructionTemplate: string; maxTotalChars: number;
   maxChunks?: number; maxCandidateChunks?: number; targetChunkChars?: number; maxChunkChars?: number;
-  threshold?: number; signal?: AbortSignal; requester?: D1Requester;
+  threshold?: number; signal?: AbortSignal;
 }) {
   const started = performance.now();
   const extractionDeadlineMs = Date.now() + config.d1.timeoutMs;
-  const effRequester = requester ?? defaultRequester(extractionDeadlineMs);
+  const effRequester = defaultRequester(extractionDeadlineMs);
   if (!text || !effRequester) return { usedD1: false, text: "", kept: 0, total: 0, d1Ms: 0 };
   const safeText = redactSecrets(text);
   const safeQuery = redactSecrets(query).trim();
@@ -732,10 +734,10 @@ async function extractRelevantChunks({ text, query, instructionTemplate, maxTota
   return { usedD1: true, text: merged.text, kept: merged.kept, total: chunks.length, d1Ms };
 }
 
-export async function distillCommandOutput({ rawOutput, command, goal, artifactPath, sourceArtifactPath, existingArtifactPath, partialSource = false, allowReadBypass = true, minChars, maxChars, signal, log, requester }: {
+export async function distillCommandOutput({ rawOutput, command, goal, artifactPath, sourceArtifactPath, existingArtifactPath, partialSource = false, allowReadBypass = true, minChars, maxChars, signal, log }: {
   rawOutput: string; command: string; goal?: string; artifactPath?: string; sourceArtifactPath?: string; existingArtifactPath?: string;
   partialSource?: boolean; allowReadBypass?: boolean;
-  minChars: number; maxChars: number; signal?: AbortSignal; log?: D1Log; requester?: D1Requester;
+  minChars: number; maxChars: number; signal?: AbortSignal; log?: D1Log;
 }) {
   const cleaned = redactSecrets(stripAnsi(rawOutput));
   if (cleaned.length <= minChars || (allowReadBypass && isCodeReadCommand(command))) return { text: cleaned, filtered: false, artifactPath: undefined };
@@ -796,7 +798,6 @@ export async function distillCommandOutput({ rawOutput, command, goal, artifactP
         instructionTemplate: "Does item [{idx}] contain failing tests, errors, tracebacks, file:line locations, counts, or key conclusions answering QUERY?",
         maxTotalChars: midBudget,
         signal,
-        requester,
       });
       if (result.usedD1) {
         const formatOut = (savedPath: string | undefined, isPartial: boolean) => {
@@ -816,10 +817,7 @@ export async function distillCommandOutput({ rawOutput, command, goal, artifactP
           const withoutMid = assemble("", anomBlk);
           const availMid = maxChars - withoutMid.length - "\n\n## RELEVANT SPANS (d1)\n\n[trimmed]".length;
           if (result.text && availMid >= 120) {
-            const cut = result.text.slice(0, availMid);
-            const nl = cut.lastIndexOf("\n");
-            const trimmedMid = `${(nl > 60 ? cut.slice(0, nl) : cut).trimEnd()}\n[trimmed]`;
-            out = assemble(trimmedMid, anomBlk);
+            out = assemble(trimAtNewline(result.text, availMid), anomBlk);
             if (out.length <= maxChars) return out;
           }
           const baseNoAnom = assemble("", "");
@@ -855,9 +853,9 @@ export async function distillCommandOutput({ rawOutput, command, goal, artifactP
   return { text, filtered: true, artifactPath: savedPath };
 }
 
-export async function distillBrowserText({ rawText, url, focus, artifactPath, partialSource = false, totalSourceChars, minChars, maxChars, signal, log, requester }: {
+export async function distillBrowserText({ rawText, url, focus, artifactPath, partialSource = false, totalSourceChars, minChars, maxChars, signal, log }: {
   rawText: string; url: string; focus?: string; artifactPath?: string; partialSource?: boolean; totalSourceChars?: number;
-  minChars: number; maxChars: number; signal?: AbortSignal; log?: D1Log; requester?: D1Requester;
+  minChars: number; maxChars: number; signal?: AbortSignal; log?: D1Log;
 }) {
   const cleaned = redactSecrets(rawText);
   if (cleaned.length <= minChars) return { text: cleaned, filtered: false, artifactPath: undefined };
@@ -885,7 +883,6 @@ export async function distillBrowserText({ rawText, url, focus, artifactPath, pa
       maxChunkChars: 1400,
       maxChunks: 6,
       signal,
-      requester,
     });
     if (result.usedD1 && result.text) {
       const savedPath = await persistArtifact(artifactPath, cleaned);
@@ -896,11 +893,7 @@ export async function distillBrowserText({ rawText, url, focus, artifactPath, pa
       let out = assemble(result.text);
       if (out.length > maxChars) {
         const avail = maxChars - assemble("").length - 12;
-        if (avail >= 80) {
-          const cut = result.text.slice(0, avail);
-          const nl = cut.lastIndexOf("\n");
-          out = assemble(`${(nl > 40 ? cut.slice(0, nl) : cut).trimEnd()}\n[trimmed]`);
-        }
+        if (avail >= 80) out = assemble(trimAtNewline(result.text, avail, 40));
         if (out.length > maxChars) out = `${out.slice(0, Math.max(0, maxChars - 12)).trimEnd()}\n[trimmed]`;
       }
       log?.info?.({ event: "d1.browser_text_filtered", rawChars: cleaned.length, outChars: out.length, kept: result.kept, total: result.total, d1Ms: result.d1Ms });
@@ -916,9 +909,9 @@ export async function distillBrowserText({ rawText, url, focus, artifactPath, pa
   return { text: cleaned, filtered: false, artifactPath: undefined };
 }
 
-export async function distillHistory({ rawHistory, action, artifactPath, minChars, maxChars, signal, log, requester }: {
+export async function distillHistory({ rawHistory, action, artifactPath, minChars, maxChars, signal, log }: {
   rawHistory: string; action: string; artifactPath?: string;
-  minChars: number; maxChars: number; signal?: AbortSignal; log?: D1Log; requester?: D1Requester;
+  minChars: number; maxChars: number; signal?: AbortSignal; log?: D1Log;
 }) {
   const cleaned = redactSecrets(rawHistory);
   if (cleaned.length <= minChars) return { text: cleaned, filtered: false, artifactPath: undefined };
@@ -941,7 +934,6 @@ export async function distillHistory({ rawHistory, action, artifactPath, minChar
       maxChunkChars: 1600,
       maxChunks: 6,
       signal,
-      requester,
     });
     if (result.usedD1 && result.text) {
       const savedPath = await persistArtifact(artifactPath, cleaned);
@@ -950,11 +942,7 @@ export async function distillHistory({ rawHistory, action, artifactPath, minChar
       let out = `${prefix}${result.text}\n`;
       if (out.length > maxChars) {
         const avail = maxChars - prefix.length - 13;
-        if (avail >= 80) {
-          const cut = result.text.slice(0, avail);
-          const nl = cut.lastIndexOf("\n");
-          out = `${prefix}${(nl > 40 ? cut.slice(0, nl) : cut).trimEnd()}\n[trimmed]\n`;
-        }
+        if (avail >= 80) out = `${prefix}${trimAtNewline(result.text, avail, 40)}\n`;
         if (out.length > maxChars) out = `${out.slice(0, Math.max(0, maxChars - 12)).trimEnd()}\n[trimmed]`;
       }
       log?.info?.({ event: "d1.history_filtered", action, rawChars: cleaned.length, outChars: out.length, kept: result.kept, total: result.total, d1Ms: result.d1Ms });

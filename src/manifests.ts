@@ -54,12 +54,9 @@ export type ActionTrigger = {
   item?: "issue" | "pr";
   author?: string;
   grades?: Grade[];
-  manual?: boolean;
   branch?: string;
   granularity?: "range" | "commit";
   message?: string;
-  cron?: string;
-  window?: string;
 };
 
 export type Action = {
@@ -78,30 +75,18 @@ export type Action = {
   start?: StartEffectName[];
   publish: EffectName[];
   enabled?: boolean;
-  priority: number;
   skill: string;
   provider: string;
   model: string;
   thinkingLevel: ThinkingLevel;
   codemode?: boolean;
-  retry: { initialDelaySeconds: number; maxDelaySeconds: number } | null;
-  channel?: string;
   maxRangeCommits?: number;
-  startMessage?: string;
   browserSteps?: number;
   browserSeconds?: number;
   rootInstructions?: string;
-  maxSelfRepairs?: number;
-  exhaustedLabel?: string | null;
-  failedLabel?: string | null;
   targets?: ("issues" | "prs")[];
   issue_labels?: LabelCategory[];
   pr_labels?: LabelCategory[];
-  branch?: string;
-  cron?: string;
-  window?: string;
-  file: string;
-  root: string;
 };
 
 export function scheduleProblem(key: "cron" | "window", value: string) {

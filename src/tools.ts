@@ -6,7 +6,7 @@ import { createBashToolDefinition, createEditToolDefinition, createFindToolDefin
 import { Type } from "typebox";
 import { backgroundsWork, createSlots, heavyCommand, withValidationSlot } from "./commands.ts";
 import { config } from "./config.ts";
-import { copyRedactedFile, distillCommandOutput, readHeadAndTail, stripAnsi, trimUtf8End } from "./d1.ts";
+import { distillCommandOutput, persistCommandArtifact, readHeadAndTail, stripAnsi, trimUtf8End } from "./d1.ts";
 import { createGrepTool } from "./grep.ts";
 import type { ToolName } from "./manifests.ts";
 import type { PiOptions } from "./pi.ts";
@@ -156,18 +156,10 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
           const artifactToken = "\0SCRAT_DIFF_ARTIFACT\0";
           const guarded = omitGeneratedFromUnifiedDiff(diffSource, generatedDiffPatterns, config.tools.git.generatedDiffBytes, artifactToken);
           if (guarded.omitted.length) {
-            let savedPath: string | undefined;
-            let partialArtifact = Boolean(diskFull?.truncated);
-            if (contextRoot) {
-              const dest = join(contextRoot, `bash-${sessionTag}-${++bashDumps}.log`);
-              if (diskFull?.truncated && details?.fullOutputPath) {
-                const copied = await copyRedactedFile(details.fullOutputPath, dest, config.harness.maxOutputBytes);
-                if (copied) { savedPath = copied.path; partialArtifact = copied.truncated; }
-              } else {
-                savedPath = await writeFile(dest, diffSource, { encoding: "utf8", mode: 0o600 }).then(() => dest, () => undefined);
-                if (savedPath) partialArtifact = false;
-              }
-            }
+            const dest = contextRoot ? join(contextRoot, `bash-${sessionTag}-${++bashDumps}.log`) : undefined;
+            const { savedPath, isPartial: partialArtifact } = await persistCommandArtifact(
+              dest, diffSource, diskFull?.truncated ? details?.fullOutputPath : undefined, undefined, Boolean(diskFull?.truncated),
+            );
             const artifactNote = savedPath
               ? `; ${partialArtifact ? "partial" : "full"} diff saved to ${savedPath} (use read to inspect)`
               : "";
@@ -216,7 +208,7 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
   const sdkLs = createLsToolDefinition(cwd);
   const ls: typeof sdkLs = { ...sdkLs, async execute(...args) { await searchRoot(args[1].path); return sdkLs.execute(...args); } };
   const sdkRead = createReadToolDefinition(cwd);
-  const seenReads = new Map<string, { hash: string; toolCallId: string; bytes: number }>();
+  const seenReads = new Map<string, { hash: string; toolCallId: string }>();
   const read: typeof sdkRead = {
     ...sdkRead,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -266,7 +258,7 @@ export async function createAgentTools({ run: { id: runId }, cwd, contextDir, to
               ...("structuredContent" in result ? { structuredContent: stub } : {}),
             };
           }
-          seenReads.set(key, { hash, toolCallId, bytes });
+          seenReads.set(key, { hash, toolCallId });
         }
       }
       return result;

@@ -17,7 +17,7 @@ type Node = { id: string; handle: string; [field: string]: any };
 type Resource = { kind: string; handle: string; visible: boolean; fields: Record<string, string> };
 type Stored = { kind: string; handle: string; visible?: boolean; fields: Record<string, { hash: string; value: string }> };
 type Snapshot = { resources: Record<string, Stored>; metaobjects: boolean; watched: string[] };
-type Change = { resource: string; gid: string; handle: string; field: string; before?: string; after?: string; paths: string[]; note?: string; events?: string[] };
+type Change = { resource: string; gid: string; handle: string; field: string; before?: string; after?: string; beforeHash?: string; afterHash?: string; paths: string[]; note?: string; events?: string[] };
 type State = { polledAt?: string; since?: string; changedAt?: string; pending: Change[] };
 type Listing = { kind: string; root: string; first: number; selection: string; visible?: (node: Node) => boolean; fields: (node: Node) => Record<string, unknown> };
 
@@ -169,20 +169,21 @@ function pathsOf(gid: string, resource: Pick<Resource, "kind" | "handle">, curre
 
 function compare(previous: Snapshot, current: Map<string, Resource>, kinds: Set<string>, watched: Set<string>) {
   const { valueBytes } = config.storefront.changes, changes: Change[] = [], resources: Record<string, Stored> = {}, before = new Set(previous.watched);
-  const record = (gid: string, resource: Pick<Resource, "kind" | "handle">, field: string, was?: string, now?: string) => {
+  const record = (gid: string, resource: Pick<Resource, "kind" | "handle">, field: string, was?: string, now?: string, beforeHash?: string, afterHash?: string) => {
     const gone = field === "deleted" || (field === "status" && now !== "ACTIVE") || (field === "published" && now === "false");
-    changes.push({ resource: resource.kind, gid, handle: resource.handle, field, before: was, after: now, paths: pathsOf(gid, resource, current), ...gone && { note: "Not visible on the storefront any more: expect a 404 on this page." } });
+    changes.push({ resource: resource.kind, gid, handle: resource.handle, field, before: was, after: now, ...(beforeHash !== undefined && { beforeHash }), ...(afterHash !== undefined && { afterHash }), paths: pathsOf(gid, resource, current), ...gone && { note: "Not visible on the storefront any more: expect a 404 on this page." } });
   };
   const comparable = (field: string) => { const key = keyOf(field); return key === undefined || (before.has(key) && watched.has(key)); };
   for (const [gid, resource] of current) {
     const stored = previous.resources[gid];
-    resources[gid] = { kind: resource.kind, handle: resource.handle, visible: resource.visible, fields: Object.fromEntries(Object.entries(resource.fields).map(([field, value]) => [field, { hash: sha(value), value: clip(value, valueBytes) }])) };
+    const nextFields = Object.fromEntries(Object.entries(resource.fields).map(([field, value]) => [field, { hash: sha(value), value: clip(value, valueBytes) }]));
+    resources[gid] = { kind: resource.kind, handle: resource.handle, visible: resource.visible, fields: nextFields };
     if (resource.kind === "metaobject" && !previous.metaobjects) continue;
     if (!stored) { if (resource.visible) record(gid, resource, "created", undefined, resource.handle); continue; }
     if (!resource.visible && stored.visible === false) continue;
-    for (const field of new Set([...Object.keys(stored.fields), ...Object.keys(resource.fields)])) {
-      const was = stored.fields[field], now = resource.fields[field];
-      if (comparable(field) && was?.hash !== (now === undefined ? undefined : sha(now))) record(gid, resource, field, was?.value, now === undefined ? undefined : clip(now, valueBytes));
+    for (const field of new Set([...Object.keys(stored.fields), ...Object.keys(nextFields)])) {
+      const was = stored.fields[field], now = nextFields[field];
+      if (comparable(field) && was?.hash !== now?.hash) record(gid, resource, field, was?.value, now?.value, was?.hash, now?.hash);
     }
   }
   for (const [gid, stored] of Object.entries(previous.resources)) {
@@ -221,9 +222,11 @@ function collapse(pending: Change[], incoming: Change[]) {
     const at = merged.findIndex(({ gid, field }) => gid === change.gid && field === change.field);
     if (at < 0) { merged.push(change); continue; }
     const events = [...new Set([...merged[at]!.events ?? [], ...change.events ?? []])];
-    merged[at] = { ...change, before: merged[at]!.before, ...events.length && { events } };
+    const prev = merged[at]!;
+    merged[at] = { ...change, before: prev.before, beforeHash: prev.beforeHash, ...events.length && { events } };
   }
-  return merged.filter(({ before, after }) => before !== after);
+  return merged.filter(({ before, after, beforeHash, afterHash }) =>
+    beforeHash !== undefined && afterHash !== undefined ? beforeHash !== afterHash : before !== after);
 }
 
 async function prune(now: Date) {
@@ -253,7 +256,8 @@ async function flush(repository: string, action: string, state: State, end: stri
   const start = state.since!;
   const { maxPages } = config.storefront.changes, summary = summarize(state.pending);
   const paths = [...new Set(state.pending.flatMap(({ paths }) => paths))], pages = paths.slice(0, maxPages).map((path) => `https://${config.storefront.publicHost}${path}`);
-  await writeStateText(`${batches}/${start}.json`, JSON.stringify({ summary, pages, pagesNotListed: paths.length - pages.length, changes: state.pending }, null, 2) + "\n");
+  const changes = state.pending.map(({ beforeHash: _bh, afterHash: _ah, ...rest }) => rest);
+  await writeStateText(`${batches}/${start}.json`, JSON.stringify({ summary, pages, pagesNotListed: paths.length - pages.length, changes }, null, 2) + "\n");
   const subject = upsertSubject({ repository, kind: "window", key: `${action}:${start}`, metadata: { start, end, summary } });
   return enqueueOnce(subject, action, summary, { source: "shopify", kind: "store_change", triggerKey: start });
 }

@@ -239,7 +239,7 @@ function readWorkflowDir(dir: string, label: string, local: boolean): WorkflowDe
   const tools = parsed.defaults.tools ?? (mode === "change" ? [...defaultChangeWorkflowTools] : [...defaultReviewWorkflowTools]);
   const problems: string[] = [];
   if (parsed.name !== folder) problems.push(`name ${parsed.name} must equal folder name ${folder}`);
-  if (parsed.name === "directory" || parsed.name === "trustLocalScripts") problems.push(`${parsed.name} is not a legal workflow name`);
+  if (parsed.name === "directory") problems.push(`${parsed.name} is not a legal workflow name`);
   if (mode === "review" && tools.some((t) => t === "bash" || t === "edit" || t === "write")) {
     problems.push("mode review forbids the bash, edit and write tools");
   }
@@ -395,8 +395,8 @@ export function resolveWorkflow(wf: WorkflowDefinition, entry?: WorkflowSettings
   };
   const config = { ...wf.config, ...(entry?.config ?? {}) };
   const skillPath = entry?.skill ? (isAbsolute(entry.skill) ? entry.skill : resolve(wf.dir, entry.skill)) : wf.skillPath;
-  const skillHash = entry?.skill
-    ? (skillPath && existsSync(skillPath) ? createHash("sha256").update(readFileSync(skillPath)).digest("hex") : entry.skill)
+  const skillHash = entry?.skill && skillPath
+    ? (existsSync(skillPath) ? createHash("sha256").update(readFileSync(skillPath)).digest("hex") : entry.skill)
     : null;
   return {
     ...wf,
@@ -422,13 +422,12 @@ export type WorkflowPipelineSpec = {
 };
 
 const cfgString = (cfg: Record<string, unknown>, key: string) => typeof cfg[key] === "string" ? cfg[key] : undefined;
-const cfgNullableString = (cfg: Record<string, unknown>, key: string) => cfg[key] === null ? null : typeof cfg[key] === "string" ? cfg[key] : undefined;
 const cfgNumber = (cfg: Record<string, unknown>, key: string) => typeof cfg[key] === "number" && Number.isFinite(cfg[key]) ? cfg[key] : undefined;
 
 export function toWorkflowSpec(wf: ResolvedWorkflow, spec: WorkflowPipelineSpec): Action {
   const trigger: Action["trigger"] = wf.on.event
-    ? { ...wf.on.event, branch: wf.on.event.branch, cron: undefined, window: undefined, manual: wf.on.manual }
-    : { source: "schedule", kind: "tick", branch: undefined, cron: wf.on.cron, window: wf.on.window, manual: wf.on.manual };
+    ? { ...wf.on.event }
+    : { source: "schedule", kind: "tick" };
   const labelSettings = workflowItemLabelSettings(wf);
   const configFiles = Array.isArray(wf.config.files)
     ? wf.config.files.filter((entry): entry is ContextFileName => typeof entry === "string")
@@ -449,30 +448,18 @@ export function toWorkflowSpec(wf: ResolvedWorkflow, spec: WorkflowPipelineSpec)
     start: spec.start ? [...spec.start] : undefined,
     publish: [...spec.publish],
     enabled: wf.enabled,
-    priority: wf.priority,
     skill: wf.skillPath ?? wf.file,
     provider: wf.defaults.provider,
     model: wf.defaults.model,
     thinkingLevel: wf.defaults.thinkingLevel,
     codemode: wf.defaults.codemode,
-    retry: wf.retry,
-    channel: cfgString(wf.config, "channel"),
     maxRangeCommits: cfgNumber(wf.config, "maxRangeCommits"),
-    startMessage: cfgString(wf.config, "startMessage"),
     browserSteps: cfgNumber(wf.config, "browserSteps"),
     browserSeconds: cfgNumber(wf.config, "browserSeconds"),
     rootInstructions: cfgString(wf.config, "rootInstructions"),
-    maxSelfRepairs: cfgNumber(wf.config, "maxSelfRepairs"),
-    exhaustedLabel: cfgNullableString(wf.config, "exhaustedLabel"),
-    failedLabel: cfgNullableString(wf.config, "failedLabel"),
     targets: labelSettings.targets,
     issue_labels: labelSettings.issue_labels,
     pr_labels: labelSettings.pr_labels,
-    branch: wf.on.event?.branch,
-    cron: wf.on.cron,
-    window: wf.on.window,
-    file: wf.file,
-    root: wf.dir,
   };
 }
 

@@ -207,7 +207,7 @@ Example `scrat.local.json` for a PAT deployment (every key already exists in the
 ```json
 {
   "github": { "repository": "acme/widgets", "auth": "pat", "botLogin": "mocha-agent", "botName": "Mocha" },
-  "actions": { "address_review": { "exhaustedLabel": "Mocha repair exhausted" }, "implement": { "failedLabel": "Mocha failed" } }
+  "workflows": { "address_review": { "config": { "exhaustedLabel": "Mocha repair exhausted" } }, "implement": { "config": { "failedLabel": "Mocha failed" } } }
 }
 ```
 
@@ -331,7 +331,7 @@ A deployment adds or replaces workflows without a code release. Set `workflows.d
 
 - Every subfolder containing `workflow.yaml` directly in that directory is loaded after the shipped `workflows/*/`. The folder name must equal `name` (lowercase letters, digits, hyphens and underscores; `directory` and `trustLocalScripts` are reserved). A folder whose `name` matches a shipped workflow replaces that whole bundle; any other name adds a workflow.
 - Overrides in `scrat.local.json` apply by workflow name after both sets are merged: `enabled`, `priority`, `skill`, `provider`, `model`, `thinkingLevel`, `reviewers`, `codemode`, `branch`, `cron`, `window`, `retry`, and `config` (merged shallowly over the bundle's default `config`). Structural fields (`on`, `mode`, `permissions`, `defaults.tools`, `http`, `browser`, `run.ts`) change by shipping a workflow bundle.
-- Each bundle must include `SKILL.md`, `run.ts`, or both. A `run.ts` script exports a default `run(ctx)` handler that can run agent sessions, call scoped GitHub/Slack/workspace helpers gated by `permissions`, or delegate to the managed pipeline (`ctx.runPipeline(...)`). Validate all bundles and typecheck all `run.ts` scripts with `npm run workflow -- check`, and test a workflow with `npm run workflow -- run <name> --dry-run`.
+- Each bundle must include `SKILL.md`, `run.ts`, or both. A `run.ts` script exports a default `run(ctx)` handler that can run agent sessions, call scoped GitHub/Slack/workspace helpers gated by `permissions`, or delegate to the managed pipeline (`ctx.review.run(...)` / `ctx.change.run(...)`). Validate all bundles and typecheck all `run.ts` scripts with `npm run workflow -- check`, and test a workflow with `npm run workflow -- run <name> --dry-run`.
 - Routing picks the workflow whose `on.event` matches what sync observed: `source` and `kind`, then `item` (`issue` or `pr`), `author: bot` (the item is authored by `github.botLogin`) and `grades` (for `low_grade`). `on.manual: false` stops manual enqueue/runs. Only an enabled match routes: a signal whose matching workflows are all disabled queues nothing, and a selection label whose `label` workflow is disabled selects nothing.
 - Two enabled workflows may not share an event trigger: startup fails naming both files. To give a trigger to a new workflow, disable the shipped one that owns it (`"review_issue": { "enabled": false }` above). The selection label still decides between the `label` and `item_changed` issue triggers.
 - `defaults.tools` is the list of agent tools (`read`, `grep`, `find`, `ls`, `git`, `read_base`, `bash`, `edit`, `write`) and the scoped tools `http`, `browser` and `github_search` (see Scoped tools below); `review` workflows get no write tools and `change` workflows no `git`, `read_base`, or `github_search`. Omitted, `defaults.tools` defaults to `read`, `grep`, `find`, `ls`, `bash`, `edit`, `write` for `mode: change` or `read`, `grep`, `find`, `ls`, `git` for `mode: review`.

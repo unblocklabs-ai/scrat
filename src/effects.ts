@@ -1,19 +1,18 @@
 import { eq } from "drizzle-orm";
 import { postReply, reactToRoot, verdictReaction } from "./commit-review.ts";
-import { upsertComment } from "./comments.ts";
+import { findBotFingerprintedIssue, findBotMarkedComment, upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
 import type { EventReferences } from "./events.ts";
 import { conventionalTitle, git, remoteBranchHead, shortSha, workflowPaths } from "./git.ts";
 import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
-import { isBotLogin } from "./config.ts";
 import { botSlug } from "./identity.ts";
 import type { Action, EffectName } from "./manifests.ts";
 import { upsertItem } from "./items.ts";
 import { reconcileLabels } from "./labels.ts";
 import { categoriesFor, itemLabelKey } from "./item-labels.ts";
 import { validateLabelSelections } from "./results.ts";
-import { endsWithMarker, fingerprintMarker, isIssueComment, reviewMarker, taskMarker, withMarker } from "./markers.ts";
+import { fingerprintMarker, reviewMarker, taskMarker, withMarker } from "./markers.ts";
 import { observe } from "./observation.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
 import { remoteUrl } from "./repository.ts";
@@ -129,7 +128,7 @@ const comment = {
     const { github, task, run, references, saveReceipt } = context;
     const marker = context.action.mode === "review" ? reviewMarker : taskMarker(task.id);
     const observation = observed(context);
-    const existing = observation.own.findLast((candidate) => isIssueComment(candidate) && endsWithMarker(candidate.body, marker));
+    const existing = findBotMarkedComment(observation.own, marker);
     const commentId = await upsertComment(github, run.context.item.number, existing, withMarker(`${run.result.text}\n\n${validationLine(run)}`, marker), references);
     saveReceipt({ commentId });
   },
@@ -147,7 +146,7 @@ const labels = {
 const prAssessment = {
   settlesRun: true,
   apply: ({ github, task, run, references }) =>
-    reconcilePrReview(github, task.subjectId, run.context.item.number, references, { task, run }),
+    reconcilePrReview(github, task.subjectId, run.context.item.number, references, { run }),
 } satisfies Effect;
 
 const itemLabels = {
@@ -174,8 +173,7 @@ const issue = {
     const { issues: open } = await github.fetchOpenItems();
     for (const { title, body, fingerprint } of missing) {
       if (publication().issues?.[fingerprint] !== undefined) continue;
-      const marker = fingerprintMarker(fingerprint);
-      const existing = open.find((candidate) => isBotLogin(candidate.user?.login) && endsWithMarker(candidate.body ?? "", marker));
+      const existing = findBotFingerprintedIssue(open, fingerprint);
       const number = existing?.number ?? (await github.createIssue({ title, body, fingerprint }, references)).number;
       saveReceipt({ issues: { ...publication().issues, [fingerprint]: number } });
     }

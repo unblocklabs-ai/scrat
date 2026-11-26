@@ -1,10 +1,9 @@
-import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { and, eq, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
 import { contextDirOf, evaluateContext, readDiffScope } from "./agent-input.ts";
 import { config } from "./config.ts";
-import { copyRedactedFile, distillCommandOutput, readHeadAndTail, stripAnsi, utf8TailSlice } from "./d1.ts";
+import { distillCommandOutput, persistCommandArtifact, readHeadAndTail, stripAnsi, utf8TailSlice } from "./d1.ts";
 import type { Action } from "./manifests.ts";
 import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
@@ -67,17 +66,10 @@ async function validationMessage(error: CheckFailure, round: number, runId: stri
     }
     if (!handled) {
       const exceedsTail = Buffer.byteLength(cleaned, "utf8") > config.harness.commandOutputTailBytes;
-      let savedPath: string | undefined;
-      let isPartial = Boolean(full?.truncated);
-      if (artifactPath && exceedsTail) {
-        if (full?.truncated && evidence) {
-          const copied = await copyRedactedFile(evidence, artifactPath, config.harness.maxOutputBytes);
-          if (copied) { savedPath = copied.path; isPartial = copied.truncated; }
-        }
-        if (!savedPath) {
-          savedPath = await writeFile(artifactPath, cleaned, { encoding: "utf8", mode: 0o600 }).then(() => artifactPath, () => undefined);
-        }
-      }
+      const persisted = artifactPath && exceedsTail
+        ? await persistCommandArtifact(artifactPath, cleaned, full?.truncated ? evidence : undefined, undefined, Boolean(full?.truncated))
+        : { savedPath: undefined, isPartial: Boolean(full?.truncated) };
+      const { savedPath, isPartial } = persisted;
       const logLabel = isPartial ? "Partial validation log" : "Full validation log";
       const tail = exceedsTail
         ? `${utf8TailSlice(cleaned, config.harness.commandOutputTailBytes)}${savedPath ? `\n\n[${logLabel}: ${savedPath}]` : ""}`
@@ -379,9 +371,9 @@ export async function validateRefreshedChange(ctx: Ctx, workspace: Workspace, ba
 }
 
 async function agentStage(ctx: Ctx, observed: Observed, p: Change, acceptance: Acceptance, { diffPaths, diffBaseSha }: Awaited<ReturnType<typeof readDiffScope>>) {
-  const { task, run, stop } = ctx;
+  const { run, stop } = ctx;
   const { workspace, mainSha, environment, database } = p;
-  const evaluated = evaluateContext(run, task, observed.observation, ctx.manifest);
+  const evaluated = evaluateContext(run, observed.observation, ctx.manifest);
   updateRun(run.id, { context: evaluated });
   const mergedBehind = await mergeBehind(ctx, observed, p, diffPaths, acceptance);
   if (p.validated) return;

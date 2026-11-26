@@ -1,3 +1,5 @@
+import { gitList } from "./git.ts";
+
 export function canonicalReviewPaths(scope: string[], tracked: string[]) {
   const files = new Map<string, Set<string>>();
   const directories = new Set<string>();
@@ -27,4 +29,26 @@ export function canonicalReviewPaths(scope: string[], tracked: string[]) {
 export function reviewScope(paths: string[], tracked: string[]) {
   const canonical = canonicalReviewPaths(paths, tracked);
   return !canonical.length || canonical.includes(".") ? undefined : canonical;
+}
+
+export async function retainReviewScope({
+  repositoryPath, mainSha, headSha, diffPaths, paths, previousMainSha, previousPaths, changedPaths,
+}: {
+  repositoryPath: string;
+  mainSha: string;
+  headSha: string;
+  diffPaths: readonly string[];
+  paths: readonly string[];
+  previousMainSha?: string | null;
+  previousPaths?: string[];
+  changedPaths?: readonly string[];
+}) {
+  const mainOnly = new Set(changedPaths);
+  const mainTracked = await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", mainSha]);
+  const headTracked = headSha !== mainSha ? await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", headSha]) : [];
+  const previousMainTracked = previousMainSha && previousMainSha !== mainSha && previousMainSha !== headSha
+    ? await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", previousMainSha]).catch(() => []) : [];
+  const tracked = headTracked.length || previousMainTracked.length ? [...mainTracked, ...headTracked, ...previousMainTracked] : mainTracked;
+  const prior = canonicalReviewPaths(previousPaths ?? [], tracked).filter((path) => path !== ".");
+  return [...new Set([...prior, ...diffPaths, ...paths.filter((path) => !mainOnly.has(path))])];
 }

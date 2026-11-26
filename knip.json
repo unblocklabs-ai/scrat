@@ -1,12 +1,11 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "entry": [
-    "src/{fetch,sync,enqueue,run-next,work,retry,cleanup,recover,recover-active,serve}.ts",
-    "src/sandbox.ts",
-    "test/{integration.test,scenario,database-command}.mjs",
+    "src/{run-next,recover-active}.ts",
+    "workflows/*/run.ts",
     "deploy/prepare-tools.mjs"
   ],
   "ignoreBinaries": ["rg"],
   "ignoreDependencies": ["lighthouse", "playwright-core"],
-  "project":["src/**/*.ts", "test/**/*.mjs", "deploy/**/*.mjs"]
+  "project": ["src/**/*.ts", "workflows/**/*.ts", "test/**/*.mjs", "deploy/**/*.mjs"]
 }

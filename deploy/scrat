@@ -425,8 +425,8 @@ print_first_sync_plan() {
     const { config, isWorkflowEnabled } = await import("./src/config.ts");
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync("data/scrat.sqlite", { readOnly: true });
-    const items = db.prepare("select i.kind as kind, i.payload as payload from items i join subjects s on s.id = i.id where s.state = ?").all("open")
-      .map((row) => ({ kind: row.kind, author: JSON.parse(row.payload).author?.toLowerCase() }));
+    const items = db.prepare("select i.kind as kind, i.payload as payload from items i join subjects s on s.id = i.id where s.state = ? and lower(s.repository) = lower(?)").all("open", config.github.repository)
+      .map((row) => ({ kind: row.kind, author: JSON.parse(row.payload).user?.login?.toLowerCase() }));
     db.close();
     const count = (kind) => items.filter((item) => item.kind === kind).length;
     const bot = items.filter((item) => item.author === config.github.botLogin.toLowerCase()).length;

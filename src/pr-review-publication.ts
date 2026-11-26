@@ -12,7 +12,7 @@ import { logger } from "./logging.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
 import { getRun, runHistory, runText, updateRun } from "./run-history.ts";
-import type { Run, Task } from "./schema.ts";
+import type { Run } from "./schema.ts";
 import { serialized } from "./single-flight.ts";
 import { latestTask } from "./tasks.ts";
 
@@ -37,7 +37,7 @@ function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeo
 
 export type ResolvedReview = { reviews: ReturnType<typeof runHistory>; state: PrReviewState; mainSha: string };
 
-async function reconcile(github: GitHubRepository, subjectId: string, number: number, references: EventReferences, publication?: { task: Task; run: Run }, observed?: GithubContext, known?: ResolvedReview) {
+async function reconcile(github: GitHubRepository, subjectId: string, number: number, references: EventReferences, publication?: { run: Run }, observed?: GithubContext, known?: ResolvedReview) {
   const current = observed ?? await github.fetchItemContext("pr", number);
   const reviews = known?.reviews ?? prReviewHistory(subjectId);
   const observation = observe(current);
@@ -89,7 +89,7 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
 export const serializePr = <T>(github: GitHubRepository, number: number, work: () => Promise<T>) =>
   serialized(pendingReviews, `${github.repository}#${number}`, work);
 
-export const reconcilePrReview = (github: GitHubRepository, subjectId: string, number: number, references: EventReferences = {}, publication?: { task: Task; run: Run }) =>
+export const reconcilePrReview = (github: GitHubRepository, subjectId: string, number: number, references: EventReferences, publication?: { run: Run }) =>
   serializePr(github, number, () => reconcile(github, subjectId, number, references, publication));
 
 export const reconcileObserved = (github: GitHubRepository, subjectId: string, number: number, references: EventReferences, current: GithubContext, known?: ResolvedReview) =>

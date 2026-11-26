@@ -60,7 +60,7 @@ export function evaluateItemContext(
   };
 }
 
-export function evaluateContext(run: Run, _task: Task, observation: ItemObservation, manifest: Action): NonNullable<Run["context"]> {
+export function evaluateContext(run: Run, observation: ItemObservation, manifest: Action): NonNullable<Run["context"]> {
   return evaluateItemContext(run, observation, {
     labelCategories: manifest.publish.includes("item_labels") ? categoriesFor(manifest, observation.kind) : undefined,
     filterFeedbackComments: manifest.context === "feedback",

@@ -22,19 +22,25 @@ export type BrowserScope = { navigationHosts: Hosts; resourceHosts: Hosts; bindi
 const text = (value: string, details: Record<string, unknown> = {}) => ({ content: [{ type: "text" as const, text: value }], details });
 const hostOf = (raw: string) => { try { return new URL(raw).hostname || "invalid"; } catch { return "invalid"; } };
 
+function urlProblem(url: URL, hosts: Hosts): string | undefined {
+  if (url.protocol !== "https:") return "only https URLs are allowed";
+  if (url.username || url.password) return "URLs with credentials are not allowed";
+  if (url.port) return "URLs with an explicit port are not allowed";
+  const problem = hostProblem(url.hostname);
+  if (problem) return problem;
+  if (hosts !== "any" && !hosts.includes(url.hostname)) return `${url.hostname} is not an allowed host`;
+  return undefined;
+}
+
 function usableHost(url: URL, hosts: Hosts) {
-  return url.protocol === "https:" && !url.username && !url.password && !url.port && !hostProblem(url.hostname) && (hosts === "any" || hosts.includes(url.hostname));
+  return urlProblem(url, hosts) === undefined;
 }
 
 function allowedUrl(raw: string, hosts: Hosts) {
   let url: URL;
   try { url = new URL(raw); } catch { throw new Error("url must be an absolute https URL"); }
-  if (url.protocol !== "https:") throw new Error("Refused: only https URLs are allowed");
-  if (url.username || url.password) throw new Error("Refused: URLs with credentials are not allowed");
-  if (url.port) throw new Error("Refused: URLs with an explicit port are not allowed");
-  const problem = hostProblem(url.hostname);
+  const problem = urlProblem(url, hosts);
   if (problem) throw new Error(`Refused: ${problem}`);
-  if (hosts !== "any" && !hosts.includes(url.hostname)) throw new Error(`Refused: ${url.hostname} is not an allowed host`);
   return url;
 }
 

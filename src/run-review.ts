@@ -5,9 +5,9 @@ import { config, isBotLogin } from "./config.ts";
 import { branchConflictCode } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { bestEffort } from "./logging.ts";
-import { createMergeCommit, gitList, prepareTarget } from "./git.ts";
+import { createMergeCommit, prepareTarget } from "./git.ts";
 import { currentPrReview } from "./pr-assessment.ts";
-import { canonicalReviewPaths } from "./review-paths.ts";
+import { retainReviewScope } from "./review-paths.ts";
 import { getRun, latestCompletedRun, latestPriorRunOfTask, updateRun } from "./run-history.ts";
 import { type AgentResult, assertComplete, hasReviewCheckpoint } from "./results.ts";
 import type { Workspace } from "./schema.ts";
@@ -67,20 +67,17 @@ async function retainedScope({ run, task, repositoryPath }: Ctx, { item, observa
   const state = pullRequest ? await currentPrReview(item.id, observation, mainSha) : undefined;
   const previous = state ? "assessment" in state ? state.assessment.run : undefined : latestCompletedRun(item.id, task.action);
   if (!previous || previous.context?.revision !== evaluated.revision) return current;
-  const mainOnly = new Set(trigger.changedPaths);
-  const mainTracked = await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", mainSha]);
-  const headTracked = headSha !== mainSha ? await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", headSha]) : [];
-  const previousMainTracked = previous.mainSha && previous.mainSha !== mainSha && previous.mainSha !== headSha
-    ? await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", previous.mainSha]).catch(() => []) : [];
-  const tracked = headTracked.length || previousMainTracked.length ? [...mainTracked, ...headTracked, ...previousMainTracked] : mainTracked;
-  const prior = canonicalReviewPaths(previous.result?.paths ?? [], tracked)
-    .filter((path) => path !== ".");
-  return [...new Set([...prior, ...diffPaths, ...paths.filter((path) => !mainOnly.has(path))])];
+  return retainReviewScope({
+    repositoryPath, mainSha, headSha, diffPaths, paths,
+    previousMainSha: previous.mainSha,
+    previousPaths: previous.result?.paths,
+    changedPaths: trigger.changedPaths,
+  });
 }
 
-const itemScope = async ({ run, task, manifest, repositoryPath }: Ctx, observed: Observed) => {
+const itemScope = async ({ run, manifest, repositoryPath }: Ctx, observed: Observed) => {
   const { mainSha, headSha } = await itemRevisions(observed);
-  return { mainSha, headSha, evaluated: evaluateContext(run, task, observed.observation, manifest), ...await readDiffScope(repositoryPath, mainSha, headSha, Boolean(observed.pullRequest)) };
+  return { mainSha, headSha, evaluated: evaluateContext(run, observed.observation, manifest), ...await readDiffScope(repositoryPath, mainSha, headSha, Boolean(observed.pullRequest)) };
 };
 
 async function prepareReviewCommands({ run, repositoryPath, references, operation, cleanup }: Ctx, { context, observation }: Observed, review: Review, environment: Environment, commands: string[][]) {

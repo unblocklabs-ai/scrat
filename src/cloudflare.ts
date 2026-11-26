@@ -8,7 +8,7 @@ import { botName } from "./identity.ts";
 import { upsertItem } from "./items.ts";
 import { clip, failure, loggieCall } from "./loggie.ts";
 import { bestEffort, logger, withOperation } from "./logging.ts";
-import { endsWithMarker, fingerprintMarker } from "./markers.ts";
+import { findBotFingerprintedIssue } from "./comments.ts";
 import { assertConfiguredRepository, findItem, openItems } from "./repository.ts";
 import { sourceCursors } from "./schema.ts";
 import { sourceCursor } from "./sources.ts";
@@ -142,8 +142,7 @@ async function reconcile(round: Round, issue: Issue) {
     return;
   }
   round.listed ??= (await github.fetchOpenItems()).issues;
-  const marker = fingerprintMarker(fingerprintOf(issue.id));
-  const existing = round.listed.find((entry) => isBotLogin(entry.user?.login) && endsWithMarker(entry.body ?? "", marker));
+  const existing = findBotFingerprintedIssue(round.listed, fingerprintOf(issue.id));
   const number = existing?.number ?? await file(github, issue, recurred);
   round.open++;
   if (!existing) counts.filed++;

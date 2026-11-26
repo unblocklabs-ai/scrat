@@ -4,13 +4,12 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { and, eq } from "drizzle-orm";
 import type { Logger } from "pino";
 import { buildItemAgentInput, evaluateItemContext, readDiffScope } from "./agent-input.ts";
-import { upsertComment } from "./comments.ts";
-import { config, isBotLogin } from "./config.ts";
+import { findBotFingerprintedIssue, findBotMarkedComment, upsertComment } from "./comments.ts";
+import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { describeError, errorCode, SupersededError, transientInferenceCode } from "./errors.ts";
 import type { EventReferences } from "./events.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
-import { gitList } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubIssue, GithubPullRequest } from "./github-types.ts";
 import { botSlug } from "./identity.ts";
@@ -18,11 +17,11 @@ import { categoriesFor, itemLabelKey } from "./item-labels.ts";
 import type { Item } from "./items.ts";
 import { reconcileLabels } from "./labels.ts";
 import type { LabelCategory, ThinkingLevel, ToolName } from "./manifests.ts";
-import { endsWithMarker, fingerprintMarker, isIssueComment, reviewMarker, withMarker } from "./markers.ts";
+import { fingerprintMarker, reviewMarker, withMarker } from "./markers.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { executePi, type SubmitResultSpec } from "./pi.ts";
 import { assertComplete, hasPublicationSnapshot, InterruptedError, SecretLeakError } from "./results.ts";
-import { canonicalReviewPaths } from "./review-paths.ts";
+import { retainReviewScope } from "./review-paths.ts";
 import { getRun, latestCompletedRun, latestPriorRunOfTask, updateRun } from "./run-history.ts";
 import { steps, workflowState, type Run, type Subject, type Task } from "./schema.ts";
 import { assertPublishable } from "./secrets.ts";
@@ -268,7 +267,12 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
 
   const findStep = (name: string) => db.select().from(steps).where(and(eq(steps.taskId, task.id), eq(steps.name, name))).get();
 
-  async function recordStep<T>(name: string, inputHash: string, fn: () => Promise<T>): Promise<T> {
+  async function recordStep<T>(
+    name: string,
+    inputHash: string,
+    fn: () => Promise<T>,
+    onErrorStatus?: (error: unknown) => "failed" | "running",
+  ): Promise<T> {
     const startedAt = new Date().toISOString();
     const startedMs = performance.now();
     db.insert(steps).values({
@@ -295,10 +299,14 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       log.info({ event: "workflow.step_completed", workflow: workflow.name, step: name, durationMs: Math.round(performance.now() - startedMs) });
       return output;
     } catch (error) {
-      const finishedAt = new Date().toISOString();
-      db.update(steps).set({ status: "failed", error: describeError(error), finishedAt })
-        .where(and(eq(steps.taskId, task.id), eq(steps.name, name))).run();
-      log.warn({ event: "workflow.step_failed", workflow: workflow.name, step: name, durationMs: Math.round(performance.now() - startedMs), err: error });
+      const status = onErrorStatus?.(error) ?? "failed";
+      const uncertain = status === "running";
+      db.update(steps).set({
+        status,
+        error: describeError(error),
+        finishedAt: uncertain ? null : new Date().toISOString(),
+      }).where(and(eq(steps.taskId, task.id), eq(steps.name, name))).run();
+      log.warn({ event: "workflow.step_failed", workflow: workflow.name, step: name, ...(onErrorStatus ? { uncertain } : {}), durationMs: Math.round(performance.now() - startedMs), err: error });
       throw error;
     }
   }
@@ -348,44 +356,12 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
     updateRun(run.id, { stage: "publishing" });
     let succeeded = false;
     try {
-      let output: T;
-      if (options.uncertainVia) {
-        const startedAt = new Date().toISOString();
-        const startedMs = performance.now();
-        db.insert(steps).values({
-          taskId: task.id,
-          name,
-          inputHash,
-          workflowHash: workflow.hash,
-          status: "running",
-          output: null,
-          error: null,
-          startedAt,
-          finishedAt: null,
-        }).onConflictDoUpdate({
-          target: [steps.taskId, steps.name],
-          set: { inputHash, workflowHash: workflow.hash, status: "running", output: null, error: null, startedAt, finishedAt: null },
-        }).run();
-        log.info({ event: "workflow.step_started", workflow: workflow.name, step: name });
-        try {
-          const rawOutput = await fn();
-          output = ensureJsonSerializable(`Step ${name} output`, rawOutput);
-          db.update(steps).set({ status: "completed", output, error: null, finishedAt: new Date().toISOString() })
-            .where(and(eq(steps.taskId, task.id), eq(steps.name, name))).run();
-          log.info({ event: "workflow.step_completed", workflow: workflow.name, step: name, durationMs: Math.round(performance.now() - startedMs) });
-        } catch (error) {
-          const confirmed = isConfirmedSlackRejection(error);
-          db.update(steps).set({
-            status: confirmed ? "failed" : "running",
-            error: describeError(error),
-            finishedAt: confirmed ? new Date().toISOString() : null,
-          }).where(and(eq(steps.taskId, task.id), eq(steps.name, name))).run();
-          log.warn({ event: "workflow.step_failed", workflow: workflow.name, step: name, uncertain: !confirmed, durationMs: Math.round(performance.now() - startedMs), err: error });
-          throw error;
-        }
-      } else {
-        output = await recordStep(name, inputHash, fn);
-      }
+      const output = await recordStep(
+        name,
+        inputHash,
+        fn,
+        options.uncertainVia ? (error) => (isConfirmedSlackRejection(error) ? "failed" : "running") : undefined,
+      );
       succeeded = true;
       published = true;
       return output;
@@ -474,57 +450,86 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
     },
   };
 
-  const workspace: WorkflowContext["workspace"] = {
-    baseBranch: config.github.baseBranch,
-    async withCheckout<T>(ref: string, fn: (ws: WorkflowCheckout) => Promise<T>): Promise<T> {
-      assertNotAborted(signal, "workspace.withCheckout");
-      assertPermission<WorkspacePermission>(workflow.permissions.workspace, "read", "workspace", workflow.name);
-      if (checkoutActive) {
-        throw new Error("Overlapping workspace.withCheckout calls are not supported in a single workflow run");
-      }
-      checkoutActive = true;
-      let ws: { id: string; path: string; baseSha: string } | undefined;
-      try {
-        const baseRef = await github.fetchBranch(ref);
-        ws = await createWorkspace({ repositoryPath, baseRef }, references);
-        updateRun(run.id, { workspaceId: ws.id, mainSha: ws.baseSha, headSha: ws.baseSha });
-        input.onWorkspaceAcquired?.({ id: ws.id, path: ws.path });
-        return await fn({ id: ws.id, path: ws.path, baseSha: ws.baseSha, ref });
-      } finally {
-        checkoutActive = false;
-        if (ws) {
-          input.onWorkspaceReleased?.();
-          try {
-            await removeWorkspace(ws.id, references);
-          } catch (cleanupError) {
-            log.warn({ err: cleanupError, workspaceId: ws.id }, "Failed to remove workflow workspace");
-          }
+  async function withExclusiveCheckout<W extends { id: string; path: string }, V, R>(
+    stage: string,
+    overlapError: string,
+    acquire: () => Promise<W>,
+    describe: (ws: W) => Promise<V> | V,
+    fn: (value: V) => Promise<R>,
+  ): Promise<R> {
+    assertNotAborted(signal, stage);
+    assertPermission<WorkspacePermission>(workflow.permissions.workspace, "read", "workspace", workflow.name);
+    if (checkoutActive) throw new Error(overlapError);
+    checkoutActive = true;
+    let acquired: W | undefined;
+    let notified = false;
+    try {
+      acquired = await acquire();
+      const value = await describe(acquired);
+      input.onWorkspaceAcquired?.({ id: acquired.id, path: acquired.path });
+      notified = true;
+      return await fn(value);
+    } finally {
+      checkoutActive = false;
+      if (acquired) {
+        if (notified) input.onWorkspaceReleased?.();
+        try {
+          await removeWorkspace(acquired.id, references);
+        } catch (cleanupError) {
+          log.warn({ err: cleanupError, workspaceId: acquired.id }, "Failed to remove workflow workspace");
         }
       }
+    }
+  }
+
+  function prepareScriptAgent(options: { skill?: string; tools?: readonly ToolName[]; provider?: string; model?: string; thinkingLevel?: ThinkingLevel; forbidReadBase?: boolean }) {
+    const skillFile = options.skill ? resolveWorkflowFile(workflow.dir, options.skill) : workflow.skillPath;
+    if (!skillFile) throw new Error(`Workflow ${workflow.name} has no SKILL.md and no skill option was provided`);
+    const effectiveTools = options.tools ?? workflow.defaults.tools;
+    for (const tool of effectiveTools) {
+      if (!allowedToolSet.has(tool)) throw new Error(`Workflow ${workflow.name} requested disallowed tool "${tool}"`);
+      if (options.forbidReadBase && tool === "read_base") {
+        throw new Error(`Workflow ${workflow.name} requested "read_base" outside ctx.item.runAgent`);
+      }
+    }
+    if (effectiveTools.includes("github_search")) {
+      assertPermission<GithubPermission>(workflow.permissions.github, "read", "github", workflow.name);
+    }
+    const effectiveRun: Run = {
+      ...run,
+      skill: skillFile,
+      provider: options.provider ?? workflow.defaults.provider,
+      model: options.model ?? workflow.defaults.model,
+      thinkingLevel: options.thinkingLevel ?? workflow.defaults.thinkingLevel,
+    };
+    return { effectiveTools, effectiveRun };
+  }
+
+  const workspace: WorkflowContext["workspace"] = {
+    baseBranch: config.github.baseBranch,
+    withCheckout<T>(ref: string, fn: (ws: WorkflowCheckout) => Promise<T>): Promise<T> {
+      return withExclusiveCheckout(
+        "workspace.withCheckout",
+        "Overlapping workspace.withCheckout calls are not supported in a single workflow run",
+        async () => {
+          const baseRef = await github.fetchBranch(ref);
+          return createWorkspace({ repositoryPath, baseRef }, references);
+        },
+        (ws) => {
+          updateRun(run.id, { workspaceId: ws.id, mainSha: ws.baseSha, headSha: ws.baseSha });
+          return { id: ws.id, path: ws.path, baseSha: ws.baseSha, ref };
+        },
+        fn,
+      );
     },
   };
 
   const agent: WorkflowContext["agent"] = {
     async run<T = Record<string, unknown>>(options: WorkflowAgentOptions): Promise<WorkflowAgentResult<T>> {
       assertNotAborted(signal, "agent.run");
-      const skillFile = options.skill
-        ? resolveWorkflowFile(workflow.dir, options.skill)
-        : workflow.skillPath;
-      if (!skillFile) throw new Error(`Workflow ${workflow.name} has no SKILL.md and no skill option was provided`);
+      const { effectiveTools, effectiveRun } = prepareScriptAgent({ ...options, forbidReadBase: true });
       const contextDir = await mkdtemp(join(tmpdir(), `scrat-wf-${workflow.name}-`));
       try {
-        const effectiveTools = options.tools ?? workflow.defaults.tools;
-        for (const tool of effectiveTools) {
-          if (!allowedToolSet.has(tool)) {
-            throw new Error(`Workflow ${workflow.name} requested disallowed tool "${tool}"`);
-          }
-          if (tool === "read_base") {
-            throw new Error(`Workflow ${workflow.name} requested "read_base" outside ctx.item.runAgent`);
-          }
-        }
-        if (effectiveTools.includes("github_search")) {
-          assertPermission<GithubPermission>(workflow.permissions.github, "read", "github", workflow.name);
-        }
         let contextText = options.context ?? "";
         if (options.input !== undefined) {
           const inputPath = join(contextDir, "input.json");
@@ -542,13 +547,6 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
               : `## Workflow input\n\nFull JSON input is staged at \`${inputPath}\` (${bytes} bytes). Read or filter it with \`codemode\` or \`read\`.`,
           ].filter(Boolean).join("\n\n");
         }
-        const effectiveRun: Run = {
-          ...run,
-          skill: skillFile,
-          provider: options.provider ?? workflow.defaults.provider,
-          model: options.model ?? workflow.defaults.model,
-          thinkingLevel: options.thinkingLevel ?? workflow.defaults.thinkingLevel,
-        };
         if (getRun(run.id)?.stage !== "publishing") updateRun(run.id, { stage: "agent" });
         let sessionInfo: { id?: string; file?: string } = {};
         const res = await executePi({
@@ -561,7 +559,6 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
           stop: signal,
         }, {
           context: contextText,
-          skillPath: skillFile,
           submitResult: options.submitResult,
           onSession: (details) => {
             sessionInfo = { id: details.piSessionId, file: details.piSessionFile };
@@ -619,7 +616,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       return runEffectStep("github.comment", safeKey, { number, body }, async () => {
         const marker = `<!-- scrat-workflow:${workflow.name}:${safeKey} -->`;
         const ctx = await github.fetchItemContext("issue", number);
-        const existing = ctx.comments.findLast((candidate) => isBotLogin(candidate.author) && isIssueComment(candidate) && endsWithMarker(candidate.body, marker));
+        const existing = findBotMarkedComment(ctx.comments, marker);
         const commentId = await upsertComment(github, number, existing, withMarker(body, marker), references);
         return { commentId };
       });
@@ -636,8 +633,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       }
       return runEffectStep("github.issue", safeKey, { title, body, labels: labels ?? [] }, async () => {
         const { issues: open } = await github.fetchOpenItems();
-        const marker = fingerprintMarker(fingerprint);
-        const existing = open.find((candidate) => isBotLogin(candidate.user?.login) && endsWithMarker(candidate.body ?? "", marker));
+        const existing = findBotFingerprintedIssue(open, fingerprint);
         if (existing) return { number: existing.number, created: false };
         const created = await github.createIssue({ title, body, fingerprint, labels }, references);
         return { number: created.number, created: true };
@@ -682,7 +678,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
     },
     savedResult() {
       const prior = run.retryOfRunId ? getRun(run.retryOfRunId) : latestPriorRunOfTask(task.id, run.id);
-      if (!hasPublicationSnapshot(prior) || !prior.result || !prior.context) return undefined;
+      if (!hasPublicationSnapshot(prior)) return undefined;
       updateRun(run.id, {
         context: prior.context,
         result: prior.result,
@@ -722,57 +718,44 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
     skipAsUnchanged(reason) {
       throw new SupersededError(reason);
     },
-    async withCheckout(observed, options, fn) {
-      assertNotAborted(signal, "item.withCheckout");
-      assertPermission<WorkspacePermission>(workflow.permissions.workspace, "read", "workspace", workflow.name);
-      if (checkoutActive) throw new Error("Overlapping workspace checkout calls are not supported in a single workflow run");
-      checkoutActive = true;
-      let ws: { id: string; path: string; branch: string | null; baseSha: string } | undefined;
-      try {
-        const headSha = observed.pullRequest ? await github.fetchPullRequestHead(observed.pullRequest) : observed.mainSha;
-        const evaluated = evaluateItemContext(run, observed.observation, { labelCategories: options.labelingCategories });
-        const { diffBaseSha, diffPaths } = await readDiffScope(repositoryPath, observed.mainSha, headSha, Boolean(observed.pullRequest));
-        ws = await createWorkspace({ repositoryPath, baseRef: headSha }, references);
-        updateRun(run.id, { workspaceId: ws.id, mainSha: observed.mainSha, headSha, context: evaluated });
-        input.onWorkspaceAcquired?.({ id: ws.id, path: ws.path });
-        if (!options.prepare) {
-          log.info({ event: "workspace.prepare_skipped", reason: options.labelingCategories ? "item labeling" : "issue review" });
-        }
-        return await fn({
-          id: ws.id,
-          path: ws.path,
-          branch: ws.branch,
-          mainSha: observed.mainSha,
-          headSha,
-          diffBaseSha,
-          diffPaths,
-          evaluated,
-          observed,
-        });
-      } finally {
-        checkoutActive = false;
-        if (ws) {
-          input.onWorkspaceReleased?.();
-          try {
-            await removeWorkspace(ws.id, references);
-          } catch (cleanupError) {
-            log.warn({ err: cleanupError, workspaceId: ws.id }, "Failed to remove workflow workspace");
+    withCheckout<T>(observed: WorkflowItemObserved, options: { prepare?: boolean; labelingCategories?: LabelCategory[] }, fn: (ws: WorkflowItemCheckout) => Promise<T>): Promise<T> {
+      let headSha = "";
+      let evaluated: NonNullable<Run["context"]>;
+      let diffBaseSha = "";
+      let diffPaths: string[] = [];
+      return withExclusiveCheckout(
+        "item.withCheckout",
+        "Overlapping workspace checkout calls are not supported in a single workflow run",
+        async () => {
+          headSha = observed.pullRequest ? await github.fetchPullRequestHead(observed.pullRequest) : observed.mainSha;
+          evaluated = evaluateItemContext(run, observed.observation, { labelCategories: options.labelingCategories });
+          ({ diffBaseSha, diffPaths } = await readDiffScope(repositoryPath, observed.mainSha, headSha, Boolean(observed.pullRequest)));
+          return createWorkspace({ repositoryPath, baseRef: headSha }, references);
+        },
+        (ws) => {
+          updateRun(run.id, { workspaceId: ws.id, mainSha: observed.mainSha, headSha, context: evaluated });
+          if (!options.prepare) {
+            log.info({ event: "workspace.prepare_skipped", reason: options.labelingCategories ? "item labeling" : "issue review" });
           }
-        }
-      }
+          return {
+            id: ws.id,
+            path: ws.path,
+            branch: ws.branch,
+            mainSha: observed.mainSha,
+            headSha,
+            diffBaseSha,
+            diffPaths,
+            evaluated,
+            observed,
+          };
+        },
+        fn,
+      );
     },
     async runAgent(ws, options) {
       assertNotAborted(signal, "item.runAgent");
       const currentItem = requireItem();
-      const skillFile = options.skill ? resolveWorkflowFile(workflow.dir, options.skill) : workflow.skillPath;
-      if (!skillFile) throw new Error(`Workflow ${workflow.name} has no SKILL.md and no skill option was provided`);
-      const effectiveTools = options.tools ?? workflow.defaults.tools;
-      for (const tool of effectiveTools) {
-        if (!allowedToolSet.has(tool)) throw new Error(`Workflow ${workflow.name} requested disallowed tool "${tool}"`);
-      }
-      if (effectiveTools.includes("github_search")) {
-        assertPermission<GithubPermission>(workflow.permissions.github, "read", "github", workflow.name);
-      }
+      const { effectiveTools, effectiveRun } = prepareScriptAgent({ skill: options.skill, tools: options.tools });
       const changeContext = options.contextMode === "change";
       const baseSha = changeContext ? ws.diffBaseSha : undefined;
       if (effectiveTools.includes("read_base") && !baseSha) {
@@ -791,13 +774,6 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         workspace: { path: ws.path, branch: ws.branch },
         files: options.files,
       });
-      const effectiveRun: Run = {
-        ...run,
-        skill: skillFile,
-        provider: workflow.defaults.provider,
-        model: workflow.defaults.model,
-        thinkingLevel: workflow.defaults.thinkingLevel,
-      };
       let sessionInfo: { id?: string; file?: string } = {};
       updateRun(run.id, { stage: "agent" });
       const res = await executePi({
@@ -813,7 +789,6 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         stop: signal,
       }, {
         context: prompt,
-        skillPath: skillFile,
         labelCategories: options.labelCategories ? [...options.labelCategories] : labelCategories,
         onSession: (details) => {
           sessionInfo = { id: details.piSessionId, file: details.piSessionFile };
@@ -826,14 +801,16 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       if (parsedTrigger.kind === "item_changed") {
         const previous = latestCompletedRun(currentItem.id, workflow.name);
         if (previous && previous.context?.revision === ws.evaluated.revision) {
-          const mainOnly = new Set(parsedTrigger.changedPaths);
-          const mainTracked = await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", ws.mainSha]);
-          const headTracked = ws.headSha !== ws.mainSha ? await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", ws.headSha]) : [];
-          const previousMainTracked = previous.mainSha && previous.mainSha !== ws.mainSha && previous.mainSha !== ws.headSha
-            ? await gitList(repositoryPath, ["ls-tree", "-r", "--name-only", "-z", previous.mainSha]).catch(() => []) : [];
-          const tracked = headTracked.length || previousMainTracked.length ? [...mainTracked, ...headTracked, ...previousMainTracked] : mainTracked;
-          const prior = canonicalReviewPaths(previous.result?.paths ?? [], tracked).filter((path) => path !== ".");
-          retained = [...new Set([...prior, ...ws.diffPaths, ...res.paths.filter((path) => !mainOnly.has(path))])];
+          retained = await retainReviewScope({
+            repositoryPath,
+            mainSha: ws.mainSha,
+            headSha: ws.headSha,
+            diffPaths: ws.diffPaths,
+            paths: res.paths,
+            previousMainSha: previous.mainSha,
+            previousPaths: previous.result?.paths,
+            changedPaths: parsedTrigger.changedPaths,
+          });
         }
       }
       const finalResult = { ...res, paths: retained };
@@ -876,7 +853,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         return { commentId: 0, dryRun: true, previewPath };
       }
       return runEffectStep("github.review_comment", safeKey, { number: current.observation.item.number, body }, async () => {
-        const existing = current.observation.own.findLast((candidate) => isIssueComment(candidate) && endsWithMarker(candidate.body, reviewMarker));
+        const existing = findBotMarkedComment(current.observation.own, reviewMarker);
         const commentId = await upsertComment(github, current.observation.item.number, existing, withMarker(`${body}\n\n`, reviewMarker), references);
         const currentPub = getRun(run.id)?.publication ?? { status: "pending" as const };
         updateRun(run.id, { publication: { ...currentPub, commentId } });

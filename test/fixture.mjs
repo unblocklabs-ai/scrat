@@ -323,9 +323,9 @@ export async function fixture(scenario, spec) {
       return [parsed.name, { provider: "fixture", ...reviewers.length && { reviewers: reviewers.map((reviewer) => ({ ...reviewer, provider: "fixture" })) } }];
     }));
   for (const configure of spec.configure ?? []) configure(config);
-  const { actions, workflows, ...fileSettings } = config;
+  const { workflows, ...fileSettings } = config;
   writeFileSync("app/scrat.config.json", JSON.stringify(fileSettings));
-  writeFileSync("app/scrat.local.json", JSON.stringify({ workflows, ...(actions && { actions }) }));
+  writeFileSync("app/scrat.local.json", JSON.stringify({ workflows }));
   mkdirSync("data");
   copyFileSync(schemaTemplate(repository), "data/scrat.sqlite");
   const app = async (path) => import(pathToFileURL(resolve("app/src", path)));

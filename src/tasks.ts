@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, lte, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
-import { defaultPriorityOf, isWorkflow, workflowOf, workflows } from "./actions.ts";
+import { defaultPriorityOf, isWorkflow, workflowOf, workflows } from "./workflow-registry.ts";
 import { config, isWorkflowEnabled } from "./config.ts";
 import { findItem, sameRepository } from "./repository.ts";
 import { db } from "./db.ts";

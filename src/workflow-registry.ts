@@ -14,7 +14,7 @@ export function workflowOf(name: string) {
 
 export const defaultPriorityOf = (name: string) => workflowOf(name).priority;
 
-export const actionsPublishing = (effect: EffectName) => (
+export const workflowsPublishing = (effect: EffectName) => (
   effect === "labels"
     ? workflows.filter((wf) => wf.on.event?.kind === "item_changed" && wf.on.event.item === "issue" && wf.permissions.github.includes("label")).map((wf) => wf.name)
     : effect === "pr_assessment"
@@ -24,7 +24,7 @@ export const actionsPublishing = (effect: EffectName) => (
         : []
 );
 
-export const matchingActions = (signal: Signal) =>
+export const matchingWorkflows = (signal: Signal) =>
   workflows.filter((wf) => matchesWorkflowSignal(workflowOf(wf.name), signal)).map((wf) => wf.name);
 
-export const routeFor = (signal: Signal) => matchingActions(signal).find((name) => isWorkflowEnabled(name));
+export const routeFor = (signal: Signal) => matchingWorkflows(signal).find((name) => isWorkflowEnabled(name));

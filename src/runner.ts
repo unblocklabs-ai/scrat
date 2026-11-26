@@ -1,6 +1,6 @@
-import { workflowOf } from "./actions.ts";
+import { workflowOf } from "./workflow-registry.ts";
 import { runWorkflow } from "./workflow-runner.ts";
-import { workflowToAction, type WorkflowPipelineSpec } from "./workflows.ts";
+import { toWorkflowSpec, type WorkflowPipelineSpec } from "./workflows.ts";
 import { refreshChangePublication } from "./change-publication.ts";
 import { getRepositoryPath } from "./config.ts";
 import { branchConflictCode, CompetingImplementation, ImplementationEnded, SupersededError, WorkflowPushRejected } from "./errors.ts";
@@ -214,8 +214,8 @@ export async function runNextTask(stop?: AbortSignal, taskId?: string) {
       workflow, task, run, subject, item, references, repositoryPath: getRepositoryPath(), operation, stop: runStop, cleanup,
       onTargetObserved: (target) => { active.target = target; },
       runPipeline: async (spec: WorkflowPipelineSpec, dryRun: boolean) => {
-        const actionSpec = workflowToAction(workflow, spec);
-        const pipelineCtx: Ctx = { task, run, subject, item, references, operation, manifest: actionSpec, repositoryPath: getRepositoryPath(), stop: runStop, cleanup };
+        const workflowSpec = toWorkflowSpec(workflow, spec);
+        const pipelineCtx: Ctx = { task, run, subject, item, references, operation, manifest: workflowSpec, repositoryPath: getRepositoryPath(), stop: runStop, cleanup };
         const outcome = await executeManagedPipeline(pipelineCtx, { active, trigger, resumingDeferred, dryRun });
         if (outcome.cancelled) pipelineCancelled = outcome.cancelled;
         if (outcome.skipped) pipelineSkipped = outcome.skipped;

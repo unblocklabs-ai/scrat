@@ -425,7 +425,7 @@ const cfgString = (cfg: Record<string, unknown>, key: string) => typeof cfg[key]
 const cfgNullableString = (cfg: Record<string, unknown>, key: string) => cfg[key] === null ? null : typeof cfg[key] === "string" ? cfg[key] : undefined;
 const cfgNumber = (cfg: Record<string, unknown>, key: string) => typeof cfg[key] === "number" && Number.isFinite(cfg[key]) ? cfg[key] : undefined;
 
-export function workflowToAction(wf: ResolvedWorkflow, spec: WorkflowPipelineSpec): Action {
+export function toWorkflowSpec(wf: ResolvedWorkflow, spec: WorkflowPipelineSpec): Action {
   const trigger: Action["trigger"] = wf.on.event
     ? { ...wf.on.event, branch: wf.on.event.branch, cron: undefined, window: undefined, manual: wf.on.manual }
     : { source: "schedule", kind: "tick", branch: undefined, cron: wf.on.cron, window: wf.on.window, manual: wf.on.manual };

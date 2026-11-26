@@ -1,4 +1,4 @@
-import { workflowOf, workflows } from "./actions.ts";
+import { workflowOf, workflows } from "./workflow-registry.ts";
 import { config, isWorkflowEnabled } from "./config.ts";
 import { type Cron, nextTick, parseCron, parseWindow } from "./cron.ts";
 import { type OperationScope, withOperationSync } from "./logging.ts";

@@ -1,4 +1,4 @@
-import { actionsPublishing, workflows } from "./actions.ts";
+import { workflows, workflowsPublishing } from "./workflow-registry.ts";
 import { branchConflictCode } from "./errors.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import type { ItemObservation } from "./observation.ts";
@@ -7,7 +7,7 @@ import { runHistory, runText } from "./run-history.ts";
 
 type History = ReturnType<typeof runHistory>;
 
-export const prReviewHistory = (subjectId: string) => runHistory(subjectId, actionsPublishing("pr_assessment"));
+export const prReviewHistory = (subjectId: string) => runHistory(subjectId, workflowsPublishing("pr_assessment"));
 
 function selectAssessment(history: History) {
   const byId = new Map(history.map((entry) => [entry.run.id, entry]));

@@ -1,5 +1,5 @@
 import { and, eq } from "drizzle-orm";
-import { workflowOf, workflows } from "./actions.ts";
+import { workflowOf, workflows } from "./workflow-registry.ts";
 import { db } from "./db.ts";
 import { type OperationScope, withOperation } from "./logging.ts";
 import type { Action } from "./manifests.ts";
@@ -7,7 +7,7 @@ import { assertConfiguredRepository } from "./repository.ts";
 import { sourceCursors, type Subject } from "./schema.ts";
 import { enqueueTask, latestTask } from "./tasks.ts";
 import type { TriggerInput } from "./triggers.ts";
-import { workflowToAction } from "./workflows.ts";
+import { toWorkflowSpec } from "./workflows.ts";
 
 export function sourceCursor(repository: string, action: string, scope: string) {
   const key = and(eq(sourceCursors.repository, repository), eq(sourceCursors.action, action), eq(sourceCursors.branch, scope));
@@ -26,7 +26,7 @@ export function pollSource(operationName: string, source: string, repository: st
     for (const wf of workflows) {
       const resolved = workflowOf(wf.name);
       if (resolved.on.event?.source === source) {
-        queued += await perAction(workflowToAction(resolved, { publish: [] }), operation, repository);
+        queued += await perAction(toWorkflowSpec(resolved, { publish: [] }), operation, repository);
       }
     }
     operation.complete({ queued });

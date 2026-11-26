@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { actionsPublishing } from "./actions.ts";
+import { workflowsPublishing } from "./workflow-registry.ts";
 import { config } from "./config.ts";
 import { distillHistory } from "./d1.ts";
 import type { ErrorDetails } from "./errors.ts";
@@ -113,7 +113,7 @@ export async function buildItemAgentInput(options: {
     : rawHistory;
   const prior = assessesPr ? priorReviewTexts(task.subjectId) : undefined;
   const previousAssessment = listed.includes("previous_assessment") ? assessesPr ? prior?.assessment : latestCompletedRun(task.subjectId, action)?.result?.text : undefined;
-  const triage = listed.includes("triage") ? latestCompletedRun(task.subjectId, actionsPublishing("labels"))?.result : undefined;
+  const triage = listed.includes("triage") ? latestCompletedRun(task.subjectId, workflowsPublishing("labels"))?.result : undefined;
   const issue = listed.includes("issue") ? issueOfPullRequest(config.github.repository, evaluated.item.number) : undefined;
   const found = listed.includes("validation") ? verificationOfCommit(headSha) : undefined, verification = found?.commands.length ? found : undefined;
   const site = listed.includes("storefront") && config.storefront.enabled && !options.baseOnly ? await import("./storefront-site.ts") : undefined;

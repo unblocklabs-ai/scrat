@@ -1,7 +1,7 @@
 import { db } from "./db.ts";
 import { and, eq, inArray, isNotNull, isNull, notExists } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
-import { workflows } from "./actions.ts";
+import { workflows } from "./workflow-registry.ts";
 import { config } from "./config.ts";
 import { listRunDatabases, removeRunDatabase } from "./databases.ts";
 import { getRun } from "./run-history.ts";

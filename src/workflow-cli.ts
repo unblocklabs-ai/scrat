@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { workflowOf, workflows } from "./actions.ts";
+import { workflowOf, workflows } from "./workflow-registry.ts";
 import { runCommand } from "./cli.ts";
 import { config } from "./config.ts";
 import { db } from "./db.ts";

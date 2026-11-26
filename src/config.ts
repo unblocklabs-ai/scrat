@@ -19,8 +19,8 @@ function loadOverrides(): Json {
 }
 
 const overrides = loadOverrides();
-if (isObject(overrides.actions) && overrides.actions.directory !== undefined && overrides.actions.directory !== null) {
-  throw new Error("Invalid scrat.local.json: actions.directory is no longer supported; use workflows.directory instead");
+if (overrides.actions !== undefined) {
+  throw configError(["actions: unknown setting; use workflows instead"]);
 }
 const workflowOverrides = isObject(overrides.workflows) ? overrides.workflows : undefined;
 const workflowDirectory = workflowOverrides?.directory;
@@ -35,45 +35,9 @@ export const trustLocalWorkflowScripts = trustLocalScripts === true;
 const repoRoot = fileURLToPath(new URL(".", configUrl));
 export const loadedWorkflows = readWorkflows(repoRoot, workflowDirectory);
 
-const migratedWorkflowTopKeys = new Set(["enabled", "priority", "cron", "window", "branch", "provider", "model", "thinkingLevel", "reviewers", "codemode", "retry", "skill"]);
-const migratedWorkflowConfigKeys = new Set(["targets", "issue_labels", "pr_labels", "channel", "browserSteps", "browserSeconds", "maxRangeCommits", "startMessage", "rootInstructions", "maxSelfRepairs", "exhaustedLabel", "failedLabel"]);
-
-function normalizeMigratedOverrides(raw: Json): Json {
-  if (!isObject(raw.actions)) return raw;
-  const workflowNames = new Set(loadedWorkflows.map((wf) => wf.name));
-  const unknownActions = Object.keys(raw.actions).filter((name) => name !== "directory" && !workflowNames.has(name));
-  if (unknownActions.length) throw configError(unknownActions.map((name) => `actions.${name}: unknown action`));
-  const nextWorkflows: Json = isObject(raw.workflows) ? { ...raw.workflows } : {};
-  for (const [name, legacy] of Object.entries(raw.actions)) {
-    if (name === "directory" || !isObject(legacy)) continue;
-    const translated: Json = {};
-    const translatedConfig: Json = {};
-    for (const [key, value] of Object.entries(legacy)) {
-      if (key === "skill" && typeof value === "string") translated[key] = isAbsolute(value) ? value : resolve(repoRoot, value);
-      else if (migratedWorkflowTopKeys.has(key)) translated[key] = value;
-      else if (migratedWorkflowConfigKeys.has(key)) translatedConfig[key] = value;
-      else if (key === "config" && isObject(value)) Object.assign(translatedConfig, value);
-      else translated[key] = value;
-    }
-    if (Object.keys(translatedConfig).length) translated.config = translatedConfig;
-    const existing = isObject(nextWorkflows[name]) ? nextWorkflows[name] : {};
-    nextWorkflows[name] = {
-      ...translated,
-      ...existing,
-      ...(isObject(translated.config) || isObject(existing.config)
-        ? { config: { ...(isObject(translated.config) ? translated.config : {}), ...(isObject(existing.config) ? existing.config : {}) } }
-        : {}),
-    };
-  }
-  const rest = { ...raw };
-  delete rest.actions;
-  return { ...rest, workflows: nextWorkflows };
-}
-
-const normalizedOverrides = normalizeMigratedOverrides(overrides);
 const workflowDefaults = { ...Object.fromEntries(loadedWorkflows.map((wf) => [wf.name, workflowDeploymentDefaults(wf)])), directory: null, trustLocalScripts: false };
 
-const merged = buildConfig({ ...settings, workflows: workflowDefaults }, normalizedOverrides);
+const merged = buildConfig({ ...settings, workflows: workflowDefaults }, overrides);
 if (isObject(merged.workflows)) {
   delete merged.workflows.directory;
   delete merged.workflows.trustLocalScripts;

@@ -1,6 +1,6 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Logger } from "pino";
-import { matchingActions, routeFor, workflowOf, workflows } from "./actions.ts";
+import { matchingWorkflows, routeFor, workflowOf, workflows } from "./workflow-registry.ts";
 import { config, getRepositoryPath, isBotLogin } from "./config.ts";
 import type { Signal } from "./manifests.ts";
 import { workflowItemLabelSettings } from "./workflows.ts";
@@ -166,7 +166,7 @@ function conflictMergePreservesLabel(subjectId: string, pr: GithubPullRequest, l
 
 function routeItemLabels(item: Item) {
   let queued = 0;
-  for (const action of matchingActions(signalFor(item, item.payload.user?.login, "item_labels"))) {
+  for (const action of matchingWorkflows(signalFor(item, item.payload.user?.login, "item_labels"))) {
     const resolved = workflowOf(action);
     const categories = resolved.enabled ? categoriesFor(workflowItemLabelSettings(resolved), item.kind) : [];
     if (!categories.length) {
@@ -240,7 +240,7 @@ async function routeObserved(ctx: SyncContext, item: Item, context: GithubContex
     ...item.kind === "pr" ? {
       conflicts: routeFor(signal("pr_conflicts")), feedback: routeFor(signal("pr_feedback")),
     } : {},
-    repairs: item.kind === "pr" ? matchingActions(signal("low_grade")) : [],
+    repairs: item.kind === "pr" ? matchingWorkflows(signal("low_grade")) : [],
     repairFor: (grade) => grade ? routeFor({ ...signal("low_grade"), grade }) : undefined,
   };
   let added = 0;

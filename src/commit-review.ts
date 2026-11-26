@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { evaluateContext } from "./agent-input.ts";
-import { workflowOf } from "./actions.ts";
+import { workflowOf } from "./workflow-registry.ts";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
 import { changedPaths, git, shortSha } from "./git.ts";

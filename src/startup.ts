@@ -1,5 +1,5 @@
 import { access, lstat, mkdir, readFile } from "node:fs/promises";
-import { workflows } from "./actions.ts";
+import { workflows } from "./workflow-registry.ts";
 import { type Resolver, publicAnswers, resolveHost, validateBindings } from "./bindings.ts";
 import { config, trustLocalWorkflowScripts } from "./config.ts";
 import { configError, type ScratConfig } from "./config-schema.ts";

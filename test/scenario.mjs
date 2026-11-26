@@ -2627,7 +2627,7 @@ fi
     const local = resolve("app/scrat.local.json"), requestLog = resolve("startup-requests.log");
     writeFileSync("startup-probe.mjs", `import{appendFileSync}from"node:fs";globalThis.fetch=async(input)=>{appendFileSync(${JSON.stringify(requestLog)},String(input?.url??input)+"\\n");throw new Error("blocked");};await import(${JSON.stringify(resolve("app/src/run-next.ts"))});`);
     const existing = JSON.parse(readFileSync(local, "utf8"));
-    const layered = (overrides) => ({ ...existing, ...overrides, actions: Object.fromEntries([...new Set([...Object.keys(existing.actions ?? {}), ...Object.keys(overrides.actions ?? {})])].map((name) => [name, { ...existing.actions?.[name], ...overrides.actions?.[name] }])) });
+    const layered = (overrides) => ({ ...existing, ...overrides, workflows: Object.fromEntries([...new Set([...Object.keys(existing.workflows ?? {}), ...Object.keys(overrides.workflows ?? {})])].map((name) => [name, { ...existing.workflows?.[name], ...overrides.workflows?.[name], ...(existing.workflows?.[name]?.config || overrides.workflows?.[name]?.config ? { config: { ...existing.workflows?.[name]?.config, ...overrides.workflows?.[name]?.config } } : {}) }])) });
     const startup = (overrides) => {
       writeFileSync(local, JSON.stringify(layered(overrides)));
       const run = spawnSync(process.execPath, ["startup-probe.mjs"], { encoding: "utf8" });
@@ -2640,16 +2640,16 @@ fi
     const broken = spawnSync(process.execPath, ["startup-probe.mjs"], { encoding: "utf8" });
     assert.notEqual(broken.status, 0); assert.match(broken.stderr, /Invalid Scrat configuration/);
     assert.equal(outbound(), ""); assert.equal(JSON.stringify([all(s.tasks), all(s.runs)]), untouched, "no task is claimed when the schema rejects the config");
-    for (const exhaustedLabel of ["scrat-exhausted", null, ""]) assert.deepEqual(startup({ actions: { address_review: { exhaustedLabel } } }), { status: 0, rejected: false });
+    for (const exhaustedLabel of ["scrat-exhausted", null, ""]) assert.deepEqual(startup({ workflows: { address_review: { config: { exhaustedLabel } } } }), { status: 0, rejected: false });
     f.addIssue(7); f.enqueue(7);
     const before = JSON.stringify([all(s.tasks), all(s.runs)]);
     const base = JSON.parse(readFileSync("app/scrat.config.json", "utf8"));
     writeFileSync("app/scrat.config.json", JSON.stringify({ ...base, workspace: { ...base.workspace, heavyCommands: [] } }));
     for (const overrides of [
-      { actions: { implement: { model: "no-such-model" } } },
-      { actions: { implement: { skill: "skills/missing/SKILL.md" } } },
+      { workflows: { implement: { model: "no-such-model" } } },
+      { workflows: { implement: { skill: "workflows/missing/SKILL.md" } } },
       { workspace: { heavyCommands: ["^(unclosed"] } },
-      { actions: { implement: { retry: { initialDelaySeconds: 1, maxDelaySeconds: 2 } } } },
+      { workflows: { implement: { retry: { initialDelaySeconds: 1, maxDelaySeconds: 2 } } } },
     ]) {
       assert.deepEqual(startup(overrides), { status: 1, rejected: true }, JSON.stringify(overrides));
       assert.equal(JSON.stringify([all(s.tasks), all(s.runs)]), before, "no task is claimed on a rejected start");
@@ -3101,7 +3101,7 @@ fi
     assert.ok(capped.includes("## ") && !capped.includes("report 10"), "a report over the cap crowds out older ones");
     config.context.historyBytes = 2048; await review(1);
     assert.ok(Buffer.byteLength(seen.at(-1)) <= 2048 && Buffer.byteLength(seen.at(-1)) > 1500);
-    const { buildAgentInput } = await f.app("agent-input.ts"), { workflowOf } = await f.app("actions.ts"), { workflowToAction } = await f.app("workflows.ts"), manifest = workflowToAction(workflowOf("review_issue"), { publish: ["comment", "labels"] });
+    const { buildAgentInput } = await f.app("agent-input.ts"), { workflowOf } = await f.app("workflow-registry.ts"), { toWorkflowSpec } = await f.app("workflows.ts"), manifest = toWorkflowSpec(workflowOf("review_issue"), { publish: ["comment", "labels"] });
     const sha = "a".repeat(40), evaluated = { revision: "r", baseBranch: "main", headSha: undefined, item: { number: 1, title: "t", body: "", url: "u" }, comments: [], commentRevisions: [] };
     const build = async (paths) => JSON.parse((await buildAgentInput({ run: huge, task: f.row(s.tasks, huge.taskId), manifest, evaluated, diffBaseSha: sha, diffPaths: paths, mainSha: sha, headSha: sha, baseRef: "main", mergeInProgress: false, workspace: { path: "w", branch: null } })).prompt);
     assert.deepEqual((await build(["a", "b", "c"])).diffPaths, ["a", "b", "c"]);
@@ -3463,7 +3463,8 @@ fi
 
     probe(undefined, ""); assert.equal(readFileSync(local, "utf8"), "{}\n");
     rejected(JSON.parse('{"workspace":{"environment":{"__proto__":{"x":"1"}}}}'), /Unknown setting in scrat\.local\.json: workspace\.environment\.__proto__/);
-    assert.throws(() => probe({ actions: { bogus: {} } }, ""), (error) => /Invalid Scrat configuration[\s\S]*actions\.bogus/.test(error.stderr));
+    assert.throws(() => probe({ actions: { bogus: {} } }, ""), (error) => /Invalid Scrat configuration[\s\S]*actions: unknown setting/.test(error.stderr));
+    assert.throws(() => probe({ workflows: { bogus: {} } }, ""), (error) => /Invalid Scrat configuration[\s\S]*workflows\.bogus/.test(error.stderr));
     assert.throws(() => probe({ harness: { maxConcurency: 8 } }, ""), (error) => /Invalid Scrat configuration[\s\S]*harness\.maxConcurency/.test(error.stderr));
 
     const provider = Object.keys(defaults.providers)[0], model = defaults.providers[provider].models[0].id;
@@ -3475,28 +3476,29 @@ fi
     assert.equal(written.baseUrl, "http://override.invalid/v1"); assert.equal(written.apiKey, defaults.providers[provider].apiKey);
     assert.deepEqual(written.models, defaults.providers[provider].models);
 
-    const labels = {
-      enabled: true, provider: "fixture", model: "gpt-6.2-sol", targets: ["issues", "prs"],
+    const labelConfig = {
+      targets: ["issues", "prs"],
       issue_labels: [{ category: "type", choices: [{ name: "bug", description: "A reported defect" }] }],
       pr_labels: [{ category: "risk", choices: [{ name: "custom: low", description: "Our deployment's low-risk rule" }] }],
     };
-    const overrides = { actions: { label_items: labels }, workflows: f.config.workflows };
+    const labels = { enabled: true, provider: "fixture", model: "gpt-6.2-sol", config: labelConfig };
+    const overrides = { workflows: { ...f.config.workflows, label_items: labels } };
     const showLabels = "console.log(JSON.stringify(config.workflows.label_items));";
     const beforeUpgrade = JSON.parse(probe(overrides, showLabels));
     const manifestPath = resolve("app/workflows/label_items/workflow.yaml"), shipped = readFileSync(manifestPath, "utf8");
     writeFileSync(manifestPath, shipped.replace("gpt-6.1-terra", "deepseek/deepseek-v4.1-flash").replace("category: risk", "category: upgraded-risk").replace("risk: low", "upgraded: low"));
     assert.deepEqual(JSON.parse(probe(overrides, showLabels)), beforeUpgrade, "a new shipped default cannot overwrite deployment label settings");
-    assert.deepEqual(beforeUpgrade.config.pr_labels, labels.pr_labels, "category arrays replace the shipped choices in full");
-    assert.deepEqual(beforeUpgrade.config.issue_labels, labels.issue_labels);
+    assert.deepEqual(beforeUpgrade.config.pr_labels, labelConfig.pr_labels, "category arrays replace the shipped choices in full");
+    assert.deepEqual(beforeUpgrade.config.issue_labels, labelConfig.issue_labels);
     assert.equal(beforeUpgrade.model, "gpt-6.2-sol");
     assert.deepEqual(JSON.parse(readFileSync(local, "utf8")), overrides, "loading does not rewrite local overrides");
     writeFileSync(manifestPath, shipped);
     const validate = `const { validateStaticConfig } = await import(${JSON.stringify(resolve("app/src/startup.ts"))}); await validateStaticConfig();`;
     probe(overrides, validate);
-    const invalidLabels = (changes, message) => assert.throws(() => probe({ actions: { label_items: { ...labels, ...changes } }, workflows: f.config.workflows }, validate), (error) => message.test(error.stderr));
+    const invalidLabels = (changes, message) => assert.throws(() => probe({ workflows: { ...f.config.workflows, label_items: { ...labels, config: { ...labelConfig, ...changes } } } }, validate), (error) => message.test(error.stderr));
     invalidLabels({ issue_labels: [] }, /issues target requires non-empty issue_labels/);
     invalidLabels({ pr_labels: [{ category: "risk", choices: [{ name: "Low", description: "low" }, { name: "low", description: "same" }] }] }, /label names must be unique/);
-    invalidLabels({ issue_labels: [...labels.issue_labels, { category: "TYPE", choices: [{ name: "feature", description: "New behavior" }] }] }, /category names must be unique/);
+    invalidLabels({ issue_labels: [...labelConfig.issue_labels, { category: "TYPE", choices: [{ name: "feature", description: "New behavior" }] }] }, /category names must be unique/);
     invalidLabels({ pr_labels: [{ category: "risk", choices: [] }] }, /Invalid Scrat configuration|minItems|must NOT have fewer than 1 items/);
   } },
   pat_auth: { title: "a personal access token authenticates every GitHub call and git credential without the App, is redacted, and must belong to botLogin case-insensitively", configure: [configurePat], run: async () => {
@@ -3895,7 +3897,7 @@ fi
   } },
   commits_source_modes: { title: "the commit source enqueues one task per matching commit oldest first with a cap, applies author and message filters in both modes, polls a second branch with its own cursor and rejects only identical trigger filters", configure: [configureCommitSource], run: async () => {
     const { pollCommits } = await f.app("commit-source.ts");
-    const { workflows } = await f.app("actions.ts");
+    const { workflows } = await f.app("workflow-registry.ts");
     const { findTriggerConflicts } = await f.app("manifests.ts");
     const { readWorkflows } = await f.app("workflows.ts");
     const { config: live } = await f.app("config.ts");
@@ -4244,7 +4246,7 @@ fi
     assert.equal(claimed.run.provider, "fixture"); assert.equal(claimed.run.model, "gpt-6.2-sol");
   } },
   manifest_directory: { title: "a deployment workflow directory adds a workflow for a freed trigger, rejects duplicate enabled triggers, unknown tools and bad directories", configure: [configureManifestDirectory], run: async () => {
-    const { routeFor } = await f.app("actions.ts");
+    const { routeFor } = await f.app("workflow-registry.ts");
     const { validateStaticConfig } = await f.app("startup.ts");
     await validateStaticConfig(f.config);
     await assert.rejects(validateStaticConfig({ ...f.config, workflows: { ...f.config.workflows, review_issue: { ...f.config.workflows.review_issue, enabled: true } } }), /review_issue, review_triage would share one review comment on each issue; enable only one/);
@@ -6367,7 +6369,7 @@ fi
       };
     }],
     run: async () => {
-      const { workflows } = await f.app("actions.ts");
+      const { workflows } = await f.app("workflow-registry.ts");
       const { validateWorkflowDefinition } = await f.app("startup.ts");
       const { pollSchedules } = await f.app("schedule-source.ts");
       const { config: liveConfig } = await f.app("config.ts");

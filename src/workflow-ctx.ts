@@ -15,8 +15,8 @@ import type { GithubContext, GithubIssue, GithubPullRequest } from "./github-typ
 import { categoriesFor, itemLabelKey } from "./item-labels.ts";
 import type { Item } from "./items.ts";
 import { reconcileLabels } from "./labels.ts";
-import type { LabelCategory, ThinkingLevel, ToolName } from "./manifests.ts";
-import { fingerprintMarker, withMarker } from "./markers.ts";
+import { effectNames, startEffectNames, type LabelCategory, type ThinkingLevel, type ToolName } from "./manifests.ts";
+import { advisoryResolvedMarker, fingerprintMarker, withMarker, workflowCommentMarker } from "./markers.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { executePi, type SubmitResultSpec } from "./pi.ts";
 import { assertComplete, hasPublicationSnapshot, InterruptedError, SecretLeakError, validateLabelSelections } from "./results.ts";
@@ -133,7 +133,7 @@ export type WorkflowContext = {
     listOpenIssues: () => Promise<GithubIssue[]>;
     listOpenPrs: () => Promise<GithubPullRequest[]>;
     listRecentMergedPrs: (sinceDays: number, limit?: number) => Promise<WorkflowMergedPr[]>;
-    comment: (args: { key: string; number: number; body: string }) => Promise<{ commentId: number; dryRun?: boolean; previewPath?: string }>;
+    comment: (args: { key: string; number: number; body: string; resolved?: boolean }) => Promise<{ commentId: number; dryRun?: boolean; previewPath?: string }>;
     issue: (args: { key: string; title: string; body: string; labels?: string[] }) => Promise<{ number: number; created: boolean; dryRun?: boolean; previewPath?: string }>;
   };
   slack: {
@@ -141,6 +141,10 @@ export type WorkflowContext = {
   };
   item: {
     connect: () => Promise<WorkflowItemObserved>;
+    observeTarget: (observed: WorkflowItemObserved) => void;
+    assertExpectedTarget: (observed: WorkflowItemObserved) => void;
+    assertLiveTarget: (observed: WorkflowItemObserved) => Promise<void>;
+    ownComment: (observed: WorkflowItemObserved, key: string) => { body: string; resolved: boolean } | undefined;
     savedResult: () => { result: WorkflowAgentResult; labelingKey?: string } | undefined;
     labelCategories: () => LabelCategory[];
     labelKey: (observed: WorkflowItemObserved, categories: readonly LabelCategory[]) => string;
@@ -207,6 +211,8 @@ function assertPermission<T extends string>(allowed: readonly T[], needed: T, sc
 }
 
 const allowedToolSet = new Set<string>(workflowAllowedTools);
+const validEffects = new Set<string>(effectNames);
+const validStartEffects = new Set<string>(startEffectNames);
 
 function safeIdempotencyKey(key: string, workflowName: string) {
   const maxKeyLength = 128 - `workflow:${workflowName}:`.length;
@@ -609,20 +615,20 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       assertPermission<GithubPermission>(workflow.permissions.github, "read", "github", workflow.name);
       return github.fetchRecentMergedPullRequests(sinceDays, limit);
     },
-    async comment({ key, number, body }) {
+    async comment({ key, number, body, resolved = false }) {
       assertNotAborted(signal, "github.comment");
       assertPermission<GithubPermission>(workflow.permissions.github, "comment", "github", workflow.name);
       const safeKey = safeIdempotencyKey(key, workflow.name);
       assertPublishable(body);
       if (dryRun) {
-        const previewPath = await writeDryRunPreview("github-comment", safeKey, { number, body });
+        const previewPath = await writeDryRunPreview("github-comment", safeKey, { number, body, resolved });
         return { commentId: 0, dryRun: true, previewPath };
       }
-      return runEffectStep("github.comment", safeKey, { number, body }, async () => {
-        const marker = `<!-- scrat-workflow:${workflow.name}:${safeKey} -->`;
+      return runEffectStep("github.comment", safeKey, { number, body, resolved }, async () => {
+        const marker = workflowCommentMarker(workflow.name, safeKey);
         const ctx = await github.fetchItemContext("issue", number);
         const existing = findBotMarkedComment(ctx.comments, marker);
-        const commentId = await upsertComment(github, number, existing, withMarker(body, marker), references);
+        const commentId = await upsertComment(github, number, existing, withMarker(body, ...resolved ? [advisoryResolvedMarker] : [], marker), references);
         return { commentId };
       });
     },
@@ -681,6 +687,31 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       if (pullRequest) input.onTargetObserved?.(`${pullRequest.head.sha}@${observation.baseBranch}`);
       return { context, observation, pullRequest, mainSha };
     },
+    observeTarget(observed) {
+      if (observed.pullRequest) input.onTargetObserved?.(`${observed.pullRequest.head.sha}@${observed.observation.baseBranch}`);
+    },
+    assertExpectedTarget(observed) {
+      const key = trigger.input.triggerKey;
+      if (typeof key !== "string" || !observed.pullRequest) return;
+      let expected: unknown;
+      try { expected = JSON.parse(key); } catch { return; }
+      if (!expected || typeof expected !== "object" || !("head" in expected) || !("base" in expected)) return;
+      if (expected.head !== observed.pullRequest.head.sha || expected.base !== observed.observation.baseBranch) {
+        throw new SupersededError("PR head or base moved after routing");
+      }
+    },
+    async assertLiveTarget(observed) {
+      assertNotAborted(signal, "item.assertLiveTarget");
+      if (dryRun || requireItem().kind !== "pr" || !observed.pullRequest) return;
+      const { item: live } = await github.fetchItemContext("pr", observed.pullRequest.number, { comments: false });
+      if (!("head" in live) || live.head.sha !== observed.pullRequest.head.sha || live.base.ref !== observed.observation.baseBranch) {
+        throw new SupersededError("PR head or base moved before publication");
+      }
+    },
+    ownComment(observed, key) {
+      const existing = findBotMarkedComment(observed.context.comments, workflowCommentMarker(workflow.name, safeIdempotencyKey(key, workflow.name)));
+      return existing && { body: existing.body, resolved: existing.body.includes(advisoryResolvedMarker) };
+    },
     savedResult() {
       if (!hasPublicationSnapshot(run)) return undefined;
       return {
@@ -716,6 +747,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         "Overlapping workspace checkout calls are not supported in a single workflow run",
         async () => {
           headSha = observed.pullRequest ? await github.fetchPullRequestHead(observed.pullRequest) : observed.mainSha;
+          if (observed.pullRequest) input.onTargetObserved?.(`${headSha}@${observed.observation.baseBranch}`);
           evaluated = evaluateItemContext(run, observed.observation, { labelCategories: options.labelingCategories });
           ({ diffBaseSha, diffPaths } = await readDiffScope(repositoryPath, observed.mainSha, headSha, Boolean(observed.pullRequest)));
           return createWorkspace({ repositoryPath, baseRef: headSha }, references);
@@ -805,7 +837,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       const finalResult = { ...res, paths: retained };
       updateRun(run.id, { result: finalResult, stage: "validating" });
       assertComplete(finalResult);
-      updateRun(run.id, { stage: "publishing" });
+      updateRun(run.id, { stage: isAdvisory(workflow) ? "agent" : "publishing" });
       return {
         text: finalResult.text,
         data: res.data as Record<string, unknown> | undefined,
@@ -863,6 +895,8 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       throw new Error(`Workflow ${workflow.name} change pipeline must publish "push" first`);
     }
     assertPermission<WorkspacePermission>(workflow.permissions.workspace, expectedMode === "change" ? "write" : "read", "workspace", workflow.name);
+    const unknownEffects = [...(spec.start ?? []).filter((effect) => !validStartEffects.has(effect)), ...spec.publish.filter((effect) => !validEffects.has(effect))];
+    if (unknownEffects.length) throw new Error(`Workflow ${workflow.name} requested unknown effects: ${unknownEffects.join(", ")}`);
     for (const effect of spec.start ?? []) {
       if (effect === "slack_post") assertPermission<SlackPermission>(workflow.permissions.slack, "post", "slack", workflow.name);
     }

@@ -36,3 +36,6 @@ defaults:
     - ls
     - git
     - read_base
+config:
+  maxFindings: 10
+  maxCommentChars: 6000

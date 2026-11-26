@@ -14,8 +14,13 @@ export function fingerprintMarker(fingerprint: string) {
 }
 export const withMarker = (body: string, ...markers: string[]) => `${body.trimEnd()}\n\n${markers.join("\n")}`;
 export const endsWithMarker = (body: string, marker: string) => body.trimEnd().endsWith(marker);
+const workflowMarkerPrefix = (workflow: string) => `<!-- scrat-workflow:${workflow}:`;
+export const workflowCommentMarker = (workflow: string, key: string) => `${workflowMarkerPrefix(workflow)}${key} -->`;
+export const advisoryResolvedMarker = "<!-- scrat-advisory-state:resolved -->";
 export const issueCommentId = (id: number | undefined) => `${issuePrefix}${id}`;
 export const isIssueComment = (comment: Pick<GithubComment, "id">) => comment.id.startsWith(issuePrefix);
+export const hasOpenWorkflowComment = (comments: readonly GithubComment[], workflow: string) =>
+  comments.some((comment) => isIssueComment(comment) && comment.body.includes(workflowMarkerPrefix(workflow)) && !comment.body.includes(advisoryResolvedMarker));
 export const parseIssueCommentId = (id: string) => Number(id.slice(issuePrefix.length));
 export const inlineCommentId = (id: number) => `inline:${id}`;
 export const reviewCommentId = (id: number) => `review:${id}`;

@@ -7,7 +7,7 @@ import { runHistory, runText } from "./run-history.ts";
 
 type History = ReturnType<typeof runHistory>;
 
-export const prReviewHistory = (subjectId: string) => runHistory(subjectId, workflowsPublishing("pr_assessment"));
+export const prReviewHistory = (subjectId: string) => runHistory(subjectId, workflowsPublishing("pr_assessment")).filter(({ run }) => !run.publication.advisory);
 
 function selectAssessment(history: History) {
   const byId = new Map(history.map((entry) => [entry.run.id, entry]));

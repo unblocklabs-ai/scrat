@@ -7,7 +7,7 @@ import type { Signal } from "./manifests.ts";
 import { isAdvisory, workflowItemLabelSettings } from "./workflows.ts";
 import { botSlug } from "./identity.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
-import { acknowledgedTaskIds, commentKey } from "./markers.ts";
+import { acknowledgedTaskIds, commentKey, hasOpenWorkflowComment } from "./markers.ts";
 import type { Item } from "./items.ts";
 import { categoriesFor, itemLabelKey } from "./item-labels.ts";
 import { observe, type ItemObservation } from "./observation.ts";
@@ -231,7 +231,8 @@ async function routeAdvisory({ github }: SyncContext, item: Item, observation: I
     }
     if (pathsMatched === false) {
       const completed = latestCompletedRun(item.id, action);
-      if (completed?.publication.status !== "published" || completed.input.pathsMatched === false) {
+      const published = completed?.publication.status === "published" && completed.input.pathsMatched !== false;
+      if (!published && !hasOpenWorkflowComment(observation.own, action)) {
         cancelPendingTasks(item.id, "Changed paths do not match", action, true);
         continue;
       }
@@ -287,8 +288,8 @@ async function routeIssueReview(item: Item, observation: ItemObservation, mainSh
   return applyDecisions(item.id, planReview({ kind: "issue", action, completed, freshness: state, latest, attempt, revision, mainSha }));
 }
 
-async function routeObserved(ctx: SyncContext, item: Item, context: GithubContext, defaultBaseSha: string) {
-  if (context.item.state !== "open") return 0;
+async function routeObserved(ctx: SyncContext, item: Item, context: GithubContext, defaultBaseSha: string): Promise<{ added: number; advise?: () => Promise<number> }> {
+  if (context.item.state !== "open") return { added: 0 };
   const { github, log } = ctx;
   const observation = observe(context);
   const mainSha = observation.kind === "pr" && observation.baseBranch !== config.github.baseBranch
@@ -302,10 +303,11 @@ async function routeObserved(ctx: SyncContext, item: Item, context: GithubContex
     repairs: item.kind === "pr" ? matchingWorkflows(signal("low_grade")) : [],
     repairFor: (grade) => grade ? routeFor({ ...signal("low_grade"), grade }) : undefined,
   };
-  let added = await bestEffort(log, "github.advisory_routing_skipped", { subjectId: item.id }, () => routeAdvisory(ctx, item, observation, mainSha)) ?? 0;
+  const advise = async () => await bestEffort(log, "github.advisory_routing_skipped", { subjectId: item.id }, () => routeAdvisory(ctx, item, observation, mainSha)) ?? 0;
+  let added = 0;
   if ((routes.conflicts || routes.feedback || routes.repairs.length) && "head" in context.item) {
     const pullRequest = context.item;
-    if (pullRequest.head.repo?.full_name !== github.repository) return added;
+    if (pullRequest.head.repo?.full_name !== github.repository) return { added, advise };
     if (routes.conflicts || routes.feedback) {
       added += await bestEffort(log, "github.pr_maintenance_skipped", { subjectId: item.id }, async () => applyDecisions(item.id, planPrMaintenance(await gatherPrMaintenanceFacts(ctx, item, observation, pullRequest, mainSha, routes)))) ?? 0;
     }
@@ -320,7 +322,7 @@ async function routeObserved(ctx: SyncContext, item: Item, context: GithubContex
   } finally {
     if (item.kind === "pr") await bestEffort(log, "github.review_reconciliation_pending", { subjectId: item.id }, () => reconcileObserved(github, item.id, item.payload.number, { subjectId: item.id }, context, resolved));
   }
-  return added;
+  return { added, advise };
 }
 
 export async function routeGithubTasks(github: GitHubRepository, current: Item[], previous: Map<string, Item>, log: Logger) {
@@ -355,9 +357,11 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       const latest = latestOf(item.id, labelAction);
       if (labelAction && (selected || latest?.status === "blocked" && isManual(latest.input))) {
         const reviewAction = routeFor(issueSignal(item, "item_changed"));
-        if (selected && reviewAction) {
-          cancelPendingTasks(item.id, "Issue selected for implementation", reviewAction, true);
-          supersedeRunningReviews(item.id, "Issue selected for implementation", { action: reviewAction, keepManual: true });
+        if (selected) {
+          for (const action of [...reviewAction ? [reviewAction] : [], ...advisoryFor(issueSignal(item, "item_changed"))]) {
+            cancelPendingTasks(item.id, "Issue selected for implementation", action, true);
+            supersedeRunningReviews(item.id, "Issue selected for implementation", { action, keepManual: true });
+          }
         }
         const newlySelected = previousItem !== undefined && !hasScratLabel(previousItem);
         const settled = latest && latest.status !== "queued" && latest.status !== "blocked" && latest.status !== "cancelled";
@@ -379,15 +383,15 @@ export async function routeGithubTasks(github: GitHubRepository, current: Item[]
       if (labelAction) cancelPendingTasks(item.id, `${botSlug} label removed`, labelAction, true);
       const context = issueContexts.get(item.id);
       if (context) {
-        const added = await routeObserved(ctx, item, context, defaultBaseSha);
-        queued += added;
+        const routed = await routeObserved(ctx, item, context, defaultBaseSha);
+        queued += routed.added + (await routed.advise?.() ?? 0);
       } else deferred++;
     } else {
-      const added = await serializePr(github, item.payload.number, async () => {
-        if (rateLimitLow()) { deferred++; return 0; }
+      const routed = await serializePr(github, item.payload.number, async () => {
+        if (rateLimitLow()) { deferred++; return undefined; }
         return routeObserved(ctx, item, await github.fetchItemContext("pr", item.payload.number), defaultBaseSha);
       });
-      queued += added;
+      if (routed) queued += routed.added + (await routed.advise?.() ?? 0);
     }
   };
   const closed = ordered.filter((item) => item.state === "closed");

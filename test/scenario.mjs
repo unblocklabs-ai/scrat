@@ -4389,10 +4389,54 @@ fi
     assess(201, { status: "complete", findings });
     assert.equal((await runTask(requeued)).error, null);
     assert.equal(verdicts().length, 1, "later heads edit the same comment");
+
+    const verdictWrites = () => verdicts().length + f.written("comment_update", (w) => w.id === verdicts()[0].id).length;
+    pr201.head.sha = pushFile("migrate", "db/004.sql", "DROP TABLE carts;\n");
+    await route();
+    const [drifting] = ofAction(check, "queued");
+    assert.equal(drifting.input.pathsMatched, true);
+    pr201.head.sha = pushFile("migrate", "db/005.sql", "DROP TABLE wishlists;\n");
+    let verdictCount = verdictWrites(), modelRequests = f.requests.length;
+    const drifted = await runTask(drifting);
+    assert.equal(drifted.error?.code, "RUN_SUPERSEDED"); assert.equal(drifted.error?.message, "PR head or base moved after routing");
+    assert.equal(drifted.context, null, "a head pushed after routing is never assessed under the stale path decision");
+    assert.equal(verdictWrites(), verdictCount); assert.equal(f.requests.length, modelRequests);
+    await route();
+    const [driftRequeued] = ofAction(check, "queued");
+    assert.equal(JSON.parse(driftRequeued.input.triggerKey).head, pr201.head.sha, "the superseded run does not cover the moved head");
+
+    assess(201, { status: "needs_decision", findings: [] }, "Unsure.");
+    const undecided = await runTask(driftRequeued);
+    assert.ok(undecided.error); assert.equal(f.row(s.tasks, driftRequeued.id).status, "failed");
+    tasks.retryTask(driftRequeued.id);
+    f.reset(201, "stall"); f.script = [{ name: "submit_result", args: { status: "complete", findings } }, "Stalled."];
+    pushed = undefined;
+    f.onModel = (context) => {
+      if (pushed || context.action !== check) return;
+      pushed = (async () => { pr201.head.sha = pushFile("migrate", "db/006.sql", "DROP TABLE coupons;\n"); await route(); })();
+    };
+    verdictCount = verdictWrites();
+    const retried = await runTask(driftRequeued); f.onModel = undefined; await pushed;
+    assert.equal(retried.retryOfRunId, undecided.id);
+    assert.equal(retried.error?.message, "Newer PR head observed", "a retry that replays its connect step still registers its head for supersession");
+    assert.equal(verdictWrites(), verdictCount);
+
+    const [stale] = ofAction(check, "queued");
+    assess(201, { status: "needs_decision", findings: [] }, "Unsure.");
+    assert.ok((await runTask(stale)).error);
+    pr201.head.sha = pushFile("migrate", "db/007.sql", "DROP TABLE refunds;\n");
+    tasks.retryTask(stale.id);
+    assess(201, { status: "complete", findings });
+    verdictCount = verdictWrites(); modelRequests = f.requests.length;
+    const overtaken = await runTask(stale);
+    assert.ok(f.requests.length > modelRequests, "the stale retry assessed its cached head");
+    assert.equal(overtaken.error?.code, "RUN_SUPERSEDED"); assert.equal(overtaken.error?.message, "PR head or base moved before publication");
+    assert.equal(verdictWrites(), verdictCount, "a stale retry never overwrites the verdict after the head moved");
+
     f.script = undefined; f.reset(201, "normal");
     while (ofAction("review_pr", "queued").length) await success();
 
-    for (const path of ["db/001.sql", "db/002.sql", "db/003.sql"]) pr201.head.sha = pushFile("migrate", path, null);
+    for (const path of ["db/001.sql", "db/002.sql", "db/003.sql", "db/004.sql", "db/005.sql", "db/006.sql", "db/007.sql"]) pr201.head.sha = pushFile("migrate", path, null);
     await route();
     const retractions = ofAction(check, "queued");
     assert.equal(retractions.length, 1); assert.equal(retractions[0].input.pathsMatched, false);
@@ -4401,14 +4445,17 @@ fi
     assert.equal(retracted.error, null, JSON.stringify(retracted.error));
     assert.equal(f.requests.length, requestsBefore, "retraction runs no agent");
     assert.match(verdicts()[0].body, new RegExp(`Resolved at \`${pr201.head.sha.slice(0, 12)}\``));
+    assert.ok(verdicts()[0].body.includes("<!-- scrat-advisory-state:resolved -->"));
     f.script = undefined; f.reset(201, "normal");
     while (ofAction("review_pr", "queued").length) await success();
     touchPr(201); await route();
     assert.equal(ofAction(check, "queued").length, 0, "one retraction per published verdict");
     assert.equal(ofAction(check).filter((task) => numberOf(task) === 202).length, 0);
+    db.update(s.subjects).set({ repository: "Fixture/Project" }).where(eq(s.subjects.id, first.subjectId)).run();
     await pollWorkflowCompletions();
+    db.update(s.subjects).set({ repository: "fixture/project" }).where(eq(s.subjects.id, first.subjectId)).run();
     const completedChecks = all(s.runs).filter((r) => r.finishedAt && !r.error && f.row(s.tasks, r.taskId).action === check).length;
-    assert.equal(ofAction("advisory_digest").length, completedChecks, "every completed parent run queues exactly one follower");
+    assert.equal(ofAction("advisory_digest").length, completedChecks, "every completed parent run queues exactly one follower, whatever the repository case");
 
     const labels = live.workflows.label_items;
     labels.enabled = true;
@@ -4425,6 +4472,14 @@ fi
     assert.match(replayed.error?.message ?? "", /SCRAT_LABELS must select exactly one allowed label/);
     assert.equal(replayed.inferenceFromRunId, unpublished.id, "claimTask alone selects the saved snapshot");
     assert.equal(f.requests.length, modelCalls); assert.equal(f.written("label", (w) => w.number === 202).length, labelWrites, "an invalid saved classification changes no labels");
+
+    const { validateWorkflowDefinition } = await f.app("startup.ts"), { workflows: loaded } = await f.app("workflow-registry.ts");
+    const critiqueProblems = (critique) => validateWorkflowDefinition(loaded.find((wf) => wf.name === "maintainer-sweep"),
+      { ...live, workflows: { ...live.workflows, "maintainer-sweep": { provider: "fixture", config: { critique } } } }, { checkDisabled: true });
+    assert.deepEqual(await critiqueProblems({ model: "gpt-6.1-terra", thinkingLevel: "low" }), []);
+    const badCritique = (await critiqueProblems({ thinkingLevel: "huge", extra: 1 })).join("\n");
+    assert.match(badCritique, /config\.critique\.extra: unknown key/); assert.match(badCritique, /config\.critique\.thinkingLevel must be one of/);
+    assert.match((await critiqueProblems({ model: "gpt-typo" })).join("\n"), /maintainer-sweep critique: no Pi model fixture\/gpt-typo/);
 
     const local = resolve("app/scrat.local.json"), directory = resolve("deployment");
     const probe = (bundles) => {

@@ -19,7 +19,7 @@ import { categoriesFor, itemLabelKey } from "./item-labels.ts";
 import { items, runs, type Run, subjects, tasks, type Task, type Subject, workspaces } from "./schema.ts";
 import { isBaseOnly, isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
 import { signalWork } from "./work-signal.ts";
-import { workflowItemLabelSettings } from "./workflows.ts";
+import { isAdvisory, workflowItemLabelSettings } from "./workflows.ts";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -250,7 +250,7 @@ export function claimTask(taskId?: string) {
       skill,
       provider, model, thinkingLevel, reviewers,
       workspaceId: resume?.workspaceId ?? (review ? null : next.subject.workspaceId),
-      publication: publicationResume ? { ...publicationResume.publication, status: "pending" } : { status: "pending" },
+      publication: { ...publicationResume?.publication, status: "pending", ...isWorkflow(task.action) && isAdvisory(workflowOf(task.action)) && { advisory: true } },
       stage,
       ...(resume ? {
         context: resume.context, result: resume.result, mainSha: resume.mainSha, headSha: resume.headSha,

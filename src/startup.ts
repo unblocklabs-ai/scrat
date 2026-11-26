@@ -11,7 +11,7 @@ import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 import { loadPlaywright } from "./scoped-tools.ts";
 import { authTest } from "./slack.ts";
 import { loadWorkflowScript } from "./workflow-runner.ts";
-import { pathPatternProblems, resolveWorkflow, validateWorkflowConfig, validateWorkflowItemLabels, workflowDeploymentDefaults, type WorkflowDefinition } from "./workflows.ts";
+import { critiqueProblems, pathPatternProblems, resolveWorkflow, validateWorkflowConfig, validateWorkflowItemLabels, workflowCritique, workflowDeploymentDefaults, type WorkflowDefinition } from "./workflows.ts";
 
 const templateVariables = new Set(["sha", "short_sha", "author", "title", "url", "branch", "count", "bot", "change"]);
 
@@ -78,6 +78,12 @@ export async function validateWorkflowDefinition(
     const { provider, model } = entry.defaults;
     if (!modelRuntime.getModel(provider, model)) {
       problems.push(`${wf.name}: no Pi model ${provider}/${model}${modelRuntime.getError() ? ` (${modelRuntime.getError()})` : ""}`);
+    }
+    if (entry.config.critique !== undefined && !critiqueProblems(entry.config.critique).length) {
+      const critique = { provider, model, ...workflowCritique(entry.config) };
+      if (!modelRuntime.getModel(critique.provider, critique.model)) {
+        problems.push(`${wf.name} critique: no Pi model ${critique.provider}/${critique.model}${modelRuntime.getError() ? ` (${modelRuntime.getError()})` : ""}`);
+      }
     }
     if (entry.skillPath && !await access(entry.skillPath).then(() => true, () => false)) {
       problems.push(`${wf.name}: skill file not found: ${entry.skillPath}`);

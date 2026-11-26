@@ -7,8 +7,8 @@ import { parse } from "yaml";
 import { hostProblem } from "./bindings.ts";
 import { isObject } from "./config-merge.ts";
 import {
-  browserSettings, contextFileNames, httpSettings, labelCategories, labelConfigProblems, modelSettings, scheduleProblem, startEffectNames,
-  type Action, type ContextFileName, type EffectName, type LabelCategory, type Signal, type StartEffectName, type ToolName,
+  browserSettings, contextFileNames, httpSettings, labelCategories, labelConfigProblems, modelSettings, scheduleProblem, startEffectNames, thinkingLevels,
+  type Action, type ContextFileName, type EffectName, type LabelCategory, type Signal, type StartEffectName, type ThinkingLevel, type ToolName,
 } from "./manifests.ts";
 import { prGrades } from "./results.ts";
 import { triggerKinds, triggerSource } from "./triggers.ts";
@@ -188,6 +188,23 @@ function hashDirectory(dir: string) {
 }
 
 const validContextFiles = new Set<string>(contextFileNames);
+const validThinkingLevels = new Set<string>(thinkingLevels);
+
+export type CritiqueSettings = { provider?: string; model?: string; thinkingLevel?: ThinkingLevel };
+export const workflowCritique = (cfg: Record<string, unknown>) => (cfg.critique ?? {}) as CritiqueSettings;
+
+export function critiqueProblems(value: unknown) {
+  if (!isObject(value)) return ["config.critique must be an object"];
+  const problems = Object.keys(value).filter((key) => !["provider", "model", "thinkingLevel"].includes(key)).map((key) => `config.critique.${key}: unknown key`);
+  for (const key of ["provider", "model"] as const) {
+    if (value[key] !== undefined && (typeof value[key] !== "string" || !value[key].trim())) problems.push(`config.critique.${key} must be a non-empty string`);
+  }
+  if (value.thinkingLevel !== undefined && (typeof value.thinkingLevel !== "string" || !validThinkingLevels.has(value.thinkingLevel))) {
+    problems.push(`config.critique.thinkingLevel must be one of: ${thinkingLevels.join(", ")}`);
+  }
+  return problems;
+}
+
 const validStartEffects = new Set<string>(startEffectNames);
 
 export function validateWorkflowConfig(cfg: Record<string, unknown>, mode: "review" | "change", event?: WorkflowEventTrigger) {
@@ -202,7 +219,8 @@ export function validateWorkflowConfig(cfg: Record<string, unknown>, mode: "revi
   if (cfg.maxSelfRepairs !== undefined && (!Number.isInteger(cfg.maxSelfRepairs) || (cfg.maxSelfRepairs as number) < 0)) {
     problems.push("config.maxSelfRepairs must be a non-negative integer");
   }
-  for (const key of ["maxRangeCommits", "browserSteps", "browserSeconds"] as const) {
+  if (cfg.critique !== undefined) problems.push(...critiqueProblems(cfg.critique));
+  for (const key of ["maxRangeCommits", "browserSteps", "browserSeconds", "maxFindings", "maxCommentChars"] as const) {
     const val = cfg[key];
     if (val !== undefined && (!Number.isInteger(val) || (val as number) < 1)) {
       problems.push(`config.${key} must be a positive integer`);

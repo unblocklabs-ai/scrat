@@ -4790,6 +4790,8 @@ fi
     const addToCart = element({ tag: "BUTTON", id: "AddToCart", innerText: "Add to cart", rect: { left: 20, top: 600, width: 350, height: 50 } });
     const checkoutLink = element({ tag: "A", className: "btn primary extra", innerText: "Check out\nnow", rect: { left: 20, top: 900, width: 350, height: 40 } });
     const hiddenSubmit = element({ tag: "BUTTON", name: "go", innerText: "Go", display: "none" });
+    const scrolledPast = element({ tag: "BUTTON", id: "Buy", innerText: "Buy now", rect: { left: 20, top: -50, width: 100, height: 40 } });
+    const carousel = element({ tag: "BUTTON", id: "Sub", innerText: "Subscribe", rect: { left: 500, top: 300, width: 100, height: 40 } });
     const entries = {
       navigation: [{ startTime: 0, responseStart: 120.4, domContentLoadedEventEnd: 900.2, loadEventEnd: 1500.6 }],
       "largest-contentful-paint": [{ startTime: 1800.4, element: element({ tag: "IMG", id: "hero" }), url: "https://shop.example.test/hero.jpg" }],
@@ -4799,9 +4801,9 @@ fi
     };
     const documentFake = (all) => ({ querySelectorAll: () => all, elementFromPoint: (x, y) => y >= 560 && y < 660 ? sticky : null });
     const domWorld = () => ({
-      window: { innerWidth: 390, innerHeight: 844, scrollY: 100 }, document: documentFake([addToCart, checkoutLink, hiddenSubmit]), getComputedStyle: (el) => el.style, location: { hostname: "shop.example.test" }, URL, setTimeout,
+      window: { innerWidth: 390, innerHeight: 844, scrollY: 100 }, document: documentFake([addToCart, checkoutLink, hiddenSubmit, scrolledPast, carousel]), getComputedStyle: (el) => el.style, location: { hostname: "shop.example.test" }, URL, setTimeout,
       performance: { getEntriesByType: (type) => entries[type === "resource" ? "resource" : type] ?? [] },
-      PerformanceObserver: class { observe({ type }) { this.type = type; if (type === "longtask") throw new Error("unsupported"); } takeRecords() { return this.type === "navigation" || this.type === "resource" ? [] : entries[this.type]; } disconnect() {} },
+      PerformanceObserver: class { static supportedEntryTypes = ["largest-contentful-paint", "layout-shift"]; observe({ type }) { this.type = type; if (type === "longtask") throw new Error("unsupported"); } takeRecords() { return this.type === "navigation" || this.type === "resource" ? [] : entries[this.type]; } disconnect() {} },
     });
     const warnings = [], settings = { navigationHosts: ["shop.example.test"], resourceHosts: ["cdn.example.test", "api.example.test"] };
     const publicAnswer = [{ address: "93.184.216.34", family: 4 }];
@@ -4977,34 +4979,52 @@ fi
     viewed.state.aria = () => "- row\n".repeat(10000);
     const clipped = JSON.parse(textOf(await act(viewed, { action: "snapshot" })));
     assert.equal(clipped.truncated, true); assert.equal(clipped.snapshot.length, browserConfig.tools.readBytes.default);
+    assert.ok(clipped.artifactPath.startsWith(resolve("ctx")) && readFileSync(clipped.artifactPath, "utf8").length > clipped.snapshot.length, "the full capped tree is saved beside the clipped one");
 
     browserConfig.tools.browser.diagnostics.consoleEntries = 2;
     const emit = (event, payload) => { for (const listener of viewed.state.events[event]) listener(payload); };
+    const req = (method = "GET") => { const request = { method: () => method, url: () => "https://cdn.example.test/app.js", failure: () => ({ errorText: "net::ERR_FAILED" }) }; emit("request", request); return request; };
     const logged = (type, message) => ({ type: () => type, text: () => message });
     emit("console", logged("log", "noise")); emit("console", logged("error", "first failure")); emit("console", logged("error", "payment token " + secret)); emit("pageerror", new Error("TypeError: x is undefined"));
-    emit("response", { status: () => 200, url: () => "https://shop.example.test/ok", request: () => ({ method: () => "GET" }) });
-    emit("response", { status: () => 404, url: () => "https://shop.example.test/missing?key=" + secret, request: () => ({ method: () => "GET" }) });
-    emit("requestfailed", { url: () => "https://cdn.example.test/app.js", method: () => "POST", failure: () => ({ errorText: "net::ERR_FAILED" }) });
+    const ok = req(), missing = req(), failed = req("POST");
+    emit("response", { status: () => 200, url: () => "https://shop.example.test/ok", request: () => ok });
+    emit("response", { status: () => 404, url: () => "https://shop.example.test/missing?key=" + secret, request: () => missing });
+    emit("requestfailed", failed);
     const report = JSON.parse(textOf(await act(viewed, { action: "diagnostics" })));
     browserConfig.tools.browser.diagnostics.consoleEntries = 30;
     assert.deepEqual([report.url, report.title, report.themeId, report.viewport], ["https://shop.example.test/p", "Shop", 7, { width: 390, height: 844 }]);
     assert.deepEqual(report.ctas, [
-      { text: "Add to cart", selectorHint: "button#AddToCart", top: 700, bottom: 750, height: 50, isAboveFold: true, visible: true, coveredBy: "header.sticky.top" },
-      { text: "Go", selectorHint: 'button[name="go"]', top: 100, bottom: 100, height: 0, isAboveFold: false, visible: false },
-      { text: "Check out now", selectorHint: "a.btn.primary", top: 1000, bottom: 1040, height: 40, isAboveFold: false, visible: true },
+      { text: "Buy now", selectorHint: "button#Buy", top: 50, bottom: 90, height: 40, isAboveFold: true, inViewport: false, visible: true },
+      { text: "Add to cart", selectorHint: "button#AddToCart", top: 700, bottom: 750, height: 50, isAboveFold: true, inViewport: true, visible: true, coveredByOverlay: "header.sticky.top" },
+      { text: "Go", selectorHint: 'button[name="go"]', top: 100, bottom: 100, height: 0, isAboveFold: false, inViewport: false, visible: false },
+      { text: "Subscribe", selectorHint: "button#Sub", top: 400, bottom: 440, height: 40, isAboveFold: false, inViewport: false, visible: true },
+      { text: "Check out now", selectorHint: "a.btn.primary", top: 1000, bottom: 1040, height: 40, isAboveFold: false, inViewport: false, visible: true },
     ]);
+    assert.deepEqual(report.ctaScope, { lightDomOnly: true });
     assert.deepEqual(report.performance, {
       navigation: { ttfbMs: 120, domContentLoadedMs: 900, loadMs: 1501 },
       lcp: { startTimeMs: 1800, element: "img#hero", url: "https://shop.example.test/hero.jpg" },
       cls: { value: 0.1734, shifts: ["div.announcement.bar"] },
-      longTaskCount: 2, longTaskTotalMs: 201,
-      resourceSummary: { totalRequests: 5, totalTransferBytes: 100600, scriptBytes: 70000, imageBytes: 30100, thirdPartyHosts: [{ host: "cdn.thirdparty.test", requests: 2, transferBytes: 20100 }, { host: "other.test", requests: 1, transferBytes: 500 }] },
+      longTaskCount: null, longTaskTotalMs: null,
+      resourceSummary: { observedRequests: 5, observedTransferBytes: 100600, observedScriptBytes: 70000, observedImageBytes: 30100, thirdPartyHosts: [{ host: "cdn.thirdparty.test", requests: 2, transferBytes: 20100 }, { host: "other.test", requests: 1, transferBytes: 500 }] },
     });
     assert.deepEqual(report.consoleErrors.map((entry) => entry.source), ["console", "pageerror"]);
     assert.ok(report.consoleErrors[0].text.startsWith("payment token ") && report.consoleErrors[0].text.includes("[redacted]") && !JSON.stringify(report).includes(secret));
     assert.equal(report.consoleErrors[1].text, "TypeError: x is undefined");
     assert.deepEqual(report.failedRequests.map(({ status, method, failure }) => [status, method, failure]), [[404, "GET", undefined], [undefined, "POST", "net::ERR_FAILED"]]);
     assert.ok(report.failedRequests[0].url.startsWith("https://shop.example.test/missing?key=") && report.failedRequests[0].url.includes("[redacted]"));
+    const stale = req();
+    await act(viewed, { action: "goto", url: "https://shop.example.test/next" });
+    emit("response", { status: () => 500, url: () => "https://shop.example.test/late", request: () => stale }); emit("requestfailed", stale);
+    const afterGoto = JSON.parse(textOf(await act(viewed, { action: "diagnostics" })));
+    assert.deepEqual([afterGoto.consoleErrors, afterGoto.failedRequests], [[], []], "a goto clears the buffers and ignores late events from the previous document");
+    const fresh = req(); emit("response", { status: () => 503, url: () => "https://shop.example.test/new", request: () => fresh });
+    assert.equal(JSON.parse(textOf(await act(viewed, { action: "diagnostics" }))).failedRequests.length, 1);
+    browserConfig.tools.browser.diagnostics.entryChars = 20;
+    addToCart.innerText = "y".repeat(15) + secret; emit("console", logged("error", "x".repeat(15) + secret)); emit("requestfailed", Object.assign(req(), { url: () => "https://s.test/" + secret }));
+    const straddled = textOf(await act(viewed, { action: "diagnostics" }));
+    browserConfig.tools.browser.diagnostics.entryChars = 500;
+    assert.ok(!straddled.includes("k9Xq2L") && !straddled.includes("scout-") && straddled.includes("xxxxxxxxxxxxxxx["), "a secret straddling the clip boundary leaves no fragment");
     await act(viewed, { action: "reset" });
     assert.deepEqual(JSON.parse(textOf(await act(viewed, { action: "diagnostics" }))).consoleErrors, [], "a reset page starts with fresh buffers");
 

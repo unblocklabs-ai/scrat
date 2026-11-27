@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { and, eq } from "drizzle-orm";
 import type { Logger } from "pino";
-import { buildItemAgentInput, evaluateItemContext, readDiffScope } from "./agent-input.ts";
+import { buildItemAgentInput, contextDirOf, evaluateItemContext, readDiffScope } from "./agent-input.ts";
 import { findBotFingerprintedIssue, findBotMarkedComment, upsertComment } from "./comments.ts";
 import { config } from "./config.ts";
 import { type D1ExtractAnswer, type D1ExtractFieldSpec, extractFields, isD1Available, scoreDecisions } from "./d1.ts";
@@ -13,6 +13,7 @@ import type { EventReferences } from "./events.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { git } from "./git.ts";
 import { botName, botSlug } from "./identity.ts";
+import { type LighthouseOptions, runStorefrontLighthouse, type StorefrontLighthouseSummary } from "./lighthouse.ts";
 import { GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubIssue, GithubPullRequest } from "./github-types.ts";
 import { categoriesFor, itemLabelKey } from "./item-labels.ts";
@@ -126,6 +127,7 @@ export type WorkflowContext = {
     devices: readonly string[];
     siteMap: () => Promise<string | undefined>;
     previewOfPr: (prNumber: number) => { url: string | null; themeId: number | null; headSha: string | null; available: boolean; problems: string[] } | undefined;
+    lighthouse: (options?: LighthouseOptions) => Promise<StorefrontLighthouseSummary>;
   };
   signal: AbortSignal;
   log: Logger;
@@ -291,6 +293,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
   const dryRunState = new Map<string, { v: unknown } | undefined>();
   let published = false;
   let managedPipelineUsed = false;
+  let lighthouseRuns = 0;
 
   async function writeDryRunPreview(kind: string, key: string, payload: Record<string, unknown>) {
     const dir = resolve("data/workflow-dry-runs", `${workflow.name}-${run.id.slice(0, 8)}`);
@@ -1012,6 +1015,11 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         devices: config.storefront.devices,
         siteMap: readSiteMap,
         previewOfPr: (prNumber) => previewOfPr(subject.repository, prNumber),
+        async lighthouse(options = {}) {
+          assertNotAborted(signal, "storefront.lighthouse");
+          if (!config.storefront.enabled || !config.storefront.publicHost) throw new Error(`Workflow ${workflow.name} called ctx.storefront.lighthouse but the storefront is not enabled (storefront.enabled and storefront.publicHost)`);
+          return runStorefrontLighthouse(`https://${config.storefront.publicHost}`, join(contextDirOf(run.id), `lighthouse-${++lighthouseRuns}`), references, signal, options);
+        },
       },
       signal,
       log,

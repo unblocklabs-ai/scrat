@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs, { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { and, eq } from "drizzle-orm";
 import { createRequire, syncBuiltinESMExports } from "node:module";
+import { createServer } from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -7105,6 +7106,218 @@ fi
       assert.equal(existsSync(lock), false);
     },
   },
+  d1_workflows: { title: "workflow scripts score and extract through ctx.d1 with clean failures, label_items labels from confident d1 decisions without Pi and replays them on publication retry, and review_pr shares one d1 navigation packet across its panel and survives a d1 outage", configure: [(config) => {
+    for (const name of ["review_issue", "resolve_conflicts", "address_pr_feedback", "address_review", "review_pr"]) config.workflows[name].enabled = false;
+    Object.assign(config.d1, { enabled: true, retryBaseDelayMs: 1, retryJitterMs: 0, retryReserveMs: 0, circuitBreakerCooldownMs: 0 });
+    const directory = resolve("deployment");
+    mkdirSync(resolve(directory, "d1_probe"), { recursive: true });
+    writeFileSync(resolve(directory, "d1_probe/workflow.yaml"), ["name: d1_probe", "enabled: false", "on:", "  manual: true", "defaults:", "  provider: fixture", "  model: gpt-6.2-sol", "  thinkingLevel: low", ""].join("\n"));
+    writeFileSync(resolve(directory, "d1_probe/run.ts"), [
+      "export default async function (ctx) {",
+      "  const state = `Order 7 failed: card declined (token ${ctx.trigger.input.secret})`;",
+      "  const score = await ctx.d1.score({ state, questions: { failed: \"Did the order fail?\", shipped: \"Was the order shipped?\" } });",
+      "  const extract = await ctx.d1.extract({ state, fields: { order: { type: \"number\", instructions: \"The order number\" }, errors: { type: \"list\", items: \"text\", instructions: \"Errors named\" } } });",
+      "  return { enabled: ctx.d1.enabled, score, extract };",
+      "}",
+      "",
+    ].join("\n"));
+    config.workflows.directory = directory;
+    config.workflows.trustLocalScripts = true;
+    config.workflows.d1_probe = { provider: "fixture" };
+  }], run: async () => {
+    const { config: live } = await f.app("config.ts");
+    const secret = "d1-workflow-secret-token-77777";
+    const previous = { token: process.env.CODEX_LB_API_KEY, url: process.env.D1_URL };
+    const d1 = { calls: [], decide: () => ({ status: 503, json: { error: "unset" } }), extract: () => ({ status: 503, json: { error: "unset" } }) };
+    const server = createServer(async (req, res) => {
+      let raw = ""; for await (const chunk of req) raw += chunk;
+      const body = JSON.parse(raw), endpoint = req.url.endsWith("/v1/extractions") ? "extractions" : "decisions";
+      d1.calls.push({ endpoint, body, authorization: req.headers.authorization });
+      const { status, json, headers = {} } = (endpoint === "extractions" ? d1.extract : d1.decide)(body);
+      res.writeHead(status, { "content-type": "application/json", ...headers }); res.end(JSON.stringify(json));
+    });
+    await new Promise((done) => server.listen(0, "127.0.0.1", done));
+    process.env.CODEX_LB_API_KEY = secret;
+    process.env.D1_URL = `http://127.0.0.1:${server.address().port}/v1/decisions`;
+    const ok = (answers) => ({ status: 200, json: { answers, usage: { input_tokens: 1 } } });
+    const noul = (scores) => ok(Object.fromEntries(Object.entries(scores).map(([key, value]) => [key, { type: "noul", noul: value }])));
+    const callsOf = (endpoint, since = 0) => d1.calls.slice(since).filter((call) => call.endpoint === endpoint);
+    try {
+      d1.decide = (body) => noul({ failed: 0.94, shipped: Object.keys(body.questions).includes("shipped") ? 0.04 : undefined });
+      d1.extract = () => ok({ order: { type: "number", value: 7, confidence: 0.97, span: [6, 7] }, errors: { type: "list", value: ["card declined"], confidences: [0.9], spans: [[16, 29]] } });
+      const probe = async () => {
+        const task = tasks.enqueueWorkflowRun("d1_probe", { input: { secret } });
+        const result = await f.runNextTask(undefined, task.id);
+        assert.equal(result.error, null, JSON.stringify(result.error));
+        return JSON.parse(result.result.text);
+      };
+      const piBefore = f.requests.length;
+      const healthy = await probe();
+      assert.equal(healthy.enabled, true);
+      assert.equal(healthy.score.ok, true); assert.deepEqual(healthy.score.scores, { failed: 0.94, shipped: 0.04 });
+      assert.equal(healthy.extract.ok, true); assert.equal(healthy.extract.answers.order.value, 7); assert.deepEqual(healthy.extract.answers.errors.value, ["card declined"]);
+      const [decision] = callsOf("decisions"), [extraction] = callsOf("extractions");
+      assert.equal(decision.authorization, `Bearer ${secret}`);
+      assert.equal(decision.body.model, live.d1.model);
+      assert.deepEqual(decision.body.questions.failed, { type: "noul", instructions: "Did the order fail?" });
+      assert.deepEqual(extraction.body.fields.errors, { type: "list", items: "text", instructions: "Errors named" }, "extractions URL is derived from D1_URL and keeps the field spec");
+      assert.ok(!decision.body.state.includes(secret) && !extraction.body.state.includes(secret), "state is redacted before reaching d1");
+      assert.equal(f.requests.length, piBefore, "ctx.d1 never calls Pi");
+
+      d1.decide = () => ({ status: 429, json: { error: "at capacity" }, headers: { "retry-after": "0" } });
+      d1.extract = () => ({ status: 503, json: { error: "overloaded" } });
+      const logs = captureLogs();
+      let failing;
+      try { failing = await probe(); } finally { restoreLogs(); }
+      assert.equal(failing.score.ok, false); assert.match(failing.score.reason, /HTTP 429/);
+      assert.equal(failing.extract.ok, false); assert.match(failing.extract.reason, /HTTP 503/);
+      assert.equal(callsOf("extractions", 2).length, 1 + live.d1.maxRetries, "503 is retried up to maxRetries");
+      const attempts = logs.filter((line) => line.event === "d1.request" && line.caller === "workflow:d1_probe");
+      assert.ok(attempts.some((line) => line.endpoint === "decisions" && line.status === 429 && line.outcome === "rate_limited" && typeof line.d1Ms === "number" && line.inputChars > 0));
+      assert.ok(attempts.some((line) => line.endpoint === "extractions" && line.status === 503 && line.outcome === "http_error" && line.attempt === 1 + live.d1.maxRetries));
+
+      d1.decide = () => ({ status: 200, json: {} });
+      d1.extract = () => ({ status: 200, json: { answers: [] } });
+      const malformedLogs = captureLogs();
+      let malformed;
+      try { malformed = await probe(); } finally { restoreLogs(); }
+      assert.equal(malformed.score.ok, false); assert.match(malformed.score.reason, /HTTP 200: response has no answers/);
+      assert.equal(malformed.extract.ok, false); assert.match(malformed.extract.reason, /HTTP 200: response has no answers/);
+      const invalid = malformedLogs.filter((line) => line.event === "d1.request" && line.caller === "workflow:d1_probe");
+      assert.ok(invalid.length && invalid.every((line) => line.status === 200 && line.outcome === "invalid_response"), "a 200 without an answers object is logged as invalid_response, never ok");
+
+      const password = "d1-url-password-31337";
+      process.env.D1_URL = `http://scrat:${password}@127.0.0.1:${server.address().port}/v1/decisions`;
+      const credentialLogs = captureLogs();
+      let credentialed;
+      try { credentialed = await probe(); } finally { restoreLogs(); process.env.D1_URL = `http://127.0.0.1:${server.address().port}/v1/decisions`; }
+      assert.equal(credentialed.score.ok, false); assert.equal(credentialed.extract.ok, false);
+      assert.match(credentialed.score.reason, /\[redacted\]@127\.0\.0\.1/);
+      assert.ok(![credentialed, credentialLogs].some((value) => JSON.stringify(value).includes(password)), "URL credentials never reach d1 failure reasons or logs");
+
+      const settings = live.workflows.label_items, names = (item) => item.labels.map((label) => label.name).sort();
+      const selections = (entries) => `Classification from the supplied source.\nSCRAT_LABELS: ${JSON.stringify(entries)}\nSCRAT_STATUS: complete`;
+      const labelScores = (low, medium, high) => (body) => body.questions.c0_0 ? noul({ c0_0: low, c0_1: medium, c0_2: high }) : noul({});
+      settings.enabled = true;
+      branchOff("labeled", "src/app.ts", "export const value = 2;\n");
+      f.addPr(201, "labeled", "human", { body: "Adjusts the exported value.", labels: [{ name: "keep" }] });
+      await route();
+      const labelTask = all(s.tasks).find((task) => task.action === "label_items" && task.status === "queued"); assert.ok(labelTask);
+      d1.decide = labelScores(0.93, 0.2, 0.05);
+      f.script = [];
+      const callsBeforeFast = d1.calls.length, pi = f.requests.length;
+      const fast = await success();
+      assert.equal(f.requests.length, pi, "confident d1 decisions label with zero Pi requests");
+      assert.deepEqual(fast.result.labels, [{ category: "risk", name: "risk: low" }]);
+      assert.match(fast.result.text, /risk → risk: low/);
+      assert.deepEqual(names(f.prs[0]), ["keep", "risk: low"]);
+      const [labelCall] = callsOf("decisions", callsBeforeFast);
+      assert.deepEqual(Object.keys(labelCall.body.questions), ["c0_0", "c0_1", "c0_2"]);
+      assert.match(labelCall.body.questions.c0_2.instructions, /"risk: high" \(Highest-risk code/);
+      assert.match(labelCall.body.state, /^pull request #201: PR 201/); assert.match(labelCall.body.state, /Existing labels: keep/); assert.match(labelCall.body.state, /src\/app\.ts \| 2/);
+
+      tasks.enqueueManualTasks("label_items", ["201"]);
+      d1.decide = labelScores(0.05, 0.1, 0.96);
+      f.faults.label.add(201);
+      const publishing = await run(); assert.ok(publishing.error); assert.equal(publishing.stage, "publishing");
+      assert.deepEqual(publishing.result.labels, [{ category: "risk", name: "risk: high" }]);
+      const callsBeforeRetry = d1.calls.length, piBeforeRetry = f.requests.length;
+      tasks.retryTask(publishing.taskId);
+      const retried = await success();
+      assert.equal(d1.calls.length, callsBeforeRetry, "publication retry reuses the saved d1 classification without calling d1");
+      assert.equal(f.requests.length, piBeforeRetry, "publication retry never calls Pi");
+      assert.deepEqual(names(f.prs[0]), ["keep", "risk: high"]);
+      assert.deepEqual(retried.result.labels, publishing.result.labels);
+
+      tasks.enqueueManualTasks("label_items", ["201"]);
+      d1.decide = labelScores(0.1, 0.84, 0.78);
+      f.reset(201, "normal");
+      f.script = [{ name: "git", args: { operation: "diff", from: "base", to: "head", path: "src/app.ts" } }, selections([{ category: "risk", name: "risk: medium" }])];
+      const piBeforeAmbiguous = f.requests.length;
+      const ambiguous = await success();
+      assert.ok(f.requests.length > piBeforeAmbiguous, "a low-margin d1 decision falls back to Pi");
+      assert.equal(f.requests.at(-1).context.action, "label_items");
+      assert.deepEqual(ambiguous.result.labels, [{ category: "risk", name: "risk: medium" }]);
+      assert.deepEqual(names(f.prs[0]), ["keep", "risk: medium"]);
+
+      tasks.enqueueManualTasks("label_items", ["201"]);
+      d1.decide = labelScores(0.99, 0.2, 0.73);
+      f.reset(201, "normal");
+      f.script = [selections([{ category: "risk", name: "risk: high" }])];
+      const piBeforeConflict = f.requests.length;
+      const conflicting = await success();
+      assert.ok(f.requests.length > piBeforeConflict, "two choices clearing d1MinScore fall back to Pi even with a wide margin");
+      assert.deepEqual(conflicting.result.labels, [{ category: "risk", name: "risk: high" }]);
+      assert.deepEqual(names(f.prs[0]), ["keep", "risk: high"]);
+
+      settings.enabled = false;
+      f.prs[0].state = "closed";
+      await route();
+      live.workflows.review_pr.enabled = true;
+      f.script = undefined;
+      branchOff("navigate", "src/app.ts", "export const value = 4;\n");
+      pushFile("navigate", "src/auth.ts", "export const refreshSession = (session) => session.user.id;\n");
+      pushFile("navigate", "src/session.ts", "export const ttl = 0;\n");
+      pushFile("navigate", "docs/notes.md", "# Notes\n");
+      const body = [
+        "Fixes #77 and relates to #999.",
+        "## Acceptance criteria", "- Sessions refresh without logging the user out.",
+        "## Reproduction", "TypeError: session.user is undefined at refreshSession",
+        "## Background", "Session refresh has been flaky. ".repeat(30),
+      ].join("\n\n");
+      f.addPr(202, "navigate", "human", { body });
+      const paths = (state) => Object.fromEntries([...state.matchAll(/^\[(\d+)\] (\S+)/gm)].map(([, index, path]) => [`f${index}`, path]));
+      const fileScores = { "src/auth.ts": 0.95, "src/session.ts": 0.81, "src/app.ts": 0.42, "docs/notes.md": 0.05 };
+      d1.decide = (request) => noul(Object.fromEntries(Object.entries(paths(request.state)).map(([key, path]) => [key, fileScores[path]])));
+      d1.extract = () => ok({
+        linked_issues: { type: "list", value: ["#77", "#999"], confidences: [0.92, 0.2] },
+        acceptance_criteria: { type: "list", value: ["Sessions refresh without logging the user out."], confidences: [0.88] },
+        reproduction_or_errors: { type: "list", value: ["TypeError: session.user is undefined at refreshSession"], confidences: [0.9] },
+        key_symbols_or_paths: { type: "list", value: ["refreshSession"], confidence: 0.86 },
+      });
+      const reviewers = live.workflows.review_pr.reviewers.map((reviewer) => reviewer.model);
+      const reviewRequests = (since) => f.requests.slice(since).filter((entry) => entry.context.action === "review_pr" && entry.context.item.number === 202 && !entry.consolidating);
+      await route();
+      f.reset(202, "normal");
+      const callsBeforeReview = d1.calls.length, piBeforeReview = f.requests.length;
+      await success();
+      const reviewCalls = d1.calls.slice(callsBeforeReview);
+      assert.deepEqual(reviewCalls.map((call) => call.endpoint).sort(), ["decisions", "extractions"], "one score and one extraction serve the whole panel");
+      assert.match(reviewCalls.find((call) => call.endpoint === "decisions").body.questions.f0.instructions, /race conditions/);
+      assert.deepEqual(Object.keys(reviewCalls.find((call) => call.endpoint === "extractions").body.fields).sort(), ["acceptance_criteria", "key_symbols_or_paths", "linked_issues", "reproduction_or_errors"]);
+      const seen = reviewRequests(piBeforeReview);
+      assert.deepEqual([...new Set(seen.map((entry) => entry.request.model))].sort(), [...reviewers].sort(), "both reviewers ran");
+      const navigationPaths = new Set(seen.map((entry) => entry.context.files.navigation));
+      assert.equal(navigationPaths.size, 1, "both reviewers share one navigation.md");
+      const [navigationPath] = navigationPaths; assert.ok(navigationPath);
+      const navigation = readFileSync(navigationPath, "utf8");
+      assert.match(navigation, /Advisory d1 navigation shortlist — all changed files and full raw diffs remain authoritative/);
+      assert.ok(navigation.indexOf("`src/auth.ts` — score 0.95") < navigation.indexOf("`src/session.ts` — score 0.81"), "focus files are ranked highest first");
+      assert.match(navigation, /`src\/app\.ts` — score 0\.42, \+1\/-1/);
+      assert.doesNotMatch(navigation, /docs\/notes\.md/, "files below scoreThreshold are dropped");
+      assert.match(navigation, /- #77\n/); assert.doesNotMatch(navigation, /#999/, "low-confidence extractions are dropped");
+      assert.match(navigation, /Sessions refresh without logging the user out\./);
+      assert.match(navigation, /TypeError: session\.user is undefined at refreshSession/);
+      assert.match(navigation, /- refreshSession/);
+
+      d1.decide = () => ({ status: 503, json: { error: "overloaded" } });
+      d1.extract = () => ({ status: 503, json: { error: "overloaded" } });
+      touchPr(202);
+      await route();
+      f.reset(202, "normal");
+      const piBeforeOutage = f.requests.length, callsBeforeOutage = d1.calls.length;
+      const outage = await success();
+      assert.ok(d1.calls.length > callsBeforeOutage, "the review still asked d1");
+      assert.equal(outage.error, null);
+      const outageRequests = reviewRequests(piBeforeOutage);
+      assert.ok(outageRequests.length && outageRequests.every((entry) => entry.context.files.navigation === undefined), "a d1 outage omits navigation.md and the review proceeds");
+    } finally {
+      process.env.CODEX_LB_API_KEY = previous.token; process.env.D1_URL = previous.url;
+      if (previous.token === undefined) delete process.env.CODEX_LB_API_KEY;
+      if (previous.url === undefined) delete process.env.D1_URL;
+      server.closeAllConnections(); await new Promise((done) => server.close(done));
+    }
+  } },
 };
 
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {

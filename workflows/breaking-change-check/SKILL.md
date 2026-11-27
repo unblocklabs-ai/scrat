@@ -20,6 +20,8 @@ Report a finding only when the change, once deployed, would destroy data or leav
 
 ## Method
 
+When `files.navigation` is present, it is an advisory d1 shortlist of files most likely to hold irreversible changes: an optional starting point, never a reason to skip the rest of the diff.
+
 1. Read the diff with `git` (`git diff <base>...HEAD`) and inspect the base version of changed files with `read_base`.
 2. For every candidate, open the surrounding code and confirm that existing data really is destroyed or becomes unreadable. Grep for remaining readers and writers of a dropped field before calling it orphaned.
 3. Keep only findings you would block a deploy over.

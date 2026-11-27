@@ -7,5 +7,6 @@
   ],
   "ignoreBinaries": ["rg"],
   "ignoreDependencies": ["lighthouse", "playwright-core"],
+  "ignoreExportsUsedInFile": { "type": true },
   "project": ["src/**/*.ts", "workflows/**/*.ts", "test/**/*.mjs", "deploy/**/*.mjs"]
 }

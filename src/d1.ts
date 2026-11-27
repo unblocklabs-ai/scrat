@@ -50,7 +50,7 @@ let d1Consecutive429s = 0;
 function getDispatcher(certPath: string | null) {
   if (cachedDispatcher && cachedDispatcher.certPath === certPath) return cachedDispatcher.agent;
   const connect = certPath && existsSync(certPath) ? { ca: readFileSync(certPath) } : undefined;
-  const agent = new Agent({ connect, connections: 4 });
+  const agent = new Agent({ connect, connections: config.d1.maxConcurrency });
   cachedDispatcher = { certPath, agent };
   return agent;
 }
@@ -578,19 +578,96 @@ function retryAfterMs(header: string | null): number | undefined {
   return undefined;
 }
 
-function defaultRequester(deadline: number) {
-  const token = process.env[config.d1.tokenEnv]?.trim();
-  const url = (process.env.D1_URL ?? config.d1.url).trim();
+type D1Endpoint = "decisions" | "extractions";
+type D1Trace = { caller: string; log?: D1Log };
+
+export type D1ExtractFieldSpec =
+  | { type: "text" | "number" | "date" | "time" | "datetime" | "duration" | "estimate" | "forecast"; instructions: string }
+  | { type: "list"; items: "text" | "number" | "date"; instructions: string };
+
+export type D1ExtractAnswer = {
+  type: string;
+  value: unknown;
+  confidence?: number;
+  confidences?: number[];
+  p_null?: number;
+  span?: number[];
+  spans?: number[][];
+};
+
+type D1Failure = { ok: false; reason: string; d1Ms: number };
+
+let d1Active = 0;
+const d1Waiters: Array<() => void> = [];
+
+function acquireD1Slot(signal: AbortSignal) {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("d1 request aborted"));
+  if (d1Active < config.d1.maxConcurrency) {
+    d1Active++;
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      const index = d1Waiters.indexOf(grant);
+      if (index >= 0) d1Waiters.splice(index, 1);
+      reject(signal.reason ?? new Error("d1 request aborted"));
+    };
+    const grant = () => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    d1Waiters.push(grant);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function releaseD1Slot() {
+  const next = d1Waiters.shift();
+  if (next) next();
+  else d1Active--;
+}
+
+const decisionsUrl = () => (process.env.D1_URL ?? config.d1.url).trim();
+
+function extractionsUrl() {
+  const explicit = (process.env.D1_EXTRACTIONS_URL ?? config.d1.extractionsUrl ?? "").trim();
+  if (explicit) return explicit;
+  const decisions = decisionsUrl();
+  return /\/v1\/decisions\/?$/.test(decisions) ? decisions.replace(/\/v1\/decisions\/?$/, "/v1/extractions") : "";
+}
+
+const endpointUrl = (endpoint: D1Endpoint) => endpoint === "decisions" ? decisionsUrl() : extractionsUrl();
+const d1Token = () => process.env[config.d1.tokenEnv]?.trim();
+
+function unavailableReason(endpoint: D1Endpoint) {
+  if (!config.d1.enabled) return "d1 disabled";
+  if (!d1Token()) return "d1 credentials missing";
+  if (!endpointUrl(endpoint)) return `d1 ${endpoint} url missing`;
+  return undefined;
+}
+
+export const isD1Available = () => unavailableReason("decisions") === undefined;
+
+function createRequester(endpoint: D1Endpoint, deadline: number, trace: D1Trace) {
+  const token = d1Token();
+  const url = endpointUrl(endpoint);
   if (!token || !url) return undefined;
   const certPath = process.env.D1_CERT_PATH ?? config.d1.certPath;
   const dispatcher = url.startsWith("https://") && certPath ? getDispatcher(certPath) : undefined;
-  return async (payload: { model: string; state: string; questions: Record<string, { type: "noul"; instructions: string }> }, signal?: AbortSignal): Promise<D1Response> => {
+  const report = (details: { status?: number; attempt: number; d1Ms: number; inputChars: number; outcome: string; err?: string }) => {
+    const entry = { event: "d1.request", endpoint, caller: trace.caller, ...details };
+    if (details.outcome === "ok") trace.log?.info?.(entry);
+    else trace.log?.warn(entry);
+  };
+  return async (payload: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> => {
+    const body = JSON.stringify(payload);
     const maxAttempts = 1 + config.d1.maxRetries;
     let lastError: Error | undefined;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const now = Date.now();
       if (d1CircuitOpenUntil > 0) {
         if (now < d1CircuitOpenUntil) {
+          report({ attempt, d1Ms: 0, inputChars: body.length, outcome: "circuit_open" });
           throw new Error(`d1 circuit breaker open (${Math.ceil((d1CircuitOpenUntil - now) / 1000)}s remaining)`);
         }
         d1CircuitOpenUntil = 0;
@@ -603,21 +680,43 @@ function defaultRequester(deadline: number) {
       const init = {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body,
         signal: combined,
         ...(dispatcher ? { dispatcher } : {}),
       };
-      const response = globalThis.fetch === nativeFetch
-        ? await undiciFetch(url, init)
-        : await globalThis.fetch(url, init);
-      if (response.ok) {
-        d1Consecutive429s = 0;
-        d1CircuitOpenUntil = 0;
-        return await response.json() as D1Response;
+      const started = performance.now();
+      const elapsed = () => Math.round(performance.now() - started);
+      let status = 0;
+      let retryAfter: string | null = null;
+      try {
+        await acquireD1Slot(combined);
+      } catch (error) {
+        report({ attempt, d1Ms: elapsed(), inputChars: body.length, outcome: timeout.aborted ? "queue_timeout" : "aborted", err: redactSecrets(errorMessage(error)) });
+        throw error;
       }
-      const status = response.status;
-      const snippet = redactSecrets((await response.text().catch(() => "")).slice(0, 300));
-      lastError = new Error(`d1 HTTP ${status}: ${snippet}`);
+      try {
+        const response = globalThis.fetch === nativeFetch
+          ? await undiciFetch(url, init)
+          : await globalThis.fetch(url, init);
+        status = response.status;
+        if (response.ok) {
+          const parsed = await response.json() as unknown;
+          d1Consecutive429s = 0;
+          d1CircuitOpenUntil = 0;
+          report({ status, attempt, d1Ms: elapsed(), inputChars: body.length, outcome: "ok" });
+          return parsed;
+        }
+        retryAfter = response.headers.get("retry-after");
+        const snippet = redactSecrets((await response.text().catch(() => "")).slice(0, 300));
+        lastError = new Error(`d1 HTTP ${status}: ${snippet}`);
+      } catch (error) {
+        const outcome = timeout.aborted ? "timeout" : signal?.aborted ? "aborted" : "error";
+        report({ attempt, d1Ms: elapsed(), inputChars: body.length, outcome, err: redactSecrets(errorMessage(error)) });
+        throw error;
+      } finally {
+        releaseD1Slot();
+      }
+      report({ status, attempt, d1Ms: elapsed(), inputChars: body.length, outcome: status === 429 ? "rate_limited" : "http_error" });
       if (status === 429) {
         d1Consecutive429s++;
         if (d1Consecutive429s >= config.d1.circuitBreakerThreshold) {
@@ -627,7 +726,7 @@ function defaultRequester(deadline: number) {
       }
       const retryable = status === 429 || status === 502 || status === 503;
       if (!retryable || attempt === maxAttempts) throw lastError;
-      const headerWait = retryAfterMs(response.headers.get("retry-after"));
+      const headerWait = retryAfterMs(retryAfter);
       const baseWait = headerWait ?? Math.round(config.d1.retryBaseDelayMs * Math.pow(2, attempt - 1));
       const jitter = config.d1.retryJitterMs > 0 ? Math.floor(Math.random() * config.d1.retryJitterMs) : 0;
       const budgetLeft = deadline - Date.now() - config.d1.retryReserveMs;
@@ -639,14 +738,73 @@ function defaultRequester(deadline: number) {
   };
 }
 
-async function extractRelevantChunks({ text, query, instructionTemplate, maxTotalChars, maxChunks = 8, maxCandidateChunks = config.d1.maxCandidateChunks, targetChunkChars = 1000, maxChunkChars = 1800, threshold = config.d1.scoreThreshold, signal }: {
+async function callD1<T>(endpoint: D1Endpoint, payload: Record<string, unknown>, { timeoutMs, signal, ...trace }: D1Trace & { timeoutMs?: number; signal?: AbortSignal }, read: (response: unknown) => T | string): Promise<({ ok: true; d1Ms: number } & T) | D1Failure> {
+  const started = performance.now();
+  const d1Ms = () => Math.round(performance.now() - started);
+  const unavailable = unavailableReason(endpoint);
+  if (unavailable) return { ok: false, reason: unavailable, d1Ms: 0 };
+  const requester = createRequester(endpoint, Date.now() + (timeoutMs ?? config.d1.timeoutMs), trace);
+  if (!requester) return { ok: false, reason: "d1 unavailable", d1Ms: 0 };
+  try {
+    const parsed = read(await requester({ model: config.d1.model, ...payload }, signal));
+    if (typeof parsed === "string") return { ok: false, reason: parsed, d1Ms: d1Ms() };
+    return { ok: true, d1Ms: d1Ms(), ...parsed };
+  } catch (error) {
+    return { ok: false, reason: redactSecrets(errorMessage(error)), d1Ms: d1Ms() };
+  }
+}
+
+const answersOf = (response: unknown) => {
+  const answers = response && typeof response === "object" ? (response as { answers?: unknown }).answers : undefined;
+  return answers && typeof answers === "object" && !Array.isArray(answers) ? answers as Record<string, unknown> : undefined;
+};
+
+export function scoreDecisions({ state, questions, ...options }: D1Trace & { state: string; questions: Record<string, string>; timeoutMs?: number; signal?: AbortSignal }) {
+  const keys = Object.keys(questions);
+  if (!keys.length) return Promise.resolve<D1Failure>({ ok: false, reason: "no questions", d1Ms: 0 });
+  const payload = {
+    state: redactSecrets(state),
+    questions: Object.fromEntries(keys.map((key) => [key, { type: "noul", instructions: redactSecrets(questions[key]!) }])),
+  };
+  return callD1("decisions", payload, options, (response) => {
+    const answers = answersOf(response);
+    if (!answers) return "d1 response has no answers";
+    const scores: Record<string, number> = {};
+    for (const key of keys) {
+      const score = (answers[key] as { noul?: unknown } | undefined)?.noul;
+      if (typeof score === "number" && Number.isFinite(score)) scores[key] = score;
+    }
+    return Object.keys(scores).length ? { scores } : "d1 response has no numeric scores";
+  });
+}
+
+export function extractFields({ state, fields, ...options }: D1Trace & { state: string; fields: Record<string, D1ExtractFieldSpec>; timeoutMs?: number; signal?: AbortSignal }) {
+  const keys = Object.keys(fields);
+  if (!keys.length) return Promise.resolve<D1Failure>({ ok: false, reason: "no fields", d1Ms: 0 });
+  const payload = {
+    state: redactSecrets(state),
+    fields: Object.fromEntries(keys.map((key) => [key, { ...fields[key]!, instructions: redactSecrets(fields[key]!.instructions) }])),
+  };
+  return callD1("extractions", payload, options, (response) => {
+    const answers = answersOf(response);
+    if (!answers) return "d1 response has no answers";
+    const kept: Record<string, D1ExtractAnswer> = {};
+    for (const key of keys) {
+      const answer = answers[key];
+      if (answer && typeof answer === "object" && "value" in answer) kept[key] = answer as D1ExtractAnswer;
+    }
+    return { answers: kept };
+  });
+}
+
+async function extractRelevantChunks({ text, query, instructionTemplate, maxTotalChars, maxChunks = 8, maxCandidateChunks = config.d1.maxCandidateChunks, targetChunkChars = 1000, maxChunkChars = 1800, threshold = config.d1.scoreThreshold, signal, caller, log }: {
   text: string; query: string; instructionTemplate: string; maxTotalChars: number;
   maxChunks?: number; maxCandidateChunks?: number; targetChunkChars?: number; maxChunkChars?: number;
-  threshold?: number; signal?: AbortSignal;
+  threshold?: number; signal?: AbortSignal; caller: string; log?: D1Log;
 }) {
   const started = performance.now();
   const extractionDeadlineMs = Date.now() + config.d1.timeoutMs;
-  const effRequester = defaultRequester(extractionDeadlineMs);
+  const effRequester = createRequester("decisions", extractionDeadlineMs, { caller, log });
   if (!text || !effRequester) return { usedD1: false, text: "", kept: 0, total: 0, d1Ms: 0 };
   const safeText = redactSecrets(text);
   const safeQuery = redactSecrets(query).trim();
@@ -700,7 +858,7 @@ async function extractRelevantChunks({ text, query, instructionTemplate, maxTota
       const idx = nextWave++;
       const { state, questions: qs } = waves[idx]!;
       try {
-        const resp = await effRequester({ model: config.d1.model, state, questions: qs }, waveSignal);
+        const resp = await effRequester({ model: config.d1.model, state, questions: qs }, waveSignal) as D1Response;
         answersList[idx] = resp.answers ?? {};
       } catch (error) {
         if (firstError === undefined) firstError = error;
@@ -798,6 +956,8 @@ export async function distillCommandOutput({ rawOutput, command, goal, artifactP
         instructionTemplate: "Does item [{idx}] contain failing tests, errors, tracebacks, file:line locations, counts, or key conclusions answering QUERY?",
         maxTotalChars: midBudget,
         signal,
+        caller: "command",
+        log,
       });
       if (result.usedD1) {
         const formatOut = (savedPath: string | undefined, isPartial: boolean) => {
@@ -883,6 +1043,8 @@ export async function distillBrowserText({ rawText, url, focus, artifactPath, pa
       maxChunkChars: 1400,
       maxChunks: 6,
       signal,
+      caller: "browser_text",
+      log,
     });
     if (result.usedD1 && result.text) {
       const savedPath = await persistArtifact(artifactPath, cleaned);
@@ -934,6 +1096,8 @@ export async function distillHistory({ rawHistory, action, artifactPath, minChar
       maxChunkChars: 1600,
       maxChunks: 6,
       signal,
+      caller: "history",
+      log,
     });
     if (result.usedD1 && result.text) {
       const savedPath = await persistArtifact(artifactPath, cleaned);

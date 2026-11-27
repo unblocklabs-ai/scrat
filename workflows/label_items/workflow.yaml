@@ -29,6 +29,11 @@ defaults:
     - git
     - read_base
 config:
+  d1FastPath: true
+  d1MinScore: 0.72
+  d1MinMargin: 0.25
+  d1MaxStateChars: 10000
+  d1MaxDiffStatChars: 4000
   targets:
     - prs
   issue_labels: []

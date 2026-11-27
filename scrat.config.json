@@ -85,6 +85,7 @@
   "d1": {
     "enabled": false,
     "url": "https://codex.unblocklabs.ai/v1/decisions",
+    "extractionsUrl": null,
     "model": "liquid/d1.2-ultra",
     "tokenEnv": "CODEX_LB_API_KEY",
     "certPath": null,
@@ -100,12 +101,14 @@
     "waveMaxItems": 18,
     "maxCandidateChunks": 12,
     "waveConcurrency": 2,
+    "maxConcurrency": 4,
     "scoreThreshold": 0.3,
     "bash": { "minChars": 4096, "maxOutputChars": 12000 },
     "validation": { "minChars": 4096, "maxOutputChars": 12000 },
     "browserText": { "minChars": 6144, "maxOutputChars": 6000 },
     "history": { "minChars": 6144, "maxOutputChars": 6000 },
-    "failureBlocks": { "enabled": true, "skipD1OnMatch": true, "maxBlocks": 12, "contextLines": 8 }
+    "failureBlocks": { "enabled": true, "skipD1OnMatch": true, "maxBlocks": 12, "contextLines": 8 },
+    "navigation": { "enabled": true, "maxFiles": 25, "maxHunks": 18, "maxHunkChars": 900, "minDiffPaths": 3, "minBodyChars": 800, "extractMinConfidence": 0.5, "topFocusFiles": 8, "maxStateChars": 12000 }
   },
   "storefront": {
     "enabled": false,

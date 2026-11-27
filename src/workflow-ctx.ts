@@ -6,6 +6,7 @@ import type { Logger } from "pino";
 import { buildItemAgentInput, evaluateItemContext, readDiffScope } from "./agent-input.ts";
 import { findBotFingerprintedIssue, findBotMarkedComment, upsertComment } from "./comments.ts";
 import { config } from "./config.ts";
+import { type D1ExtractAnswer, type D1ExtractFieldSpec, extractFields, isD1Available, scoreDecisions } from "./d1.ts";
 import { db } from "./db.ts";
 import { describeError, errorCode, SupersededError, transientInferenceCode } from "./errors.ts";
 import type { EventReferences } from "./events.ts";
@@ -32,6 +33,8 @@ import {
   workflowItemLabelSettings, type WorkflowPipelineSpec, type WorkspacePermission,
 } from "./workflows.ts";
 import { createWorkspace, removeWorkspace } from "./workspaces.ts";
+
+export type { D1ExtractAnswer, D1ExtractFieldSpec };
 
 type WorkflowCheckout = {
   id: string;
@@ -129,6 +132,19 @@ export type WorkflowContext = {
   agent: {
     run: <T = Record<string, unknown>>(options: WorkflowAgentOptions) => Promise<WorkflowAgentResult<T>>;
   };
+  d1: {
+    enabled: boolean;
+    score: (args: {
+      state: string;
+      questions: Record<string, string>;
+      timeoutMs?: number;
+    }) => Promise<{ ok: true; scores: Record<string, number>; d1Ms: number } | { ok: false; reason: string; d1Ms: number }>;
+    extract: (args: {
+      state: string;
+      fields: Record<string, D1ExtractFieldSpec>;
+      timeoutMs?: number;
+    }) => Promise<{ ok: true; answers: Record<string, D1ExtractAnswer>; d1Ms: number } | { ok: false; reason: string; d1Ms: number }>;
+  };
   github: {
     listOpenItems: () => Promise<{ issues: GithubIssue[]; pullRequests: GithubPullRequest[] }>;
     listOpenIssues: () => Promise<GithubIssue[]>;
@@ -167,6 +183,7 @@ export type WorkflowContext = {
         submitResult?: SubmitResultSpec;
       },
     ) => Promise<WorkflowAgentResult>;
+    recordResult: (result: Pick<WorkflowAgentResult, "text" | "outcome" | "ready" | "labels" | "paths">) => void;
     assertLabelSelections: (labels: unknown, categories: readonly LabelCategory[]) => asserts labels is Array<{ category: string; name: string }>;
     assertFreshForPublication: (current: WorkflowItemObserved, options?: { labelKey?: string; labelCategories?: readonly LabelCategory[] }) => Promise<void>;
     reconcileLabels: (args: { key: string; current: WorkflowItemObserved; desired: string[]; managed: string[] }) => Promise<{ desired: string[]; dryRun?: boolean; previewPath?: string }>;
@@ -593,6 +610,23 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
     },
   };
 
+  const d1Trace = { signal, log, caller: `workflow:${workflow.name}` };
+  const d1: WorkflowContext["d1"] = {
+    enabled: isD1Available(),
+    async score({ state, questions, timeoutMs }) {
+      assertNotAborted(signal, "d1.score");
+      const res = await scoreDecisions({ state, questions, timeoutMs, ...d1Trace });
+      assertNotAborted(signal, "d1.score result");
+      return res;
+    },
+    async extract({ state, fields, timeoutMs }) {
+      assertNotAborted(signal, "d1.extract");
+      const res = await extractFields({ state, fields, timeoutMs, ...d1Trace });
+      assertNotAborted(signal, "d1.extract result");
+      return res;
+    },
+  };
+
   const githubHelper: WorkflowContext["github"] = {
     async listOpenItems() {
       assertNotAborted(signal, "github.listOpenItems");
@@ -886,6 +920,14 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         return { desired };
       });
     },
+    recordResult(result) {
+      assertNotAborted(signal, "item.recordResult");
+      requireItem();
+      const saved = { text: result.text, outcome: result.outcome, ready: result.ready, paths: [...result.paths], ...(result.labels ? { labels: result.labels } : {}) };
+      updateRun(run.id, { result: saved, stage: "validating" });
+      assertComplete(saved);
+      updateRun(run.id, { stage: isAdvisory(workflow) ? "agent" : "publishing" });
+    },
     assertLabelSelections(labels, categories) {
       validateLabelSelections(labels, categories);
     },
@@ -943,6 +985,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       state,
       workspace,
       agent,
+      d1,
       github: githubHelper,
       slack: slackHelper,
       item: itemHelper,

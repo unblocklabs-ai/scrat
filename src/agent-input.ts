@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { workflowsPublishing } from "./workflow-registry.ts";
 import { config } from "./config.ts";
 import { distillHistory } from "./d1.ts";
+import { buildD1NavigationPacket } from "./d1-navigation.ts";
 import type { ErrorDetails } from "./errors.ts";
 import { changedPaths, git, gitPage, shortSha } from "./git.ts";
 import { GitHubRepository } from "./github.ts";
@@ -118,6 +119,12 @@ export async function buildItemAgentInput(options: {
   const site = listed.includes("storefront") && config.storefront.enabled && !options.baseOnly ? await import("./storefront-site.ts") : undefined;
   const storefront = await site?.storefrontContext(task.subjectId, headSha, trigger.source);
   const cloudflare = listed.includes("cloudflare") && config.cloudflare.enabled ? await (await import("./cloudflare.ts")).cloudflareContext(config.github.repository, evaluated.item.number) : undefined;
+  const navigation = assessesPr || action === "review_issue" || action === "breaking-change-check"
+    ? buildD1NavigationPacket({
+        action, title: evaluated.item.title, body: [evaluated.item.body ?? "", issue ? `# Linked issue #${issue.number}: ${issue.title}\n\n${issue.body ?? ""}` : ""].filter((part) => part.trim()).join("\n\n"),
+        workspacePath: options.workspace.path, diffBaseSha, headSha, diffPaths, log: logger,
+      })
+    : undefined;
   const reviewedSha = evaluated.headSha;
   const checks = listed.includes("validation") && reviewedSha
     ? (await bestEffort(logger, "github.check_runs_failed", { sha: reviewedSha }, () => new GitHubRepository(config.github.repository).checkRunConclusions(reviewedSha))) ?? []
@@ -135,6 +142,7 @@ export async function buildItemAgentInput(options: {
     triage?.ready && writeContext("triage", "triage.md", triage.text),
     issue && writeContext("issue", "issue.md", `# ${issue.title} (#${issue.number})\n\n${issue.body ?? ""}\n`),
     history && writeContext("history", "history.md", history),
+    navigation?.then((packet) => packet ? writeContext("navigation", "navigation.md", packet) : undefined),
     cloudflare && writeContext("cloudflare", "cloudflare.md", cloudflare),
     storefront && writeContext("storefront", "storefront.json", JSON.stringify(storefront.context, null, 2)),
     storefront?.siteMap && writeContext("siteMap", "site.md", storefront.siteMap),

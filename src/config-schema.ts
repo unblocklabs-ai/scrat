@@ -54,6 +54,7 @@ const schema = Type.Object({
   d1: Type.Object({
     enabled: Type.Boolean(),
     url: Type.String({ minLength: 1 }),
+    extractionsUrl: nullable(Type.String({ minLength: 1 })),
     model: Type.String({ minLength: 1 }),
     tokenEnv: Type.String({ minLength: 1 }),
     certPath: nullable(Type.String()),
@@ -69,12 +70,17 @@ const schema = Type.Object({
     waveMaxItems: positive,
     maxCandidateChunks: positive,
     waveConcurrency: positive,
+    maxConcurrency: positive,
     scoreThreshold: Type.Number({ minimum: 0, maximum: 1 }),
     bash: Type.Object({ minChars: positive, maxOutputChars: positive }, strict),
     validation: Type.Object({ minChars: positive, maxOutputChars: positive }, strict),
     browserText: Type.Object({ minChars: positive, maxOutputChars: positive }, strict),
     history: Type.Object({ minChars: positive, maxOutputChars: positive }, strict),
     failureBlocks: Type.Object({ enabled: Type.Boolean(), skipD1OnMatch: Type.Boolean(), maxBlocks: positive, contextLines: Type.Integer({ minimum: 0 }) }, strict),
+    navigation: Type.Object({
+      enabled: Type.Boolean(), maxFiles: positive, maxHunks: Type.Integer({ minimum: 0 }), maxHunkChars: positive, minDiffPaths: positive, minBodyChars: positive,
+      extractMinConfidence: Type.Number({ minimum: 0, maximum: 1 }), topFocusFiles: positive, maxStateChars: positive,
+    }, strict),
   }, strict),
   storefront: Type.Object({
     enabled: Type.Boolean(), store: Type.String(), publicHost: Type.String(), model: Type.Optional(modelSettings), siteMapMaxAgeDays: positive, siteMapRetryHours: positive, siteMapPaths: Type.String(), auditPaths: Type.Array(Type.String({ pattern: "^/(?!/)" }), { uniqueItems: true }), screenshotRetentionDays: positive,

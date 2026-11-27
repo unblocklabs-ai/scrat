@@ -57,12 +57,13 @@ export async function fixture(scenario, spec) {
   if (scenario.startsWith("commit_review") || scenario === "store_audit" || scenario === "store_changes" || scenario === "recovery" || scenario === "isolation" || scenario.startsWith("slack_status") || scenario === "publish_effects" || scenario === "workflows") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
   const verdicts = {}, modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), checkRuns = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [], deployments = [];
-  const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set(), permissions: new Set(), commitComment: new Set() };
+  const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set(), permissions: new Set(), commitComment: new Set(), close: new Set() };
   const checkRollups = new Map();
   const graphqlRate = { ...rate };
   const tokens = new Map(patMode ? [[pat, { issues: "write", pull_requests: "write", contents: "write" }]] : []);
   const transient = { failures: 0, seen: new Map() };
-  let onModel, script, nextCommentId = 1000, nextIssueNumber = 500;
+  let onModel, onWrite, script, nextCommentId = 1000, nextIssueNumber = 500;
+  writes.push = (...entries) => { const count = Array.prototype.push.apply(writes, entries); for (const entry of entries) onWrite?.(entry); return count; };
   const external = [], searches = [], commitComments = new Map();
   const md5 = (text) => createHash("md5").update(text).digest("hex"), mainTheme = "gid://shopify/OnlineStoreTheme/1";
   const store = (theme, filename, type, value, checksum) => { theme.files.set(filename, checksum ?? md5(Buffer.from(value, type === "TEXT" ? "utf8" : "base64"))); theme.bodies.set(filename, { type, value }); };
@@ -177,7 +178,7 @@ export async function fixture(scenario, spec) {
     const consolidating = Boolean(text?.includes("Consolidate the two independent reviews below"));
     const mode = modes.get(context.item.number) ?? "normal";
     const seen = transient.seen.get(request.model) ?? 0;
-    if ((mode === "transient" || (mode === "transient-mixed" && !request.model.includes("deepseek"))) && seen < transient.failures) {
+    if ((mode === "transient" || (mode === "transient-mixed" && !request.model.includes("deepseek")) || (mode === "obsolete-transient" && request.model.includes("deepseek") && !consolidating)) && seen < transient.failures) {
       transient.seen.set(request.model, seen + 1);
       res.writeHead(503, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "Service temporarily unavailable" } }));
@@ -274,6 +275,7 @@ export async function fixture(scenario, spec) {
     const fumble = !corrected && (mode === "format-once" || (mode === "reviewer-grade-once" && review && !consolidating && request.model.includes("deepseek"))
       || (mode === "consolidation-grade-once" && consolidating));
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : mode === "incomplete-once" && !continued ? "incomplete" : "complete";
+    const obsolete = mode === "obsolete" || mode === "obsolete-transient" || (mode === "obsolete-split" && (consolidating || !request.model.includes("deepseek")));
     const verdict = scenario.startsWith("commit_review") ? (consolidating && verdicts.consolidating) || verdicts[request.model] || verdicts.default : undefined;
     const output = (context.action === "storefront_discover" ? "- `/products/<handle>`: product page with add to cart." : review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : feedback ? "Fixed the validation failure." : "Implemented the change.")
       + (review && mode.startsWith("grade-") ? ` (${mode})` : "")
@@ -286,7 +288,8 @@ export async function fixture(scenario, spec) {
       + (mode === "revised" ? "\nRevised after the latest changes." : "")
       + (mode === "ready" ? "\nSCRAT_READY" : "")
       + (text?.includes("\n## Storefront preview\n") && storefrontLine ? `\nSCRAT_STOREFRONT: ${storefrontLine}` : "")
-      + (["review_pr", "my_pr_review"].includes(context.action) && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : storefrontGrade ?? (["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : mode === "grade-C" ? "C" : "B")}` : "")
+      + (obsolete ? "\nSCRAT_OBSOLETE: true" : "")
+      + (["review_pr", "my_pr_review"].includes(context.action) && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : storefrontGrade ?? (["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : ["grade-C", "obsolete", "obsolete-split", "obsolete-transient"].includes(mode) ? "C" : "B")}` : "")
       + (verdict ? `\nSCRAT_VERDICT: ${verdict}` : "")
       + (mode === "no-status" || (fumble && mode === "format-once" && !review) ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
     const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] } : { role: "assistant", content: scriptedReply ?? output };
@@ -435,6 +438,15 @@ export async function fixture(scenario, spec) {
       const item = (match[1] === "issues" ? issues.get(Number(match[2])) : undefined) ?? prs.find((pr) => pr.number === Number(match[2]));
       return item ? reply(match[1] === "pulls" ? { ...item, base: { sha: headOf(item.base.ref), ...item.base } } : item) : reply({ message: "Not Found" }, 404);
     }
+    if (match && method === "PATCH") {
+      const n = Number(match[2]), item = match[1] === "issues" ? issues.get(n) ?? prs.find((pr) => pr.number === n) : prs.find((pr) => pr.number === n);
+      if (!item) return reply({ message: "Not Found" }, 404);
+      if (!can(match[1] === "pulls" || !issues.has(n) ? "pull_requests" : "issues")) return reply({ message: "Resource not accessible by integration" }, 403);
+      writes.push({ type: match[1] === "pulls" ? "pr_update" : "issue_update", number: n, state: body.state, stateReason: body.state_reason });
+      if (faults.close.delete(`${match[1]}/${n}`)) return reply({ message: "Service unavailable" }, 503);
+      Object.assign(item, body.state && { state: body.state }, body.state_reason && { state_reason: body.state_reason });
+      return reply(item);
+    }
     match = path.match(/\/pulls\/(\d+)\/reviews$/);
     if (match) return reply(reviews.get(Number(match[1])) ?? []);
     if (/\/pulls\/\d+\/comments$/.test(path)) return reply([]);
@@ -538,6 +550,7 @@ export async function fixture(scenario, spec) {
   const written = (type, predicate = () => true) => writes.filter((write) => write.type === type && predicate(write));
   return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, loggie, cloudflare, pat, user, githubApp, modes, verdicts, requests, calls, tokens, slack, rate, issues, prs, comments, reviews, writes, deployments, checkRuns, checkRollups, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
     set onModel(value) { onModel = value; },
+    set onWrite(value) { onWrite = value; },
     set script(value) { script = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },
     async close() { globalThis.fetch = originalFetch; db.$client.close(); server.closeAllConnections(); await new Promise((done) => server.close(done)); },

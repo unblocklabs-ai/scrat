@@ -475,6 +475,20 @@ export class GitHubRepository {
     }
   }
 
+  async closePullRequest(pullNumber: number, references: EventReferences = {}): Promise<void> {
+    await this.write("github.close_pull_request", { pullNumber }, references, "pull_request", {
+      request: ({ github, owner, repo }) => github.rest.pulls.update({ owner, repo, pull_number: pullNumber, state: "closed" }),
+      journal: ({ data }) => ({ event: { type: "github.pull_request_closed", data: { repository: this.repository, pullRequestNumber: pullNumber, url: data.html_url } } }),
+    });
+  }
+
+  async closeIssue(issueNumber: number, stateReason: "completed" | "not_planned", references: EventReferences = {}): Promise<void> {
+    await this.write("github.close_issue", { issueNumber, stateReason }, references, "write", {
+      request: ({ github, owner, repo }) => github.rest.issues.update({ owner, repo, issue_number: issueNumber, state: "closed", state_reason: stateReason }),
+      journal: ({ data }) => ({ event: { type: "github.issue_closed", data: { repository: this.repository, issueNumber, stateReason, url: data.html_url } } }),
+    });
+  }
+
   async createDeployment({ ref, environment, description }: { ref: string; environment: string; description: string }, references: EventReferences = {}) {
     const response = await this.write("github.create_deployment", { ref, environment }, references, "deployments", {
       inspect: () => assertPublishable(description),

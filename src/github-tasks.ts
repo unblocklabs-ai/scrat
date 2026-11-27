@@ -117,6 +117,11 @@ function repairConfigOf(name: string | undefined) {
 }
 
 async function reconcileExhaustedLabel(ctx: SyncContext, item: Item, observation: ItemObservation, routes: Routes, repair: string | undefined, state: PrReviewState, count: number) {
+  if (state.kind === "current" && state.assessment.result.obsolete) {
+    const managed = [...new Set(routes.repairs.flatMap((name) => repairConfigOf(name)?.exhaustedLabel ?? []))];
+    if (managed.length) await bestEffort(ctx.log, "github.label_pending", { subjectId: item.id }, () => reconcileLabels(ctx.github, item.payload.number, { current: observation.labels, desired: [], managed }, { subjectId: item.id }));
+    return;
+  }
   const name = repair ?? routes.repairs[0], settings = repairConfigOf(name);
   const latestRepair = latestOf(item.id, name);
   const repairActive = latestRepair?.status === "queued" || latestRepair?.status === "running";
@@ -262,7 +267,7 @@ async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObse
     action, keepManual: true, unlessTarget: `${observation.item.head.sha}@${observation.baseBranch}`,
   });
   const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
-  const repairAction = routes.repairFor(state.kind === "current" ? state.assessment.result.grade : undefined);
+  const repairAction = state.kind === "current" && !state.assessment.result.obsolete ? routes.repairFor(state.assessment.result.grade) : undefined;
   const limit = repairConfigOf(repairAction)?.maxSelfRepairs;
   const repair = planSelfRepair({
     repairAction, repairActions: routes.repairs, state, feedbackTask: latestOf(item.id, routes.feedback),

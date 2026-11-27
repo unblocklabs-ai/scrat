@@ -24,7 +24,7 @@ export const latestRunOfTask = (taskId: string, database: Database = db) =>
 type RunContext = NonNullable<Run["context"]>;
 type HistoryRun = Omit<Run, "context" | "verification" | "reviewers" | "result" | "error"> & {
   context: Pick<RunContext, "revision" | "baseBranch" | "commentRevisions"> | null;
-  result: Pick<AgentResult, "outcome" | "paths" | "grade"> | null;
+  result: Pick<AgentResult, "outcome" | "paths" | "grade" | "obsolete"> | null;
   error: Pick<ErrorDetails, "code"> | null;
 };
 
@@ -32,11 +32,11 @@ const { context: _context, verification: _verification, reviewers: _reviewers, r
 const historyContext = sql<string | null>`case when ${runs.context} is null then null else json_object('revision', json_extract(${runs.context}, '$.revision'), 'baseBranch', json_extract(${runs.context}, '$.baseBranch'), 'commentRevisions', json_extract(${runs.context}, '$.commentRevisions')) end`
   .mapWith((value: string | null) => value === null ? null : JSON.parse(value) as HistoryRun["context"]);
 
-const historyResult = sql<string | null>`case when ${runs.result} is null then null else json_object('outcome', json_extract(${runs.result}, '$.outcome'), 'paths', json_extract(${runs.result}, '$.paths'), 'grade', json_extract(${runs.result}, '$.grade')) end`
+const historyResult = sql<string | null>`case when ${runs.result} is null then null else json_object('outcome', json_extract(${runs.result}, '$.outcome'), 'paths', json_extract(${runs.result}, '$.paths'), 'grade', json_extract(${runs.result}, '$.grade'), 'obsolete', json_extract(${runs.result}, '$.obsolete')) end`
   .mapWith((value: string | null) => {
     if (value === null) return null;
-    const { grade, ...result } = JSON.parse(value) as NonNullable<HistoryRun["result"]>;
-    return { ...result, grade: grade ?? undefined };
+    const { grade, obsolete, ...result } = JSON.parse(value) as NonNullable<HistoryRun["result"]>;
+    return { ...result, grade: grade ?? undefined, ...obsolete && { obsolete: true } };
   });
 const historyError = sql<string | null>`case when ${runs.error} is null then null else json_object('code', json_extract(${runs.error}, '$.code')) end`
   .mapWith((value: string | null) => {

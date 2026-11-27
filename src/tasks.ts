@@ -95,7 +95,9 @@ function planRunStart(task: Task, { previousRun, trigger }: { previousRun: Run |
   const pinned = review && !resume ? undefined : prior;
   const configuredReviewers = wf.defaults.reviewers;
   const configuredSkill = wf.skillPath ?? wf.scriptPath ?? wf.file;
-  const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? (isBaseOnly(trigger) ? configuredReviewers.slice(0, 1) : configuredReviewers);
+  const escalated = isBaseOnly(trigger) && prior?.reviewers.length === 2 && prior.mainSha === trigger.mainSha
+    && prior.reviewers.every((reviewer, index) => reviewer.provider === configuredReviewers[index]?.provider && reviewer.model === configuredReviewers[index]?.model);
+  const reviewers = resume ? resume.reviewers : pinned?.reviewers ?? (isBaseOnly(trigger) && !escalated ? configuredReviewers.slice(0, 1) : configuredReviewers);
   const { provider, model, thinkingLevel } = !resume && reviewers.length === 1 ? reviewers[0]! : (pinned ?? wf.defaults);
   const skill = pinned?.skill ?? configuredSkill;
   return { prior, resume, publicationResume, review, reviewers, skill, provider, model, thinkingLevel, resumeReason, resumingDeferred,

@@ -123,6 +123,8 @@ export const runs = sqliteTable("runs", {
     storefrontReportUrl?: string;
     storefrontReplyTs?: string;
     advisory?: true;
+    closedPullRequest?: true;
+    closedIssueNumber?: number;
   }>().notNull().$defaultFn(() => ({ status: "pending" })),
 }, (table) => [uniqueIndex("runs_sequence_unique").on(table.sequence)]);
 

@@ -68,6 +68,9 @@ export async function validateWorkflowDefinition(
   for (const issue of validateWorkflowConfig(entry.config, entry.mode, entry.on.event)) {
     problems.push(`${wf.name}: ${issue}`);
   }
+  if (entry.config.autoCloseObsolete === true && !(["issue", "pull_request"] as const).every((permission) => entry.permissions.github.includes(permission))) {
+    problems.push(`${wf.name}: config.autoCloseObsolete requires permissions.github: issue, pull_request`);
+  }
   if (wf.on.event?.kind === "item_labels") {
     problems.push(...validateWorkflowItemLabels(entry));
   }

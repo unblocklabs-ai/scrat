@@ -87,7 +87,7 @@ export async function itemRevisions({ github, pullRequest, mainSha }: Observed) 
 
 export async function runAgent({ run, task, manifest, operation, stop }: Ctx, { environment, input, sessionFile, baseSha, panel }: {
   environment: Environment; input: Omit<Parameters<typeof buildAgentInput>[0], "run" | "task" | "manifest">;
-  sessionFile?: string; baseSha?: string; panel?: { baseSha: string; requireGrade: boolean; beforeReview?: (storefront: boolean) => Run };
+  sessionFile?: string; baseSha?: string; panel?: { baseSha: string; requireGrade: boolean; configuredReviewers?: Action["reviewers"]; beforeReview?: (storefront: boolean) => Run };
 }) {
   const { workspace } = input;
   const { prompt, contextDir, revisions, storefront, labelCategories } = await buildAgentInput({ run, task, manifest, ...input });
@@ -97,7 +97,7 @@ export async function runAgent({ run, task, manifest, operation, stop }: Ctx, { 
     ? { navigationHosts: "any" as const, resourceHosts: "any" as const, ...manifest.browser, limits: { steps: manifest.browserSteps ?? browserSteps, milliseconds: (manifest.browserSeconds ?? browserSeconds) * 1000 } } : manifest.browser;
   const options = { run: activeRun, cwd: workspace.path, tools: manifest.tools, scoped: { ...manifest, browser }, storefront, contextDir, revisions, environment, log: operation.log, stop };
   const agentResult = panel
-    ? await reviewPullRequest({ ...options, baseSha: panel.baseSha }, prompt, panel.requireGrade)
+    ? await reviewPullRequest({ ...options, baseSha: panel.baseSha }, prompt, panel.requireGrade, panel.configuredReviewers)
     : await executePi({ ...options, baseSha }, { context: prompt, sessionFile, labelCategories });
   return { result: { ...agentResult, paths: [...new Set([...input.diffPaths, ...agentResult.paths])] }, contextDir, revisions };
 }

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
-import { and, eq, isNotNull, isNull } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { findBotMarkedComment, upsertComment } from "./comments.ts";
 import { config } from "./config.ts";
 import { db } from "./db.ts";
@@ -14,7 +14,7 @@ import type { GitHubRepository } from "./github.ts";
 import type { GithubComment, GithubItem } from "./github-types.ts";
 import { bestEffort, logger } from "./logging.ts";
 import { previewMarker, withMarker } from "./markers.ts";
-import { themePreviews, type ThemePreview } from "./schema.ts";
+import { subjects, themePreviews, type ThemePreview } from "./schema.ts";
 import { loggie } from "./loggie.ts";
 
 type UserErrors = { userErrors: { field?: string[] | null; message: string }[] };
@@ -301,9 +301,19 @@ export async function deletePreview(github: GitHubRepository, subjectId: string,
   if (preview) savePreview(preview, { deletedAt: now() });
 }
 
-export function previewContext(subjectId: string, headSha: string) {
-  const preview = livePreview(subjectId);
-  if (preview?.headSha !== headSha) return undefined;
+function previewView(preview: ThemePreview, headSha: string | null) {
   const available = !preview.problems.length;
   return { url: available ? previewUrl(preview) : null, themeId: preview.themeId, headSha, available, problems: preview.problems };
+}
+
+export function previewContext(subjectId: string, headSha: string) {
+  const preview = livePreview(subjectId);
+  return preview?.headSha === headSha ? previewView(preview, headSha) : undefined;
+}
+
+export function previewOfPr(repository: string, pullRequestNumber: number) {
+  const row = db.select({ preview: themePreviews }).from(themePreviews).innerJoin(subjects, eq(subjects.id, themePreviews.subjectId))
+    .where(and(eq(themePreviews.pullRequestNumber, pullRequestNumber), isNull(themePreviews.deletedAt), sql`lower(${subjects.repository}) = lower(${repository})`))
+    .orderBy(desc(themePreviews.createdAt)).get();
+  return row && previewView(row.preview, row.preview.headSha);
 }

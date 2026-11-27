@@ -50,8 +50,8 @@ function pollFollower({ name: follower, trigger, enabled }: Action, operation: O
     const followerSubject = upsertSubject({ repository, kind: "workflow", key: `${follower}:${run.id}` });
     queued += enqueueOnce(followerSubject, follower, `${parent} run ${run.id} completed`, {
       source: "workflow", kind: "workflow_completed", triggerKey: run.id, workflow: parent, runId: run.id, taskId: task.id,
-      subject: { kind: subject.kind, key: subject.key },
-      ...item ? { item: { kind: item.kind, number: item.payload.number } } : {},
+      subject: { kind: subject.kind, key: subject.key }, subjectId: subject.id,
+      ...item ? { item: { kind: item.kind, number: item.payload.number, title: item.payload.title } } : {},
       outcome: run.result?.outcome ?? "complete", publication: run.publication.status,
     });
   }

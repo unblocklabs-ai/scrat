@@ -4378,9 +4378,16 @@ fi
     mkdirSync(resolve(directory, "advisory_digest"), { recursive: true });
     writeFileSync(resolve(directory, "advisory_digest/workflow.yaml"), [
       "name: advisory_digest", "enabled: true", "on:", "  event:", "    source: workflow", "    kind: workflow_completed", "    workflow: breaking-change-check",
-      "defaults:", "  provider: fixture", "  model: gpt-6.2-sol", "  thinkingLevel: low", "",
+      "permissions:", "  github: [read]", "defaults:", "  provider: fixture", "  model: gpt-6.2-sol", "  thinkingLevel: low", "",
     ].join("\n"));
-    writeFileSync(resolve(directory, "advisory_digest/run.ts"), "export default async function (ctx) { return { parent: ctx.trigger.input.runId, item: ctx.trigger.input.item, publication: ctx.trigger.input.publication }; }\n");
+    writeFileSync(resolve(directory, "advisory_digest/run.ts"), [
+      "export default async function (ctx) {",
+      "  const pr = await ctx.github.getPr(201), issue = await ctx.github.getIssue(202), { storefront } = ctx;",
+      "  return { parent: ctx.trigger.input.runId, item: ctx.trigger.input.item, publication: ctx.trigger.input.publication, bot: ctx.bot, triggerItem: ctx.trigger.item,",
+      "    storefront: { enabled: storefront.enabled, liveUrl: storefront.liveUrl, publicHost: storefront.publicHost, devices: storefront.devices, siteMap: await storefront.siteMap(), preview: storefront.previewOfPr(201), missing: storefront.previewOfPr(999) ?? null },",
+      "    pr: { number: pr.number, state: pr.state, headSha: pr.head.sha, labels: pr.labels, title: pr.title }, issueTitle: issue.title };",
+      "}", "",
+    ].join("\n"));
     config.workflows.directory = directory;
     config.workflows.trustLocalScripts = true;
     config.workflows.advisory_digest = { provider: "fixture" };
@@ -4426,9 +4433,27 @@ fi
 
     assert.equal(await pollWorkflowCompletions(), 1);
     const [digestTask] = ofAction("advisory_digest", "queued");
-    assert.equal(digestTask.input.runId, flagged.id); assert.deepEqual(digestTask.input.item, { kind: "pr", number: 201 }); assert.equal(digestTask.input.publication, "published");
-    const digest = await runTask(digestTask);
-    assert.equal(digest.error, null, JSON.stringify(digest.error)); assert.equal(JSON.parse(digest.result.text).parent, flagged.id);
+    const prTitle = all(s.items).find((item) => item.id === first.subjectId).payload.title;
+    assert.equal(digestTask.input.runId, flagged.id); assert.deepEqual(digestTask.input.item, { kind: "pr", number: 201, title: prTitle }); assert.equal(digestTask.input.publication, "published");
+    assert.equal(digestTask.input.subjectId, first.subjectId);
+    const previewRow = { subjectId: first.subjectId, pullRequestNumber: 201, themeId: 4242, name: "pr-201", headSha: pr201.head.sha };
+    db.insert(s.themePreviews).values([{ ...previewRow, createdAt: "2026-01-01T00:00:00.000Z" }, { ...previewRow, themeId: 9999, name: "pr-201-old", createdAt: "2026-02-01T00:00:00.000Z", deletedAt: "2026-02-02T00:00:00.000Z" }]).run();
+    mkdirSync(resolve("data/storefront"), { recursive: true }); writeFileSync(resolve("data/storefront/site.md"), "Site map text.\n");
+    const storefront = live.storefront, saved = { ...storefront };
+    Object.assign(storefront, { enabled: true, publicHost: "shop.example.test" });
+    let digest;
+    try { digest = await runTask(digestTask); } finally { Object.assign(storefront, saved); }
+    assert.equal(digest.error, null, JSON.stringify(digest.error));
+    const out = JSON.parse(digest.result.text);
+    assert.equal(out.parent, flagged.id);
+    assert.deepEqual(out.bot, { name: f.config.github.botName, slug: out.bot.slug }); assert.match(out.bot.slug, /^[a-z0-9-]+$/);
+    assert.deepEqual(out.triggerItem, { id: first.subjectId, kind: "pr", number: 201, title: prTitle });
+    assert.deepEqual(out.storefront, {
+      enabled: true, liveUrl: "https://shop.example.test", publicHost: "shop.example.test", devices: [...live.storefront.devices], siteMap: "Site map text.\n",
+      preview: { url: "https://shop.example.test/?preview_theme_id=4242", themeId: 4242, headSha: pr201.head.sha, available: true, problems: [] }, missing: null,
+    });
+    assert.deepEqual(out.pr, { number: 201, state: "open", headSha: pr201.head.sha, labels: [], title: prTitle });
+    assert.equal(typeof out.issueTitle, "string");
     assert.equal(await pollWorkflowCompletions(), 0, "a follower's own completion does not re-trigger it");
 
     f.script = undefined; f.reset(201, "normal"); f.reset(202, "normal");

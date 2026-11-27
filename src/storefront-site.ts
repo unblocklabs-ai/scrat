@@ -23,6 +23,7 @@ export const auditState = "audits";
 export const stateOf = (source: TriggerInput["source"]) => source === "shopify" ? "" : auditState;
 const scope = "site_map", dayMs = 86_400_000, hourMs = 3_600_000;
 const siteMapPath = () => statePath("site.md");
+export const readSiteMap = () => ifMissing(readFile(siteMapPath(), "utf8"), undefined);
 const liveUrl = () => `https://${config.storefront.publicHost}/`;
 const skillHash = async (path: string) => createHash("sha256").update(await readFile(path)).digest("hex");
 
@@ -95,7 +96,7 @@ export async function storefrontContext(subjectId: string, headSha: string, sour
   const { devices, auditPaths, limits: { confirmationRuns, regressionMaxGrade } } = config.storefront;
   const context = preview ? { ...preview, liveUrl: liveUrl(), devices, confirmationRuns, regressionMaxGrade }
     : audit ? { liveUrl: liveUrl(), devices, confirmationRuns, auditPaths, knownBreakages: knownBreakages(await readState<Alerts>(join(stateOf(source), "alerts.json"), {})) } : { liveUrl: liveUrl() };
-  return { context, siteMap: await ifMissing(readFile(siteMapPath(), "utf8"), undefined), browse: preview?.available ?? true };
+  return { context, siteMap: await readSiteMap(), browse: preview?.available ?? true };
 }
 
 export async function pruneScreenshots(now = Date.now()) {

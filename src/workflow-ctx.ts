@@ -12,6 +12,7 @@ import { describeError, errorCode, SupersededError, transientInferenceCode } fro
 import type { EventReferences } from "./events.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { git } from "./git.ts";
+import { botName, botSlug } from "./identity.ts";
 import { GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubIssue, GithubPullRequest } from "./github-types.ts";
 import { categoriesFor, itemLabelKey } from "./item-labels.ts";
@@ -27,6 +28,8 @@ import { getRun, latestCompletedRun, updateRun } from "./run-history.ts";
 import { steps, workflowState, type Run, type Subject, type Task } from "./schema.ts";
 import { assertPublishable, childEnvironment } from "./secrets.ts";
 import { postMessage } from "./slack.ts";
+import { previewOfPr } from "./storefront.ts";
+import { readSiteMap } from "./storefront-site.ts";
 import { parseTriggerInput } from "./triggers.ts";
 import {
   type GithubPermission, hashJson, isAdvisory, type ResolvedWorkflow, type SlackPermission, workflowAllowedTools,
@@ -115,6 +118,15 @@ export type WorkflowContext = {
     end?: string;
     item?: { id: string; kind: "issue" | "pr"; number: number; title: string };
   };
+  bot: { name: string; slug: string };
+  storefront: {
+    enabled: boolean;
+    liveUrl: string | null;
+    publicHost: string;
+    devices: readonly string[];
+    siteMap: () => Promise<string | undefined>;
+    previewOfPr: (prNumber: number) => { url: string | null; themeId: number | null; headSha: string | null; available: boolean; problems: string[] } | undefined;
+  };
   signal: AbortSignal;
   log: Logger;
   step: <T>(name: string, input: unknown, fn: () => Promise<T>) => Promise<T>;
@@ -149,6 +161,8 @@ export type WorkflowContext = {
     listOpenItems: () => Promise<{ issues: GithubIssue[]; pullRequests: GithubPullRequest[] }>;
     listOpenIssues: () => Promise<GithubIssue[]>;
     listOpenPrs: () => Promise<GithubPullRequest[]>;
+    getPr: (number: number) => Promise<GithubPullRequest>;
+    getIssue: (number: number) => Promise<GithubIssue>;
     listRecentMergedPrs: (sinceDays: number, limit?: number) => Promise<WorkflowMergedPr[]>;
     comment: (args: { key: string; number: number; body: string; resolved?: boolean }) => Promise<{ commentId: number; dryRun?: boolean; previewPath?: string }>;
     issue: (args: { key: string; title: string; body: string; labels?: string[] }) => Promise<{ number: number; created: boolean; dryRun?: boolean; previewPath?: string }>;
@@ -645,6 +659,18 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       const { pullRequests } = await github.fetchOpenItems();
       return pullRequests;
     },
+    async getPr(number) {
+      assertNotAborted(signal, "github.getPr");
+      assertPermission<GithubPermission>(workflow.permissions.github, "read", "github", workflow.name);
+      const { item: found } = await github.fetchItemContext("pr", number, { comments: false });
+      if (!("head" in found)) throw new Error(`#${number} is not a pull request`);
+      return found;
+    },
+    async getIssue(number) {
+      assertNotAborted(signal, "github.getIssue");
+      assertPermission<GithubPermission>(workflow.permissions.github, "read", "github", workflow.name);
+      return (await github.fetchItemContext("issue", number, { comments: false })).item;
+    },
     async listRecentMergedPrs(sinceDays, limit) {
       assertNotAborted(signal, "github.listRecentMergedPrs");
       assertPermission<GithubPermission>(workflow.permissions.github, "read", "github", workflow.name);
@@ -978,6 +1004,15 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
     ctx: {
       workflow: { name: workflow.name, dir: workflow.dir, hash: workflow.hash, dryRun, config: workflow.config },
       trigger,
+      bot: { name: botName, slug: botSlug },
+      storefront: {
+        enabled: config.storefront.enabled,
+        liveUrl: config.storefront.enabled && config.storefront.publicHost ? `https://${config.storefront.publicHost}` : null,
+        publicHost: config.storefront.publicHost,
+        devices: config.storefront.devices,
+        siteMap: readSiteMap,
+        previewOfPr: (prNumber) => previewOfPr(subject.repository, prNumber),
+      },
       signal,
       log,
       step: runStep,

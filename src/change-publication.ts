@@ -25,9 +25,9 @@ export async function refreshChangePublication(ctx: Ctx, github: GitHubRepositor
   const common = await git(path, ["merge-base", base, commitSha]);
   if (!(await workflowPaths(path, common, base)).length) return;
 
-  const remote = remoteUrl(github.repository), env = await github.getGitEnvironment();
+  const remote = remoteUrl(github.repository);
   const expected = expectedBranchHead(workspace, context.headSha);
-  const remoteHead = () => remoteBranchHead(repositoryPath, remote, branch, env);
+  const remoteHead = async () => remoteBranchHead(repositoryPath, remote, branch, await github.getGitEnvironment());
   const actual = await remoteHead();
   if (actual !== expected) {
     // A push can succeed before its receipt is saved. Reconcile it; do not replace it.

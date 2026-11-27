@@ -9,11 +9,14 @@ import { git } from "./git.ts";
 import type { Item } from "./items.ts";
 import { getRun, updateRun } from "./run-history.ts";
 import type { Run, Subject, Task } from "./schema.ts";
-import { isManual, parseTriggerInput } from "./triggers.ts";
+import { isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
 import { createWorkflowContext, type WorkflowContext, type WorkflowPipelineRunner } from "./workflow-ctx.ts";
 import type { ResolvedWorkflow } from "./workflows.ts";
 
 type WorkflowFn = (ctx: WorkflowContext) => Promise<unknown>;
+const completedItem = (parsed: TriggerInput) => parsed.kind === "workflow_completed" && parsed.item && parsed.subjectId && parsed.item.title !== undefined
+  ? { item: { id: parsed.subjectId, kind: parsed.item.kind, number: parsed.item.number, title: parsed.item.title } } : {};
+
 const loadedModules = new Map<string, WorkflowFn>();
 
 export async function loadWorkflowScript(scriptPath: string): Promise<WorkflowFn> {
@@ -71,7 +74,7 @@ export async function runWorkflow({
           kind: "event",
           manual: isManual(parsed),
           input: parsed as Record<string, unknown>,
-          ...(item ? { item: { id: item.id, kind: item.kind, number: item.payload.number, title: item.payload.title } } : {}),
+          ...(item ? { item: { id: item.id, kind: item.kind, number: item.payload.number, title: item.payload.title } } : completedItem(parsed)),
         };
 
   const { ctx, hasPublishedEffects, usedManagedPipeline } = createWorkflowContext({

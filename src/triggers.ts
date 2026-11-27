@@ -35,7 +35,8 @@ const workflowCompleted = Type.Object({
   source: Type.Literal("workflow"), kind: Type.Literal("workflow_completed"),
   triggerKey: text, workflow: text, runId: text, taskId: text,
   subject: Type.Object({ kind: text, key: text }),
-  item: Type.Optional(Type.Object({ kind: Type.Union([Type.Literal("issue"), Type.Literal("pr")]), number: Type.Number() })),
+  subjectId: Type.Optional(text),
+  item: Type.Optional(Type.Object({ kind: Type.Union([Type.Literal("issue"), Type.Literal("pr")]), number: Type.Number(), title: Type.Optional(text) })),
   outcome: text, publication: text,
 });
 

@@ -91,7 +91,7 @@ const schema = Type.Object({
       themeNamePrefix: Type.String(), themePaths: Type.String(), processingWaitSeconds: positive, processingPollSeconds: positive,
       filesPageSize: Type.Integer({ minimum: 1, maximum: 250 }), filenamesPerRequest: Type.Integer({ minimum: 1, maximum: 50 }), uploadBatch: Type.Integer({ minimum: 1, maximum: 50 }), uploadBatchBytes: positive, requestTimeoutSeconds: positive,
     }, strict),
-    lighthouse: Type.Object({ runs: positive, pages: Type.Array(Type.String({ pattern: "^/(?!/)" }), { minItems: 1, uniqueItems: true }), timeoutSeconds: positive }, strict),
+    lighthouse: Type.Object({ runs: positive, pages: Type.Array(Type.String({ pattern: "^/(?!/)" }), { minItems: 1, uniqueItems: true }), timeoutSeconds: positive, insights: Type.Object({ max: Type.Integer({ minimum: 0 }), items: Type.Integer({ minimum: 0 }), valueChars: positive }, strict) }, strict),
     changes: Type.Object({
       pollMinutes: positive, quietMinutes: Type.Integer({ minimum: 0 }), concurrency: positive, valueBytes: positive, batchRetentionDays: positive, maxPages: positive, summaryEvents: Type.Integer({ minimum: 0 }),
       pageSizes: Type.Object({ products: positive, collections: positive, pages: positive, menus: positive, metafields: positive, shopMetafields: positive, metaobjectDefinitions: positive, metaobjects: positive, events: positive }, strict),

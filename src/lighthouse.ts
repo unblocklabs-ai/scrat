@@ -8,7 +8,7 @@ import { config } from "./config.ts";
 import { errorMessage } from "./errors.ts";
 import type { EventReferences } from "./events.ts";
 import { shortSha } from "./git.ts";
-import { launchChromium } from "./scoped-tools.ts";
+import { launchChromium, loadPlaywright } from "./scoped-tools.ts";
 import { readState, writeState } from "./storefront.ts";
 
 const categories = { performance: "Performance", accessibility: "Accessibility", "best-practices": "Best Practices", seo: "SEO" } as const;
@@ -25,9 +25,16 @@ type Device = typeof devices[number];
 type Metric = keyof typeof metrics;
 type Scores = Record<Category, number>;
 type Metrics = Record<Metric, number>;
-type Run = { device: Device; page: string; run: number; scores?: Scores; metrics?: Metrics; report?: string; error?: string };
+type Insight = { id: string; title: string; score: number | null; displayValue?: string; metricSavings?: Record<string, number>; items?: Record<string, string | number | boolean>[]; runs?: number };
+type AgenticBrowsing = { passed: number; total: number; failed: { id: string; title: string; displayValue?: string }[] };
+type Run = { device: Device; page: string; run: number; scores?: Scores; metrics?: Metrics; report?: string; error?: string; insights?: Insight[]; agenticBrowsing?: AgenticBrowsing };
+export type LighthouseOptions = { pages?: string[]; runs?: number; devices?: Device[]; timeoutSeconds?: number; includeAgenticBrowsing?: boolean; previewThemeId?: number };
+type LighthouseGroup = { runs: number; scored: number; scores?: Scores; metrics?: Metrics; topInsights: Insight[]; agenticBrowsing?: AgenticBrowsing };
+export type StorefrontLighthouseSummary = { devices: Partial<Record<Device, LighthouseGroup>>; pages: Record<string, Partial<Record<Device, LighthouseGroup>>>; errors: { device: Device; page: string; run: number; error: string }[]; reports: string[] };
+type Delta = { before: number; after: number; delta: number };
 type Previous = Partial<Record<Device, { sha: string; scores: Scores; metrics?: Metrics }>>;
 
+const insightIds = ["lcp-breakdown-insight", "lcp-discovery-insight", "cls-culprits-insight", "render-blocking-insight", "image-delivery-insight", "third-parties-insight", "forced-reflow-insight", "duplicated-javascript-insight", "legacy-javascript-insight", "font-display-insight", "dom-size-insight", "document-latency-insight", "network-dependency-tree-insight", "cache-insight", "inp-breakdown-insight", "viewport-insight", "modern-http-insight", "unused-javascript", "unused-css-rules"];
 const ids = Object.keys(categories) as Category[], metricIds = Object.keys(metrics) as Metric[];
 
 export async function loadLighthouse() {
@@ -47,7 +54,7 @@ const freePort = () => new Promise<number>((done, fail) => {
 const auditScript = fileURLToPath(new URL("./lighthouse-audit.ts", import.meta.url));
 const labelled = (table: Record<string, { label: string }>) => Object.fromEntries(Object.entries(table).map(([id, { label }]) => [id, label]));
 
-const childAudit = (input: string, signal: AbortSignal) => new Promise<{ scores: Scores; metrics: Metrics }>((done, fail) => {
+const childAudit = (input: string, signal: AbortSignal) => new Promise<{ scores: Scores; metrics: Metrics; insights?: Insight[]; agenticBrowsing?: AgenticBrowsing }>((done, fail) => {
   const child = spawn(process.execPath, [auditScript, input], { env: process.env, stdio: ["ignore", "pipe", "pipe"] }), out: Buffer[] = [], err: Buffer[] = [];
   const abort = () => { child.kill("SIGKILL"); };
   if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
@@ -62,32 +69,54 @@ const childAudit = (input: string, signal: AbortSignal) => new Promise<{ scores:
   });
 });
 
-async function audited(url: string, device: Device, reportPath: string, signal: AbortSignal) {
-  const port = await freePort(), browser = await launchChromium([`--remote-debugging-port=${port}`]);
+async function warmPreviewTheme(port: number, origin: string, themeId: number) {
+  const client = await (await loadPlaywright()).chromium.connectOverCDP(`http://127.0.0.1:${port}`);
   try {
-    const flags = { port, output: "json", logLevel: "error", onlyCategories: ids, disableFullPageScreenshot: true };
-    return await childAudit(JSON.stringify({ url, device, reportPath, flags, categories, metrics: labelled(metrics) }), signal);
+    const page = await client.contexts()[0]!.newPage();
+    let served: unknown;
+    for (let attempt = 0; attempt < 2 && served !== themeId; attempt++) {
+      await page.goto(`${origin}/?preview_theme_id=${themeId}`, { waitUntil: "load", timeout: config.tools.browser.navigationSeconds * 1000 });
+      served = await page.evaluate!<unknown>("window.Shopify?.theme?.id");
+      if (typeof served === "string") served = Number(served);
+    }
+    if (served !== themeId) throw new Error(`The preview theme ${themeId} was not served: the store served ${typeof served === "number" ? `theme ${served}` : "no theme"}`);
+    await page.close();
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+}
+
+async function audited(url: string, device: Device, reportPath: string, signal: AbortSignal, { includeAgenticBrowsing, previewThemeId }: { includeAgenticBrowsing: boolean; previewThemeId?: number }) {
+  const port = await freePort(), browser = await launchChromium([`--remote-debugging-port=${port}`]), { max, items, valueChars } = config.storefront.lighthouse.insights;
+  try {
+    if (previewThemeId !== undefined) await warmPreviewTheme(port, new URL(url).origin, previewThemeId);
+    const flags = { port, output: "json", logLevel: "error", onlyCategories: includeAgenticBrowsing ? [...ids, "agentic-browsing"] : ids, disableFullPageScreenshot: true, ...previewThemeId !== undefined ? { disableStorageReset: true } : {} };
+    return await childAudit(JSON.stringify({ url, device, reportPath, flags, categories, metrics: labelled(metrics), insightIds, agentic: includeAgenticBrowsing, maxInsights: max, maxItems: items, valueChars }), signal);
   } finally {
     await browser.close().catch(() => undefined);
   }
 }
 
-export async function runLighthouse(origin: string, directory: string, references: EventReferences, stop?: AbortSignal) {
-  const { runs, pages, timeoutSeconds } = config.storefront.lighthouse;
+export async function runLighthouse(origin: string, directory: string, references: EventReferences, stop?: AbortSignal, options: LighthouseOptions = {}) {
+  const { runs = config.storefront.lighthouse.runs, pages = config.storefront.lighthouse.pages, timeoutSeconds = config.storefront.lighthouse.timeoutSeconds, devices: wanted = [...devices], includeAgenticBrowsing = true, previewThemeId } = options;
+  if (!pages.length || pages.some((page) => !/^\/(?!\/)/.test(page))) throw new Error("Lighthouse pages must each start with a single /");
+  if (!Number.isInteger(runs) || runs < 1) throw new Error("Lighthouse runs must be a positive integer");
+  if (!wanted.length || wanted.some((device) => !devices.includes(device))) throw new Error(`Lighthouse devices must be from ${devices.join(", ")}`);
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0) throw new Error("Lighthouse timeoutSeconds must be 0 or more");
   await loadLighthouse();
   await mkdir(directory, { recursive: true });
   return withValidationSlot(async () => {
-    const budget = AbortSignal.timeout(timeoutSeconds * 1000), signal = stop ? AbortSignal.any([budget, stop]) : budget, results: Run[] = [];
-    for (const device of devices) for (const [index, page] of pages.entries()) for (let run = 1; run <= runs; run++) {
+    const budget = timeoutSeconds ? AbortSignal.timeout(timeoutSeconds * 1000) : undefined, signal = AbortSignal.any([budget, stop].filter((item) => item !== undefined)), results: Run[] = [];
+    for (const device of devices.filter((name) => wanted.includes(name))) for (const [index, page] of pages.entries()) for (let run = 1; run <= runs; run++) {
       if (stop?.aborted) throw stop.reason;
-      if (budget.aborted) { results.push({ device, page, run, error: `not run, the ${timeoutSeconds}s budget was spent` }); continue; }
+      if (budget?.aborted) { results.push({ device, page, run, error: `not run, the ${timeoutSeconds}s budget was spent` }); continue; }
       try {
         const path = join(directory, `${device}-${index + 1}-${run}.json`);
-        const { scores, metrics } = await audited(new URL(page, origin).href, device, path, signal);
-        results.push({ device, page, run, scores, metrics, report: path });
+        const { scores, metrics, insights, agenticBrowsing } = await audited(new URL(page, origin).href, device, path, signal, { includeAgenticBrowsing, previewThemeId });
+        results.push({ device, page, run, scores, metrics, report: path, insights, agenticBrowsing });
       } catch (error) {
         if (stop?.aborted) throw error;
-        results.push({ device, page, run, error: budget.aborted ? `stopped when the ${timeoutSeconds}s budget was spent` : errorMessage(error).replace(/\s+/g, " ") });
+        results.push({ device, page, run, error: budget?.aborted ? `stopped when the ${timeoutSeconds}s budget was spent` : errorMessage(error).replace(/\s+/g, " ") });
       }
     }
     return results;
@@ -140,4 +169,52 @@ export async function recordLighthouse(results: Run[], sha: string, state: strin
     `| Device | Page | Run | ${perRunLabels.join(" | ")} | Report |\n| --- | --- | --- | ${perRunLabels.map(() => "---").join(" | ")} | --- |\n${perRun.join("\n")}`,
   ].join("\n\n");
   return { slack, report, missing, table: { header: tableHeader, rows: tableRows }, hasPrevious: devices.some((device) => previous[device]) };
+}
+
+const savingsTotal = (insight: Insight) => Object.values(insight.metricSavings ?? {}).reduce((sum, value) => sum + value, 0);
+const mergedInsights = (scored: Run[]) => {
+  const byId = new Map<string, Insight[]>();
+  for (const insight of scored.flatMap((run) => run.insights ?? [])) byId.set(insight.id, [...byId.get(insight.id) ?? [], insight]);
+  const merged = [...byId.values()].map((list): Insight => {
+    const latest = list.at(-1)!, numeric = list.flatMap((insight) => insight.score === null ? [] : [insight.score]);
+    const keys = [...new Set(list.flatMap((insight) => Object.keys(insight.metricSavings ?? {})))];
+    const savings = Object.fromEntries(keys.map((key) => [key, mean(list.flatMap((insight) => insight.metricSavings?.[key] === undefined ? [] : [insight.metricSavings[key]]))]));
+    return { id: latest.id, title: latest.title, score: numeric.length ? mean(numeric) : null, ...latest.displayValue ? { displayValue: latest.displayValue } : {}, ...keys.length ? { metricSavings: savings } : {}, ...latest.items ? { items: latest.items } : {}, runs: list.length };
+  }).sort((a, b) => savingsTotal(b) - savingsTotal(a) || (a.score ?? 1) - (b.score ?? 1));
+  const { max } = config.storefront.lighthouse.insights;
+  return max ? merged.slice(0, max) : merged;
+};
+const grouped = (all: Run[]): LighthouseGroup => {
+  const scored = all.filter((run) => run.scores && run.metrics);
+  return { runs: all.length, scored: scored.length, ...scored.length ? { scores: average(scored.map((run) => run.scores!)), metrics: averageMetrics(scored.map((run) => run.metrics!)), agenticBrowsing: scored.at(-1)!.agenticBrowsing } : {}, topInsights: mergedInsights(scored) };
+};
+const groupedDevices = (results: Run[]) => Object.fromEntries(devices.flatMap((device) => {
+  const all = results.filter((run) => run.device === device);
+  return all.length ? [[device, grouped(all)]] : [];
+})) as Partial<Record<Device, LighthouseGroup>>;
+
+export function summarizeLighthouseRuns(results: Run[]): StorefrontLighthouseSummary {
+  return {
+    devices: groupedDevices(results),
+    pages: Object.fromEntries([...new Set(results.map((run) => run.page))].map((page) => [page, groupedDevices(results.filter((run) => run.page === page))])),
+    errors: results.flatMap(({ device, page, run, error }) => error ? [{ device, page, run, error }] : []),
+    reports: results.flatMap((run) => run.report ? [run.report] : []),
+  };
+}
+
+export const runStorefrontLighthouse = async (origin: string, directory: string, references: EventReferences, stop: AbortSignal | undefined, options: LighthouseOptions) => summarizeLighthouseRuns(await runLighthouse(origin, directory, references, stop, options));
+
+export function compareLighthouseSummaries(before: StorefrontLighthouseSummary, after: StorefrontLighthouseSummary) {
+  const delta = (from: number, to: number, digits = 0): Delta => ({ before: from, after: to, delta: Number((to - from).toFixed(digits)) });
+  const compared: Partial<Record<Device, { scores: Record<Category, Delta>; metrics: Record<Metric, Delta> }>> = {}, rows: string[] = [];
+  for (const device of devices) {
+    const from = before.devices[device], to = after.devices[device];
+    if (!from?.scores || !from.metrics || !to?.scores || !to.metrics) continue;
+    const scores = Object.fromEntries(ids.map((id) => [id, delta(from.scores![id], to.scores![id])])) as Record<Category, Delta>;
+    const measured = Object.fromEntries(metricIds.map((id) => [id, delta(from.metrics![id], to.metrics![id], metrics[id].digits)])) as Record<Metric, Delta>;
+    compared[device] = { scores, metrics: measured };
+    rows.push(...ids.map((id) => `| ${capitalised(device)} | ${categories[id]} | ${scores[id].before} | ${scores[id].after} | ${signed(scores[id].delta)} |`));
+    rows.push(...metricIds.map((id) => `| ${capitalised(device)} | ${metrics[id].label} | ${formatMetric(id, measured[id].before)} | ${formatMetric(id, measured[id].after)} | ${signed(measured[id].delta, metrics[id].digits)} |`));
+  }
+  return { devices: compared, markdown: rows.length ? `| Device | Measure | Before | After | Change |\n| --- | --- | --- | --- | --- |\n${rows.join("\n")}` : "" };
 }

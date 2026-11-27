@@ -152,10 +152,10 @@ const mainStorefront = async () => {
   writeFileSync(scriptPath, JSON.stringify({ mobile: [], desktop: [] })); writeFileSync(auditsPath, "");
   const script = (device) => ({ push: (...entries) => {
     const pending = JSON.parse(readFileSync(scriptPath, "utf8"));
-    pending[device].push(...entries.map((entry) => typeof entry === "string" ? entry : { scores: { ...entry }, metrics: entry.metrics }));
+    pending[device].push(...entries.map((entry) => typeof entry === "string" ? entry : { scores: { ...entry }, metrics: entry.metrics, extra: entry.extra }));
     writeFileSync(scriptPath, JSON.stringify(pending));
   } });
-  const fakes = globalThis.storefrontFakes = { launches: [], launchOptions: [], visits: [], get audits() { return readFileSync(auditsPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)); }, scores: { mobile: script("mobile"), desktop: script("desktop") }, look: "v1" };
+  const fakes = globalThis.storefrontFakes = { launches: [], launchOptions: [], visits: [], cdp: [], cdpVisits: [], servedTheme: undefined, get audits() { return readFileSync(auditsPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)); }, scores: { mobile: script("mobile"), desktop: script("desktop") }, look: "v1" };
   const pkg = (name, source) => {
     const directory = resolve("app/src/node_modules", name); mkdirSync(directory, { recursive: true });
     writeFileSync(resolve(directory, "package.json"), JSON.stringify({ name, type: "module", main: "index.js" })); writeFileSync(resolve(directory, "index.js"), source);
@@ -164,6 +164,11 @@ const mainStorefront = async () => {
 const fakes = globalThis.storefrontFakes;
 export const chromium = {
   executablePath: () => process.execPath,
+  async connectOverCDP(endpoint) {
+    fakes.cdp.push(endpoint);
+    const newPage = async () => ({ goto: async (url) => { fakes.cdpVisits.push(url); }, evaluate: async () => fakes.servedTheme, close: async () => {} });
+    return { contexts: () => [{ newPage }], close: async () => {} };
+  },
   async launch({ args, ...options }) {
     fakes.launches.push(args); fakes.launchOptions.push(options);
     let current = "about:blank", width = 0;
@@ -184,10 +189,10 @@ export default async function lighthouse(url, flags, settings) {
   const path = process.env.SCRAT_TEST_LIGHTHOUSE, pending = JSON.parse(readFileSync(path, "utf8"));
   const device = settings === desktopConfig ? "desktop" : "mobile", next = pending[device].shift();
   writeFileSync(path, JSON.stringify(pending));
-  appendFileSync(path + ".audits.jsonl", JSON.stringify({ url, device, port: flags.port, output: flags.output, categories: flags.onlyCategories, screenshot: !flags.disableFullPageScreenshot }) + "\\n");
+  appendFileSync(path + ".audits.jsonl", JSON.stringify({ url, device, port: flags.port, output: flags.output, categories: flags.onlyCategories, screenshot: !flags.disableFullPageScreenshot, disableStorageReset: flags.disableStorageReset }) + "\\n");
   if (next === "hang") { setInterval(() => {}, 1000); return new Promise(() => {}); }
   if (typeof next === "string") throw new Error(next);
-  return { lhr: { categories: Object.fromEntries(Object.entries(next.scores).map(([id, score]) => [id, { score }])), audits: Object.fromEntries(Object.entries(next.metrics).map(([id, numericValue]) => [id, { numericValue }])) }, report: JSON.stringify({ url, device, next: next.scores }) };
+  return { lhr: { categories: { ...Object.fromEntries(Object.entries(next.scores).map(([id, score]) => [id, { score }])), ...next.extra?.categories }, audits: { ...Object.fromEntries(Object.entries(next.metrics).map(([id, numericValue]) => [id, { numericValue }])), ...next.extra?.audits } }, report: JSON.stringify({ url, device, next: next.scores }) };
 }
 `);
   const dns = createRequire(import.meta.url)("node:dns/promises"), lookup = dns.lookup;
@@ -4131,7 +4136,7 @@ fi
     assert.deepEqual(json("lighthouse.json"), { mobile: { sha: first, scores: S(65, 90, 96, 100), metrics: m1 }, desktop: { sha: first, scores: S(93, 95, 100, 100), metrics: m1 } });
     assert.deepEqual(JSON.parse(readFileSync(`${runs}/lighthouse/mobile-1-1.json`, "utf8")), { url: site + "/", device: "mobile", next: S(0.6, 0.9, 0.96, 1) }, "each run's report is kept as evidence");
     assert.deepEqual(fakes.audits.map(({ url, device, output, categories, screenshot }) => [url, device, output, categories.join(","), screenshot]),
-      [...Array(2).fill([site + "/", "mobile", "json", "performance,accessibility,best-practices,seo", false]), ...Array(2).fill([site + "/", "desktop", "json", "performance,accessibility,best-practices,seo", false])]);
+      [...Array(2).fill([site + "/", "mobile", "json", "performance,accessibility,best-practices,seo,agentic-browsing", false]), ...Array(2).fill([site + "/", "desktop", "json", "performance,accessibility,best-practices,seo,agentic-browsing", false])]);
     const debugging = fakes.launches.filter((args) => args.length), browsing = fakes.launches.filter((args) => !args.length);
     assert.deepEqual(debugging.map(([flag]) => Number(/^--remote-debugging-port=(\d+)$/.exec(flag)[1])), fakes.audits.map(({ port }) => port), "each Lighthouse run drives its own Chromium through its debugging port");
     assert.deepEqual([...new Set(fakes.launchOptions.map((options) => JSON.stringify(options)))], [JSON.stringify({ headless: true, channel: "chromium", chromiumSandbox: true })], "every launch asks Playwright for the full Chromium build with its sandbox");
@@ -5231,6 +5236,58 @@ fi
       assert.ok(maxInFlight >= 2, `store_changes should parallelize queries: maxInFlight=${maxInFlight}`);
       assert.ok(maxInFlight <= 2, `shared limiter must cap nested listings + metaobjects at concurrency=2: got ${maxInFlight}`);
     } finally { globalThis.fetch = prevFetch; }
+  } },
+  lighthouse_insights: { title: "Lighthouse runs keep compact, bounded insights ordered by metric savings without the passing or not applicable ones, parse the agentic browsing category when the installed Lighthouse has it and tolerate its absence, warm a preview theme through the debugging port and refuse to measure a store serving another theme, and summaries average runs and compare as a signed table", configure: [configureMainStorefront], run: async () => {
+    const { fakes } = await mainStorefront(), { config: live } = await f.app("config.ts"), { runLighthouse, summarizeLighthouseRuns, compareLighthouseSummaries } = await f.app("lighthouse.ts");
+    Object.assign(live.storefront.lighthouse.insights, { max: 2, items: 2, valueChars: 12 });
+    const origin = "https://shop.example.test/", mobile = { pages: ["/"], runs: 1, devices: ["mobile"] };
+    const entry = (extra) => Object.defineProperty(storefrontScores(0.6, 0.9, 0.96, 1), "extra", { value: extra });
+    const row = (name, wasted) => ({ url: { type: "url", value: `https://shop.example.test/${name}.css` }, node: { type: "node", selector: "div.hero > img", nodeLabel: "ignored" }, wastedBytes: wasted, subItems: { items: [1] }, nested: [1], source: { type: "source-location", url: "https://shop.example.test/app.js" }, other: { type: "code", value: "x" } });
+    const audits = {
+      "render-blocking-insight": { title: "Render blocking", score: 0.3, scoreDisplayMode: "numeric", displayValue: "Est savings of 300 ms", metricSavings: { FCP: 300, LCP: 0 }, details: { type: "list", items: [{ type: "table", items: [row("a", 1234.5678), row("b", 2), row("c", 3)] }] } },
+      "dom-size-insight": { title: "DOM size", score: 0.9, scoreDisplayMode: "numeric", details: { type: "table", items: [] } },
+      "cache-insight": { title: "Cache", score: null, scoreDisplayMode: "metricSavings", metricSavings: { LCP: 50 } },
+      "font-display-insight": { title: "Fonts", score: 1, scoreDisplayMode: "numeric", metricSavings: { FCP: 10 } },
+      "viewport-insight": { title: "Viewport", score: null, scoreDisplayMode: "notApplicable", metricSavings: { INP: 10 } },
+      "ab-pass": { title: "Passes", score: 1, scoreDisplayMode: "binary" }, "ab-fail": { title: "Fails", score: 0, scoreDisplayMode: "binary", displayValue: "x" }, "ab-skip": { title: "Skipped", score: null, scoreDisplayMode: "notApplicable" },
+    };
+    fakes.scores.mobile.push(entry({ audits, categories: { "agentic-browsing": { score: 0.5, auditRefs: [{ id: "ab-pass" }, { id: "ab-fail" }, { id: "ab-skip" }] } } }), storefrontScores(0.6, 0.9, 0.96, 1), storefrontScores(0.6, 0.9, 0.96, 1));
+    const [first] = await runLighthouse(origin, resolve("lh-first"), {}, undefined, mobile);
+    assert.deepEqual(first.insights, [
+      { id: "render-blocking-insight", title: "Render blocking", score: 0.3, displayValue: "Est savings of 300 ms", metricSavings: { FCP: 300 }, items: [
+        { url: "https://shop", node: "div.hero > i", wastedBytes: 1234.57, source: "https://shop" }, { url: "https://shop", node: "div.hero > i", wastedBytes: 2, source: "https://shop" }] },
+      { id: "cache-insight", title: "Cache", score: null, metricSavings: { LCP: 50 } },
+    ]);
+    assert.deepEqual(first.agenticBrowsing, { passed: 1, total: 2, failed: [{ id: "ab-fail", title: "Fails", displayValue: "x" }] });
+    const [absent] = await runLighthouse(origin, resolve("lh-absent"), {}, undefined, mobile);
+    assert.equal(absent.agenticBrowsing, undefined); assert.equal(absent.scores.performance, 60); assert.deepEqual(absent.insights, []);
+    await runLighthouse(origin, resolve("lh-plain"), {}, undefined, { ...mobile, includeAgenticBrowsing: false });
+    assert.deepEqual(fakes.audits.map(({ categories }) => categories.at(-1)), ["agentic-browsing", "agentic-browsing", "seo"]);
+    assert.deepEqual([fakes.cdp, fakes.audits.map(({ disableStorageReset }) => disableStorageReset)], [[], [undefined, undefined, undefined]]);
+
+    fakes.servedTheme = 123; fakes.scores.mobile.push(storefrontScores(0.7, 0.9, 0.96, 1));
+    const [preview] = await runLighthouse(origin, resolve("lh-preview"), {}, undefined, { ...mobile, previewThemeId: 123 });
+    assert.equal(preview.scores.performance, 70);
+    const [launched] = fakes.launches.at(-1);
+    assert.deepEqual([fakes.cdp, fakes.cdpVisits, fakes.audits.at(-1).disableStorageReset], [[`http://127.0.0.1:${launched.split("=")[1]}`], ["https://shop.example.test/?preview_theme_id=123"], true]);
+    fakes.servedTheme = 7; const audited = fakes.audits.length;
+    const [refused] = await runLighthouse(origin, resolve("lh-refused"), {}, undefined, { ...mobile, previewThemeId: 123 });
+    assert.equal(refused.scores, undefined); assert.match(refused.error, /preview theme 123 was not served.*theme 7/);
+    assert.equal(fakes.cdpVisits.length, 3, "the warmup is retried once"); assert.equal(fakes.audits.length, audited, "no Lighthouse run measures the wrong theme");
+    await assert.rejects(runLighthouse(origin, resolve("lh-bad"), {}, undefined, { pages: ["//evil"] }), /single \//);
+    await assert.rejects(runLighthouse(origin, resolve("lh-bad"), {}, undefined, { devices: ["tablet"] }), /devices must be/);
+
+    const raw = (performance, lcp, insight) => ({ device: "mobile", page: "/", run: 1, report: "r", scores: { performance, accessibility: 90, "best-practices": 96, seo: 100 }, metrics: { "first-contentful-paint": 1800, "largest-contentful-paint": lcp, "total-blocking-time": 210, "cumulative-layout-shift": 0.05, "speed-index": 2900 }, insights: [insight] });
+    const before = summarizeLighthouseRuns([raw(60, 3100, { id: "x", title: "old", score: 0.4, metricSavings: { LCP: 100 } }), { ...raw(64, 3100, { id: "x", title: "new", score: 0.6, metricSavings: { LCP: 200 } }), run: 2, report: "r2" }, { device: "mobile", page: "/", run: 3, error: "boom" }]);
+    assert.deepEqual(before.devices.mobile.scores, { performance: 62, accessibility: 90, "best-practices": 96, seo: 100 });
+    assert.deepEqual([before.devices.mobile.runs, before.devices.mobile.scored, before.devices.mobile.metrics["largest-contentful-paint"], before.reports, before.errors], [3, 2, 3.1, ["r", "r2"], [{ device: "mobile", page: "/", run: 3, error: "boom" }]]);
+    assert.deepEqual(before.devices.mobile.topInsights, [{ id: "x", title: "new", score: 0.5, metricSavings: { LCP: 150 }, runs: 2 }]);
+    assert.deepEqual(before.pages["/"].mobile, before.devices.mobile);
+    const after = summarizeLighthouseRuns([raw(66, 2800, { id: "x", title: "new", score: 0.6 })]);
+    const { markdown, devices } = compareLighthouseSummaries(before, after);
+    assert.deepEqual(devices.mobile.scores.performance, { before: 62, after: 66, delta: 4 });
+    assert.deepEqual(markdown.split("\n").filter((line) => /Performance|LCP|CLS|TBT/.test(line)), ["| Mobile | Performance | 62 | 66 | +4 |", "| Mobile | LCP | 3.1 s | 2.8 s | -0.3 |", "| Mobile | TBT | 210 ms | 210 ms | ±0 |", "| Mobile | CLS | 0.05 | 0.05 | ±0.00 |"]);
+    assert.equal(compareLighthouseSummaries(before, summarizeLighthouseRuns([])).markdown, "");
   } },
   storefront_preview: { title: "an enabled storefront gives each Scrat PR review one recorded MAIN duplicate through Loggie, adopts a duplicate whose reply was lost, resumes its processing wait, replaces a theme that vanished, reuses it and deletes it when the PR closes, retrying a failed delete; a refused Loggie call only logs, and a disabled storefront or a human PR makes no Loggie call", configure: [(config) => { Object.assign(config.storefront, { store: "fixture.myshopify.com", publicHost: "shop.example.test" }); Object.assign(config.storefront.preview, { processingPollSeconds: 1, filesPageSize: 2 }); }], run: async () => {
     const { config: live } = await f.app("config.ts"), { loggie } = await f.app("loggie.ts"), { childEnvironment, containsSecret } = await f.app("secrets.ts");

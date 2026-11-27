@@ -34,6 +34,9 @@ config:
   d1MinMargin: 0.25
   d1MaxStateChars: 10000
   d1MaxDiffStatChars: 4000
+  d1GitTimeoutMs: 5000
+  d1DiffStatWidth: 240
+  d1DiffStatNameWidth: 200
   targets:
     - prs
   issue_labels: []

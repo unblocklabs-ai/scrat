@@ -120,9 +120,12 @@ export async function buildItemAgentInput(options: {
   const storefront = await site?.storefrontContext(task.subjectId, headSha, trigger.source);
   const cloudflare = listed.includes("cloudflare") && config.cloudflare.enabled ? await (await import("./cloudflare.ts")).cloudflareContext(config.github.repository, evaluated.item.number) : undefined;
   const navigation = assessesPr || action === "review_issue" || action === "breaking-change-check"
-    ? buildD1NavigationPacket({
-        action, title: evaluated.item.title, body: [evaluated.item.body ?? "", issue ? `# Linked issue #${issue.number}: ${issue.title}\n\n${issue.body ?? ""}` : ""].filter((part) => part.trim()).join("\n\n"),
-        workspacePath: options.workspace.path, diffBaseSha, headSha, diffPaths, log: logger,
+    ? bestEffort(logger, "d1.navigation_failed", { action }, async () => {
+        const packet = await buildD1NavigationPacket({
+          action, title: evaluated.item.title, body: [evaluated.item.body ?? "", issue ? `# Linked issue #${issue.number}: ${issue.title}\n\n${issue.body ?? ""}` : ""].filter((part) => part.trim()).join("\n\n"),
+          workspacePath: options.workspace.path, diffBaseSha, headSha, diffPaths, log: logger,
+        });
+        if (packet) await writeContext("navigation", "navigation.md", packet);
       })
     : undefined;
   const reviewedSha = evaluated.headSha;
@@ -142,7 +145,7 @@ export async function buildItemAgentInput(options: {
     triage?.ready && writeContext("triage", "triage.md", triage.text),
     issue && writeContext("issue", "issue.md", `# ${issue.title} (#${issue.number})\n\n${issue.body ?? ""}\n`),
     history && writeContext("history", "history.md", history),
-    navigation?.then((packet) => packet ? writeContext("navigation", "navigation.md", packet) : undefined),
+    navigation,
     cloudflare && writeContext("cloudflare", "cloudflare.md", cloudflare),
     storefront && writeContext("storefront", "storefront.json", JSON.stringify(storefront.context, null, 2)),
     storefront?.siteMap && writeContext("siteMap", "site.md", storefront.siteMap),

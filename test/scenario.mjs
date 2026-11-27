@@ -7176,6 +7176,25 @@ fi
       assert.ok(attempts.some((line) => line.endpoint === "decisions" && line.status === 429 && line.outcome === "rate_limited" && typeof line.d1Ms === "number" && line.inputChars > 0));
       assert.ok(attempts.some((line) => line.endpoint === "extractions" && line.status === 503 && line.outcome === "http_error" && line.attempt === 1 + live.d1.maxRetries));
 
+      d1.decide = () => ({ status: 200, json: {} });
+      d1.extract = () => ({ status: 200, json: { answers: [] } });
+      const malformedLogs = captureLogs();
+      let malformed;
+      try { malformed = await probe(); } finally { restoreLogs(); }
+      assert.equal(malformed.score.ok, false); assert.match(malformed.score.reason, /HTTP 200: response has no answers/);
+      assert.equal(malformed.extract.ok, false); assert.match(malformed.extract.reason, /HTTP 200: response has no answers/);
+      const invalid = malformedLogs.filter((line) => line.event === "d1.request" && line.caller === "workflow:d1_probe");
+      assert.ok(invalid.length && invalid.every((line) => line.status === 200 && line.outcome === "invalid_response"), "a 200 without an answers object is logged as invalid_response, never ok");
+
+      const password = "d1-url-password-31337";
+      process.env.D1_URL = `http://scrat:${password}@127.0.0.1:${server.address().port}/v1/decisions`;
+      const credentialLogs = captureLogs();
+      let credentialed;
+      try { credentialed = await probe(); } finally { restoreLogs(); process.env.D1_URL = `http://127.0.0.1:${server.address().port}/v1/decisions`; }
+      assert.equal(credentialed.score.ok, false); assert.equal(credentialed.extract.ok, false);
+      assert.match(credentialed.score.reason, /\[redacted\]@127\.0\.0\.1/);
+      assert.ok(![credentialed, credentialLogs].some((value) => JSON.stringify(value).includes(password)), "URL credentials never reach d1 failure reasons or logs");
+
       const settings = live.workflows.label_items, names = (item) => item.labels.map((label) => label.name).sort();
       const selections = (entries) => `Classification from the supplied source.\nSCRAT_LABELS: ${JSON.stringify(entries)}\nSCRAT_STATUS: complete`;
       const labelScores = (low, medium, high) => (body) => body.questions.c0_0 ? noul({ c0_0: low, c0_1: medium, c0_2: high }) : noul({});
@@ -7220,6 +7239,16 @@ fi
       assert.equal(f.requests.at(-1).context.action, "label_items");
       assert.deepEqual(ambiguous.result.labels, [{ category: "risk", name: "risk: medium" }]);
       assert.deepEqual(names(f.prs[0]), ["keep", "risk: medium"]);
+
+      tasks.enqueueManualTasks("label_items", ["201"]);
+      d1.decide = labelScores(0.99, 0.2, 0.73);
+      f.reset(201, "normal");
+      f.script = [selections([{ category: "risk", name: "risk: high" }])];
+      const piBeforeConflict = f.requests.length;
+      const conflicting = await success();
+      assert.ok(f.requests.length > piBeforeConflict, "two choices clearing d1MinScore fall back to Pi even with a wide margin");
+      assert.deepEqual(conflicting.result.labels, [{ category: "risk", name: "risk: high" }]);
+      assert.deepEqual(names(f.prs[0]), ["keep", "risk: high"]);
 
       settings.enabled = false;
       f.prs[0].state = "closed";

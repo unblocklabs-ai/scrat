@@ -108,7 +108,7 @@
     "browserText": { "minChars": 6144, "maxOutputChars": 6000 },
     "history": { "minChars": 6144, "maxOutputChars": 6000 },
     "failureBlocks": { "enabled": true, "skipD1OnMatch": true, "maxBlocks": 12, "contextLines": 8 },
-    "navigation": { "enabled": true, "maxFiles": 25, "maxHunks": 18, "maxHunkChars": 900, "minDiffPaths": 3, "minBodyChars": 800, "extractMinConfidence": 0.5, "topFocusFiles": 8, "maxStateChars": 12000 }
+    "navigation": { "enabled": true, "maxFiles": 25, "maxHunks": 18, "maxHunkChars": 900, "minDiffPaths": 3, "minBodyChars": 800, "extractMinConfidence": 0.5, "topFocusFiles": 8, "maxStateChars": 12000, "maxTitleChars": 300, "gitTimeoutMs": 5000 }
   },
   "storefront": {
     "enabled": false,

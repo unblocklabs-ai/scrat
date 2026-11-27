@@ -79,7 +79,7 @@ const schema = Type.Object({
     failureBlocks: Type.Object({ enabled: Type.Boolean(), skipD1OnMatch: Type.Boolean(), maxBlocks: positive, contextLines: Type.Integer({ minimum: 0 }) }, strict),
     navigation: Type.Object({
       enabled: Type.Boolean(), maxFiles: positive, maxHunks: Type.Integer({ minimum: 0 }), maxHunkChars: positive, minDiffPaths: positive, minBodyChars: positive,
-      extractMinConfidence: Type.Number({ minimum: 0, maximum: 1 }), topFocusFiles: positive, maxStateChars: positive,
+      extractMinConfidence: Type.Number({ minimum: 0, maximum: 1 }), topFocusFiles: positive, maxStateChars: positive, maxTitleChars: positive, gitTimeoutMs: positive,
     }, strict),
   }, strict),
   storefront: Type.Object({

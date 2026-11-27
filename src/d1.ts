@@ -46,6 +46,10 @@ const nativeFetch = globalThis.fetch;
 let cachedDispatcher: { certPath: string | null; agent: Agent } | undefined;
 let d1CircuitOpenUntil = 0;
 let d1Consecutive429s = 0;
+let d1BreakerEpoch = 0;
+
+const scrub = (text: string) => redactSecrets(text).replace(/(https?:\/\/)[^@\s/]+@/gi, "$1[redacted]@");
+const safeError = (error: unknown) => scrub(errorMessage(error));
 
 function getDispatcher(certPath: string | null) {
   if (cachedDispatcher && cachedDispatcher.certPath === certPath) return cachedDispatcher.agent;
@@ -597,6 +601,8 @@ export type D1ExtractAnswer = {
 
 type D1Failure = { ok: false; reason: string; d1Ms: number };
 
+class D1InvalidResponse extends Error {}
+
 let d1Active = 0;
 const d1Waiters: Array<() => void> = [];
 
@@ -632,8 +638,14 @@ const decisionsUrl = () => (process.env.D1_URL ?? config.d1.url).trim();
 function extractionsUrl() {
   const explicit = (process.env.D1_EXTRACTIONS_URL ?? config.d1.extractionsUrl ?? "").trim();
   if (explicit) return explicit;
-  const decisions = decisionsUrl();
-  return /\/v1\/decisions\/?$/.test(decisions) ? decisions.replace(/\/v1\/decisions\/?$/, "/v1/extractions") : "";
+  try {
+    const parsed = new URL(decisionsUrl());
+    if (!/\/v1\/decisions\/?$/.test(parsed.pathname)) return "";
+    parsed.pathname = parsed.pathname.replace(/\/v1\/decisions\/?$/, "/v1/extractions");
+    return parsed.toString();
+  } catch {
+    return "";
+  }
 }
 
 const endpointUrl = (endpoint: D1Endpoint) => endpoint === "decisions" ? decisionsUrl() : extractionsUrl();
@@ -691,27 +703,40 @@ function createRequester(endpoint: D1Endpoint, deadline: number, trace: D1Trace)
       try {
         await acquireD1Slot(combined);
       } catch (error) {
-        report({ attempt, d1Ms: elapsed(), inputChars: body.length, outcome: timeout.aborted ? "queue_timeout" : "aborted", err: redactSecrets(errorMessage(error)) });
+        report({ attempt, d1Ms: elapsed(), inputChars: body.length, outcome: timeout.aborted ? "queue_timeout" : "aborted", err: safeError(error) });
         throw error;
       }
+      if (Date.now() < d1CircuitOpenUntil) {
+        releaseD1Slot();
+        report({ attempt, d1Ms: elapsed(), inputChars: body.length, outcome: "circuit_open" });
+        throw new Error(`d1 circuit breaker open (${Math.ceil((d1CircuitOpenUntil - Date.now()) / 1000)}s remaining)`);
+      }
+      const startedEpoch = d1BreakerEpoch;
       try {
         const response = globalThis.fetch === nativeFetch
           ? await undiciFetch(url, init)
           : await globalThis.fetch(url, init);
         status = response.status;
         if (response.ok) {
-          const parsed = await response.json() as unknown;
-          d1Consecutive429s = 0;
-          d1CircuitOpenUntil = 0;
+          const parsed = await response.json().catch(() => undefined) as unknown;
+          if (!answersOf(parsed)) {
+            report({ status, attempt, d1Ms: elapsed(), inputChars: body.length, outcome: "invalid_response" });
+            throw new D1InvalidResponse(`d1 HTTP ${status}: response has no answers object`);
+          }
+          if (d1BreakerEpoch === startedEpoch) {
+            d1Consecutive429s = 0;
+            d1CircuitOpenUntil = 0;
+          }
           report({ status, attempt, d1Ms: elapsed(), inputChars: body.length, outcome: "ok" });
           return parsed;
         }
         retryAfter = response.headers.get("retry-after");
-        const snippet = redactSecrets((await response.text().catch(() => "")).slice(0, 300));
+        const snippet = scrub((await response.text().catch(() => "")).slice(0, 300));
         lastError = new Error(`d1 HTTP ${status}: ${snippet}`);
       } catch (error) {
+        if (error instanceof D1InvalidResponse) throw error;
         const outcome = timeout.aborted ? "timeout" : signal?.aborted ? "aborted" : "error";
-        report({ attempt, d1Ms: elapsed(), inputChars: body.length, outcome, err: redactSecrets(errorMessage(error)) });
+        report({ attempt, d1Ms: elapsed(), inputChars: body.length, outcome, err: safeError(error) });
         throw error;
       } finally {
         releaseD1Slot();
@@ -721,6 +746,7 @@ function createRequester(endpoint: D1Endpoint, deadline: number, trace: D1Trace)
         d1Consecutive429s++;
         if (d1Consecutive429s >= config.d1.circuitBreakerThreshold) {
           d1CircuitOpenUntil = Date.now() + config.d1.circuitBreakerCooldownMs;
+          d1BreakerEpoch++;
           throw lastError;
         }
       }
@@ -743,14 +769,14 @@ async function callD1<T>(endpoint: D1Endpoint, payload: Record<string, unknown>,
   const d1Ms = () => Math.round(performance.now() - started);
   const unavailable = unavailableReason(endpoint);
   if (unavailable) return { ok: false, reason: unavailable, d1Ms: 0 };
-  const requester = createRequester(endpoint, Date.now() + (timeoutMs ?? config.d1.timeoutMs), trace);
-  if (!requester) return { ok: false, reason: "d1 unavailable", d1Ms: 0 };
   try {
+    const requester = createRequester(endpoint, Date.now() + (timeoutMs ?? config.d1.timeoutMs), trace);
+    if (!requester) return { ok: false, reason: "d1 unavailable", d1Ms: 0 };
     const parsed = read(await requester({ model: config.d1.model, ...payload }, signal));
     if (typeof parsed === "string") return { ok: false, reason: parsed, d1Ms: d1Ms() };
     return { ok: true, d1Ms: d1Ms(), ...parsed };
   } catch (error) {
-    return { ok: false, reason: redactSecrets(errorMessage(error)), d1Ms: d1Ms() };
+    return { ok: false, reason: safeError(error), d1Ms: d1Ms() };
   }
 }
 
@@ -998,7 +1024,7 @@ export async function distillCommandOutput({ rawOutput, command, goal, artifactP
         return { text: cleaned, filtered: false, artifactPath: undefined };
       }
     } catch (error) {
-      log?.warn({ event: "d1.fallback", target: "command", err: redactSecrets(errorMessage(error)) });
+      log?.warn({ event: "d1.fallback", target: "command", err: safeError(error) });
     }
   }
 
@@ -1062,7 +1088,7 @@ export async function distillBrowserText({ rawText, url, focus, artifactPath, pa
       return { text: out, filtered: true, artifactPath: savedPath };
     }
   } catch (error) {
-    log?.warn({ event: "d1.fallback", target: "browser_text", err: redactSecrets(errorMessage(error)) });
+    log?.warn({ event: "d1.fallback", target: "browser_text", err: safeError(error) });
   }
   if (cleaned.length > maxChars) {
     const savedPath = await persistArtifact(artifactPath, cleaned);
@@ -1113,7 +1139,7 @@ export async function distillHistory({ rawHistory, action, artifactPath, minChar
       return { text: out, filtered: true, artifactPath: savedPath };
     }
   } catch (error) {
-    log?.warn({ event: "d1.fallback", target: "history", action, err: redactSecrets(errorMessage(error)) });
+    log?.warn({ event: "d1.fallback", target: "history", action, err: safeError(error) });
   }
   return { text: cleaned, filtered: false, artifactPath: undefined };
 }

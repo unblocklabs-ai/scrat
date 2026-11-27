@@ -21,8 +21,9 @@ const factFields: Record<string, { title: string; spec: D1ExtractFieldSpec }> = 
 
 const clip = (value: string, max: number) => value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`;
 
-async function numstat(workspacePath: string, from: string, to: string) {
-  const out = await git(workspacePath, ["--literal-pathspecs", "diff", ...diffFlags, "--numstat", "-z", from, to]).catch(() => "");
+async function numstat(workspacePath: string, from: string, to: string, signal: AbortSignal) {
+  const out = await git(workspacePath, ["--literal-pathspecs", "diff", ...diffFlags, "--numstat", "-z", from, to], undefined, { signal }).catch(() => undefined);
+  if (out === undefined) return undefined;
   const stats = new Map<string, { added?: number; deleted?: number }>();
   for (const entry of out.split("\0")) {
     const [added, deleted, path] = entry.split("\t");
@@ -32,9 +33,9 @@ async function numstat(workspacePath: string, from: string, to: string) {
   return stats;
 }
 
-async function firstHunk(workspacePath: string, from: string, to: string, path: string, maxChars: number) {
+async function firstHunk(workspacePath: string, from: string, to: string, path: string, maxChars: number, signal: AbortSignal) {
   const headerChars = 4 * Buffer.byteLength(path) + 256;
-  const page = await gitPage(workspacePath, ["--literal-pathspecs", "diff", "--unified=1", ...diffFlags, from, to, "--", path], 0, headerChars + maxChars).catch(() => undefined);
+  const page = await gitPage(workspacePath, ["--literal-pathspecs", "diff", "--unified=1", ...diffFlags, from, to, "--", path], 0, headerChars + maxChars, { signal }).catch(() => undefined);
   const start = page?.text.indexOf("\n@@") ?? -1;
   return start >= 0 ? clip(page!.text.slice(start + 1).trimEnd(), maxChars) : "";
 }
@@ -49,12 +50,17 @@ async function rankFocusFiles({ action, title, workspacePath, diffBaseSha, headS
   const generated = config.tools.git.generatedPaths.map((pattern) => new RegExp(pattern));
   const source = diffPaths.filter((path) => !generated.some((pattern) => pattern.test(path)));
   const candidates = (source.length ? source : diffPaths).slice(0, nav.maxFiles);
+  const gitSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(nav.gitTimeoutMs)]) : AbortSignal.timeout(nav.gitTimeoutMs);
   const [stats, hunks] = await Promise.all([
-    numstat(workspacePath, diffBaseSha, headSha),
-    Promise.all(candidates.map((path, index) => index < nav.maxHunks ? firstHunk(workspacePath, diffBaseSha, headSha, path, nav.maxHunkChars) : Promise.resolve(""))),
+    numstat(workspacePath, diffBaseSha, headSha, gitSignal),
+    Promise.all(candidates.map((path, index) => index < nav.maxHunks ? firstHunk(workspacePath, diffBaseSha, headSha, path, nav.maxHunkChars, gitSignal) : Promise.resolve(""))),
   ]);
+  if (!stats || gitSignal.aborted) {
+    log?.warn({ event: "d1.navigation_fallback", action, target: "focus_files", reason: gitSignal.aborted ? "git diff timed out or aborted" : "git numstat failed" });
+    return undefined;
+  }
   const lens = action === "breaking-change-check" ? breakingLens : reviewLens;
-  const header = `PULL REQUEST: ${clip(title, 300)}\n\nCHANGED FILES:`;
+  const header = `PULL REQUEST: ${clip(title, nav.maxTitleChars)}\n\nCHANGED FILES:`;
   const entries: string[] = [];
   const questions: Record<string, string> = {};
   const indexed: string[] = [];
@@ -84,10 +90,11 @@ async function rankFocusFiles({ action, title, workspacePath, diffBaseSha, headS
 function confidentEntries(answer: D1ExtractAnswer | undefined, minConfidence: number) {
   if (!answer) return [];
   const values = Array.isArray(answer.value) ? answer.value : [answer.value];
+  if (typeof answer.p_null === "number" && answer.p_null > 1 - minConfidence) return [];
+  const confident = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= minConfidence;
   const kept = values.filter((value, index) => {
     if (typeof value !== "string" || !value.trim()) return false;
-    const confidence = answer.confidences?.[index] ?? answer.confidence;
-    return confidence === undefined || confidence >= minConfidence;
+    return Array.isArray(answer.confidences) ? confident(answer.confidences[index]) : confident(answer.confidence);
   }) as string[];
   return [...new Set(kept.map((value) => value.trim().replace(/\s+/g, " ")))];
 }

@@ -24,9 +24,9 @@ function timedOut(label: string) {
 
 const gitCommand = (repositoryPath: string, args: string[], env: NodeJS.ProcessEnv) => inWorkspace(repositoryPath)
   ? sandboxCommand(repositoryPath, "git", args, env) : { file: "git", args: ["-C", repositoryPath, ...args], env };
-export async function git(repositoryPath: string, args: string[], env = childEnvironment()) {
+export async function git(repositoryPath: string, args: string[], env = childEnvironment(), options: { signal?: AbortSignal } = {}) {
   const command = gitCommand(repositoryPath, args, env);
-  const { stdout } = await executeFile(command.file, command.args, { cwd: repositoryPath, env: command.env, maxBuffer: config.harness.maxOutputBytes, ...(networkCommands.has(args[0]!) ? networkOptions() : {}) }).catch(timedOut(args[0]!));
+  const { stdout } = await executeFile(command.file, command.args, { cwd: repositoryPath, env: command.env, maxBuffer: config.harness.maxOutputBytes, ...(networkCommands.has(args[0]!) ? networkOptions() : {}), ...options }).catch(timedOut(args[0]!));
   return args.includes("-z") || args[0] === "show" ? stdout : stdout.trim();
 }
 
@@ -48,10 +48,10 @@ export async function blobSize(repositoryPath: string, object: string) {
   } catch { return undefined; }
 }
 
-export function gitPage(repositoryPath: string, args: string[], offset: number, limit: number) {
+export function gitPage(repositoryPath: string, args: string[], offset: number, limit: number, options: { signal?: AbortSignal } = {}) {
   return new Promise<GitPage>((done, fail) => {
     const command = gitCommand(repositoryPath, args, childEnvironment());
-    const child = spawn(command.file, command.args, { cwd: repositoryPath, env: command.env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command.file, command.args, { cwd: repositoryPath, env: command.env, stdio: ["ignore", "pipe", "pipe"], ...options });
     const chunks: Buffer[] = [];
     let position = 0, kept = 0, stderr = "", stopped = false;
     child.stderr.on("data", (data: Buffer) => { if (stderr.length < config.harness.maxStderrBytes) stderr += data.toString(); });

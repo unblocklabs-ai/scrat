@@ -52,6 +52,7 @@ function pollFollower({ name: follower, trigger, enabled }: Action, operation: O
       source: "workflow", kind: "workflow_completed", triggerKey: run.id, workflow: parent, runId: run.id, taskId: task.id,
       subject: { kind: subject.kind, key: subject.key }, subjectId: subject.id,
       ...item ? { item: { kind: item.kind, number: item.payload.number, title: item.payload.title } } : {},
+      ...run.result?.grade ? { grade: run.result.grade } : {}, ...run.headSha ?? run.context?.headSha ? { headSha: run.headSha ?? run.context?.headSha } : {},
       outcome: run.result?.outcome ?? "complete", publication: run.publication.status,
     });
   }

@@ -4389,10 +4389,10 @@ fi
     ].join("\n"));
     writeFileSync(resolve(directory, "advisory_digest/run.ts"), [
       "export default async function (ctx) {",
-      "  const pr = await ctx.github.getPr(201), issue = await ctx.github.getIssue(202), { storefront } = ctx;",
+      "  const pr = await ctx.github.getPr(201), issue = await ctx.github.getIssue(301), asIssue = await ctx.github.getIssue(201).catch((error) => error.message), { storefront } = ctx;",
       "  return { parent: ctx.trigger.input.runId, item: ctx.trigger.input.item, publication: ctx.trigger.input.publication, bot: ctx.bot, triggerItem: ctx.trigger.item,",
-      "    storefront: { enabled: storefront.enabled, liveUrl: storefront.liveUrl, publicHost: storefront.publicHost, devices: storefront.devices, siteMap: await storefront.siteMap(), preview: storefront.previewOfPr(201), missing: storefront.previewOfPr(999) ?? null },",
-      "    pr: { number: pr.number, state: pr.state, headSha: pr.head.sha, labels: pr.labels, title: pr.title }, issueTitle: issue.title };",
+      "    storefront: { enabled: storefront.enabled, liveUrl: storefront.liveUrl, publicHost: storefront.publicHost, devices: storefront.devices, siteMap: await storefront.siteMap(), preview: storefront.previewOfPr(201), missing: storefront.previewOfPr(999) ?? null, unsynced: storefront.previewOfPr(203) },",
+      "    pr: { number: pr.number, state: pr.state, headSha: pr.head.sha, labels: pr.labels, title: pr.title }, issueTitle: issue.title, asIssue };",
       "}", "",
     ].join("\n"));
     config.workflows.directory = directory;
@@ -4442,12 +4442,16 @@ fi
     const [digestTask] = ofAction("advisory_digest", "queued");
     const prTitle = all(s.items).find((item) => item.id === first.subjectId).payload.title;
     assert.equal(digestTask.input.runId, flagged.id); assert.deepEqual(digestTask.input.item, { kind: "pr", number: 201, title: prTitle }); assert.equal(digestTask.input.publication, "published");
-    assert.equal(digestTask.input.subjectId, first.subjectId);
+    assert.equal(digestTask.input.subjectId, first.subjectId); assert.equal(digestTask.input.headSha, pr201.head.sha);
+    assert.equal(digestTask.input.grade, flagged.result?.grade);
     const previewRow = { subjectId: first.subjectId, pullRequestNumber: 201, themeId: 4242, name: "pr-201", headSha: pr201.head.sha };
-    db.insert(s.themePreviews).values([{ ...previewRow, createdAt: "2026-01-01T00:00:00.000Z" }, { ...previewRow, themeId: 9999, name: "pr-201-old", createdAt: "2026-02-01T00:00:00.000Z", deletedAt: "2026-02-02T00:00:00.000Z" }]).run();
+    db.insert(s.themePreviews).values([{ ...previewRow, createdAt: "2026-01-01T00:00:00.000Z" }, { ...previewRow, themeId: 9999, name: "pr-201-old", createdAt: "2026-02-01T00:00:00.000Z", deletedAt: "2026-02-02T00:00:00.000Z" }, { ...previewRow, subjectId: all(s.items).find((item) => item.payload.number === 202).id, pullRequestNumber: 203, name: "pr-203", headSha: null }]).run();
+    const { subjectId: _subject, item: _item, ...legacy } = digestTask.input;
+    db.update(s.tasks).set({ input: legacy }).where(eq(s.tasks.id, digestTask.id)).run();
     mkdirSync(resolve("data/storefront"), { recursive: true }); writeFileSync(resolve("data/storefront/site.md"), "Site map text.\n");
     const storefront = live.storefront, saved = { ...storefront };
     Object.assign(storefront, { enabled: true, publicHost: "shop.example.test" });
+    f.addIssue(301);
     let digest;
     try { digest = await runTask(digestTask); } finally { Object.assign(storefront, saved); }
     assert.equal(digest.error, null, JSON.stringify(digest.error));
@@ -4458,9 +4462,10 @@ fi
     assert.deepEqual(out.storefront, {
       enabled: true, liveUrl: "https://shop.example.test", publicHost: "shop.example.test", devices: [...live.storefront.devices], siteMap: "Site map text.\n",
       preview: { url: "https://shop.example.test/?preview_theme_id=4242", themeId: 4242, headSha: pr201.head.sha, available: true, problems: [] }, missing: null,
+      unsynced: { url: null, themeId: 4242, headSha: null, available: false, problems: [] },
     });
     assert.deepEqual(out.pr, { number: 201, state: "open", headSha: pr201.head.sha, labels: [], title: prTitle });
-    assert.equal(typeof out.issueTitle, "string");
+    assert.equal(typeof out.issueTitle, "string"); assert.equal(out.asIssue, "#201 is a pull request, not an issue");
     assert.equal(await pollWorkflowCompletions(), 0, "a follower's own completion does not re-trigger it");
 
     f.script = undefined; f.reset(201, "normal"); f.reset(202, "normal");

@@ -249,8 +249,8 @@ async function deploy({ github, number, references }: Target, preview: ThemePrev
   });
 }
 
-async function publish(target: Target, preview: ThemePreview, outcome: Outcome) {
-  const repeated = "headSha" in outcome && preview.headSha === outcome.headSha && JSON.stringify(preview.problems) === JSON.stringify(outcome.problems);
+async function publish(target: Target, preview: ThemePreview, outcome: Outcome, prior: Pick<ThemePreview, "headSha" | "problems"> = preview) {
+  const repeated = "headSha" in outcome && prior.headSha === outcome.headSha && JSON.stringify(prior.problems) === JSON.stringify(outcome.problems);
   if (!repeated) await deploy(target, preview, outcome);
   const { github, number, comments, references } = target;
   const existing = findBotMarkedComment(comments, previewMarker);
@@ -265,17 +265,19 @@ export async function ensurePreview(target: Target, revision: Revision, stop?: A
   const duplicated = found.themeGid ? found : await duplicate(found, Boolean(recorded), stop);
   const preview = duplicated.baseline ? duplicated : await settle(duplicated, stop);
   if (preview.headSha === headSha && !preview.problems.length) return;
+  const prior = { headSha: preview.headSha, problems: preview.problems };
   let problems: string[];
   try {
     const { role } = await readTheme<{ role: string }>(preview, processingQuery, {}, stop);
+    if (role === "UNPUBLISHED") savePreview(preview, { headSha: null });
     problems = role === "UNPUBLISHED" ? await syncFiles(preview, revision, stop) : [`${themeLabel(preview)} is no longer unpublished (role ${role}), so Scrat does not write to it`];
   } catch (error) {
     if (!stop?.aborted) {
-      await bestEffort(logger, "storefront.link_failed", { subjectId }, () => publish(target, livePreview(subjectId) ?? preview, { headSha, problems: [`The sync to this commit failed (${errorMessage(error)}); the next review retries it.`] }));
+      await bestEffort(logger, "storefront.link_failed", { subjectId }, () => publish(target, livePreview(subjectId) ?? preview, { headSha, problems: [`The sync to this commit failed (${errorMessage(error)}); the next review retries it.`] }, prior));
     }
     throw error;
   }
-  await publish(target, livePreview(subjectId) ?? preview, { headSha, problems });
+  await publish(target, livePreview(subjectId) ?? preview, { headSha, problems }, prior);
 }
 
 async function removeTheme(preview: ThemePreview) {
@@ -302,7 +304,7 @@ export async function deletePreview(github: GitHubRepository, subjectId: string,
 }
 
 function previewView(preview: ThemePreview, headSha: string | null) {
-  const available = !preview.problems.length;
+  const available = typeof preview.themeId === "number" && headSha !== null && !preview.problems.length;
   return { url: available ? previewUrl(preview) : null, themeId: preview.themeId, headSha, available, problems: preview.problems };
 }
 

@@ -450,7 +450,7 @@ export async function fixture(scenario, spec) {
     let match = path.match(/\/(issues|pulls)\/(\d+)$/);
     if (match && method === "GET") {
       const item = (match[1] === "issues" ? issues.get(Number(match[2])) : undefined) ?? prs.find((pr) => pr.number === Number(match[2]));
-      return item ? reply(match[1] === "pulls" ? { ...item, base: { sha: headOf(item.base.ref), ...item.base } } : item) : reply({ message: "Not Found" }, 404);
+      return item ? reply(match[1] === "pulls" ? { ...item, base: { sha: headOf(item.base.ref), ...item.base } } : match[1] === "issues" && !issues.has(Number(match[2])) ? { ...item, pull_request: {} } : item) : reply({ message: "Not Found" }, 404);
     }
     if (match && method === "PATCH") {
       const n = Number(match[2]), item = match[1] === "issues" ? issues.get(n) ?? prs.find((pr) => pr.number === n) : prs.find((pr) => pr.number === n);

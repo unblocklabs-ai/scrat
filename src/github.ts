@@ -253,12 +253,15 @@ export class GitHubRepository {
       }));
   }
 
-  async fetchItemContext(kind: "issue" | "pr", number: number, { comments: withComments = true, item: known }: { comments?: boolean; item?: GithubItem } = {}): Promise<GithubContext> {
+  async fetchItemContext(kind: "issue" | "pr", number: number, { comments: withComments = true, item: known, issueOnly = false }: { comments?: boolean; item?: GithubItem; issueOnly?: boolean } = {}): Promise<GithubContext> {
     const { github, owner, repo } = await this.read();
     const when = <T>(enabled: boolean, read: () => Promise<T[]>) => enabled ? read() : Promise.resolve([] as T[]);
     const reads = [
       known ? Promise.resolve(known) : kind === "issue"
-        ? github.rest.issues.get({ owner, repo, issue_number: number }).then(({ data }) => issueView(data))
+        ? github.rest.issues.get({ owner, repo, issue_number: number }).then(({ data }) => {
+          if (issueOnly && data.pull_request) throw new Error(`#${number} is a pull request, not an issue`);
+          return issueView(data);
+        })
         : github.rest.pulls.get({ owner, repo, pull_number: number }).then(({ data }) => pullRequestView(data)),
       when(withComments, () => github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 })),
       when(withComments && kind === "pr", () => github.paginate(github.rest.pulls.listReviewComments, { owner, repo, pull_number: number, per_page: 100 })),

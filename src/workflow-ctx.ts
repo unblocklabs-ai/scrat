@@ -672,7 +672,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
     async getIssue(number) {
       assertNotAborted(signal, "github.getIssue");
       assertPermission<GithubPermission>(workflow.permissions.github, "read", "github", workflow.name);
-      return (await github.fetchItemContext("issue", number, { comments: false })).item;
+      return (await github.fetchItemContext("issue", number, { comments: false, issueOnly: true })).item;
     },
     async listRecentMergedPrs(sinceDays, limit) {
       assertNotAborted(signal, "github.listRecentMergedPrs");

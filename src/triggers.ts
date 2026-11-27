@@ -37,7 +37,7 @@ const workflowCompleted = Type.Object({
   subject: Type.Object({ kind: text, key: text }),
   subjectId: Type.Optional(text),
   item: Type.Optional(Type.Object({ kind: Type.Union([Type.Literal("issue"), Type.Literal("pr")]), number: Type.Number(), title: Type.Optional(text) })),
-  outcome: text, publication: text,
+  outcome: text, publication: text, grade: Type.Optional(text), headSha: Type.Optional(text),
 });
 
 const members = {

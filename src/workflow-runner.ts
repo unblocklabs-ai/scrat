@@ -4,18 +4,25 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Logger } from "pino";
 import { trustLocalWorkflowScripts } from "./config.ts";
+import { db } from "./db.ts";
+import { eq } from "drizzle-orm";
 import type { EventReferences } from "./events.ts";
 import { git } from "./git.ts";
 import type { Item } from "./items.ts";
 import { getRun, updateRun } from "./run-history.ts";
-import type { Run, Subject, Task } from "./schema.ts";
+import { items, type Run, type Subject, type Task, tasks } from "./schema.ts";
 import { isManual, parseTriggerInput, type TriggerInput } from "./triggers.ts";
 import { createWorkflowContext, type WorkflowContext, type WorkflowPipelineRunner } from "./workflow-ctx.ts";
 import type { ResolvedWorkflow } from "./workflows.ts";
 
 type WorkflowFn = (ctx: WorkflowContext) => Promise<unknown>;
-const completedItem = (parsed: TriggerInput) => parsed.kind === "workflow_completed" && parsed.item && parsed.subjectId && parsed.item.title !== undefined
-  ? { item: { id: parsed.subjectId, kind: parsed.item.kind, number: parsed.item.number, title: parsed.item.title } } : {};
+function completedItem(parsed: TriggerInput) {
+  if (parsed.kind !== "workflow_completed") return {};
+  const found = parsed.subjectId && parsed.item?.title !== undefined ? undefined
+    : db.select({ id: items.id, kind: items.kind, payload: items.payload }).from(tasks).innerJoin(items, eq(items.id, tasks.subjectId)).where(eq(tasks.id, parsed.taskId)).get();
+  const item = found ? { id: found.id, kind: found.kind, number: found.payload.number, title: found.payload.title } : parsed.item && parsed.subjectId && parsed.item.title !== undefined ? { id: parsed.subjectId, kind: parsed.item.kind, number: parsed.item.number, title: parsed.item.title } : undefined;
+  return item ? { item } : {};
+}
 
 const loadedModules = new Map<string, WorkflowFn>();
 

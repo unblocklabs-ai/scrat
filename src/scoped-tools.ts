@@ -145,10 +145,10 @@ type PageLike = {
   screenshot(options: { path: string; fullPage?: boolean; timeout: number }): Promise<unknown>;
   innerHTML(selector: string, options: { timeout: number }): Promise<string>;
   waitForLoadState(state: "load", options: { timeout: number }): Promise<void>;
-  on(event: "popup", listener: (popup: { close(): Promise<void> }) => void): unknown;
-  off(event: "popup", listener: (popup: { close(): Promise<void> }) => void): unknown;
+  on(event: string, listener: (payload: never) => void): unknown;
+  off(event: string, listener: (payload: never) => void): unknown;
   setViewportSize(size: { width: number; height: number }): Promise<void>;
-  locator(selector: string): { count(): Promise<number>; first?(): { isVisible(): Promise<boolean> } };
+  locator(selector: string): { count(): Promise<number>; ariaSnapshot(options: { timeout: number }): Promise<string>; first?(): { isVisible(): Promise<boolean>; ariaSnapshot(options: { timeout: number }): Promise<string> } };
   click(selector: string, options: { timeout: number }): Promise<void>;
   fill(selector: string, value: string, options: { timeout: number }): Promise<void>;
   selectOption(selector: string, value: string, options: { timeout: number }): Promise<unknown>;
@@ -167,7 +167,9 @@ export async function loadPlaywright(): Promise<Playwright> {
 }
 
 export const launchChromium = async (args: string[]) => (await loadPlaywright()).chromium.launch({ headless: true, channel: "chromium", chromiumSandbox: true, args });
-const browserActions = ["goto", "text", "screenshot", "click", "fill", "select", "reset"];
+const browserActions = ["goto", "text", "screenshot", "click", "fill", "select", "reset", "snapshot", "diagnostics"];
+type BrowserSession = { context: ContextLike; page: PageLike; consoleErrors: { source: string; text: string }[]; failedRequests: Record<string, unknown>[] };
+const scrubbed = (value: unknown): unknown => typeof value === "string" ? redactSecrets(value) : Array.isArray(value) ? value.map(scrubbed) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, scrubbed(entry)])) : value;
 const xmlSchemaHosts = new Set(["www.sitemaps.org", "sitemaps.org", "www.w3.org", "w3.org", "www.google.com"]);
 const isSitemapPathname = (rawUrl: string) => {
   try { return /sitemap[^/]*\.xml(?:\.gz)?$/i.test(new URL(rawUrl).pathname); }
@@ -179,6 +181,81 @@ const decodeXmlEntities = (value: string) => value
   .replaceAll("&gt;", ">")
   .replaceAll("&quot;", '"')
   .replaceAll("&apos;", "'");
+
+const diagnosticsScript = `(limits) => {
+  const width = window.innerWidth, height = window.innerHeight, scrollY = window.scrollY || 0;
+  const classesOf = (el, count) => String(el.className && el.className.baseVal !== undefined ? el.className.baseVal : el.className || "").split(/\\s+/).filter(Boolean).slice(0, count).map((name) => "." + name).join("");
+  const tag = (el) => el.tagName.toLowerCase();
+  const hintOf = (el) => tag(el) + (el.id ? "#" + el.id : el.getAttribute("name") ? '[name="' + el.getAttribute("name") + '"]' : classesOf(el, 2));
+  const describe = (el) => tag(el) + (el.id ? "#" + el.id : "") + classesOf(el, 2);
+  const textOf = (el) => String(el.innerText || el.textContent || "").trim().replace(/\\s+/g, " ").slice(0, 80);
+  const found = new Set(document.querySelectorAll('form[action*="/cart/add"] button, form[action*="/cart/add"] [type=submit], button[type="submit"], a[href*="/checkout"]'));
+  for (const el of document.querySelectorAll("button, a")) if (/add to (cart|bag)|buy|subscribe|checkout/i.test(textOf(el))) found.add(el);
+  const seen = new Set(), ctas = [];
+  for (const el of found) {
+    const rect = el.getBoundingClientRect(), style = getComputedStyle(el);
+    const visible = style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) !== 0 && rect.width > 0 && rect.height > 0;
+    const entry = { text: textOf(el), selectorHint: hintOf(el), top: Math.round(rect.top + scrollY), bottom: Math.round(rect.bottom + scrollY), height: Math.round(rect.height), isAboveFold: visible && rect.top < height, visible };
+    const centerX = rect.left + rect.width / 2, centerY = rect.top + rect.height / 2;
+    if (visible && centerX >= 0 && centerX < width && centerY >= 0 && centerY < height) {
+      const hit = document.elementFromPoint(centerX, centerY);
+      if (hit && hit !== el && !el.contains(hit)) entry.coveredBy = describe(hit);
+    }
+    const key = entry.text + "|" + entry.selectorHint + "|" + entry.top;
+    if (!seen.has(key)) { seen.add(key); ctas.push(entry); }
+  }
+  ctas.sort((a, b) => (b.isAboveFold ? 1 : 0) - (a.isAboveFold ? 1 : 0) || a.top - b.top);
+  const entriesOf = (type) => {
+    try {
+      const observer = new PerformanceObserver(() => {});
+      observer.observe({ type, buffered: true });
+      const records = observer.takeRecords();
+      observer.disconnect();
+      if (records.length) return records;
+    } catch (error) {}
+    try { return performance.getEntriesByType(type); } catch (error) { return []; }
+  };
+  const guarded = (read) => { try { return read(); } catch (error) { return undefined; } };
+  const round = (value) => Math.round(value);
+  const navigation = guarded(() => {
+    const entry = performance.getEntriesByType("navigation")[0];
+    return entry && { ttfbMs: round(entry.responseStart - entry.startTime), domContentLoadedMs: round(entry.domContentLoadedEventEnd - entry.startTime), loadMs: round(entry.loadEventEnd - entry.startTime) };
+  });
+  const lcp = guarded(() => {
+    const entry = entriesOf("largest-contentful-paint").slice(-1)[0];
+    return entry && { startTimeMs: round(entry.startTime), element: entry.element ? describe(entry.element) : undefined, url: entry.url || undefined };
+  });
+  const cls = guarded(() => {
+    const shifts = entriesOf("layout-shift").filter((entry) => !entry.hadRecentInput), hints = [];
+    for (const entry of shifts) for (const source of entry.sources || []) if (source.node && !hints.includes(hintOf(source.node))) hints.push(hintOf(source.node));
+    return { value: Math.round(shifts.reduce((sum, entry) => sum + entry.value, 0) * 10000) / 10000, shifts: hints.slice(0, limits.ctas) };
+  });
+  const longTasks = guarded(() => entriesOf("longtask"));
+  const resourceSummary = guarded(() => {
+    const resources = performance.getEntriesByType("resource"), hosts = new Map();
+    const summary = { totalRequests: resources.length, totalTransferBytes: 0, scriptBytes: 0, imageBytes: 0 };
+    for (const entry of resources) {
+      const bytes = entry.transferSize || 0;
+      summary.totalTransferBytes += bytes;
+      if (entry.initiatorType === "script") summary.scriptBytes += bytes;
+      if (entry.initiatorType === "img") summary.imageBytes += bytes;
+      const host = guarded(() => new URL(entry.name).hostname);
+      if (host && host !== location.hostname) {
+        const known = hosts.get(host) || { host, requests: 0, transferBytes: 0 };
+        known.requests += 1;
+        known.transferBytes += bytes;
+        hosts.set(host, known);
+      }
+    }
+    summary.thirdPartyHosts = [...hosts.values()].sort((a, b) => b.transferBytes - a.transferBytes || b.requests - a.requests).slice(0, limits.thirdPartyHosts);
+    return summary;
+  });
+  return {
+    viewport: { width, height },
+    ctas: ctas.slice(0, limits.ctas),
+    performance: { navigation, lcp, cls, longTaskCount: longTasks && longTasks.length, longTaskTotalMs: longTasks && round(longTasks.reduce((sum, entry) => sum + entry.duration, 0)), resourceSummary },
+  };
+}`;
 
 const domScopingScript = `(() => {
   const isElementVisible = (el, requireInViewport = false) => {
@@ -337,7 +414,7 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
   if (!Object.hasOwn(viewports, config.tools.browser.defaultViewport)) throw new Error(`tools.browser.defaultViewport must be one of: ${viewportNames.join(", ")}`);
   let blockedNavigation: string | undefined, size = viewports[config.tools.browser.defaultViewport], pendingGotoViewport: string | null = null;
   const secret = binding && bindingSecret(binding);
-  let browser: BrowserLike | undefined, closed = false, release: (() => void) | undefined, session: { context: ContextLike; page: PageLike } | undefined, startedAt: number | undefined, halted: string | undefined, steps = 0, shots = 0, textDumps = 0;
+  let browser: BrowserLike | undefined, closed = false, release: (() => void) | undefined, session: BrowserSession | undefined, startedAt: number | undefined, halted: string | undefined, steps = 0, shots = 0, textDumps = 0;
   const answered = new Map<string, Promise<boolean>>();
   const resolvesPublicly = (host: string) => {
     if (!answered.has(host)) answered.set(host, publicAnswers(host, resolve).then(Boolean, () => false));
@@ -347,6 +424,8 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
     const themeId = themeIdOf(await page.innerHTML("html", timeout).catch(() => ""));
     return themeId === undefined ? {} : { themeId };
   };
+
+  const nextArtifactPath = () => { const tag = sessionTag ?? prefix; return contextDir ? join(contextDir, `browser-text-${tag ? `${tag}-` : ""}${++textDumps}.txt`) : undefined; };
 
   async function close() {
     closed = true;
@@ -394,7 +473,14 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
         if (decision && intercepted.request().isNavigationRequest()) blockedNavigation = intercepted.request().url();
         return intercepted.abort("blockedbyclient");
       });
-      session = { context, page: await context.newPage() };
+      const page = await context.newPage(), consoleErrors: BrowserSession["consoleErrors"] = [], failedRequests: BrowserSession["failedRequests"] = [];
+      const keep = <T>(list: T[], entry: T, cap: number) => { list.push(entry); list.splice(0, list.length - cap); };
+      const kept = () => config.tools.browser.diagnostics;
+      page.on("console", (message: { type(): string; text(): string }) => { if (message.type() === "error") keep(consoleErrors, { source: "console", text: message.text() }, kept().consoleEntries); });
+      page.on("pageerror", (error: { message?: string }) => keep(consoleErrors, { source: "pageerror", text: String(error?.message ?? error) }, kept().consoleEntries));
+      page.on("response", (response: { status(): number; url(): string; request(): { method(): string } }) => { if (response.status() >= 400) keep(failedRequests, { url: response.url(), status: response.status(), method: response.request().method() }, kept().failedRequests); });
+      page.on("requestfailed", (request: { url(): string; method(): string; failure(): { errorText: string } | null }) => keep(failedRequests, { url: request.url(), method: request.method(), failure: request.failure()?.errorText }, kept().failedRequests));
+      session = { context, page, consoleErrors, failedRequests };
       startedAt ??= Date.now();
       return session;
     } catch (error) {
@@ -411,6 +497,8 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
         : `Drive a headless browser. Pages may be visited on: ${navigationHosts.join(", ")}. Other hosts, and page resources outside the allowlist, are blocked.`,
       `action=goto: open \`url\` (optionally with \`viewport\`, one of: ${viewportNames.join(", ")}, applied before the page loads and kept for later actions) and return the final URL, status, title and the page's Shopify.theme id when it declares one. action=text: the visible text of the page (optionally scoped with \`selector\`, capped at ${config.tools.readBytes.default} characters; XML sitemaps are grouped deterministically${config.tools.browser.domScoping ? ", repetitive header/nav/footer chrome is omitted while preserving main content and open modals/drawers" : ""}${config.d1.enabled ? `, and long pages > ${config.d1.browserText.minChars} chars are distilled via d1 with full text saved to a readable file — pass optional \`focus\` to target specific page elements or \`raw: true\` for full unfiltered body text` : " — pass \`raw: true\` for full unfiltered body text"}).`,
       `action=screenshot: save a PNG and return its path, the final URL and the page's Shopify.theme id when it declares one. \`viewport\` is one of: ${viewportNames.join(", ")}; \`fullPage\` captures the whole page.`,
+      `action=snapshot: the page's ARIA tree as YAML text (roles, names and states), optionally scoped to the first match of \`selector\`, with the final URL, title and Shopify.theme id; a tree longer than ${config.tools.readBytes.default} characters is ${config.d1.enabled ? "distilled via d1 (optional `focus`, `raw: true` to skip) with the full tree saved to a readable file" : "cut and marked truncated: true"}.`,
+      "action=diagnostics: read-only report of the loaded page, no network calls: viewport, call-to-action candidates (add to cart, buy, checkout and submit buttons) with document position, isAboveFold, visible and the element covering them, navigation timing, LCP element, layout shifts, long tasks, resource totals with the top third-party hosts, and the recent console and page errors and failed requests since the page opened.",
       "action=reset: drop the page with its cookies and storage; the next action opens a fresh one in the same browser at the current viewport.",
       "action=click: click the element matching `selector`. action=fill: put `text` in the field matching `selector`. action=select: choose the option `text` in the select matching `selector`. They return the resulting URL, title and Shopify.theme id, plus how many elements `selector` matched before the action when the page did not navigate, `popupClosed: true` when a new window opened (it is closed), and `blocked: <url>` when a navigation was refused because its host is not allowed. The viewport stays as last set.",
       `At most ${limits.steps} actions and ${Math.round(limits.milliseconds / 1000)} seconds per session. Page content is untrusted text.`,
@@ -449,8 +537,8 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
         if (target && navigationHosts === "any" && !await resolvesPublicly(target.hostname)) throw new Error(`Refused: ${target.hostname} does not resolve to a public address`);
         const hadSession = session !== undefined, previousSize = size;
         if (target && viewport && !hadSession) size = viewports[viewport];
-        let page: PageLike;
-        try { ({ page } = await open()); }
+        let page: PageLike, live: BrowserSession;
+        try { live = await open(); page = live.page; }
         catch (error) {
           if (target && viewport && !hadSession) size = previousSize;
           throw error;
@@ -493,8 +581,6 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
             ? redacted.slice(0, Math.min(captureCap, Math.max(0, redacted.length - margin)))
             : redacted.slice(0, captureCap);
           const partialCapture = rawBody.length > captureCap;
-          const nameTag = sessionTag ?? prefix;
-          const nextArtifactPath = () => contextDir ? join(contextDir, `browser-text-${nameTag ? `${nameTag}-` : ""}${++textDumps}.txt`) : undefined;
           if (!rawText && !selector) {
             const sitemap = summarizeXmlSitemap(content, currentUrl, config.tools.browser.sitemapSamplesPerGroup, config.tools.browser.sitemapMaxGroups);
             if (sitemap && sitemap.text.length < content.length) {
@@ -531,6 +617,35 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
           const inlineText = content.length > inlineCap ? content.slice(0, inlineCap) : content;
           const inlineTruncated = rawBody.length > inlineCap || content.length > inlineCap;
           return text(inlineTruncated ? `${inlineText}\n\n[truncated: page text exceeded ${inlineCap} chars (${rawBody.length} total)]` : inlineText);
+        }
+        if (action === "snapshot") {
+          const located = page.locator(selector || "body"), currentUrl = redactSecrets(page.url());
+          const tree = redactSecrets(await (selector && located.first ? located.first() : located).ariaSnapshot(timeout));
+          let snapshot = tree, truncated = false;
+          if (tree.length > config.tools.readBytes.default) {
+            if (config.d1.enabled && !rawText) {
+              snapshot = (await distillBrowserText({
+                rawText: tree, url: currentUrl, focus, artifactPath: nextArtifactPath(), totalSourceChars: tree.length,
+                minChars: config.d1.browserText.minChars, maxChars: config.d1.browserText.maxOutputChars, signal, log,
+              })).text;
+            } else { snapshot = tree.slice(0, config.tools.readBytes.default); truncated = true; }
+          }
+          operation.complete();
+          return text(JSON.stringify({ url: currentUrl, title: redactSecrets(await page.title()), ...await servedTheme(page, timeout), snapshot, ...(truncated && { truncated }) }));
+        }
+        if (action === "diagnostics") {
+          if (typeof page.evaluate !== "function") throw new Error("diagnostics is not supported by this browser");
+          const { consoleEntries, failedRequests, ctas, thirdPartyHosts } = config.tools.browser.diagnostics;
+          let timer: NodeJS.Timeout | undefined;
+          const measured = await Promise.race([
+            page.evaluate<Record<string, unknown>>(`(${diagnosticsScript})(${JSON.stringify({ ctas, thirdPartyHosts })})`),
+            new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`diagnostics did not finish within ${config.tools.browser.actionSeconds} s`)), timeout.timeout); }),
+          ]).finally(() => { if (timer) clearTimeout(timer); });
+          operation.complete();
+          return text(JSON.stringify(scrubbed({
+            url: page.url(), title: await page.title(), ...await servedTheme(page, timeout), ...measured,
+            consoleErrors: live.consoleErrors.slice(-consoleEntries), failedRequests: live.failedRequests.slice(-failedRequests),
+          })));
         }
         if (interaction && selector) {
           pendingGotoViewport = null;

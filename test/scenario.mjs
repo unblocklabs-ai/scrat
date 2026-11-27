@@ -4,6 +4,7 @@ import fs, { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileS
 import { and, eq } from "drizzle-orm";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { createServer } from "node:http";
+import { runInNewContext } from "node:vm";
 import { DatabaseSync } from "node:sqlite";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -4737,7 +4738,7 @@ fi
     mkdirSync("ctx");
     const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
     const fake = () => {
-      const state = { closed: false, contexts: 0, launches: 0, handler: undefined, contextOptions: undefined, visited: [], visitViewports: [], clicked: [], typed: [], viewport: undefined, html: "<html></html>", timeouts: [], navigations: [], popups: [], listeners: [] };
+      const state = { closed: false, contexts: 0, launches: 0, handler: undefined, contextOptions: undefined, visited: [], visitViewports: [], clicked: [], typed: [], viewport: undefined, html: "<html></html>", timeouts: [], navigations: [], popups: [], listeners: [], events: {}, snapshots: [] };
       let current = "about:blank";
       const page = {
         async request(url, navigation, headers = { accept: "*/*" }) {
@@ -4750,12 +4751,15 @@ fi
         title: async () => "Shop", url: () => current, innerText: async () => "Cart total 5. token " + secret,
         screenshot: async ({ path, fullPage, timeout }) => { state.timeouts.push(timeout); writeFileSync(path, `png ${state.viewport?.width ?? "default"} ${fullPage ?? false}`); },
         innerHTML: async (_selector, { timeout }) => { state.timeouts.push(timeout); return state.html; }, waitForLoadState: async () => {},
-        on: (_event, listener) => { state.listeners.push(listener); }, off: (_event, listener) => { state.listeners = state.listeners.filter((entry) => entry !== listener); },
+        on: (event, listener) => { if (event === "popup") state.listeners.push(listener); else (state.events[event] ??= []).push(listener); },
+        off: (event, listener) => { if (event === "popup") state.listeners = state.listeners.filter((entry) => entry !== listener); else state.events[event] = (state.events[event] ?? []).filter((entry) => entry !== listener); },
+        evaluate: async (expression) => /^\(\(limits\)/.test(expression) ? runInNewContext(expression, state.world) : undefined,
         setViewportSize: async (size) => { state.viewport = size; },
         locator: (selector) => ({
+          ariaSnapshot: async ({ timeout }) => { state.timeouts.push(timeout); state.snapshots.push(selector); return state.aria(selector); },
           count: async () => selector === "#missing" || selector === "#all-hidden >> visible=true" ? 0
             : selector.endsWith(" >> visible=true") ? 1 : 2,
-          first: () => ({ isVisible: async () => !["#hidden-first", "#hidden-first >> visible=false", "button[data-visible=true]", "#all-hidden"].includes(selector) }),
+          first: () => ({ ariaSnapshot: async ({ timeout }) => { state.timeouts.push(timeout); state.snapshots.push(selector); return state.aria(selector); }, isVisible: async () => !["#hidden-first", "#hidden-first >> visible=false", "button[data-visible=true]", "#all-hidden"].includes(selector) }),
         }),
         click: async (selector, { timeout }) => {
           state.timeouts.push(timeout);
@@ -4772,9 +4776,30 @@ fi
       const browser = { async newContext(options) { state.contextOptions = options; state.viewport = undefined; state.contexts++; return { route: async (_pattern, handler) => { state.handler = handler; }, newPage: async () => page, close: async () => {} }; }, close: async () => { state.closed = true; } };
       return { state, page, launch: async (args) => { state.args = args; state.launches++; return browser; } };
     };
+    const element = ({ tag, id = "", className = "", innerText = "", name = null, display = "block", rect = { left: 0, top: 0, width: 0, height: 0 } }) => {
+      const el = { tagName: tag, id, className, innerText, getAttribute: (key) => key === "name" ? name : null, contains: (other) => other === el, getBoundingClientRect: () => ({ ...rect, bottom: rect.top + rect.height }), style: { display, visibility: "visible", opacity: "1" } };
+      return el;
+    };
+    const sticky = element({ tag: "HEADER", className: "sticky top", rect: { left: 0, top: 560, width: 390, height: 100 } });
+    const addToCart = element({ tag: "BUTTON", id: "AddToCart", innerText: "Add to cart", rect: { left: 20, top: 600, width: 350, height: 50 } });
+    const checkoutLink = element({ tag: "A", className: "btn primary extra", innerText: "Check out\nnow", rect: { left: 20, top: 900, width: 350, height: 40 } });
+    const hiddenSubmit = element({ tag: "BUTTON", name: "go", innerText: "Go", display: "none" });
+    const entries = {
+      navigation: [{ startTime: 0, responseStart: 120.4, domContentLoadedEventEnd: 900.2, loadEventEnd: 1500.6 }],
+      "largest-contentful-paint": [{ startTime: 1800.4, element: element({ tag: "IMG", id: "hero" }), url: "https://shop.example.test/hero.jpg" }],
+      "layout-shift": [{ value: 0.1234, hadRecentInput: false, sources: [{ node: element({ tag: "DIV", className: "announcement bar" }) }] }, { value: 0.5, hadRecentInput: true, sources: [] }, { value: 0.05, hadRecentInput: false, sources: [] }],
+      longtask: [{ duration: 80.4 }, { duration: 120.2 }],
+      resource: [["https://shop.example.test/app.js", "script", 50000], ["https://shop.example.test/a.jpg", "img", 30000], ["https://cdn.thirdparty.test/t.js", "script", 20000], ["https://cdn.thirdparty.test/p.gif", "img", 100], ["https://other.test/x", "fetch", 500]].map(([name, initiatorType, transferSize]) => ({ name, initiatorType, transferSize })),
+    };
+    const documentFake = (all) => ({ querySelectorAll: () => all, elementFromPoint: (x, y) => y >= 560 && y < 660 ? sticky : null });
+    const domWorld = () => ({
+      window: { innerWidth: 390, innerHeight: 844, scrollY: 100 }, document: documentFake([addToCart, checkoutLink, hiddenSubmit]), getComputedStyle: (el) => el.style, location: { hostname: "shop.example.test" }, URL,
+      performance: { getEntriesByType: (type) => entries[type === "resource" ? "resource" : type] ?? [] },
+      PerformanceObserver: class { observe({ type }) { this.type = type; if (type === "longtask") throw new Error("unsupported"); } takeRecords() { return this.type === "navigation" || this.type === "resource" ? [] : entries[this.type]; } disconnect() {} },
+    });
     const warnings = [], settings = { navigationHosts: ["shop.example.test"], resourceHosts: ["cdn.example.test", "api.example.test"] };
     const publicAnswer = [{ address: "93.184.216.34", family: 4 }];
-    const make = (extra = {}) => { const stub = fake(), { tool, close } = createBrowserTool({ settings, contextDir: resolve("ctx"), runId: "run", launch: stub.launch, resolve: async () => publicAnswer, log: { warn: (details) => warnings.push(details) }, ...extra }); return { ...stub, tool, close }; };
+    const make = (extra = {}) => { const stub = fake(), { tool, close } = createBrowserTool({ settings, contextDir: resolve("ctx"), runId: "run", launch: stub.launch, resolve: async () => publicAnswer, log: { warn: (details) => warnings.push(details) }, ...extra }); stub.state.world = domWorld(); stub.state.aria = (selector) => selector === "#cart" ? `- region "Cart":\n  - button "Checkout"` : `- banner:\n  - link "Shop" token ${secret}`; return { ...stub, tool, close }; };
     const act = (browser, args) => browser.tool.execute("call", args, undefined, undefined, {});
     const textOf = (result) => result.content[0].text;
 
@@ -4933,6 +4958,50 @@ fi
     await assert.rejects(act(slow, { action: "text" }), /limited to 1 seconds per session/);
     await assert.rejects(act(slow, { action: "goto", url: "https://shop.example.test/" }), /limited to 1 seconds per session/);
     assert.equal(slow.state.closed, true); assert.equal(slow.state.visited.length, 1);
+    assert.match(bound.tool.description, /action=snapshot.*action=diagnostics/s);
+    const { config: browserConfig } = await f.app("config.ts"), viewed = make();
+    await act(viewed, { action: "goto", url: "https://shop.example.test/p" });
+    viewed.state.html = '<script>Shopify.theme = {"id":7};</script>';
+    const tree = JSON.parse(textOf(await act(viewed, { action: "snapshot" })));
+    assert.deepEqual(Object.keys(tree), ["url", "title", "themeId", "snapshot"]);
+    assert.deepEqual([tree.url, tree.title, tree.themeId], ["https://shop.example.test/p", "Shop", 7]);
+    assert.ok(tree.snapshot.startsWith("- banner:") && tree.snapshot.includes("[redacted]") && !tree.snapshot.includes(secret));
+    assert.equal(JSON.parse(textOf(await act(viewed, { action: "snapshot", selector: "#cart" }))).snapshot, '- region "Cart":\n  - button "Checkout"');
+    assert.deepEqual(viewed.state.snapshots, ["body", "#cart"]);
+    viewed.state.aria = () => "- row\n".repeat(10000);
+    const clipped = JSON.parse(textOf(await act(viewed, { action: "snapshot" })));
+    assert.equal(clipped.truncated, true); assert.equal(clipped.snapshot.length, browserConfig.tools.readBytes.default);
+
+    browserConfig.tools.browser.diagnostics.consoleEntries = 2;
+    const emit = (event, payload) => { for (const listener of viewed.state.events[event]) listener(payload); };
+    const logged = (type, message) => ({ type: () => type, text: () => message });
+    emit("console", logged("log", "noise")); emit("console", logged("error", "first failure")); emit("console", logged("error", "payment token " + secret)); emit("pageerror", new Error("TypeError: x is undefined"));
+    emit("response", { status: () => 200, url: () => "https://shop.example.test/ok", request: () => ({ method: () => "GET" }) });
+    emit("response", { status: () => 404, url: () => "https://shop.example.test/missing?key=" + secret, request: () => ({ method: () => "GET" }) });
+    emit("requestfailed", { url: () => "https://cdn.example.test/app.js", method: () => "POST", failure: () => ({ errorText: "net::ERR_FAILED" }) });
+    const report = JSON.parse(textOf(await act(viewed, { action: "diagnostics" })));
+    browserConfig.tools.browser.diagnostics.consoleEntries = 30;
+    assert.deepEqual([report.url, report.title, report.themeId, report.viewport], ["https://shop.example.test/p", "Shop", 7, { width: 390, height: 844 }]);
+    assert.deepEqual(report.ctas, [
+      { text: "Add to cart", selectorHint: "button#AddToCart", top: 700, bottom: 750, height: 50, isAboveFold: true, visible: true, coveredBy: "header.sticky.top" },
+      { text: "Go", selectorHint: 'button[name="go"]', top: 100, bottom: 100, height: 0, isAboveFold: false, visible: false },
+      { text: "Check out now", selectorHint: "a.btn.primary", top: 1000, bottom: 1040, height: 40, isAboveFold: false, visible: true },
+    ]);
+    assert.deepEqual(report.performance, {
+      navigation: { ttfbMs: 120, domContentLoadedMs: 900, loadMs: 1501 },
+      lcp: { startTimeMs: 1800, element: "img#hero", url: "https://shop.example.test/hero.jpg" },
+      cls: { value: 0.1734, shifts: ["div.announcement.bar"] },
+      longTaskCount: 2, longTaskTotalMs: 201,
+      resourceSummary: { totalRequests: 5, totalTransferBytes: 100600, scriptBytes: 70000, imageBytes: 30100, thirdPartyHosts: [{ host: "cdn.thirdparty.test", requests: 2, transferBytes: 20100 }, { host: "other.test", requests: 1, transferBytes: 500 }] },
+    });
+    assert.deepEqual(report.consoleErrors.map((entry) => entry.source), ["console", "pageerror"]);
+    assert.ok(report.consoleErrors[0].text.startsWith("payment token ") && report.consoleErrors[0].text.includes("[redacted]") && !JSON.stringify(report).includes(secret));
+    assert.equal(report.consoleErrors[1].text, "TypeError: x is undefined");
+    assert.deepEqual(report.failedRequests.map(({ status, method, failure }) => [status, method, failure]), [[404, "GET", undefined], [undefined, "POST", "net::ERR_FAILED"]]);
+    assert.ok(report.failedRequests[0].url.startsWith("https://shop.example.test/missing?key=") && report.failedRequests[0].url.includes("[redacted]"));
+    await act(viewed, { action: "reset" });
+    assert.deepEqual(JSON.parse(textOf(await act(viewed, { action: "diagnostics" }))).consoleErrors, [], "a reset page starts with fresh buffers");
+
     const { config: liveConfig } = await f.app("config.ts"); liveConfig.tools.browser.steps = 2;
     const configured = make();
     for (let n = 0; n < 2; n++) await act(configured, { action: "goto", url: "https://shop.example.test/" });

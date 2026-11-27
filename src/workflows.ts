@@ -193,17 +193,48 @@ const validThinkingLevels = new Set<string>(thinkingLevels);
 export type CritiqueSettings = { provider?: string; model?: string; thinkingLevel?: ThinkingLevel };
 export const workflowCritique = (cfg: Record<string, unknown>) => (cfg.critique ?? {}) as CritiqueSettings;
 
-export function critiqueProblems(value: unknown) {
-  if (!isObject(value)) return ["config.critique must be an object"];
-  const problems = Object.keys(value).filter((key) => !["provider", "model", "thinkingLevel"].includes(key)).map((key) => `config.critique.${key}: unknown key`);
+function modelOverrideProblems(value: Record<string, unknown>, path: string, extraKeys: readonly string[] = []) {
+  const problems = Object.keys(value).filter((key) => !["provider", "model", "thinkingLevel", ...extraKeys].includes(key)).map((key) => `${path}.${key}: unknown key`);
   for (const key of ["provider", "model"] as const) {
-    if (value[key] !== undefined && (typeof value[key] !== "string" || !value[key].trim())) problems.push(`config.critique.${key} must be a non-empty string`);
+    if (value[key] !== undefined && (typeof value[key] !== "string" || !value[key].trim())) problems.push(`${path}.${key} must be a non-empty string`);
   }
   if (value.thinkingLevel !== undefined && (typeof value.thinkingLevel !== "string" || !validThinkingLevels.has(value.thinkingLevel))) {
-    problems.push(`config.critique.thinkingLevel must be one of: ${thinkingLevels.join(", ")}`);
+    problems.push(`${path}.thinkingLevel must be one of: ${thinkingLevels.join(", ")}`);
   }
   return problems;
 }
+
+export function critiqueProblems(value: unknown) {
+  if (!isObject(value)) return ["config.critique must be an object"];
+  return modelOverrideProblems(value, "config.critique");
+}
+
+
+function selfReviewProblems(value: unknown) {
+  if (!isObject(value)) return ["config.selfReview must be an object"];
+  const problems = modelOverrideProblems(value, "config.selfReview", ["enabled", "maxRounds"]);
+  if (typeof value.enabled !== "boolean") problems.push("config.selfReview.enabled must be a boolean");
+  if (value.maxRounds !== undefined || value.enabled === true) {
+    if (!Number.isInteger(value.maxRounds) || (value.maxRounds as number) < 0) problems.push("config.selfReview.maxRounds must be a non-negative integer");
+  }
+  return problems;
+}
+
+type SelfReviewSettings = CritiqueSettings & { enabled: boolean; maxRounds: number };
+
+export function activeSelfReview({ config: cfg, defaults }: { config: Record<string, unknown>; defaults: { provider: string; model: string; thinkingLevel: ThinkingLevel } }) {
+  if (cfg.selfReview === undefined || selfReviewProblems(cfg.selfReview).length) return undefined;
+  const settings = cfg.selfReview as SelfReviewSettings;
+  if (settings.enabled !== true || !settings.maxRounds) return undefined;
+  return {
+    maxRounds: settings.maxRounds,
+    provider: settings.provider ?? defaults.provider,
+    model: settings.model ?? defaults.model,
+    thinkingLevel: settings.thinkingLevel ?? defaults.thinkingLevel,
+  };
+}
+
+export type SelfReviewCritic = NonNullable<ReturnType<typeof activeSelfReview>>;
 
 const validStartEffects = new Set<string>(startEffectNames);
 
@@ -213,14 +244,21 @@ export function validateWorkflowConfig(cfg: Record<string, unknown>, mode: "revi
     if (mode !== "change") problems.push("failedLabel requires mode change");
     if (cfg.failedLabel !== null && typeof cfg.failedLabel !== "string") problems.push("config.failedLabel must be string or null");
   }
-  if (cfg.exhaustedLabel !== undefined && cfg.exhaustedLabel !== null && typeof cfg.exhaustedLabel !== "string") {
-    problems.push("config.exhaustedLabel must be string or null");
+  for (const key of ["exhaustedLabel", "needsDecisionLabel"] as const) {
+    if (cfg[key] !== undefined && cfg[key] !== null && typeof cfg[key] !== "string") problems.push(`config.${key} must be string or null`);
+  }
+  if (cfg.selfReview !== undefined) {
+    if (mode !== "change") problems.push("selfReview requires mode change");
+    problems.push(...selfReviewProblems(cfg.selfReview));
   }
   if (cfg.maxSelfRepairs !== undefined && (!Number.isInteger(cfg.maxSelfRepairs) || (cfg.maxSelfRepairs as number) < 0)) {
     problems.push("config.maxSelfRepairs must be a non-negative integer");
   }
   if (cfg.critique !== undefined) problems.push(...critiqueProblems(cfg.critique));
   if (cfg.autoCloseObsolete !== undefined && typeof cfg.autoCloseObsolete !== "boolean") problems.push("config.autoCloseObsolete must be a boolean");
+  if (cfg.obsoleteLabel !== undefined && cfg.obsoleteLabel !== null && typeof cfg.obsoleteLabel !== "string") {
+    problems.push("config.obsoleteLabel must be string or null");
+  }
   for (const key of ["maxRangeCommits", "browserSteps", "browserSeconds", "maxFindings", "maxCommentChars"] as const) {
     const val = cfg[key];
     if (val !== undefined && (!Number.isInteger(val) || (val as number) < 1)) {
@@ -523,6 +561,7 @@ export type WorkflowPipelineSpec = {
   agent?: "single" | "panel";
   acceptance?: "complete" | "nonempty_diff" | "conflict_free";
   commitPrefix?: string;
+  acceptDecision?: boolean;
   start?: readonly StartEffectName[];
   publish: readonly EffectName[];
 };
@@ -550,6 +589,7 @@ export function toWorkflowSpec(wf: ResolvedWorkflow, spec: WorkflowPipelineSpec)
     files: configFiles ?? [...(spec.files ?? [])],
     acceptance: spec.acceptance,
     commitPrefix: spec.commitPrefix,
+    acceptDecision: spec.acceptDecision,
     start: spec.start ? [...spec.start] : undefined,
     publish: [...spec.publish],
     enabled: wf.enabled,

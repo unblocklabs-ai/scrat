@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { postReply, reactToRoot, verdictReaction } from "./commit-review.ts";
 import { findBotFingerprintedIssue, findBotMarkedComment, upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
@@ -15,7 +15,8 @@ import { observe } from "./observation.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
 import { remoteUrl } from "./repository.ts";
 import { assertPublishable } from "./secrets.ts";
-import { subjects, workspaces, type Run, type Task, type Subject } from "./schema.ts";
+import { items, runs, subjects, workspaces, type Run, type Task, type Subject } from "./schema.ts";
+import { parseTriggerInput } from "./triggers.ts";
 import { assertCurrentImplementation } from "./tasks.ts";
 import { expectedBranchHead, getWorkspace, pushWorkspace } from "./workspaces.ts";
 
@@ -86,10 +87,18 @@ const push = {
     }
     db.transaction((transaction) => {
       transaction.update(workspaces).set({ pushedHeadSha: commitSha }).where(eq(workspaces.id, workspace.id)).run();
-      context.saveReceipt({ publishedCommitSha: commitSha }, transaction);
+      const charge = commitSha !== expected && chargesRepair(context, transaction);
+      if (charge) transaction.update(items).set({ selfRepairCount: sql`${items.selfRepairCount} + 1` }).where(eq(items.id, context.task.subjectId)).run();
+      context.saveReceipt({ publishedCommitSha: commitSha, ...charge && { repairCharged: true } }, transaction);
     });
   },
 } satisfies Effect;
+
+function chargesRepair({ task, publication }: EffectContext, transaction: Pick<typeof db, "select">) {
+  if (parseTriggerInput(task.input).kind !== "low_grade" || publication().repairCharged) return false;
+  return !transaction.select({ id: runs.id }).from(runs)
+    .where(and(eq(runs.taskId, task.id), sql`json_extract(${runs.publication}, '$.repairCharged') = 1`)).get();
+}
 
 const pullRequest = {
   receipted: (publication) => Boolean(publication.pullRequestNumber),

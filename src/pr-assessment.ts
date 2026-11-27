@@ -34,11 +34,19 @@ function selectAssessment(history: History) {
   return selected;
 }
 
+export const repairWorkflowNames = () => workflows.filter((wf) => wf.on.event?.kind === "low_grade").map((wf) => wf.name);
+
+export function pushedCommitOf({ publication, context }: Pick<History[number]["run"], "publication" | "context">) {
+  const sha = publication.publishedCommitSha;
+  return sha && sha !== context?.headSha ? sha : undefined;
+}
+
 export function priorReviewTexts(subjectId: string) {
   const assessment = selectAssessment(prReviewHistory(subjectId));
   if (!assessment) return undefined;
-  const repairRun = runHistory(subjectId, workflows.filter((wf) => wf.on.event?.kind === "low_grade").map((wf) => wf.name))
-    .find(({ run }) => run.result?.outcome === "complete" && run.sequence > assessment.run.sequence)?.run;
+  const repairRun = runHistory(subjectId, repairWorkflowNames())
+    .find(({ run }) => run.sequence > assessment.run.sequence && run.result && run.result.outcome !== "incomplete"
+      && (pushedCommitOf(run) || !run.error && run.publication.status === "published"))?.run;
   return { assessment: runText(assessment.run.id), repair: repairRun && runText(repairRun.id) };
 }
 

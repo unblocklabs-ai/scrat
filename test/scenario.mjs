@@ -2391,7 +2391,7 @@ fi
     assert.ok(statSync(check.evidence[0]).size > 20 * 1024 * 1024);
     const { runHistory } = await f.app("run-history.ts");
     const [entry] = runHistory(f.row(s.tasks, r.taskId).subjectId, ["implement"]);
-    assert.equal(entry.run.id, r.id); assert.ok(!("verification" in entry.run)); assert.deepEqual(Object.keys(entry.run.context).sort(), ["baseBranch", "commentRevisions", "revision"]);
+    assert.equal(entry.run.id, r.id); assert.ok(!("verification" in entry.run)); assert.deepEqual(Object.keys(entry.run.context).sort(), ["baseBranch", "commentRevisions", "headSha", "revision"]);
   } },
   command_timeout: { title: "a validation command that outlives harness.commandTimeoutSeconds is killed, fails the run as infrastructure without re-prompting the agent and accepts validation-only retry", configure: [configureCommandTimeout], run: async () => {
     f.addIssue(1, ["scrat"]); f.enqueue(1, "implement");
@@ -2867,7 +2867,7 @@ fi
     assert.equal(readFileSync(request.context.files.issue, "utf8"), "# Issue 1 (#1)\n\nInspect app.ts\n");
     assert.equal(f.comments.get(201).length, 2); assert.match(f.comments.get(201)[1].body, /Implemented the change/);
     await route(); assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 0, "A reply-only repair leaves the assessment current and cannot retrigger");
-    assert.equal(repairs(201).length, 1); assert.equal(count(201), 1);
+    assert.equal(repairs(201).length, 1); assert.equal(count(201), 0, "A repair that pushed nothing charges no cap slot");
     db.$client.prepare("update items set self_repair_count = 2 where id = ?").run(prItem(201).id); await route();
     assert.ok(f.prs.find((pr) => pr.number === 201).labels.some((label) => label.name === "Scrat repair exhausted"), "A last repair that changed nothing still marks the PR");
     await implement(2); db.$client.prepare("update runs set verification = null").run(); await review(202, "normal");
@@ -2899,7 +2899,7 @@ fi
     await success(); await route(); assert.equal(repairs(204).length, 1, "A new low grade at the cap queues nothing");
     assert.equal(labels204(), 1, "Still low at the cap");
     touchPr(204); await route(); f.reset(204, "normal"); assert.equal((await success()).result.grade, "B"); await route();
-    assert.equal(labels204(), 0, "A better grade removes the label");
+    assert.equal(labels204(), 0, "A better grade removes the label"); assert.equal(count(204), 0, "Reaching B resets the repair budget");
     await implement(5);
     f.comments.set(205, [humanComment(205, 9100, "Please rename it", "2026-10-19T01:00:00Z")]);
     assert.equal((await review(205, "grade-C")).result.grade, "C"); await route();
@@ -2931,8 +2931,8 @@ fi
     assert.equal(repairs(210).length, 2); assert.equal(requeued10.input.assessmentRunId, graded10.id);
     assert.equal(count(210), 0, "Re-queuing the same assessment after a cancel spends no cap slot");
     f.reset(210, "no-change"); const repaired10 = await success(); assert.equal(repaired10.taskId, requeued10.id);
-    assert.equal(count(210), 1, "One claimed repair counts once"); await route();
-    assert.equal(repairs(210).length, 2); assert.equal(count(210), 1);
+    assert.equal(count(210), 0, "A claimed repair that pushed nothing charges nothing"); await route();
+    assert.equal(repairs(210).length, 2); assert.equal(count(210), 0);
     await implement(9); await review(209, "grade-C"); await route();
     const repair9 = repairs(209)[0]; assert.equal(repair9.status, "queued");
     const branch9 = f.prs.find((pr) => pr.number === 209).head.ref;
@@ -2942,6 +2942,82 @@ fi
     const calls9 = f.requests.length, head9 = git(resolve("remote.git"), "rev-parse", branch9); f.reset(209, "no-change");
     const moved = await run(); assert.equal(moved.taskId, repair9.id); assert.equal(moved.error.message, guarded);
     assert.equal(f.requests.length, calls9); assert.equal(git(resolve("remote.git"), "rev-parse", branch9), head9);
+  } },
+  repair_escalation: { title: "a self-repair is critiqued before push and fixed in-session, charges the repair budget once only when it pushes a fix, escalates a needed decision with a label instead of looping, and later rounds see a repair history that skips failed unpushed runs", configure: [configureValidation], run: async () => {
+    const prItem = (n) => all(s.items).find((i) => i.kind === "pr" && i.payload.number === n);
+    const repairs = (n) => all(s.tasks).filter((t) => t.subjectId === prItem(n).id && t.action === "address_review");
+    const count = (n) => db.$client.prepare("select self_repair_count as c from items where id = ?").get(prItem(n).id).c;
+    const review = async (n, mode) => { f.reset(n, mode); await route(); return success(); };
+    const validations = () => readFileSync("validations.log", "utf8").trim().split("\n").length;
+    const critics = () => f.requests.filter((r) => r.context.selfReview);
+    const labels = (n) => f.prs.find((pr) => pr.number === n).labels.map((label) => label.name);
+    const head = (n) => git(resolve("remote.git"), "rev-parse", f.prs.find((pr) => pr.number === n).head.ref);
+    const { config: live } = await f.app("config.ts"), configured = live.workflows.address_review.config;
+
+    await implement(1); await review(201, "grade-C"); await route();
+    f.selfReviews.push("revise", "approve"); f.faults.comment.add(201); f.reset(201, "normal");
+    const pushedFrom = head(201), lost = await run();
+    assert.equal(lost.stage, "publishing"); assert.ok(lost.error);
+    const [first, second] = critics();
+    assert.equal(critics().length, 2); assert.deepEqual([first.context.selfReview.round, second.context.selfReview.round], [1, 2]);
+    assert.equal(first.context.previous.headSha, pushedFrom); assert.notEqual(first.context.workspace.headSha, pushedFrom, "the critic sees the uncommitted candidate as head");
+    assert.match(readFileSync(first.context.files.review, "utf8"), /Consolidated source-verified review/); assert.ok(first.context.files.issue);
+    assert.ok(f.requests.some((r) => !r.context.selfReview && r.context.action === "address_review" && r.request.messages.at(-1).role === "user" && JSON.stringify(r.request.messages.at(-1)).includes("pre-push self-review (round 1 of 2)")), "the critic's findings go back into the repair session");
+    assert.equal(git(resolve("remote.git"), "show", `${head(201)}:src/app.ts`), "export const value = 221;", "the in-session fix is what ships");
+    assert.equal(git(resolve("remote.git"), "rev-list", "--count", `${pushedFrom}..${head(201)}`), "1");
+    assert.equal(count(201), 1, "a pushed fix charges one cap slot"); assert.equal(lost.publication.repairCharged, true);
+    tasks.retryTask(lost.taskId); const published = await success();
+    assert.equal(critics().length, 2, "a publication retry runs no critic"); assert.equal(count(201), 1, "a publication retry never charges twice");
+    await route(); f.reset(201, "normal"); assert.equal((await success()).result.grade, "B"); await route();
+    assert.equal(count(201), 0, "reaching B resets the repair budget");
+    assert.equal(readFileSync(f.requests.findLast((r) => r.context.action === "review_pr").context.files.previous_repair, "utf8"), published.result.text);
+
+    for (const [n, selfReview] of [[202, { enabled: false }], [203, { enabled: true, maxRounds: 0 }]]) {
+      live.workflows.address_review.config = { ...configured, selfReview };
+      await implement(n - 200); await review(n, "grade-C"); await route();
+      const critiqued = critics().length; f.reset(n, "normal"); await success();
+      assert.equal(critics().length, critiqued, `selfReview ${JSON.stringify(selfReview)} runs no critic`); assert.equal(count(n), 1);
+      f.prs.find((pr) => pr.number === n).state = "closed"; await route();
+    }
+    live.workflows.address_review.config = configured;
+
+    await implement(4); await review(204, "grade-C"); await route();
+    const checked = validations(), critiqued = critics().length, pushed = head(204); f.reset(204, "decision-no-change");
+    const decided = await success();
+    assert.equal(decided.result.outcome, "needs_decision"); assert.equal(f.row(s.tasks, decided.taskId).status, "completed");
+    assert.equal(validations(), checked, "a decision with no edits skips validation"); assert.equal(decided.verification, null);
+    assert.equal(critics().length, critiqued); assert.equal(head(204), pushed); assert.equal(count(204), 0, "an escalation charges nothing");
+    assert.match(f.botComments(204).at(-1).body, /Implemented the change/);
+    await route(); await route();
+    assert.ok(labels(204).includes("Scrat needs decision")); assert.ok(!labels(204).includes("Scrat repair exhausted"));
+    assert.equal(repairs(204).length, 1, "an escalated assessment is not repaired again"); assert.equal(all(s.tasks).filter((t) => t.status === "queued").length, 0);
+    touchPr(204); await route(); f.reset(204, "normal"); assert.equal((await success()).result.grade, "B"); await route();
+    assert.ok(!labels(204).includes("Scrat needs decision"), "a passing re-review removes the decision label");
+
+    await implement(6); await review(206, "grade-C"); await route();
+    const partialFrom = head(206); f.reset(206, "needs_decision");
+    const partial = await success();
+    assert.equal(partial.result.outcome, "needs_decision"); assert.notEqual(head(206), partialFrom);
+    assert.equal(count(206), 1, "a partial fix pushed with an escalation charges one cap slot");
+    await route(); assert.ok(labels(206).includes("Scrat needs decision"), "the decision label stays while the pushed partial fix is re-reviewed");
+    f.prs.find((pr) => pr.number === 206).state = "closed"; await route();
+
+    await implement(7); await review(207, "grade-C"); await route();
+    f.selfReviews.push("revise", "approve"); f.reset(207, "scratch-file"); await success();
+    const shipped = git(resolve("remote.git"), "ls-tree", "--name-only", head(207));
+    assert.ok(shipped.includes(".gitignore") && !shipped.includes("scratch.log"), "the critic snapshot never stages a file the revise turn later ignores");
+    f.prs.find((pr) => pr.number === 207).state = "closed"; await route();
+
+    await implement(5); await review(205, "grade-C"); await route(); f.reset(205, "feedback-stuck");
+    const failed = await run(); assert.ok(failed.error); assert.equal(failed.publication.publishedCommitSha, undefined);
+    assert.equal(count(205), 0, "a failed unpushed repair charges nothing");
+    touchPr(205); await review(205, "grade-C");
+    const rereview = f.requests.filter((r) => r.context.action === "review_pr" && r.context.item.number === 205).at(-1).context.files;
+    assert.ok(rereview.previous_assessment && !("previous_repair" in rereview), "a failed unpushed repair is not the previous repair");
+    await route(); f.reset(205, "normal"); await success();
+    const history = readFileSync(f.requests.findLast((r) => r.context.action === "address_review" && !r.context.selfReview).context.files.repairHistory, "utf8");
+    assert.match(history, new RegExp(`## Run ${failed.id.slice(0, 8)}, assessment [0-9a-f]{8} graded C, .*\nOutcome: failed \\(.+\\)\\. Commit: nothing published\\.`));
+    assert.equal(count(205), 1);
   } },
   review_prior_assessment: { title: "a re-review of a Scrat PR after a pushed repair gives both panel reviewers and the consolidator the previous assessment and repair summary; a re-review of a human PR after a pushed file gets the previous assessment and head; first reviews get neither; implementation gets its issue's latest review when that review was ready, and reviews of a Scrat PR get the issue it implements while a human PR naming that issue does not", run: async () => {
     const review = async (n, mode) => { f.reset(n, mode); await route(); return success(); };
@@ -3642,6 +3718,8 @@ fi
     await startup((c) => { c.workflows.implement.retry = { initialDelaySeconds: 1, maxDelaySeconds: 2 }; }, /implement: retry requires mode review/);
     await startup((c) => { c.workflows.review_pr.config = { failedLabel: "Scrat failed" }; }, /review_pr: failedLabel requires mode change/);
     await startup((c) => { c.workflows.review_issue.model = "missing-model"; }, /review_issue: no Pi model fixture\/missing-model/);
+    await startup((c) => { c.workflows.address_review.config = { selfReview: { enabled: true, maxRounds: 1, model: "missing-critic" } }; }, /address_review selfReview: no Pi model fixture\/missing-critic/);
+    await validateStaticConfig(variant((c) => { c.workflows.address_review.config = { selfReview: { enabled: true, maxRounds: 0, model: "missing-critic" } }; }));
     await startup((c) => { c.workflows.review_pr.reviewers[0].provider = "nowhere"; }, /review_pr reviewer 1: no Pi model nowhere/);
     await startup((c) => { c.workflows.resolve_conflicts.skill = "missing/SKILL.md"; }, /resolve_conflicts: skill file not found/);
 
@@ -7200,6 +7278,7 @@ fi
       const labelScores = (low, medium, high) => (body) => body.questions.c0_0 ? noul({ c0_0: low, c0_1: medium, c0_2: high }) : noul({});
       settings.enabled = true;
       branchOff("labeled", "src/app.ts", "export const value = 2;\n");
+      pushFile("labeled", 'docs/release "v2"\tnotes.md ', "Release notes.\n");
       f.addPr(201, "labeled", "human", { body: "Adjusts the exported value.", labels: [{ name: "keep" }] });
       await route();
       const labelTask = all(s.tasks).find((task) => task.action === "label_items" && task.status === "queued"); assert.ok(labelTask);
@@ -7214,7 +7293,34 @@ fi
       const [labelCall] = callsOf("decisions", callsBeforeFast);
       assert.deepEqual(Object.keys(labelCall.body.questions), ["c0_0", "c0_1", "c0_2"]);
       assert.match(labelCall.body.questions.c0_2.instructions, /"risk: high" \(Highest-risk code/);
-      assert.match(labelCall.body.state, /^pull request #201: PR 201/); assert.match(labelCall.body.state, /Existing labels: keep/); assert.match(labelCall.body.state, /src\/app\.ts \| 2/);
+      assert.match(labelCall.body.questions.c0_2.instructions, /highest applicable risk level/);
+      assert.match(labelCall.body.state, /^pull request #201: PR 201/);
+      assert.doesNotMatch(labelCall.body.state, /Existing labels: keep/);
+      assert.ok(labelCall.body.state.includes('2 files changed (+2/-1)\ndocs/: release "v2"\tnotes.md  (+1/-0)\nsrc/: app.ts (+1/-1)'), "numstat paths with quotes, tabs and trailing spaces are reported verbatim");
+
+      // Oversized body distills via d1.extract instead of dropping files or falling back to Pi.
+      const prevMaxState = settings.config.d1MaxStateChars;
+      settings.config.d1MaxStateChars = 400;
+      f.prs[0].body = "Very long PR description with pasted logs. ".repeat(30);
+      d1.extract = () => ok({ summary: { type: "text", value: "Small UI copy tweak.", confidence: 0.9 } });
+      d1.decide = labelScores(0.92, 0.15, 0.05);
+      tasks.enqueueManualTasks("label_items", ["201"]);
+      const piBeforeLongBody = f.requests.length;
+      const longBody = await success();
+      assert.equal(f.requests.length, piBeforeLongBody, "oversized body distills through d1.extract and stays on the fast path");
+      assert.deepEqual(longBody.result.labels, [{ category: "risk", name: "risk: low" }]);
+      settings.config.d1MaxStateChars = prevMaxState;
+      f.prs[0].body = "Adjusts the exported value.";
+
+      // Out-of-range d1 score (>1) is ignored and falls back cleanly to Pi.
+      tasks.enqueueManualTasks("label_items", ["201"]);
+      d1.decide = labelScores(1.4, 0.1, 0.05);
+      f.reset(201, "normal");
+      f.script = [selections([{ category: "risk", name: "risk: low" }])];
+      const piBeforeOutOfRange = f.requests.length;
+      const outOfRange = await success();
+      assert.ok(f.requests.length > piBeforeOutOfRange, "out-of-range d1 scores fall back to Pi");
+      assert.deepEqual(outOfRange.result.labels, [{ category: "risk", name: "risk: low" }]);
 
       tasks.enqueueManualTasks("label_items", ["201"]);
       d1.decide = labelScores(0.05, 0.1, 0.96);
@@ -7377,17 +7483,25 @@ fi
     assert.deepEqual([reversed.obsolete, reversed.storefront, reversed.grade], [true, "verified", "C"]); assert.doesNotMatch(reversed.text, /SCRAT_OBSOLETE/);
     assert.throws(() => parseResult("Resolved on main.\nSCRAT_OBSOLETE: true\nMore prose.\nSCRAT_GRADE: C\nSCRAT_STATUS: complete", [], { requireGrade: true }), ResultFormatError);
 
+    const hasLabel = (n, label) => (pr(n)?.labels ?? []).some((l) => (typeof l === "string" ? l : l.name).toLowerCase() === label.toLowerCase());
     f.addIssue(1); branchOff("human-fix", "src/app.ts", "export const value = 2;\n");
     f.addPr(301, "human-fix", "human", { body: "Fixes #1" }); f.reset(301, "obsolete"); await route();
     const human = await success();
     assert.ok(human.reviewers.every((r) => r.result.obsolete) && human.result.obsolete);
     assert.equal(f.botComments(301).length, 1); assert.equal(pr(301).state, "open"); assert.equal(f.issues.get(1).state, "open");
     assert.equal(closes("pr_update", 301) + closes("issue_update", 1), 0, "a human PR is flagged, never closed");
+    assert.ok(hasLabel(301, "obsolete"), "obsolete PR receives the obsolete label");
+    assert.ok(hasLabel(203, "obsolete") && hasLabel(302, "obsolete"), "auto-closed and unreceipted obsolete PRs also receive the obsolete label");
+
+    pr(301).head.sha = pushFile("human-fix", "src/app.ts", "export const value = 99;\n");
+    f.reset(301, "normal"); await route(); await success();
+    assert.ok(!hasLabel(301, "obsolete"), "obsolete label is removed when a fresh review is no longer obsolete");
 
     await implement(2); f.reset(202, "obsolete-split"); await route();
     const split = await success();
     assert.deepEqual(split.reviewers.map((r) => Boolean(r.result.obsolete)), [true, false]); assert.equal(split.result.obsolete, true);
     assert.equal(pr(202).state, "open"); assert.equal(f.issues.get(2).state, "open"); assert.equal(marked(2, 202).length, 0);
+    assert.ok(hasLabel(202, "obsolete"), "consolidated obsolete PR receives the obsolete label even on split panel");
     await route(); assert.equal(repairs(202).length, 0, "an obsolete assessment never queues self-repair");
 
     await implement(4); f.reset(204, "obsolete"); f.faults.close.add("pulls/204"); await route();
@@ -7399,11 +7513,12 @@ fi
     assert.equal(pr(204).state, "closed"); assert.equal(publication(resumed).closedPullRequest, true);
     assert.equal(marked(4, 204).length, 1); assert.equal(closes("issue_update", 4), 1, "the receipt keeps a retry from commenting on or closing the issue again");
 
-    const { config: live } = await f.app("config.ts"); live.workflows.review_pr.config = { autoCloseObsolete: false };
+    const { config: live } = await f.app("config.ts"); live.workflows.review_pr.config = { autoCloseObsolete: false, obsoleteLabel: null };
     await implement(5); f.reset(205, "obsolete"); await route();
     const disabled = await success();
     assert.ok(disabled.reviewers.every((r) => r.result.obsolete) && disabled.result.obsolete);
     assert.equal(pr(205).state, "open"); assert.equal(f.issues.get(5).state, "open"); assert.equal(closes("pr_update", 205) + closes("issue_update", 5), 0);
+    assert.ok(!hasLabel(205, "obsolete"), "setting obsoleteLabel: null disables the obsolete label");
     await route(); assert.equal(repairs(205).length, 0);
   } },
 };

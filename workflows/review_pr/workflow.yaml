@@ -19,6 +19,7 @@ defaults:
   retry: { initialDelaySeconds: 60, maxDelaySeconds: 3600 }
 config:
   autoCloseObsolete: true
+  obsoleteLabel: obsolete
 permissions:
   github: [read, comment, label, issue, pull_request]
   workspace: [read]

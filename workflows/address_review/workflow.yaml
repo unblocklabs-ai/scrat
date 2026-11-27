@@ -22,3 +22,7 @@ permissions:
 config:
   maxSelfRepairs: 2
   exhaustedLabel: Scrat repair exhausted
+  needsDecisionLabel: Scrat needs decision
+  selfReview:
+    enabled: true
+    maxRounds: 2

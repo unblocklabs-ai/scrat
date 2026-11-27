@@ -13,7 +13,7 @@ export function hasValidationCheckpoint(run: Run | undefined): run is Run & {
   result: AgentResult; context: NonNullable<Run["context"]>;
   agentCheckpoint: NonNullable<Run["agentCheckpoint"]>; workspaceId: string; mainSha: string;
 } {
-  return run?.stage === "validating" && run.result?.outcome === "complete"
+  return run?.stage === "validating" && (run.result?.outcome === "complete" || run.result?.outcome === "needs_decision")
     && Boolean(run.context && run.agentCheckpoint && run.workspaceId && run.mainSha);
 }
 
@@ -34,6 +34,7 @@ export type PrGrade = typeof prGrades[number];
 
 const reviewVerdicts = ["clean", "concerns", "breaking"] as const;
 type ReviewVerdict = typeof reviewVerdicts[number];
+const selfReviewVerdicts = ["approve", "revise"] as const;
 const outcomes = ["complete", "incomplete", "needs_decision"] as const;
 const storefrontResults = ["verified", "regression", "unavailable"] as const;
 
@@ -47,6 +48,7 @@ export type AgentResult = {
   outcome: typeof outcomes[number];
   grade?: PrGrade;
   verdict?: ReviewVerdict;
+  selfReview?: typeof selfReviewVerdicts[number];
   obsolete?: boolean;
   storefront?: typeof storefrontResults[number];
   issues?: ReportedIssue[];
@@ -83,8 +85,8 @@ export class SecretLeakError extends Error {
 
 export const agentIncompleteCode = "AGENT_INCOMPLETE";
 
-export function assertComplete(result: AgentResult) {
-  if (result.outcome !== "complete") {
+export function assertComplete(result: AgentResult, acceptDecision = false) {
+  if (result.outcome !== "complete" && !(acceptDecision && result.outcome === "needs_decision")) {
     throw Object.assign(new Error(`Agent returned ${result.outcome}: ${result.text}`), { code: agentIncompleteCode });
   }
 }
@@ -135,7 +137,8 @@ function popFooter<T extends string>(lines: string[], token: string, values: rea
   return value;
 }
 
-export function footerRules(requireGrade: boolean, storefront: boolean, requireLabels = false) {
+export function footerRules(requireGrade: boolean, storefront: boolean, requireLabels = false, selfReview = false) {
+  if (selfReview) return `SCRAT_VERDICT: ${anyOf(selfReviewVerdicts)} (required for a complete self-review)\nSCRAT_STATUS: ${anyOf(outcomes)} (required, and the very last line)`;
   return `SCRAT_READY (optional, only when ready)\n${requireLabels ? 'SCRAT_LABELS: [{"category":"...","name":"..."}] (required for a complete classification; exactly one configured choice per category)\n' : ""}${storefront ? `SCRAT_STOREFRONT: ${anyOf(storefrontResults)} (required for a complete review)\n` : ""}SCRAT_OBSOLETE: true or false (optional; emit true only when your instructions confirm the PR's underlying issue is already completely resolved on main)\nSCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of ${prGrades.join(", ")}, with no plus or minus)\nSCRAT_VERDICT: ${anyOf(reviewVerdicts)} (only when your instructions ask for it)\nSCRAT_STATUS: ${anyOf(outcomes)} (required, and the very last line)`;
 }
 
@@ -160,10 +163,17 @@ function popLabelSelections(lines: string[]) {
   return value;
 }
 
-export function parseResult(output: string, paths: string[], { requireGrade = false, labelCategories }: { requireGrade?: boolean; labelCategories?: readonly LabelCategory[] } = {}): AgentResult {
+export function parseResult(output: string, paths: string[], { requireGrade = false, labelCategories, selfReview = false }: { requireGrade?: boolean; labelCategories?: readonly LabelCategory[]; selfReview?: boolean } = {}): AgentResult {
   const lines = output.trim().split("\n");
   const outcome = popFooter(lines, "SCRAT_STATUS", outcomes);
   if (!outcome) throw new ResultFormatError(`Pi must end its response with SCRAT_STATUS: ${anyOf(outcomes)}`);
+  if (selfReview) {
+    const decided = popFooter(lines, "SCRAT_VERDICT", selfReviewVerdicts);
+    const text = lines.join("\n").trim();
+    if (!text) throw new ResultFormatError("Pi returned no report");
+    if (outcome === "complete" && !decided) throw new ResultFormatError(`A complete self-review must end with SCRAT_VERDICT: ${anyOf(selfReviewVerdicts)} immediately before SCRAT_STATUS`);
+    return { text, ready: false, paths, outcome, ...decided && { selfReview: decided } };
+  }
   const verdict = popFooter(lines, "SCRAT_VERDICT", reviewVerdicts);
   const grade = popFooter(lines, "SCRAT_GRADE", prGrades);
   const obsoleteValues = ["true", "false"] as const;

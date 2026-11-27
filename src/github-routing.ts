@@ -46,14 +46,15 @@ export function planPrMaintenance({ conflictAction, feedbackAction, conflicts, p
   return decisions;
 }
 
-export function planSelfRepair({ repairAction, repairActions, state, feedbackTask, conflictTask, reviewTask, repairTask, count, limit }: {
-  repairAction: string | undefined; repairActions: readonly string[]; state: PrReviewState;
+export function planSelfRepair({ repairAction, repairActions, publishing = [], state, feedbackTask, conflictTask, reviewTask, repairTask, count, limit }: {
+  repairAction: string | undefined; repairActions: readonly string[]; publishing?: readonly string[]; state: PrReviewState;
   feedbackTask?: TaskFacts; conflictTask?: TaskFacts; reviewTask?: TaskFacts; repairTask?: TaskFacts; count: number; limit: number | undefined;
 }): { decisions: RoutingDecision[]; limited: boolean } {
-  const cancel: RoutingDecision[] = repairActions.map((action) => ({ type: "cancel", action, reason: "No current low-graded review to repair" }));
+  const cancel: RoutingDecision[] = repairActions.filter((action) => !publishing.includes(action))
+    .map((action) => ({ type: "cancel", action, reason: "No current low-graded review to repair" }));
   const reviewActive = reviewTask?.status === "queued" || reviewTask?.status === "running";
   const conflictActive = conflictTask?.status === "queued" || conflictTask?.status === "running";
-  if (!repairAction || state.kind !== "current" || feedbackTask?.status === "queued" || reviewActive || conflictActive) {
+  if (!repairAction || publishing.includes(repairAction) || state.kind !== "current" || feedbackTask?.status === "queued" || reviewActive || conflictActive) {
     return { decisions: cancel, limited: false };
   }
   const { originId } = state.assessment, grade = state.assessment.result.grade;

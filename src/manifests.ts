@@ -6,7 +6,7 @@ type TriggerKind = (typeof triggerKinds)[number];
 
 export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const toolNames = ["read", "grep", "find", "ls", "git", "read_base", "bash", "edit", "write", "http", "browser", "github_search"] as const;
-export const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "history", "validation", "triage", "issue", "storefront", "cloudflare", "store_changes"] as const;
+export const contextFileNames = ["discussion", "review", "previous_assessment", "previous_repair", "repair_history", "history", "validation", "triage", "issue", "storefront", "cloudflare", "store_changes"] as const;
 export const effectNames = ["push", "pull_request", "comment", "labels", "pr_assessment", "issue", "slack_reply", "site_map"] as const;
 export const startEffectNames = ["slack_post"] as const;
 export type ThinkingLevel = (typeof thinkingLevels)[number];
@@ -77,6 +77,7 @@ export type Action = {
   files: ContextFileName[];
   acceptance?: "complete" | "nonempty_diff" | "conflict_free";
   commitPrefix?: string;
+  acceptDecision?: boolean;
   start?: StartEffectName[];
   publish: EffectName[];
   enabled?: boolean;

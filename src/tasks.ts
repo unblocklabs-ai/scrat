@@ -264,9 +264,6 @@ export function claimTask(taskId?: string) {
       } : {}),
       startedAt: new Date().toISOString(),
     }).returning().get()!;
-    if (!claimable.previousRun && claimable.trigger.kind === "low_grade") {
-      transaction.update(items).set({ selfRepairCount: sql`${items.selfRepairCount} + 1` }).where(eq(items.id, task.subjectId)).run();
-    }
     recordEvent({ subjectId: task.subjectId, taskId: task.id, runId: run.id, type: "run.started", data: {
       action: task.action, skill: run.skill, provider: run.provider, model: run.model, thinkingLevel: run.thinkingLevel,
     } }, transaction);

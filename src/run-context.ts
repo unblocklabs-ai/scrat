@@ -90,7 +90,7 @@ export async function runAgent({ run, task, manifest, operation, stop }: Ctx, { 
   sessionFile?: string; baseSha?: string; panel?: { baseSha: string; requireGrade: boolean; configuredReviewers?: Action["reviewers"]; beforeReview?: (storefront: boolean) => Run };
 }) {
   const { workspace } = input;
-  const { prompt, contextDir, revisions, storefront, labelCategories } = await buildAgentInput({ run, task, manifest, ...input });
+  const { prompt, contextDir, revisions, files, storefront, labelCategories } = await buildAgentInput({ run, task, manifest, ...input });
   const activeRun = panel?.beforeReview ? panel.beforeReview(Boolean(storefront)) : run;
   const { browserSteps, browserSeconds } = config.storefront.limits;
   const browser = storefront && manifest.tools.includes("browser")
@@ -99,5 +99,5 @@ export async function runAgent({ run, task, manifest, operation, stop }: Ctx, { 
   const agentResult = panel
     ? await reviewPullRequest({ ...options, baseSha: panel.baseSha }, prompt, panel.requireGrade, panel.configuredReviewers)
     : await executePi({ ...options, baseSha }, { context: prompt, sessionFile, labelCategories });
-  return { result: { ...agentResult, paths: [...new Set([...input.diffPaths, ...agentResult.paths])] }, contextDir, revisions };
+  return { result: { ...agentResult, paths: [...new Set([...input.diffPaths, ...agentResult.paths])] }, contextDir, revisions, files };
 }

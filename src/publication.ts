@@ -12,8 +12,8 @@ import { getWorkspace, removeWorkspace } from "./workspaces.ts";
 export async function publishRun(github: GitHubRepository, subject: Subject, task: Task, run: Run, references: EventReferences, current: GithubContext | undefined, actionSpec: Action) {
   const { result, context } = run;
   if (!result || !context) throw new Error("Run has no evaluated result to publish");
-  if (result.outcome !== "complete") throw new Error("Incomplete agent work cannot be published");
   const manifest = actionSpec;
+  if (result.outcome !== "complete" && !(manifest.acceptDecision && result.outcome === "needs_decision")) throw new Error("Incomplete agent work cannot be published");
   let publication = run.publication;
   const effectContext: EffectContext = {
     references, github, subject, task, run: { ...run, result, context }, action: manifest, current,

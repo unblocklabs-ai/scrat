@@ -798,7 +798,7 @@ export function scoreDecisions({ state, questions, ...options }: D1Trace & { sta
     const scores: Record<string, number> = {};
     for (const key of keys) {
       const score = (answers[key] as { noul?: unknown } | undefined)?.noul;
-      if (typeof score === "number" && Number.isFinite(score)) scores[key] = score;
+      if (typeof score === "number" && Number.isFinite(score) && score >= 0 && score <= 1) scores[key] = score;
     }
     return Object.keys(scores).length ? { scores } : "d1 response has no numeric scores";
   });

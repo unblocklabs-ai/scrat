@@ -30,13 +30,11 @@ defaults:
     - read_base
 config:
   d1FastPath: true
-  d1MinScore: 0.72
-  d1MinMargin: 0.25
-  d1MaxStateChars: 10000
-  d1MaxDiffStatChars: 4000
+  d1MinScore: 0.7
+  d1MinMargin: 0.18
+  d1MaxStateChars: 24000
+  d1MaxDiffStatChars: 12000
   d1GitTimeoutMs: 5000
-  d1DiffStatWidth: 240
-  d1DiffStatNameWidth: 200
   targets:
     - prs
   issue_labels: []

@@ -22,12 +22,12 @@ import { dropModelRuntime, sharedModelRuntime } from "./model-runtime.ts";
 
 const withStorefront = (skill: string, shown: boolean) => skill.replace(/^\{\{#storefront\}\}\n([\s\S]*?)^\{\{\/storefront\}\}\n/gm, (_, body: string) => shown ? body : "");
 
-function correctionMessage(error: string, requireGrade: boolean, storefront: boolean, requireLabels: boolean) {
-  return `Your previous final answer was not accepted: ${error}.\n\nSend your complete final answer again, with the same content, correctly formatted. It must end with these footer lines, in this order:\n${footerRules(requireGrade, storefront, requireLabels)}`;
+function correctionMessage(error: string, requireGrade: boolean, storefront: boolean, requireLabels: boolean, selfReview: boolean) {
+  return `Your previous final answer was not accepted: ${error}.\n\nSend your complete final answer again, with the same content, correctly formatted. It must end with these footer lines, in this order:\n${footerRules(requireGrade, storefront, requireLabels, selfReview)}`;
 }
 
-function continuationMessage(requireGrade: boolean, storefront: boolean, requireLabels: boolean) {
-  return `Your assessment was returned incomplete. Finish the remaining inspection, then return the full final assessment. It must end with these footer lines, in this order:\n${footerRules(requireGrade, storefront, requireLabels)}`;
+function continuationMessage(requireGrade: boolean, storefront: boolean, requireLabels: boolean, selfReview: boolean) {
+  return `Your assessment was returned incomplete. Finish the remaining inspection, then return the full final assessment. It must end with these footer lines, in this order:\n${footerRules(requireGrade, storefront, requireLabels, selfReview)}`;
 }
 
 export function saveReviewer(runId: string, index: number, patch: Partial<Reviewer>) {
@@ -73,7 +73,7 @@ export type SubmitResultSpec = {
   description?: string;
 };
 
-export async function executePi(options: PiOptions, { context, sessionFile, reviewerIndex, onSession, requireGrade = false, labelCategories, followUp, submitResult }: {
+export async function executePi(options: PiOptions, { context, sessionFile, reviewerIndex, onSession, requireGrade = false, labelCategories, followUp, submitResult, selfReview = false }: {
   context: string;
   sessionFile?: string;
   reviewerIndex?: number;
@@ -82,6 +82,7 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
   labelCategories?: readonly LabelCategory[];
   followUp?: string;
   submitResult?: SubmitResultSpec;
+  selfReview?: boolean;
 }) {
   const { run, cwd, tools, scoped, storefront = false, baseSha, log, stop } = options;
   const readOnly = scoped.mode === "review";
@@ -276,7 +277,7 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
           result = { outcome, text, paths: [], ready: false, data: submittedData };
         } else {
           if (!output) throw new ResultFormatError("Pi returned an empty response");
-          result = parseResult(output, [], { requireGrade, labelCategories });
+          result = parseResult(output, [], { requireGrade, labelCategories, selfReview });
         }
         const problem = graded && result.outcome === "complete" ? storefrontProblem(result, config.storefront.limits.regressionMaxGrade, regressionReported) : undefined;
         regressionReported ||= result.storefront === "regression";
@@ -287,7 +288,7 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
           submittedData = undefined;
           await prompt(submitResult
             ? "Your assessment was returned incomplete. Finish the remaining inspection, call `submit_result` with the final payload, and return the full Markdown report."
-            : continuationMessage(requireGrade, graded, labelCategories !== undefined));
+            : continuationMessage(requireGrade, graded, labelCategories !== undefined, selfReview));
           corrections--;
           continue;
         }
@@ -308,7 +309,7 @@ export async function executePi(options: PiOptions, { context, sessionFile, revi
           ? keepValidPayload
             ? `Your previous final answer was not accepted: ${error.message}. Your structured payload is already recorded; now return your complete Markdown report.`
             : `Your previous final answer was not accepted: ${error.message}. Call \`submit_result\` with a valid payload and return your complete Markdown report.`
-          : correctionMessage(error.message, requireGrade, graded, labelCategories !== undefined));
+          : correctionMessage(error.message, requireGrade, graded, labelCategories !== undefined, selfReview));
       }
     }
   } finally {

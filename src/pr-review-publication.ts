@@ -1,5 +1,7 @@
+import { and, eq, gt } from "drizzle-orm";
 import { findBotMarkedComment, upsertComment } from "./comments.ts";
 import { getRepositoryPath, isBotLogin } from "./config.ts";
+import { db } from "./db.ts";
 import { errorStatus, redactSecrets } from "./errors.ts";
 import type { EventReferences } from "./events.ts";
 import { git } from "./git.ts";
@@ -10,12 +12,12 @@ import { gradeLabels, reconcileLabels } from "./labels.ts";
 import { acknowledgedTaskIds, isIssueComment, issueCommentId, obsoleteCloseMarker, parseIssueCommentId, reviewMarker, taskMarker, withMarker } from "./markers.ts";
 import { logger } from "./logging.ts";
 import { observe, type ItemObservation } from "./observation.ts";
-import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
+import { prReviewHistory, repairWorkflowNames, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
 import { getRun, inferenceRunOf, issueOfPullRequest, runHistory, runText, updateRun } from "./run-history.ts";
-import type { Run } from "./schema.ts";
+import { items, type Run } from "./schema.ts";
 import { serialized } from "./single-flight.ts";
 import { latestTask } from "./tasks.ts";
-import { workflowOf } from "./workflow-registry.ts";
+import { workflowOf, workflowsPublishing } from "./workflow-registry.ts";
 
 const pendingReviews = new Map<string, Promise<unknown>>();
 
@@ -90,6 +92,28 @@ export function settleObsoleteClose(runId: string) {
 
 export type ResolvedReview = { reviews: ReturnType<typeof runHistory>; state: PrReviewState; mainSha: string };
 
+const passingGrades = new Set<string>(["S", "A", "B"]);
+
+function configLabel(action: string, key: "obsoleteLabel" | "needsDecisionLabel") {
+  const raw = workflowOf(action).config[key];
+  return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+}
+
+const configLabels = (actions: readonly string[], key: "obsoleteLabel" | "needsDecisionLabel") => [...new Set(actions.flatMap((action) => configLabel(action, key) ?? []))];
+
+function decisionLabel(subjectId: string, desired: Extract<PrReviewState, { kind: "current" }>["assessment"] | undefined) {
+  const escalation = runHistory(subjectId, repairWorkflowNames()).find(({ run }) => run.finishedAt && !run.error);
+  if (escalation?.run.result?.outcome !== "needs_decision") return undefined;
+  const superseded = desired && desired.run.sequence > escalation.run.sequence && (desired.result.obsolete || passingGrades.has(desired.result.grade!));
+  return superseded ? undefined : configLabel(escalation.task.action, "needsDecisionLabel");
+}
+
+function resetRepairBudget(subjectId: string, desired: Extract<PrReviewState, { kind: "current" }>["assessment"], references: EventReferences) {
+  if (desired.result.obsolete || !passingGrades.has(desired.result.grade!)) return;
+  const reset = db.update(items).set({ selfRepairCount: 0 }).where(and(eq(items.id, subjectId), gt(items.selfRepairCount, 0))).returning({ id: items.id }).get();
+  if (reset) logger.info({ ...references, event: "self_repair.budget_reset", grade: desired.result.grade });
+}
+
 async function reconcile(github: GitHubRepository, subjectId: string, number: number, references: EventReferences, publication?: { run: Run }, observed?: GithubContext, known?: ResolvedReview) {
   const current = observed ?? await github.fetchItemContext("pr", number);
   if (publication && settleObsoleteClose(publication.run.id)) return;
@@ -107,10 +131,17 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
   const shown = desired ?? (state.kind === "blocked" ? state.attempt : failed);
   const deliveryReferences = shown ? { ...references, subjectId, taskId: shown.task.id, runId: shown.run.id } : references;
   const labels = observation.labels;
-  const managed = Object.values(gradeLabels);
+  const obsoleteLabel = desired && configLabel(desired.task.action, "obsoleteLabel");
+  const decided = decisionLabel(subjectId, desired);
+  const managed = [...Object.values(gradeLabels), ...configLabels(workflowsPublishing("pr_assessment"), "obsoleteLabel"), ...configLabels(repairWorkflowNames(), "needsDecisionLabel")];
   const grade = desired?.result.grade;
-  const gradeLabel = grade ? [gradeLabels[grade]] : [];
-  const kept = gradeLabel.filter((name) => labels.includes(name));
+  const desiredLabels = [
+    ...(grade ? [gradeLabels[grade]] : []),
+    ...(desired?.result.obsolete && obsoleteLabel ? [obsoleteLabel] : []),
+    ...(decided ? [decided] : []),
+  ];
+  const lowerLabels = new Set(labels.map((name) => name.toLowerCase()));
+  const kept = desiredLabels.filter((name) => lowerLabels.has(name.toLowerCase()));
   await reconcileLabels(github, number, { current: labels, desired: kept, managed }, deliveryReferences);
   if (publication && !desired) throw new Error(staleReview);
 
@@ -134,11 +165,13 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
   }
 
   await reconcileLabels(github, number, {
-    current: kept, desired: gradeLabel, managed,
+    current: kept, desired: desiredLabels, managed,
   }, deliveryReferences);
   if (desired) {
     await closeObsolete(github, number, current, observation.baseBranch, desired, deliveryReferences);
-    updateRun(desired.run.id, { publication: { ...getRun(desired.run.id)!.publication, commentId, status: "published" } });
+    const receipt = getRun(desired.run.id)!.publication;
+    if (receipt.status !== "published") resetRepairBudget(subjectId, desired, deliveryReferences);
+    updateRun(desired.run.id, { publication: { ...receipt, commentId, status: "published" } });
   }
   if (publication && publication.run.id !== desired?.run.id) updateRun(publication.run.id, { publication: { ...publication.run.publication, status: "not_needed" } });
 }

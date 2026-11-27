@@ -56,7 +56,7 @@ export async function fixture(scenario, spec) {
   if (scoped) process.env.SCOUT_TOKEN = "scout-" + "k9Xq2LmPz7".repeat(3);
   if (scenario.startsWith("commit_review") || scenario === "store_audit" || scenario === "store_changes" || scenario === "recovery" || scenario === "isolation" || scenario.startsWith("slack_status") || scenario === "publish_effects" || scenario === "workflows") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
-  const verdicts = {}, modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), checkRuns = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [], deployments = [];
+  const verdicts = {}, selfReviews = [], modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), checkRuns = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [], deployments = [];
   const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set(), permissions: new Set(), commitComment: new Set(), close: new Set() };
   const checkRollups = new Map();
   const graphqlRate = { ...rate };
@@ -173,6 +173,7 @@ export async function fixture(scenario, spec) {
     const corrected = texts.at(-1).startsWith("Your previous final answer was not accepted");
     const continued = texts.at(-1).startsWith("Your assessment was returned incomplete");
     const feedback = texts.at(-1).startsWith(`${config.github.botName}'s validation failed`), turnStart = request.messages.at(-1).role === "user";
+    const selfReviewFix = texts.at(-1).startsWith(`${config.github.botName}'s pre-push self-review`);
     const start = text ? text.indexOf('{\n  "action"') : -1;
     const context = start >= 0 ? JSON.parse(text.slice(start, text.indexOf("\n}", start) + 2)) : { action: "workflow", item: { number: 0 } };
     const consolidating = Boolean(text?.includes("Consolidate the two independent reviews below"));
@@ -187,6 +188,15 @@ export async function fixture(scenario, spec) {
       transient.seen.set("consolidation", 1);
       res.writeHead(200, { "content-type": "text/event-stream" });
       return res.end("data: " + JSON.stringify({ error: { message: "stream_incomplete: Upstream closed stream without completion" } }) + "\n\n");
+    }
+    if (context.selfReview) {
+      requests.push({ request, text, context, consolidating: false });
+      const verdict = selfReviews.shift() ?? "approve";
+      const content = verdict === "revise" ? "- B1 `src/app.ts:1`: the fix covers only the cited caller.\nSCRAT_VERDICT: revise\nSCRAT_STATUS: complete"
+        : verdict === "fail" ? "Could not check.\nSCRAT_STATUS: wrong" : "No problems found; checked src/app.ts.\nSCRAT_VERDICT: approve\nSCRAT_STATUS: complete";
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      return res.end("data: " + JSON.stringify({ id: "local_" + requests.length, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: request.model,
+        choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 30, total_tokens: 130 } }) + "\n\ndata: [DONE]\n\n");
     }
     const key = `${context.item.number}/${request.model === config.storefront.model?.model ? config.providers.fixture.models[0].id : request.model}/${consolidating}/${context.database?.container ?? ""}`;
     const step = steps.get(key) ?? 0; steps.set(key, step + 1);
@@ -236,7 +246,7 @@ export async function fixture(scenario, spec) {
     if (review && scenario === "scope_snapshots" && step === 0) tool = { name: "read_base", args: { path: "src/deleted.ts" } };
     if (review && scenario === "scope_snapshots" && step === 1) tool = { name: "read", args: { path: " leading.ts" } };
     if (review && scenario === "scope_snapshots" && step === 2) tool = { name: "read", args: { path: "src/generated.ts" } };
-    if (!review && step === 0 && mode !== "no-change") {
+    if (!review && step === 0 && mode !== "no-change" && mode !== "decision-no-change") {
       const mainSha = () => git(resolve("seed"), "rev-parse", "main");
       tool = mode === "remove-bad" ? { name: "bash", args: { command: "rm -f bad.txt" } }
         : mode === "resolve" ? { name: "bash", args: { command: `git -c user.name=Fixture -c user.email=fixture@example.invalid merge --no-commit ${mainSha()}; printf 'export const value = 300;\\n' > src/app.ts && git add src/app.ts` } }
@@ -247,6 +257,10 @@ export async function fixture(scenario, spec) {
     if (!review && context.database && step === 1) tool = { name: "write", args: { path: "migration.sql", content: "ALTER TABLE identities ADD COLUMN IF NOT EXISTS extra integer;\n" } };
     if (!review && step === 0 && mode.startsWith("feedback-")) tool = { name: "bash", args: { command: `printf 'export const value = ${context.item.number + 10};\\n' > src/app.ts && touch fail-validation` } };
     if (!review && feedback && turnStart && mode === "feedback-fix") tool = { name: "bash", args: { command: "rm -f fail-validation" } };
+    if (!review && step === 0 && mode === "scratch-file") tool = { name: "bash", args: { command: `printf 'export const value = ${context.item.number + 10};\\n' > src/app.ts && printf 'scratch\\n' > scratch.log` } };
+    if (!review && selfReviewFix && turnStart) tool = mode === "scratch-file"
+      ? { name: "bash", args: { command: `printf 'scratch.log\\n' >> .gitignore && printf 'export const value = ${context.item.number + 20};\\n' > src/app.ts` } }
+      : { name: "write", args: { path: "src/app.ts", content: `export const value = ${context.item.number + 20};\n` } };
     if (!review && step === 0 && mode === "heavy") tool = { name: "bash", args: { command: "nohup pnpm verify > log 2>&1 &" } };
     if (!review && step === 0 && mode === "heavy-bg") tool = { name: "bash", args: { command: "mkdir -p .scrat; touch .scrat/heavy-bg &" } };
     if (!review && step === 0 && mode === "heavy-fg") tool = { name: "bash", args: { command: "mkdir -p .scrat; touch .scrat/heavy-fg && printf 'export const value = 11;\\n' > src/app.ts" } };
@@ -274,7 +288,7 @@ export async function fixture(scenario, spec) {
     if (scriptedReply !== undefined) tool = undefined;
     const fumble = !corrected && (mode === "format-once" || (mode === "reviewer-grade-once" && review && !consolidating && request.model.includes("deepseek"))
       || (mode === "consolidation-grade-once" && consolidating));
-    const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : mode === "incomplete-once" && !continued ? "incomplete" : "complete";
+    const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : mode === "decision-no-change" ? "needs_decision" : mode === "incomplete-once" && !continued ? "incomplete" : "complete";
     const obsolete = mode === "obsolete" || mode === "obsolete-transient" || (mode === "obsolete-split" && (consolidating || !request.model.includes("deepseek")));
     const verdict = scenario.startsWith("commit_review") ? (consolidating && verdicts.consolidating) || verdicts[request.model] || verdicts.default : undefined;
     const output = (context.action === "storefront_discover" ? "- `/products/<handle>`: product page with add to cart." : review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : feedback ? "Fixed the validation failure." : "Implemented the change.")
@@ -548,7 +562,7 @@ export async function fixture(scenario, spec) {
   const addPr = (number, branch, login, extra = {}) => { prs.push(githubItem("pr", number, { title: "PR " + number, body: "", user: { login }, head: { ref: branch, sha: git(resolve("remote.git"), "rev-parse", branch), repo: { full_name: "fixture/project" } }, base: { ref: "main", repo: { full_name: "fixture/project" } }, ...extra })); };
   const botComments = (number) => (comments.get(number) ?? []).filter((c) => c.user.login !== "human");
   const written = (type, predicate = () => true) => writes.filter((write) => write.type === type && predicate(write));
-  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, loggie, cloudflare, pat, user, githubApp, modes, verdicts, requests, calls, tokens, slack, rate, issues, prs, comments, reviews, writes, deployments, checkRuns, checkRollups, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
+  return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, loggie, cloudflare, pat, user, githubApp, modes, verdicts, selfReviews, requests, calls, tokens, slack, rate, issues, prs, comments, reviews, writes, deployments, checkRuns, checkRollups, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
     set onModel(value) { onModel = value; },
     set onWrite(value) { onWrite = value; },
     set script(value) { script = value; },

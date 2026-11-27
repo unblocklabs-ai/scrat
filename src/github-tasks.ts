@@ -111,7 +111,7 @@ function repairConfigOf(name: string | undefined) {
     throw new Error(`${name}: config.maxSelfRepairs must be a non-negative integer`);
   }
   return {
-    exhaustedLabel: typeof cfg.exhaustedLabel === "string" ? cfg.exhaustedLabel : null,
+    exhaustedLabel: typeof cfg.exhaustedLabel === "string" && cfg.exhaustedLabel.trim() ? cfg.exhaustedLabel.trim() : null,
     maxSelfRepairs: rawMax as number | undefined,
   };
 }
@@ -269,8 +269,13 @@ async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObse
   const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
   const repairAction = state.kind === "current" && !state.assessment.result.obsolete ? routes.repairFor(state.assessment.result.grade) : undefined;
   const limit = repairConfigOf(repairAction)?.maxSelfRepairs;
+  const publishing = routes.repairs.filter((name) => {
+    const task = latestOf(item.id, name);
+    const run = task?.status === "queued" ? latestRunOfTask(task.id) : undefined;
+    return run?.stage === "publishing" && run.publication.status === "pending" && Boolean(run.publication.commitSha);
+  });
   const repair = planSelfRepair({
-    repairAction, repairActions: routes.repairs, state, feedbackTask: latestOf(item.id, routes.feedback),
+    repairAction, repairActions: routes.repairs, publishing, state, feedbackTask: latestOf(item.id, routes.feedback),
     conflictTask, reviewTask: latest, repairTask: latestOf(item.id, repairAction), count, limit,
   });
   if (repair.limited && state.kind === "current" && !limitLogged.has(state.assessment.originId)) {

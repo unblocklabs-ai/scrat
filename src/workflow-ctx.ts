@@ -189,7 +189,7 @@ export type WorkflowContext = {
     reconcileLabels: (args: { key: string; current: WorkflowItemObserved; desired: string[]; managed: string[] }) => Promise<{ desired: string[]; dryRun?: boolean; previewPath?: string }>;
   };
   review: {
-    run: (spec: Omit<WorkflowPipelineSpec, "acceptance" | "commitPrefix">) => Promise<WorkflowPipelineOutcome>;
+    run: (spec: Omit<WorkflowPipelineSpec, "acceptance" | "commitPrefix" | "acceptDecision">) => Promise<WorkflowPipelineOutcome>;
   };
   change: {
     run: (spec: Omit<WorkflowPipelineSpec, "agent" | "start">) => Promise<WorkflowPipelineOutcome>;

@@ -1,4 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { copyFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { and, eq, isNull } from "drizzle-orm";
 import type { Logger } from "pino";
 import { contextDirOf, evaluateContext, readDiffScope } from "./agent-input.ts";
@@ -9,7 +12,7 @@ import { botName } from "./identity.ts";
 import { runCommands, withValidationSlot } from "./commands.ts";
 import { createRunDatabase, removeRunDatabase } from "./databases.ts";
 import { db } from "./db.ts";
-import { CompetingImplementation, describeError, type ErrorDetails, errorExitCode, redactSecrets } from "./errors.ts";
+import { CompetingImplementation, describeError, type ErrorDetails, errorExitCode, ifMissing, redactSecrets, SupersededError } from "./errors.ts";
 import { recordEvent } from "./events.ts";
 import { bestEffort } from "./logging.ts";
 import { conventionalTitle, git, headOf, hasPendingMerge, isAncestor, mergeBase, prepareTarget, remoteBranchHead, shortSha } from "./git.ts";
@@ -17,8 +20,10 @@ import { freshness, savedEvaluation } from "./freshness.ts";
 import { executePi } from "./pi.ts";
 import { remoteUrl } from "./repository.ts";
 import { getRun, inferenceRunOf, latestSessionRun, updateRun } from "./run-history.ts";
-import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint, InterruptedError } from "./results.ts";
-import { subjects, workspaces, type Workspace } from "./schema.ts";
+import { assertComplete, type AgentResult, CheckFailure, hasValidationCheckpoint, InterruptedError, SecretLeakError } from "./results.ts";
+import { workflowOf } from "./workflow-registry.ts";
+import { activeSelfReview, type SelfReviewCritic } from "./workflows.ts";
+import { type Run, subjects, workspaces, type Workspace } from "./schema.ts";
 import { childEnvironment } from "./secrets.ts";
 import { assertCurrentImplementation } from "./tasks.ts";
 import { assertNoCommittedSecrets, checkpointMatches, checkpointWorkspace, commitWorkspace, createWorkspace, expectedBranchHead, getWorkspace, pinWorkspaceBase, removeWorkspace, stageTree, validateWorkspace, workspaceMatchesCommit } from "./workspaces.ts";
@@ -126,7 +131,7 @@ type Change = {
   database: Awaited<ReturnType<typeof createRunDatabase>> | undefined;
   environment: Environment; commandEnvironment: Environment;
   result: AgentResult | null; validated: boolean; validationFailure: ErrorDetails | undefined;
-  agentInput: { contextDir: string; revisions: Record<string, string> } | undefined;
+  agentInput: { contextDir: string; revisions: Record<string, string>; files?: Record<string, string> } | undefined;
 };
 
 async function targetOf(p: Change, headSha = p.headSha) {
@@ -319,9 +324,82 @@ async function correctionRound({ run, operation, manifest, stop }: Ctx, p: Chang
   updateRun(run.id, { stage: "agent" });
   const followUp = await executePi({ run, cwd: p.workspace.path, tools: manifest.tools, scoped: manifest, log: operation.log, environment: p.environment, ...p.agentInput, stop }, { context: "", sessionFile, followUp: await validationMessage(error, round, run.id, p.agentInput?.contextDir, stop, operation.log) });
   const corrected = { ...followUp, text: `${result.text}\n\n**Validation correction ${round}:** ${followUp.text}`, paths: [...new Set([...result.paths, ...followUp.paths])] };
+  assertComplete(corrected, manifest.acceptDecision);
   updateRun(run.id, { result: corrected, stage: "validating" });
-  assertComplete(corrected);
   return corrected;
+}
+
+const selfReviewSkill = fileURLToPath(new URL("../workflows/address_review/SELF_REVIEW.md", import.meta.url));
+
+async function hasCandidateChanges({ workspace, startHeadSha }: Change) {
+  return await headOf(workspace.path) !== startHeadSha || Boolean(await git(workspace.path, ["status", "--porcelain"]));
+}
+
+async function candidateCommit({ workspace, startHeadSha }: Change) {
+  const gitDir = join(workspace.path, ".git");
+  const index = join(gitDir, `scrat-self-review-index-${randomUUID()}`);
+  const env = { ...childEnvironment(), GIT_INDEX_FILE: index };
+  try {
+    if (!await ifMissing(copyFile(join(gitDir, "index"), index).then(() => true), false)) await git(workspace.path, ["read-tree", "HEAD"], env);
+    await git(workspace.path, ["add", "--all"], env);
+    const tree = await git(workspace.path, ["write-tree"], env);
+    await assertNoCommittedSecrets(workspace, startHeadSha, tree);
+    const { name, email } = botAuthor();
+    return await git(workspace.path, ["-c", `user.name=${name}`, "-c", `user.email=${email}`, "commit-tree", tree, "-p", "HEAD", "-m", "Self-review candidate"]);
+  } finally {
+    await rm(index, { force: true });
+  }
+}
+
+async function critique({ run, task, operation, stop }: Ctx, p: Change, item: NonNullable<Run["context"]>["item"], diffBaseSha: string, critic: SelfReviewCritic, round: number) {
+  const { workspace, mainSha, startHeadSha, agentInput } = p;
+  const { contextDir, files = {} } = agentInput!;
+  const head = await candidateCommit(p);
+  const repair = join(contextDir, `self-review-${round}-repair.md`);
+  await writeFile(repair, redactSecrets(p.result!.text));
+  const context = JSON.stringify({
+    action: task.action,
+    selfReview: { round, maxRounds: critic.maxRounds },
+    item,
+    workspace: { path: workspace.path, branch: workspace.branch, mainSha, headSha: head },
+    diffBaseSha, previous: { headSha: startHeadSha },
+    files: { ...files, repair },
+  }, null, 2);
+  const { provider, model, thinkingLevel } = critic;
+  return executePi({
+    run: { ...run, skill: selfReviewSkill, provider, model, thinkingLevel }, cwd: workspace.path, tools: ["read", "grep", "find", "ls", "git", "read_base"], scoped: { mode: "review" },
+    contextDir, baseSha: diffBaseSha, revisions: { head, base: diffBaseSha, main: mainSha, previousHead: startHeadSha }, log: operation.log, stop,
+  }, { context, selfReview: true, onSession: ({ piSessionId }) => operation.log.info({ event: "self_review.started", round, piSessionId }) });
+}
+
+function selfReviewMessage(findings: string, round: number, maxRounds: number) {
+  return `${botName}'s pre-push self-review (round ${round} of ${maxRounds}) found problems in your repair before it was validated and pushed:\n\n${findings}\n\nVerify each finding against current source. Fix the valid ones at their root cause, including sibling callers and parallel paths that share the same contract; reject any that are wrong or already handled, with a \`path:line\` reason. Then return your complete final reply again, updated for these changes (it replaces your earlier reply), with the usual SCRAT_STATUS footer.`;
+}
+
+async function selfReviewStage(ctx: Ctx, p: Change, item: NonNullable<Run["context"]>["item"], diffBaseSha: string) {
+  const { run, task, operation, manifest, stop } = ctx;
+  const critic = activeSelfReview(workflowOf(task.action));
+  if (!critic) return;
+  for (let round = 1; round <= critic.maxRounds; round++) {
+    if (p.result?.outcome !== "complete" || !await hasCandidateChanges(p)) return;
+    stopBefore(stop, "self-review");
+    let verdict: AgentResult;
+    try { verdict = await critique(ctx, p, item, diffBaseSha, critic, round); }
+    catch (error) {
+      if (stop?.aborted || error instanceof InterruptedError || error instanceof SupersededError || error instanceof SecretLeakError) throw error;
+      operation.log.warn({ event: "self_review.skipped", round, err: error }, "Self-review failed; continuing to validation");
+      return;
+    }
+    operation.log.info({ event: "self_review.verdict", round, verdict: verdict.selfReview ?? null, outcome: verdict.outcome });
+    if (verdict.outcome !== "complete" || verdict.selfReview !== "revise") return;
+    const sessionFile = getRun(run.id)!.piSessionFile ?? undefined;
+    if (!sessionFile) return;
+    operation.log.warn({ event: "pi.self_review_retry", round });
+    updateRun(run.id, { stage: "agent" });
+    const followUp = await executePi({ run, cwd: p.workspace.path, tools: manifest.tools, scoped: manifest, log: operation.log, environment: p.environment, ...p.agentInput, stop }, { context: "", sessionFile, followUp: selfReviewMessage(verdict.text, round, critic.maxRounds) });
+    p.result = { ...followUp, paths: [...new Set([...p.result.paths, ...followUp.paths])] };
+    updateRun(run.id, { result: p.result, stage: "validating" });
+  }
 }
 
 async function validateStage(ctx: Ctx, p: Change, acceptance: Acceptance) {
@@ -329,8 +407,8 @@ async function validateStage(ctx: Ctx, p: Change, acceptance: Acceptance) {
   const { workspace, validationOnly } = p;
   let { result } = p;
   if (!result) throw new Error("No saved agent result to validate");
-  assertComplete(result);
-  const unchanged = acceptance === "complete" && !p.validated && !validationOnly
+  assertComplete(result, ctx.manifest.acceptDecision);
+  const unchanged = (acceptance === "complete" || result.outcome === "needs_decision") && !p.validated && !validationOnly
     && p.startHeadSha === p.preparedHead && !p.mergeInProgress && await headOf(workspace.path) === p.startHeadSha
     && !await git(workspace.path, ["status", "--porcelain"]);
   if (unchanged) updateRun(run.id, { publication: { status: "pending", commitSha: p.startHeadSha }, stage: "publishing" });
@@ -381,16 +459,17 @@ async function agentStage(ctx: Ctx, observed: Observed, p: Change, acceptance: A
   const merged = await prepareChangeCommands(ctx, observed, p) || mergedBehind;
   stopBefore(stop, "the agent");
   updateRun(run.id, { stage: "agent" });
-  const { result, contextDir, revisions } = await runAgent(ctx, {
+  const { result, contextDir, revisions, files } = await runAgent(ctx, {
     environment, sessionFile: latestSessionRun(workspace.id, run.taskId, run.id)?.piSessionFile ?? undefined,
     input: {
       workspace, evaluated, diffBaseSha: merged ? mainSha : diffBaseSha, diffPaths, mainSha, headSha: p.headSha, baseRef: mainSha, mergeInProgress: p.mergeInProgress, validationFailure: p.validationFailure,
       database: database ? { ...database, environment, schemaPrepared: !p.deferred, prepare: config.workspace.prepare, migrate: p.databaseConfig?.migrate } : undefined,
     },
   });
-  p.agentInput = { contextDir, revisions };
+  p.agentInput = { contextDir, revisions, files };
   p.result = result;
   updateRun(run.id, { result: p.result, stage: "validating" });
+  await selfReviewStage(ctx, p, evaluated.item, merged ? mainSha : diffBaseSha);
 }
 
 export async function changeRun(ctx: Ctx, observed: Observed, resumingDeferred: boolean) {

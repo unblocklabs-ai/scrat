@@ -150,7 +150,7 @@ export async function reviewRun(ctx: Ctx, observed: Observed | undefined) {
   const { result } = await runAgent(ctx, {
     environment, baseSha: changeContext ? review.diffBaseSha : undefined,
     panel: manifest.agent === "panel" ? {
-      baseSha: review.diffBaseSha, requireGrade: !changeContext,
+      baseSha: review.diffBaseSha, requireGrade: !changeContext, configuredReviewers: manifest.reviewers,
       beforeReview: (storefront) => reuseReviewers(ctx, mainSha, headSha, evaluated.revision, storefront),
     } : undefined,
     input: { workspace: review.workspace, evaluated, diffBaseSha: review.diffBaseSha, diffPaths, mainSha: review.mainSha, headSha: review.headSha, baseRef: review.mainSha, mergeInProgress: false, baseOnly },

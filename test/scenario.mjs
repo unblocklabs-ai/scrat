@@ -5515,7 +5515,7 @@ fi
     assert.deepEqual(outcome(regression), { grade: "C", storefront: "regression", line: false, label: ["C · Needs work"] });
     const [correction] = corrections(regression.requests);
     assert.equal(corrections(regression.requests).length, 1); assert.equal(correction.consolidating, true);
-    assert.match(JSON.stringify(correction.request.messages.at(-1)), /SCRAT_STOREFRONT: regression caps the grade at C.*SCRAT_STOREFRONT: verified, regression, or unavailable \(required for a complete review\)\\nSCRAT_GRADE/);
+    assert.match(JSON.stringify(correction.request.messages.at(-1)), /SCRAT_STOREFRONT: regression caps the grade at C.*SCRAT_STOREFRONT: verified, regression, or unavailable \(required for a complete review\)\\nSCRAT_OBSOLETE: [^\\]*\\nSCRAT_GRADE/);
     assert.deepEqual(regression.run.reviewers.map((reviewer) => [reviewer.result.storefront, reviewer.result.grade]), [["regression", "A"], ["regression", "A"]], "reviewers are not capped; the consolidated grade is");
 
     const flip = await reviewOf("storefront-flip");
@@ -7317,6 +7317,59 @@ fi
       if (previous.url === undefined) delete process.env.D1_URL;
       server.closeAllConnections(); await new Promise((done) => server.close(done));
     }
+  } },
+  obsolete_pr_autoclose: { title: "a review that finds a PR already resolved on main flags it; only a Scrat PR whose two reviewers and consolidation all confirm it, including a base-only review escalated to the panel, closes its linked issue with one marked comment and then the PR, resumes a failed close from its receipts, and never queues a self-repair", configure: [(config) => { config.workflows.resolve_conflicts.enabled = false; config.workflows.review_issue.enabled = false; }], run: async () => {
+    const [primary, secondary] = f.config.workflows.review_pr.reviewers.map((reviewer) => reviewer.model);
+    const pr = (n) => f.prs.find((candidate) => candidate.number === n);
+    const repairs = (n) => all(s.tasks).filter((t) => t.action === "address_review" && t.subjectId === all(s.items).find((i) => i.kind === "pr" && i.payload.number === n).id);
+    const closes = (type, n) => f.written(type, (w) => w.number === n && w.state === "closed").length;
+    const marked = (issue, n) => (f.comments.get(issue) ?? []).filter((c) => c.body.endsWith(`<!-- scrat-obsolete-pr:${n} -->`));
+    const publication = (r) => f.row(s.runs, r.id).publication;
+
+    await implement(3); f.reset(203, "normal"); await route(); await success();
+    changeMain("src/app.ts", "export const value = 13;\n"); f.reset(203, "obsolete"); await route();
+    const queued = all(s.tasks).filter((t) => t.status === "queued" && t.action === "review_pr");
+    assert.equal(queued.length, 1); assert.equal(queued[0].input.baseOnly, true);
+    let mark = f.requests.length; const escalated = await success();
+    const seen = f.requests.slice(mark).filter((r) => r.context.action === "review_pr");
+    assert.ok(seen.some((r) => !r.consolidating && r.request.model === primary) && seen.some((r) => r.request.model === secondary) && seen.some((r) => r.consolidating), "an obsolete base-only review escalates to the second reviewer and consolidation");
+    assert.ok(seen.find((r) => r.consolidating).text.includes("A review with obsolete: true reported SCRAT_OBSOLETE: true"));
+    assert.deepEqual(escalated.reviewers.map((r) => [r.model, r.result.obsolete]), [[primary, true], [secondary, true]]);
+    assert.equal(escalated.result.obsolete, true); assert.equal(escalated.result.grade, "C");
+    assert.equal(f.issues.get(3).state, "closed"); assert.equal(f.issues.get(3).state_reason, "completed");
+    assert.equal(marked(3, 203).length, 1); assert.match(marked(3, 203)[0].body, /already resolved on `main` \(verified while reviewing PR #203\)/);
+    assert.equal(pr(203).state, "closed"); assert.equal(f.botComments(203).length, 1);
+    assert.deepEqual([publication(escalated).closedIssueNumber, publication(escalated).closedPullRequest, publication(escalated).status], [3, true, "published"]);
+    assert.equal(repairs(203).length, 0); await route(); assert.equal(repairs(203).length, 0);
+
+    f.addIssue(1); branchOff("human-fix", "src/app.ts", "export const value = 2;\n");
+    f.addPr(301, "human-fix", "human", { body: "Fixes #1" }); f.reset(301, "obsolete"); await route();
+    const human = await success();
+    assert.ok(human.reviewers.every((r) => r.result.obsolete) && human.result.obsolete);
+    assert.equal(f.botComments(301).length, 1); assert.equal(pr(301).state, "open"); assert.equal(f.issues.get(1).state, "open");
+    assert.equal(closes("pr_update", 301) + closes("issue_update", 1), 0, "a human PR is flagged, never closed");
+
+    await implement(2); f.reset(202, "obsolete-split"); await route();
+    const split = await success();
+    assert.deepEqual(split.reviewers.map((r) => Boolean(r.result.obsolete)), [true, false]); assert.equal(split.result.obsolete, true);
+    assert.equal(pr(202).state, "open"); assert.equal(f.issues.get(2).state, "open"); assert.equal(marked(2, 202).length, 0);
+    await route(); assert.equal(repairs(202).length, 0, "an obsolete assessment never queues self-repair");
+
+    await implement(4); f.reset(204, "obsolete"); f.faults.close.add("pulls/204"); await route();
+    const failed = await run(); assert.ok(failed.error); assert.equal(failed.stage, "publishing");
+    assert.equal(f.issues.get(4).state, "closed"); assert.equal(pr(204).state, "open");
+    assert.equal(publication(failed).closedIssueNumber, 4); assert.equal(publication(failed).closedPullRequest, undefined);
+    mark = f.requests.length; tasks.retryTask(failed.taskId); const resumed = await success();
+    assert.equal(f.requests.length, mark, "publication retry runs no inference");
+    assert.equal(pr(204).state, "closed"); assert.equal(publication(resumed).closedPullRequest, true);
+    assert.equal(marked(4, 204).length, 1); assert.equal(closes("issue_update", 4), 1, "the receipt keeps a retry from commenting on or closing the issue again");
+
+    const { config: live } = await f.app("config.ts"); live.workflows.review_pr.config = { autoCloseObsolete: false };
+    await implement(5); f.reset(205, "obsolete"); await route();
+    const disabled = await success();
+    assert.ok(disabled.reviewers.every((r) => r.result.obsolete) && disabled.result.obsolete);
+    assert.equal(pr(205).state, "open"); assert.equal(f.issues.get(5).state, "open"); assert.equal(closes("pr_update", 205) + closes("issue_update", 5), 0);
+    await route(); assert.equal(repairs(205).length, 0);
   } },
 };
 

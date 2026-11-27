@@ -220,6 +220,7 @@ export function validateWorkflowConfig(cfg: Record<string, unknown>, mode: "revi
     problems.push("config.maxSelfRepairs must be a non-negative integer");
   }
   if (cfg.critique !== undefined) problems.push(...critiqueProblems(cfg.critique));
+  if (cfg.autoCloseObsolete !== undefined && typeof cfg.autoCloseObsolete !== "boolean") problems.push("config.autoCloseObsolete must be a boolean");
   for (const key of ["maxRangeCommits", "browserSteps", "browserSeconds", "maxFindings", "maxCommentChars"] as const) {
     const val = cfg[key];
     if (val !== undefined && (!Number.isInteger(val) || (val as number) < 1)) {

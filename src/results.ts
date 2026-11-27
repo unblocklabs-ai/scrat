@@ -47,6 +47,7 @@ export type AgentResult = {
   outcome: typeof outcomes[number];
   grade?: PrGrade;
   verdict?: ReviewVerdict;
+  obsolete?: boolean;
   storefront?: typeof storefrontResults[number];
   issues?: ReportedIssue[];
   labels?: LabelSelection[];
@@ -135,7 +136,7 @@ function popFooter<T extends string>(lines: string[], token: string, values: rea
 }
 
 export function footerRules(requireGrade: boolean, storefront: boolean, requireLabels = false) {
-  return `SCRAT_READY (optional, only when ready)\n${requireLabels ? 'SCRAT_LABELS: [{"category":"...","name":"..."}] (required for a complete classification; exactly one configured choice per category)\n' : ""}${storefront ? `SCRAT_STOREFRONT: ${anyOf(storefrontResults)} (required for a complete review)\n` : ""}SCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of ${prGrades.join(", ")}, with no plus or minus)\nSCRAT_VERDICT: ${anyOf(reviewVerdicts)} (only when your instructions ask for it)\nSCRAT_STATUS: ${anyOf(outcomes)} (required, and the very last line)`;
+  return `SCRAT_READY (optional, only when ready)\n${requireLabels ? 'SCRAT_LABELS: [{"category":"...","name":"..."}] (required for a complete classification; exactly one configured choice per category)\n' : ""}${storefront ? `SCRAT_STOREFRONT: ${anyOf(storefrontResults)} (required for a complete review)\n` : ""}SCRAT_OBSOLETE: true or false (optional; emit true only when your instructions confirm the PR's underlying issue is already completely resolved on main)\nSCRAT_GRADE: X (${requireGrade ? "required for a complete review; " : "optional; "}X is exactly one of ${prGrades.join(", ")}, with no plus or minus)\nSCRAT_VERDICT: ${anyOf(reviewVerdicts)} (only when your instructions ask for it)\nSCRAT_STATUS: ${anyOf(outcomes)} (required, and the very last line)`;
 }
 
 const isLabelSelections = (value: unknown): value is LabelSelection[] => Array.isArray(value) && value.every((choice: unknown) =>
@@ -165,6 +166,7 @@ export function parseResult(output: string, paths: string[], { requireGrade = fa
   if (!outcome) throw new ResultFormatError(`Pi must end its response with SCRAT_STATUS: ${anyOf(outcomes)}`);
   const verdict = popFooter(lines, "SCRAT_VERDICT", reviewVerdicts);
   const grade = popFooter(lines, "SCRAT_GRADE", prGrades);
+  const obsolete = popFooter(lines, "SCRAT_OBSOLETE", ["true", "false"]) === "true";
   const storefront = popFooter(lines, "SCRAT_STOREFRONT", storefrontResults);
   const labels = popLabelSelections(lines);
   const ready = lines.at(-1)?.trim() === "SCRAT_READY";
@@ -174,7 +176,7 @@ export function parseResult(output: string, paths: string[], { requireGrade = fa
   if (!text) throw new ResultFormatError("Pi returned no report");
   if (requireGrade && outcome === "complete" && !grade) throw new ResultFormatError("A complete consolidated PR review must include SCRAT_GRADE");
   if (labelCategories && outcome === "complete") validateLabelSelections(labels, labelCategories);
-  return { text, ready, paths, outcome, grade, verdict, storefront, ...labels ? { labels } : {}, issues: issues.length ? issues : undefined };
+  return { text, ready, paths, outcome, grade, verdict, storefront, ...obsolete && { obsolete: true }, ...labels ? { labels } : {}, issues: issues.length ? issues : undefined };
 }
 
 export function storefrontProblem({ storefront, grade }: AgentResult, regressionMaxGrade: PrGrade, regressionReported: boolean) {

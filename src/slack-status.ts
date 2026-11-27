@@ -21,6 +21,8 @@ function messageFor(event: JournalEvent, subject: Pick<Subject, "repository">): 
     case "github.comment_updated": return `Updated ${link(event.data.url, "a comment")}`;
     case "github.pull_request_created": return `Opened ${link(event.data.url, `pull request #${event.data.pullRequestNumber}`)}`;
     case "github.issue_created": return `Created ${link(event.data.url, `issue #${event.data.issueNumber}`)}`;
+    case "github.issue_closed": return `Closed ${link(event.data.url, `issue #${event.data.issueNumber}`)}`;
+    case "github.pull_request_closed": return `Closed ${link(event.data.url, `pull request #${event.data.pullRequestNumber}`)}`;
     case "github.labels_added": return `Added labels: ${escapeSlack(event.data.labels.join(", "))}`;
     case "github.label_removed": return `Removed label: ${escapeSlack(event.data.label)}`;
     case "workspace.pushed": return `Pushed ${link(`https://github.com/${subject.repository}/commit/${event.data.commitSha}`, shortSha(event.data.commitSha))}`;

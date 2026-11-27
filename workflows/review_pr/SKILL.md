@@ -25,6 +25,10 @@ Follow changed contracts through persisted records, wire formats, configuration 
 
 Report only defensible findings tied to changed code and reachable behavior or a concrete maintenance burden. Exclude style preferences, unrelated preexisting issues and speculative risks. Do not repeat known tracked failures or concerns explicitly acknowledged in the supplied thread as new findings. Acknowledgment does not resolve a shipping risk: retain remaining material risks and blockers in the assessment.
 
+## Issue relevance
+
+Check whether the problem this PR addresses still exists on the base branch. Compare the defects and acceptance criteria named in the PR body and `files.issue` (when present) against current base-branch source with `git` `show` at `revision=main`; `read_base` and `revision=base` show the merge base, which can predate a fix that landed later. When every material defect or acceptance criterion the PR addresses is already completely resolved on the base branch outside this PR, and the PR adds no remaining needed fix, hardening or regression test the base lacks, the PR is obsolete: lead the assessment with that conclusion and cite the exact `path:line` or symbol on the base branch that resolves each point, then emit `SCRAT_OBSOLETE: true` immediately before the `SCRAT_GRADE` line. Never emit it for a partial resolution, an unverified assumption, or a PR that still closes a real gap on the base branch.
+
 ## Findings and patch judgment
 
 Order findings by severity: P1 breaks functionality or security; P2 is a likely correctness or reliability failure on a normal path; P3 is a material maintainability problem. A failure that needs two independent faults, unusual timing between concurrent actors or a retry spanning a deploy is a follow-up and does not lower the grade unless it loses data, breaks authorization or repeats an external side effect. Reserve P0 for exceptional critical defects with concrete evidence. When `files.issue` is present, it is the issue this PR closes: grade scope against it, reporting material work outside the issue as P3 and a missing acceptance criterion as P2. Each finding needs a precise location on the supplied head (or base for deleted code), triggering condition, affected consumer, impact, concise proof, introduced/preexisting distinction and the smallest fix; never prescribe a new mechanism (claim, checkpoint, reconciliation job) for a failure mode the base already had. Write locations as `path:line` in backticks, never as Markdown links. Never invent a command, exit status or test pass.
@@ -55,7 +59,7 @@ For a complete review, include exactly one machine-readable `SCRAT_GRADE: <grade
 
 In the assessment, add a short Storefront part: which pages you checked and why, what you verified on the preview (page, device, evidence), what you could not verify and why, any unconfirmed candidates as such, and each confirmed regression as a finding with its page, device and screenshot paths. Name screenshots by path; never embed them. Grade a confirmed regression by the rubric like any finding; the grade can be no better than `regressionMaxGrade`.
 
-End with exactly one `SCRAT_STOREFRONT: <result>` line immediately before the `SCRAT_GRADE` line: `regression` when at least one regression is confirmed; `verified` when you checked the preview and confirmed none, whether or not the fix held (the findings cover that); or `unavailable` when you could not check the preview at all. An unconfirmed candidate is never `regression`.
+End with exactly one `SCRAT_STOREFRONT: <result>` line immediately before the `SCRAT_GRADE` line, or before `SCRAT_OBSOLETE` when you emit it: `regression` when at least one regression is confirmed; `verified` when you checked the preview and confirmed none, whether or not the fix held (the findings cover that); or `unavailable` when you could not check the preview at all. An unconfirmed candidate is never `regression`.
 
 {{/storefront}}
 ## Previous assessment

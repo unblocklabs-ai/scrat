@@ -57,7 +57,7 @@ export async function fixture(scenario, spec) {
   if (scenario.startsWith("commit_review") || scenario === "store_audit" || scenario === "store_changes" || scenario === "recovery" || scenario === "isolation" || scenario.startsWith("slack_status") || scenario === "publish_effects" || scenario === "workflows") process.env.SLACK_BOT_TOKEN = ["xoxb", "1234567890", "fixtureSlackToken"].join("-");
   process.env.PI_CODING_AGENT_DIR = resolve("pi-agent"); mkdirSync("pi-agent");
   const verdicts = {}, modes = new Map(), steps = new Map(), requests = [], calls = [], rate = { limit: 5000, remaining: 5000, reset: Math.floor(Date.now() / 1000) + 3600 }, issues = new Map(), checkRuns = new Map(), prs = [], comments = new Map(), reviews = new Map(), writes = [], deployments = [];
-  const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set(), permissions: new Set(), commitComment: new Set() };
+  const faults = { label: new Set(), comment: new Set(), pr: new Set(), cleanup: new Set(), issue: new Set(), permissions: new Set(), commitComment: new Set(), close: new Set() };
   const checkRollups = new Map();
   const graphqlRate = { ...rate };
   const tokens = new Map(patMode ? [[pat, { issues: "write", pull_requests: "write", contents: "write" }]] : []);
@@ -274,6 +274,7 @@ export async function fixture(scenario, spec) {
     const fumble = !corrected && (mode === "format-once" || (mode === "reviewer-grade-once" && review && !consolidating && request.model.includes("deepseek"))
       || (mode === "consolidation-grade-once" && consolidating));
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : mode === "incomplete-once" && !continued ? "incomplete" : "complete";
+    const obsolete = mode === "obsolete" || (mode === "obsolete-split" && (consolidating || !request.model.includes("deepseek")));
     const verdict = scenario.startsWith("commit_review") ? (consolidating && verdicts.consolidating) || verdicts[request.model] || verdicts.default : undefined;
     const output = (context.action === "storefront_discover" ? "- `/products/<handle>`: product page with add to cart." : review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : feedback ? "Fixed the validation failure." : "Implemented the change.")
       + (review && mode.startsWith("grade-") ? ` (${mode})` : "")
@@ -286,7 +287,8 @@ export async function fixture(scenario, spec) {
       + (mode === "revised" ? "\nRevised after the latest changes." : "")
       + (mode === "ready" ? "\nSCRAT_READY" : "")
       + (text?.includes("\n## Storefront preview\n") && storefrontLine ? `\nSCRAT_STOREFRONT: ${storefrontLine}` : "")
-      + (["review_pr", "my_pr_review"].includes(context.action) && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : storefrontGrade ?? (["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : mode === "grade-C" ? "C" : "B")}` : "")
+      + (obsolete ? "\nSCRAT_OBSOLETE: true" : "")
+      + (["review_pr", "my_pr_review"].includes(context.action) && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : storefrontGrade ?? (["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : ["grade-C", "obsolete", "obsolete-split"].includes(mode) ? "C" : "B")}` : "")
       + (verdict ? `\nSCRAT_VERDICT: ${verdict}` : "")
       + (mode === "no-status" || (fumble && mode === "format-once" && !review) ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
     const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] } : { role: "assistant", content: scriptedReply ?? output };
@@ -434,6 +436,15 @@ export async function fixture(scenario, spec) {
     if (match && method === "GET") {
       const item = (match[1] === "issues" ? issues.get(Number(match[2])) : undefined) ?? prs.find((pr) => pr.number === Number(match[2]));
       return item ? reply(match[1] === "pulls" ? { ...item, base: { sha: headOf(item.base.ref), ...item.base } } : item) : reply({ message: "Not Found" }, 404);
+    }
+    if (match && method === "PATCH") {
+      const n = Number(match[2]), item = match[1] === "issues" ? issues.get(n) ?? prs.find((pr) => pr.number === n) : prs.find((pr) => pr.number === n);
+      if (!item) return reply({ message: "Not Found" }, 404);
+      if (!can(match[1] === "pulls" || !issues.has(n) ? "pull_requests" : "issues")) return reply({ message: "Resource not accessible by integration" }, 403);
+      writes.push({ type: match[1] === "pulls" ? "pr_update" : "issue_update", number: n, state: body.state, stateReason: body.state_reason });
+      if (faults.close.delete(`${match[1]}/${n}`)) return reply({ message: "Service unavailable" }, 503);
+      Object.assign(item, body.state && { state: body.state }, body.state_reason && { state_reason: body.state_reason });
+      return reply(item);
     }
     match = path.match(/\/pulls\/(\d+)\/reviews$/);
     if (match) return reply(reviews.get(Number(match[1])) ?? []);

@@ -1,5 +1,5 @@
-import { upsertComment } from "./comments.ts";
-import { getRepositoryPath } from "./config.ts";
+import { findBotMarkedComment, upsertComment } from "./comments.ts";
+import { getRepositoryPath, isBotLogin } from "./config.ts";
 import { redactSecrets } from "./errors.ts";
 import type { EventReferences } from "./events.ts";
 import { git } from "./git.ts";
@@ -7,14 +7,15 @@ import type { GitHubRepository } from "./github.ts";
 import type { GithubContext } from "./github-types.ts";
 import { botName } from "./identity.ts";
 import { gradeLabels, reconcileLabels } from "./labels.ts";
-import { acknowledgedTaskIds, isIssueComment, issueCommentId, parseIssueCommentId, reviewMarker, taskMarker, withMarker } from "./markers.ts";
+import { acknowledgedTaskIds, isIssueComment, issueCommentId, obsoleteCloseMarker, parseIssueCommentId, reviewMarker, taskMarker, withMarker } from "./markers.ts";
 import { logger } from "./logging.ts";
 import { observe, type ItemObservation } from "./observation.ts";
 import { prReviewHistory, resolvePrReview, type PrReviewState } from "./pr-assessment.ts";
-import { getRun, runHistory, runText, updateRun } from "./run-history.ts";
+import { getRun, inferenceRunOf, issueOfPullRequest, runHistory, runText, updateRun } from "./run-history.ts";
 import type { Run } from "./schema.ts";
 import { serialized } from "./single-flight.ts";
 import { latestTask } from "./tasks.ts";
+import { workflowOf } from "./workflow-registry.ts";
 
 const pendingReviews = new Map<string, Promise<unknown>>();
 
@@ -33,6 +34,31 @@ function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeo
   const taskIds = new Set(reviews.map(({ task }) => task.id));
   return issueComments.findLast((comment) => acknowledgedTaskIds(comment.body)
     .some((id) => taskIds.has(id) && comment.body.trimEnd().endsWith(`${reviewMarker}\n${taskMarker(id)}`)));
+}
+
+const closingReference = /(?:^|\s)(?:closes|fixes|resolves)\s+#(\d+)\b/i;
+
+async function closeObsolete(github: GitHubRepository, number: number, { item }: GithubContext, baseBranch: string, desired: Extract<PrReviewState, { kind: "current" }>["assessment"], references: EventReferences) {
+  if (workflowOf(desired.task.action).config.autoCloseObsolete !== true || !desired.result.obsolete) return;
+  if (!("head" in item) || !isBotLogin(item.user?.login) || item.state !== "open") return;
+  const { reviewers } = inferenceRunOf(getRun(desired.run.id)!);
+  if (reviewers.length !== 2 || !reviewers.every((reviewer) => reviewer.result?.obsolete === true)) return;
+  const receipts = () => getRun(desired.run.id)!.publication;
+  const referenced = closingReference.exec(item.body ?? "")?.[1];
+  const linked = issueOfPullRequest(github.repository, number)?.number ?? (referenced ? Number(referenced) : undefined);
+  if (linked !== undefined && !receipts().closedIssueNumber) {
+    const issue = await github.fetchItemContext("issue", linked);
+    if (!/\/pull\/\d+$/.test(issue.item.html_url) && issue.item.state === "open") {
+      const marker = obsoleteCloseMarker(number);
+      const body = withMarker(`Closing this issue as already resolved on \`${baseBranch}\` (verified while reviewing PR #${number}). See PR #${number} for source evidence.`, marker);
+      await upsertComment(github, linked, findBotMarkedComment(issue.comments, marker), body, references);
+      await github.closeIssue(linked, "completed", references);
+    }
+    updateRun(desired.run.id, { publication: { ...receipts(), closedIssueNumber: linked } });
+  }
+  if (receipts().closedPullRequest) return;
+  await github.closePullRequest(number, references);
+  updateRun(desired.run.id, { publication: { ...receipts(), closedPullRequest: true } });
 }
 
 export type ResolvedReview = { reviews: ReturnType<typeof runHistory>; state: PrReviewState; mainSha: string };
@@ -84,6 +110,7 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
   }, deliveryReferences);
   if (desired) updateRun(desired.run.id, { publication: { ...desired.run.publication, commentId, status: "published" } });
   if (publication && publication.run.id !== desired?.run.id) updateRun(publication.run.id, { publication: { ...publication.run.publication, status: "not_needed" } });
+  if (desired) await closeObsolete(github, number, current, observation.baseBranch, desired, deliveryReferences);
 }
 
 export const serializePr = <T>(github: GitHubRepository, number: number, work: () => Promise<T>) =>

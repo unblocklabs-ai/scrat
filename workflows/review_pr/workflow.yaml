@@ -17,6 +17,8 @@ defaults:
     - { provider: codex-lb, model: deepseek/deepseek-v4.1-flash, thinkingLevel: high }
   tools: [read, grep, find, ls, git, read_base, browser]
   retry: { initialDelaySeconds: 60, maxDelaySeconds: 3600 }
+config:
+  autoCloseObsolete: true
 permissions:
   github: [read, comment, label]
   workspace: [read]

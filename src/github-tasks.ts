@@ -262,7 +262,7 @@ async function routePrReview(ctx: SyncContext, item: Item, observation: ItemObse
     action, keepManual: true, unlessTarget: `${observation.item.head.sha}@${observation.baseBranch}`,
   });
   const count = db.select({ count: items.selfRepairCount }).from(items).where(eq(items.id, item.id)).get()!.count;
-  const repairAction = routes.repairFor(state.kind === "current" ? state.assessment.result.grade : undefined);
+  const repairAction = state.kind === "current" && !state.assessment.result.obsolete ? routes.repairFor(state.assessment.result.grade) : undefined;
   const limit = repairConfigOf(repairAction)?.maxSelfRepairs;
   const repair = planSelfRepair({
     repairAction, repairActions: routes.repairs, state, feedbackTask: latestOf(item.id, routes.feedback),

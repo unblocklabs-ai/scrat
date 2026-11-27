@@ -166,8 +166,12 @@ export function parseResult(output: string, paths: string[], { requireGrade = fa
   if (!outcome) throw new ResultFormatError(`Pi must end its response with SCRAT_STATUS: ${anyOf(outcomes)}`);
   const verdict = popFooter(lines, "SCRAT_VERDICT", reviewVerdicts);
   const grade = popFooter(lines, "SCRAT_GRADE", prGrades);
-  const obsolete = popFooter(lines, "SCRAT_OBSOLETE", ["true", "false"]) === "true";
+  const obsoleteValues = ["true", "false"] as const;
+  let obsoleteLine = popFooter(lines, "SCRAT_OBSOLETE", obsoleteValues);
   const storefront = popFooter(lines, "SCRAT_STOREFRONT", storefrontResults);
+  obsoleteLine ??= popFooter(lines, "SCRAT_OBSOLETE", obsoleteValues);
+  if (lines.some((line) => line.trim().startsWith("SCRAT_OBSOLETE:"))) throw new ResultFormatError("SCRAT_OBSOLETE must appear at most once, in the footer immediately before SCRAT_GRADE");
+  const obsolete = obsoleteLine === "true";
   const labels = popLabelSelections(lines);
   const ready = lines.at(-1)?.trim() === "SCRAT_READY";
   if (ready) lines.pop();
@@ -180,7 +184,7 @@ export function parseResult(output: string, paths: string[], { requireGrade = fa
 }
 
 export function storefrontProblem({ storefront, grade }: AgentResult, regressionMaxGrade: PrGrade, regressionReported: boolean) {
-  if (!storefront) return "A complete storefront review must include SCRAT_STOREFRONT immediately before SCRAT_GRADE";
+  if (!storefront) return "A complete storefront review must include SCRAT_STOREFRONT immediately before SCRAT_GRADE, or before SCRAT_OBSOLETE when present";
   if (regressionReported && storefront !== "regression") return "An earlier answer reported SCRAT_STOREFRONT: regression; keep that line and lower the grade instead of changing the result";
   if (storefront === "regression" && grade && prGrades.indexOf(grade) < prGrades.indexOf(regressionMaxGrade)) {
     return `SCRAT_STOREFRONT: regression caps the grade at ${regressionMaxGrade}; lower SCRAT_GRADE and the grade in the assessment to ${regressionMaxGrade} or below and keep the confirmed regression among the findings`;

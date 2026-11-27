@@ -7342,6 +7342,41 @@ fi
     assert.deepEqual([publication(escalated).closedIssueNumber, publication(escalated).closedPullRequest, publication(escalated).status], [3, true, "published"]);
     assert.equal(repairs(203).length, 0); await route(); assert.equal(repairs(203).length, 0);
 
+    await implement(6); f.reset(206, "normal"); await route(); await success();
+    changeMain("src/app.ts", "export const value = 16;\n"); f.reset(206, "obsolete-transient"); f.transient.failures = 1; await route();
+    const interrupted = await run(); assert.equal(interrupted.error.code, "TRANSIENT_INFERENCE"); assert.equal(interrupted.input.baseOnly, true);
+    assert.deepEqual(interrupted.reviewers.map((r) => [r.model, Boolean(r.result?.obsolete), Boolean(r.error)]), [[primary, true, false], [secondary, false, true]]);
+    assert.equal(pr(206).state, "open"); assert.equal(f.issues.get(6).state, "open");
+    mark = f.requests.length; tasks.retryTask(interrupted.taskId); const retried = await success();
+    const rerun = f.requests.slice(mark).filter((r) => r.context.action === "review_pr");
+    assert.ok(rerun.some((r) => r.consolidating) && rerun.every((r) => r.consolidating || r.request.model === secondary), "a base-only retry after escalation reruns only the failed second reviewer and the consolidation");
+    assert.ok(all(s.events).some((e) => e.type === "run.reviewers_reused" && e.runId === retried.id && e.data.fromRunId === interrupted.id));
+    assert.equal(retried.input.baseOnly, true); assert.equal(retried.result.storefront, undefined);
+    assert.equal(pr(206).state, "closed"); assert.equal(f.issues.get(6).state, "closed");
+
+    let pushed = false;
+    await implement(7); f.reset(207, "obsolete");
+    f.onWrite = (w) => { if (!pushed && w.type === "comment" && w.number === 207) { pushed = true; pr(207).head.sha = pushFile(pr(207).head.ref, "touched.txt", "touched during publication\n"); } };
+    await route(); const moved = await run(); f.onWrite = undefined;
+    assert.ok(pushed); assert.equal(moved.stage, "publishing"); assert.match(JSON.stringify(moved.error), /Reviewed code changed/);
+    assert.equal(pr(207).state, "open"); assert.equal(f.issues.get(7).state, "open"); assert.equal(marked(7, 207).length, 0);
+    assert.equal(closes("pr_update", 207) + closes("issue_update", 7), 0, "a head pushed during publication aborts the close for the unreviewed head");
+    assert.notEqual(publication(moved).status, "published");
+    await route(); const fresh = await success(); assert.equal(fresh.headSha, pr(207).head.sha);
+    assert.equal(pr(207).state, "closed"); assert.equal(f.issues.get(7).state, "closed");
+
+    f.addIssue(8); branchOff("bot-fix", "src/app.ts", "export const value = 8;\n");
+    f.addPr(302, "bot-fix", f.config.github.botLogin, { body: "Closes #8" }); f.reset(302, "obsolete"); await route();
+    const unreceipted = await success();
+    assert.ok(unreceipted.reviewers.every((r) => r.result.obsolete) && unreceipted.result.obsolete);
+    assert.equal(pr(302).state, "open"); assert.equal(f.issues.get(8).state, "open");
+    assert.equal(closes("pr_update", 302) + closes("issue_update", 8), 0, "a bot-login PR without Scrat's creation receipt is never closed");
+
+    const { parseResult, ResultFormatError } = await f.app("results.ts");
+    const reversed = parseResult("Resolved on main at `src/app.ts:1`.\nSCRAT_OBSOLETE: true\nSCRAT_STOREFRONT: verified\nSCRAT_GRADE: C\nSCRAT_STATUS: complete", [], { requireGrade: true });
+    assert.deepEqual([reversed.obsolete, reversed.storefront, reversed.grade], [true, "verified", "C"]); assert.doesNotMatch(reversed.text, /SCRAT_OBSOLETE/);
+    assert.throws(() => parseResult("Resolved on main.\nSCRAT_OBSOLETE: true\nMore prose.\nSCRAT_GRADE: C\nSCRAT_STATUS: complete", [], { requireGrade: true }), ResultFormatError);
+
     f.addIssue(1); branchOff("human-fix", "src/app.ts", "export const value = 2;\n");
     f.addPr(301, "human-fix", "human", { body: "Fixes #1" }); f.reset(301, "obsolete"); await route();
     const human = await success();

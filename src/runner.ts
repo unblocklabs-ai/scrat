@@ -10,7 +10,7 @@ import { freshness, savedEvaluation } from "./freshness.ts";
 import { bestEffort, startOperation } from "./logging.ts";
 import { observe } from "./observation.ts";
 import { currentPrReview } from "./pr-assessment.ts";
-import { reconcilePrReview } from "./pr-review-publication.ts";
+import { reconcilePrReview, settleObsoleteClose } from "./pr-review-publication.ts";
 import { getRun, latestCompletedRun } from "./run-history.ts";
 import { publishRun } from "./publication.ts";
 import { InterruptedError } from "./results.ts";
@@ -86,6 +86,7 @@ async function publishStage(ctx: Ctx, observed: Observed | undefined) {
   const evaluated = getRun(run.id)!;
   if (!observed) return publishRun(new GitHubRepository(subject.repository), subject, task, evaluated, references, undefined, manifest);
   const { github } = observed;
+  if (manifest.publish.includes("pr_assessment") && settleObsoleteClose(run.id)) return;
   const current = await checkPublicationContext(ctx, observed, evaluated, run.stage !== "publishing");
   if (manifest.mode === "review") return publishRun(github, subject, task, evaluated, references, current, manifest);
 
@@ -113,6 +114,7 @@ async function executeManagedPipeline(
   { active, trigger, resumingDeferred, dryRun = false }: { active: ActiveRun; trigger: TriggerInput; resumingDeferred: boolean; dryRun?: boolean },
 ): Promise<{ skipped?: string; cancelled?: string; published?: boolean }> {
   const { task, run, item, references, operation, stop: runStop } = ctx;
+  if (run.stage === "publishing" && ctx.manifest.publish.includes("pr_assessment") && settleObsoleteClose(run.id)) return { published: true };
   const observed = await connect(ctx);
   if (observed?.pullRequest) active.target = `${observed.pullRequest.head.sha}@${observed.observation.baseBranch}`;
   if (observed && resumingDeferred) await restartStaleDeferredPublication(ctx, observed);

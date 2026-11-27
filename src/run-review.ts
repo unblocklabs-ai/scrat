@@ -25,8 +25,8 @@ const auditsStorefront = ({ subject, manifest }: Ctx) => config.storefront.enabl
 
 async function settleReviewPlan(ctx: Ctx, { item, observation, mainSha }: Observed) {
   const { run, manifest } = ctx;
-  if (run.reviewers.length !== 1) return false;
   const trigger = parseTriggerInput(run.input);
+  if (run.reviewers.length !== 1 && !(isBaseOnly(trigger) && run.reviewers.length === 2)) return false;
   if (isBaseOnly(trigger)) {
     const state = await currentPrReview(item.id, observation, mainSha);
     if (state.kind === "stale" && state.reason === "base" && (state.assessment.run.mainSha ?? null) === (trigger.previousMainSha ?? null)

@@ -20,5 +20,5 @@ defaults:
 config:
   autoCloseObsolete: true
 permissions:
-  github: [read, comment, label]
+  github: [read, comment, label, issue, pull_request]
   workspace: [read]

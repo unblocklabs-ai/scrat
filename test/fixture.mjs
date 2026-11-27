@@ -62,7 +62,8 @@ export async function fixture(scenario, spec) {
   const graphqlRate = { ...rate };
   const tokens = new Map(patMode ? [[pat, { issues: "write", pull_requests: "write", contents: "write" }]] : []);
   const transient = { failures: 0, seen: new Map() };
-  let onModel, script, nextCommentId = 1000, nextIssueNumber = 500;
+  let onModel, onWrite, script, nextCommentId = 1000, nextIssueNumber = 500;
+  writes.push = (...entries) => { const count = Array.prototype.push.apply(writes, entries); for (const entry of entries) onWrite?.(entry); return count; };
   const external = [], searches = [], commitComments = new Map();
   const md5 = (text) => createHash("md5").update(text).digest("hex"), mainTheme = "gid://shopify/OnlineStoreTheme/1";
   const store = (theme, filename, type, value, checksum) => { theme.files.set(filename, checksum ?? md5(Buffer.from(value, type === "TEXT" ? "utf8" : "base64"))); theme.bodies.set(filename, { type, value }); };
@@ -177,7 +178,7 @@ export async function fixture(scenario, spec) {
     const consolidating = Boolean(text?.includes("Consolidate the two independent reviews below"));
     const mode = modes.get(context.item.number) ?? "normal";
     const seen = transient.seen.get(request.model) ?? 0;
-    if ((mode === "transient" || (mode === "transient-mixed" && !request.model.includes("deepseek"))) && seen < transient.failures) {
+    if ((mode === "transient" || (mode === "transient-mixed" && !request.model.includes("deepseek")) || (mode === "obsolete-transient" && request.model.includes("deepseek") && !consolidating)) && seen < transient.failures) {
       transient.seen.set(request.model, seen + 1);
       res.writeHead(503, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "Service temporarily unavailable" } }));
@@ -274,7 +275,7 @@ export async function fixture(scenario, spec) {
     const fumble = !corrected && (mode === "format-once" || (mode === "reviewer-grade-once" && review && !consolidating && request.model.includes("deepseek"))
       || (mode === "consolidation-grade-once" && consolidating));
     const outcome = ["incomplete", "needs_decision"].includes(mode) ? mode : mode === "incomplete-once" && !continued ? "incomplete" : "complete";
-    const obsolete = mode === "obsolete" || (mode === "obsolete-split" && (consolidating || !request.model.includes("deepseek")));
+    const obsolete = mode === "obsolete" || mode === "obsolete-transient" || (mode === "obsolete-split" && (consolidating || !request.model.includes("deepseek")));
     const verdict = scenario.startsWith("commit_review") ? (consolidating && verdicts.consolidating) || verdicts[request.model] || verdicts.default : undefined;
     const output = (context.action === "storefront_discover" ? "- `/products/<handle>`: product page with add to cart." : review ? consolidating ? "Consolidated source-verified review." : `Independent review from ${request.model}.` : feedback ? "Fixed the validation failure." : "Implemented the change.")
       + (review && mode.startsWith("grade-") ? ` (${mode})` : "")
@@ -288,7 +289,7 @@ export async function fixture(scenario, spec) {
       + (mode === "ready" ? "\nSCRAT_READY" : "")
       + (text?.includes("\n## Storefront preview\n") && storefrontLine ? `\nSCRAT_STOREFRONT: ${storefrontLine}` : "")
       + (obsolete ? "\nSCRAT_OBSOLETE: true" : "")
-      + (["review_pr", "my_pr_review"].includes(context.action) && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : storefrontGrade ?? (["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : ["grade-C", "obsolete", "obsolete-split"].includes(mode) ? "C" : "B")}` : "")
+      + (["review_pr", "my_pr_review"].includes(context.action) && !["missing-grade", "quoted-only"].includes(mode) && !(fumble && mode === "consolidation-grade-once") ? `\nSCRAT_GRADE: ${fumble ? "C+" : storefrontGrade ?? (["grade-A", "helper-grade-A", "quoted-grade"].includes(mode) ? "A" : ["grade-C", "obsolete", "obsolete-split", "obsolete-transient"].includes(mode) ? "C" : "B")}` : "")
       + (verdict ? `\nSCRAT_VERDICT: ${verdict}` : "")
       + (mode === "no-status" || (fumble && mode === "format-once" && !review) ? "" : mode === "bare-status" ? "\ncomplete" : `\nSCRAT_STATUS: ${outcome}`);
     const delta = tool ? { role: "assistant", tool_calls: [{ index: 0, id: "call_" + requests.length, type: "function", function: { name: tool.name, arguments: JSON.stringify(tool.args) } }] } : { role: "assistant", content: scriptedReply ?? output };
@@ -549,6 +550,7 @@ export async function fixture(scenario, spec) {
   const written = (type, predicate = () => true) => writes.filter((write) => write.type === type && predicate(write));
   return { app, db, schema, tasks, runNextTask, git, commit, config, external, searches, loggie, cloudflare, pat, user, githubApp, modes, verdicts, requests, calls, tokens, slack, rate, issues, prs, comments, reviews, writes, deployments, checkRuns, checkRollups, faults, transient, frozen, forced, addIssue, addPr, botComments, enqueue, row, written,
     set onModel(value) { onModel = value; },
+    set onWrite(value) { onWrite = value; },
     set script(value) { script = value; },
     reset(number, mode) { modes.set(number, mode); for (const key of steps.keys()) if (key.startsWith(number + "/")) steps.delete(key); },
     async close() { globalThis.fetch = originalFetch; db.$client.close(); server.closeAllConnections(); await new Promise((done) => server.close(done)); },

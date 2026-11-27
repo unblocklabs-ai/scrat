@@ -52,7 +52,7 @@ try {
   try {
     result = await audit(url, flags, device === "desktop" ? desktopConfig : undefined, page);
     if (!result) throw new Error("Lighthouse returned no result");
-    served = { url: page.url(), finalDisplayedUrl: result.lhr.finalDisplayedUrl, mainDocumentUrl: result.lhr.mainDocumentUrl, themeId: await page.evaluate("window.Shopify?.theme?.id") };
+    served = { url: page.url(), finalDisplayedUrl: result.lhr.finalDisplayedUrl, mainDocumentUrl: result.lhr.mainDocumentUrl, themeId: await page.evaluate("window.Shopify?.theme?.id").catch(() => undefined) };
   } finally {
     await page.close().catch(() => undefined);
     await browser.disconnect().catch(() => undefined);

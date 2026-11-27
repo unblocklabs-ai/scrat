@@ -188,7 +188,7 @@ const decodeXmlEntities = (value: string) => value
   .replaceAll("&apos;", "'");
 
 const diagnosticsScript = `async (limits) => {
-  const width = window.innerWidth, height = window.innerHeight, scrollX = window.scrollX || 0, scrollY = window.scrollY || 0, rawCap = limits.entryChars + limits.margin;
+  const width = window.innerWidth, height = window.innerHeight, scrollX = window.scrollX || 0, scrollY = window.scrollY || 0, rawCap = limits.entryChars + limits.margin + 1;
   const clip = (value) => String(value).slice(0, rawCap);
   const guarded = (read) => { try { return read(); } catch (error) { return undefined; } };
   const supported = (type) => guarded(() => PerformanceObserver.supportedEntryTypes.includes(type)) === true;
@@ -203,7 +203,9 @@ const diagnosticsScript = `async (limits) => {
   for (const el of found) {
     const rect = el.getBoundingClientRect(), style = getComputedStyle(el);
     const visible = style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) !== 0 && rect.width > 0 && rect.height > 0;
-    const docTop = rect.top + scrollY, docBottom = rect.bottom + scrollY, docLeft = rect.left + scrollX, docRight = docLeft + rect.width;
+    let pinned = false;
+    for (let node = el; node && !pinned; node = node.parentElement) pinned = getComputedStyle(node).position === "fixed";
+    const docTop = rect.top + (pinned ? 0 : scrollY), docBottom = rect.bottom + (pinned ? 0 : scrollY), docLeft = rect.left + (pinned ? 0 : scrollX), docRight = docLeft + rect.width;
     const entry = { text: textOf(el), selectorHint: hintOf(el), top: Math.round(docTop), bottom: Math.round(docBottom), height: Math.round(rect.height), isAboveFold: visible && docTop < height && docBottom > 0 && docLeft < width && docRight > 0, inViewport: visible && rect.top < height && rect.bottom > 0 && rect.left < width && rect.left + rect.width > 0, visible };
     const centerX = rect.left + rect.width / 2, centerY = rect.top + rect.height / 2;
     if (visible && centerX >= 0 && centerX < width && centerY >= 0 && centerY < height) {

@@ -26,7 +26,7 @@ type Metric = keyof typeof metrics;
 type Scores = Record<Category, number>;
 type Metrics = Record<Metric, number>;
 type Insight = { id: string; title: string; score: number | null; displayValue?: string; metricSavings?: Record<string, number>; items?: Record<string, string | number | boolean>[]; runs?: number };
-type AgenticBrowsing = { passed: number; total: number; failed: { id: string; title: string; displayValue?: string; runs?: number }[] };
+type AgenticBrowsing = { runs?: number; passed: number; total: number; failed: { id: string; title: string; displayValue?: string; runs?: number }[] };
 type Served = { url?: string; finalDisplayedUrl?: string; mainDocumentUrl?: string; themeId?: unknown };
 type Run = { device: Device; page: string; run: number; scores?: Scores; metrics?: Metrics; report?: string; error?: string; insights?: Insight[]; agenticBrowsing?: AgenticBrowsing };
 export type LighthouseOptions = { pages?: string[]; runs?: number; devices?: Device[]; timeoutSeconds?: number; includeAgenticBrowsing?: boolean; previewThemeId?: number };
@@ -206,7 +206,7 @@ const mergedInsights = (scored: Run[]) => {
 const mergedAgentic = (scored: Run[]) => {
   const seen = scored.flatMap((run) => run.agenticBrowsing ? [run.agenticBrowsing] : []), failed = new Map<string, NonNullable<AgenticBrowsing["failed"][number]>>();
   for (const { id, title, displayValue } of seen.flatMap((found) => found.failed)) { const known = failed.get(id); if (known) known.runs = (known.runs ?? 0) + 1; else failed.set(id, { id, title, ...displayValue ? { displayValue } : {}, runs: 1 }); }
-  return seen.length ? { agenticBrowsing: { passed: seen.reduce((sum, found) => sum + found.passed, 0), total: seen.reduce((sum, found) => sum + found.total, 0), failed: [...failed.values()] } } : {};
+  return seen.length ? { agenticBrowsing: { runs: seen.length, passed: seen.reduce((sum, found) => sum + found.passed, 0), total: seen.reduce((sum, found) => sum + found.total, 0), failed: [...failed.values()] } } : {};
 };
 const grouped = (all: Run[]): LighthouseGroup => {
   const scored = all.filter((run) => run.scores && run.metrics);

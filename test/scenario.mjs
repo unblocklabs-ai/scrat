@@ -4797,8 +4797,8 @@ fi
       const browser = { async newContext(options) { state.contextOptions = options; state.viewport = undefined; state.contexts++; return { route: async (_pattern, handler) => { state.handler = handler; }, newPage: async () => page, close: async () => {} }; }, close: async () => { state.closed = true; } };
       return { state, page, launch: async (args) => { state.args = args; state.launches++; return browser; } };
     };
-    const element = ({ tag, id = "", className = "", innerText = "", name = null, display = "block", rect = { left: 0, top: 0, width: 0, height: 0 } }) => {
-      const el = { tagName: tag, id, className, innerText, getAttribute: (key) => key === "name" ? name : null, contains: (other) => other === el, getBoundingClientRect: () => ({ ...rect, bottom: rect.top + rect.height }), style: { display, visibility: "visible", opacity: "1" } };
+    const element = ({ tag, id = "", className = "", innerText = "", name = null, display = "block", position = "static", rect = { left: 0, top: 0, width: 0, height: 0 } }) => {
+      const el = { tagName: tag, id, className, innerText, getAttribute: (key) => key === "name" ? name : null, contains: (other) => other === el, getBoundingClientRect: () => ({ ...rect, bottom: rect.top + rect.height }), style: { display, visibility: "visible", opacity: "1", position } };
       return el;
     };
     const sticky = element({ tag: "HEADER", className: "sticky top", rect: { left: 0, top: 560, width: 390, height: 100 } });
@@ -4807,6 +4807,7 @@ fi
     const hiddenSubmit = element({ tag: "BUTTON", name: "go", innerText: "Go", display: "none" });
     const scrolledPast = element({ tag: "BUTTON", id: "Buy", innerText: "Buy now", rect: { left: 20, top: -50, width: 100, height: 40 } });
     const carousel = element({ tag: "BUTTON", id: "Sub", innerText: "Subscribe", rect: { left: 500, top: 300, width: 100, height: 40 } });
+    const pinnedBar = element({ tag: "BUTTON", id: "StickyAtc", innerText: "Add to bag", position: "fixed", rect: { left: 0, top: 790, width: 390, height: 50 } });
     const entries = {
       navigation: [{ startTime: 0, responseStart: 120.4, domContentLoadedEventEnd: 900.2, loadEventEnd: 1500.6 }],
       "largest-contentful-paint": [{ startTime: 1800.4, element: element({ tag: "IMG", id: "hero" }), url: "https://shop.example.test/hero.jpg" }],
@@ -4816,7 +4817,7 @@ fi
     };
     const documentFake = (all) => ({ querySelectorAll: () => all, elementFromPoint: (x, y) => y >= 560 && y < 660 ? sticky : null });
     const domWorld = () => ({
-      window: { innerWidth: 390, innerHeight: 844, scrollY: 100 }, document: documentFake([addToCart, checkoutLink, hiddenSubmit, scrolledPast, carousel]), getComputedStyle: (el) => el.style, location: { hostname: "shop.example.test" }, URL, setTimeout,
+      window: { innerWidth: 390, innerHeight: 844, scrollY: 100 }, document: documentFake([addToCart, checkoutLink, hiddenSubmit, scrolledPast, carousel, pinnedBar]), getComputedStyle: (el) => el.style, location: { hostname: "shop.example.test" }, URL, setTimeout,
       performance: { getEntriesByType: (type) => entries[type === "resource" ? "resource" : type] ?? [] },
       PerformanceObserver: class { static supportedEntryTypes = ["largest-contentful-paint", "layout-shift"]; observe({ type }) { this.type = type; if (type === "longtask") throw new Error("unsupported"); } takeRecords() { return this.type === "navigation" || this.type === "resource" ? [] : entries[this.type]; } disconnect() {} },
     });
@@ -5011,6 +5012,7 @@ fi
     assert.deepEqual(report.ctas, [
       { text: "Buy now", selectorHint: "button#Buy", top: 50, bottom: 90, height: 40, isAboveFold: true, inViewport: false, visible: true },
       { text: "Add to cart", selectorHint: "button#AddToCart", top: 700, bottom: 750, height: 50, isAboveFold: true, inViewport: true, visible: true, coveredByOverlay: "header.sticky.top" },
+      { text: "Add to bag", selectorHint: "button#StickyAtc", top: 790, bottom: 840, height: 50, isAboveFold: true, inViewport: true, visible: true },
       { text: "Go", selectorHint: 'button[name="go"]', top: 100, bottom: 100, height: 0, isAboveFold: false, inViewport: false, visible: false },
       { text: "Subscribe", selectorHint: "button#Sub", top: 400, bottom: 440, height: 40, isAboveFold: false, inViewport: false, visible: true },
       { text: "Check out now", selectorHint: "a.btn.primary", top: 1000, bottom: 1040, height: 40, isAboveFold: false, inViewport: false, visible: true },
@@ -5453,7 +5455,7 @@ fi
     assert.equal(compareLighthouseSummaries(before, summarizeLighthouseRuns([])).markdown, "");
     const withAgentic = (found) => ({ ...raw(60, 3100, { id: "x", title: "t", score: 0.4 }), agenticBrowsing: found });
     const agentic = summarizeLighthouseRuns([withAgentic({ passed: 2, total: 4, failed: [{ id: "a", title: "A", displayValue: "x" }, { id: "b", title: "B" }] }), { ...withAgentic({ passed: 3, total: 4, failed: [{ id: "a", title: "A2" }] }), run: 2 }, { ...raw(60, 3100, { id: "x", title: "t", score: 0.4 }), run: 3 }]);
-    assert.deepEqual(agentic.devices.mobile.agenticBrowsing, { passed: 5, total: 8, failed: [{ id: "a", title: "A", displayValue: "x", runs: 2 }, { id: "b", title: "B", runs: 1 }] });
+    assert.deepEqual(agentic.devices.mobile.agenticBrowsing, { runs: 2, passed: 5, total: 8, failed: [{ id: "a", title: "A", displayValue: "x", runs: 2 }, { id: "b", title: "B", runs: 1 }] });
     assert.equal(summarizeLighthouseRuns([raw(60, 3100, { id: "x", title: "t", score: 0.4 })]).devices.mobile.agenticBrowsing, undefined);
     const twoPages = summarizeLighthouseRuns([raw(60, 3100, { id: "x", title: "t", score: 0.4 }), { ...raw(40, 5100, { id: "x", title: "t", score: 0.4 }), page: "/a" }]);
     const partial = summarizeLighthouseRuns([raw(70, 2900, { id: "x", title: "t", score: 0.4 }), { device: "mobile", page: "/a", run: 1, error: "boom" }]);

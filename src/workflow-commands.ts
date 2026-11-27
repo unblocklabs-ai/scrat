@@ -1,10 +1,8 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { findPackageJSON } from "node:module";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { pathToFileURL } from "node:url";
 import { parseArgs, promisify } from "node:util";
 import { workflowOf, workflows } from "./workflow-registry.ts";
 import { config } from "./config.ts";
@@ -22,9 +20,20 @@ function isServeRunning() {
   return isProcessAlive(Number(readOptionalText("data/serve.pid")));
 }
 
+function findNearestPackageJson(scriptPath: string) {
+  let dir = dirname(resolve(scriptPath));
+  while (true) {
+    const candidate = join(dir, "package.json");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
 async function isStandaloneScript(scriptPath: string, local: boolean) {
   if (!local) return false;
-  const packageFile = findPackageJSON(pathToFileURL(scriptPath));
+  const packageFile = findNearestPackageJson(scriptPath);
   const packageType = packageFile ? (JSON.parse(new TextDecoder().decode(await readFile(packageFile))) as { type?: unknown }).type : undefined;
   return packageType !== "module" && packageType !== "commonjs";
 }

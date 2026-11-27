@@ -26,7 +26,8 @@ type Metric = keyof typeof metrics;
 type Scores = Record<Category, number>;
 type Metrics = Record<Metric, number>;
 type Insight = { id: string; title: string; score: number | null; displayValue?: string; metricSavings?: Record<string, number>; items?: Record<string, string | number | boolean>[]; runs?: number };
-type AgenticBrowsing = { passed: number; total: number; failed: { id: string; title: string; displayValue?: string }[] };
+type AgenticBrowsing = { passed: number; total: number; failed: { id: string; title: string; displayValue?: string; runs?: number }[] };
+type Served = { url?: string; finalDisplayedUrl?: string; mainDocumentUrl?: string; themeId?: unknown };
 type Run = { device: Device; page: string; run: number; scores?: Scores; metrics?: Metrics; report?: string; error?: string; insights?: Insight[]; agenticBrowsing?: AgenticBrowsing };
 export type LighthouseOptions = { pages?: string[]; runs?: number; devices?: Device[]; timeoutSeconds?: number; includeAgenticBrowsing?: boolean; previewThemeId?: number };
 type LighthouseGroup = { runs: number; scored: number; scores?: Scores; metrics?: Metrics; topInsights: Insight[]; agenticBrowsing?: AgenticBrowsing };
@@ -54,7 +55,7 @@ const freePort = () => new Promise<number>((done, fail) => {
 const auditScript = fileURLToPath(new URL("./lighthouse-audit.ts", import.meta.url));
 const labelled = (table: Record<string, { label: string }>) => Object.fromEntries(Object.entries(table).map(([id, { label }]) => [id, label]));
 
-const childAudit = (input: string, signal: AbortSignal) => new Promise<{ scores: Scores; metrics: Metrics; insights?: Insight[]; agenticBrowsing?: AgenticBrowsing }>((done, fail) => {
+const childAudit = (input: string, signal: AbortSignal) => new Promise<{ scores: Scores; metrics: Metrics; insights?: Insight[]; agenticBrowsing?: AgenticBrowsing; served: Served }>((done, fail) => {
   const child = spawn(process.execPath, [auditScript, input], { env: process.env, stdio: ["ignore", "pipe", "pipe"] }), out: Buffer[] = [], err: Buffer[] = [];
   const abort = () => { child.kill("SIGKILL"); };
   if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
@@ -77,11 +78,14 @@ async function warmPreviewTheme(port: number, origin: string, themeId: number, s
     for (let attempt = 0; attempt < 2 && served !== themeId; attempt++) {
       signal.throwIfAborted();
       await page.goto(`${origin}/?preview_theme_id=${themeId}`, { waitUntil: "load", timeout: config.tools.browser.navigationSeconds * 1000 });
+      if (new URL(page.url()).origin !== origin) throw new Error(`The preview warm-up was redirected to ${page.url()}, outside ${origin}`);
       served = await page.evaluate!<unknown>("window.Shopify?.theme?.id");
       if (typeof served === "string") served = Number(served);
     }
     if (served !== themeId) throw new Error(`The preview theme ${themeId} was not served: the store served ${typeof served === "number" ? `theme ${served}` : "no theme"}`);
-    await (await context.newCDPSession(page)).send("Network.clearBrowserCache");
+    const session = await context.newCDPSession(page);
+    await session.send("Network.clearBrowserCache");
+    await session.send("Storage.clearDataForOrigin", { origin, storageTypes: "cache_storage,service_workers" });
     await page.close();
   } finally {
     await client.close().catch(() => undefined);
@@ -89,12 +93,22 @@ async function warmPreviewTheme(port: number, origin: string, themeId: number, s
 }
 
 async function audited(url: string, device: Device, reportPath: string, signal: AbortSignal, { includeAgenticBrowsing, previewThemeId }: { includeAgenticBrowsing: boolean; previewThemeId?: number }) {
-  const port = await freePort(), browser = await launchChromium([`--remote-debugging-port=${port}`]), { max, items, valueChars } = config.storefront.lighthouse.insights;
+  const port = await freePort(), browser = await launchChromium([`--remote-debugging-port=${port}`]), { max, items, valueChars } = config.storefront.lighthouse.insights, { origin, pathname, search } = new URL(url);
+  const close = () => { void browser.close().catch(() => undefined); };
+  if (signal.aborted) close(); else signal.addEventListener("abort", close, { once: true });
   try {
-    if (previewThemeId !== undefined) await warmPreviewTheme(port, new URL(url).origin, previewThemeId, signal);
-    const flags = { port, output: "json", logLevel: "error", onlyCategories: includeAgenticBrowsing ? [...ids, "agentic-browsing"] : ids, disableFullPageScreenshot: true, ...previewThemeId !== undefined ? { disableStorageReset: true } : {} };
-    return await childAudit(JSON.stringify({ url, device, reportPath, flags, categories, metrics: labelled(metrics), insightIds, agentic: includeAgenticBrowsing, maxInsights: max, maxItems: items, valueChars }), signal);
+    if (previewThemeId !== undefined) await warmPreviewTheme(port, origin, previewThemeId, signal);
+    const attempt = (agentic: boolean) => childAudit(JSON.stringify({ url, device, reportPath, flags: { port, output: "json", logLevel: "error", onlyCategories: agentic ? [...ids, "agentic-browsing"] : ids, disableFullPageScreenshot: true, ...previewThemeId !== undefined ? { disableStorageReset: true } : {} }, categories, metrics: labelled(metrics), insightIds, agentic, maxInsights: max, maxItems: items, valueChars }), signal);
+    const { served, ...result } = await attempt(includeAgenticBrowsing).catch((error: unknown) => {
+      if (includeAgenticBrowsing && /unrecognized category in 'onlyCategories'.*agentic-browsing/.test(errorMessage(error))) return attempt(false);
+      throw error;
+    });
+    for (const shown of [served.url, served.finalDisplayedUrl, served.mainDocumentUrl]) if (shown && new URL(shown).origin !== origin) throw new Error(`Lighthouse measured ${shown}, outside ${origin}`);
+    const themeId = Number(served.themeId ?? NaN);
+    if (previewThemeId !== undefined && themeId !== previewThemeId) throw new Error(`Preview theme ${previewThemeId} did not apply on ${pathname}${search}; got ${themeId > 0 ? `theme ${themeId}` : "no theme"}`);
+    return result;
   } finally {
+    signal.removeEventListener("abort", close);
     await browser.close().catch(() => undefined);
   }
 }
@@ -104,8 +118,10 @@ export async function runLighthouse(origin: string, directory: string, reference
   if (!pages.length || pages.some((page) => !/^\/(?!\/)/.test(page))) throw new Error("Lighthouse pages must each start with a single /");
   if (!Number.isInteger(runs) || runs < 1) throw new Error("Lighthouse runs must be a positive integer");
   if (!wanted.length || wanted.some((device) => !devices.includes(device))) throw new Error(`Lighthouse devices must be from ${devices.join(", ")}`);
-  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0) throw new Error("Lighthouse timeoutSeconds must be 0 or more");
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0 || timeoutSeconds * 1000 > 2 ** 31 - 1) throw new Error("Lighthouse timeoutSeconds must be between 0 and 2147483 (the Node timer limit)");
   if (previewThemeId !== undefined && (!Number.isSafeInteger(previewThemeId) || previewThemeId < 1)) throw new Error("Lighthouse previewThemeId must be a positive integer");
+  const liveOrigin = new URL(origin).origin;
+  for (const page of pages) if (new URL(page, origin).origin !== liveOrigin) throw new Error(`Lighthouse page ${page} must stay on ${liveOrigin}`);
   await loadLighthouse();
   await mkdir(directory, { recursive: true });
   return withValidationSlot(async () => {
@@ -187,9 +203,14 @@ const mergedInsights = (scored: Run[]) => {
   const { max } = config.storefront.lighthouse.insights;
   return max ? merged.slice(0, max) : merged;
 };
+const mergedAgentic = (scored: Run[]) => {
+  const seen = scored.flatMap((run) => run.agenticBrowsing ? [run.agenticBrowsing] : []), failed = new Map<string, NonNullable<AgenticBrowsing["failed"][number]>>();
+  for (const { id, title, displayValue } of seen.flatMap((found) => found.failed)) { const known = failed.get(id); if (known) known.runs = (known.runs ?? 0) + 1; else failed.set(id, { id, title, ...displayValue ? { displayValue } : {}, runs: 1 }); }
+  return seen.length ? { agenticBrowsing: { passed: seen.reduce((sum, found) => sum + found.passed, 0), total: seen.reduce((sum, found) => sum + found.total, 0), failed: [...failed.values()] } } : {};
+};
 const grouped = (all: Run[]): LighthouseGroup => {
   const scored = all.filter((run) => run.scores && run.metrics);
-  return { runs: all.length, scored: scored.length, ...scored.length ? { scores: average(scored.map((run) => run.scores!)), metrics: averageMetrics(scored.map((run) => run.metrics!)), agenticBrowsing: scored.at(-1)!.agenticBrowsing } : {}, topInsights: mergedInsights(scored) };
+  return { runs: all.length, scored: scored.length, ...scored.length ? { scores: average(scored.map((run) => run.scores!)), metrics: averageMetrics(scored.map((run) => run.metrics!)), ...mergedAgentic(scored) } : {}, topInsights: mergedInsights(scored) };
 };
 const groupedDevices = (results: Run[]) => Object.fromEntries(devices.flatMap((device) => {
   const all = results.filter((run) => run.device === device);
@@ -207,15 +228,25 @@ export function summarizeLighthouseRuns(results: Run[]): StorefrontLighthouseSum
 
 export const runStorefrontLighthouse = async (origin: string, directory: string, references: EventReferences, stop: AbortSignal | undefined, options: LighthouseOptions) => summarizeLighthouseRuns(await runLighthouse(origin, directory, references, stop, options));
 
-export function compareLighthouseSummaries(before: StorefrontLighthouseSummary, after: StorefrontLighthouseSummary) {
+export type LighthouseComparison = { devices: Partial<Record<Device, { matchedPages: string[]; unmatchedPages: string[]; scores?: Record<Category, Delta>; metrics?: Record<Metric, Delta> }>>; markdown: string };
+
+export function compareLighthouseSummaries(before: StorefrontLighthouseSummary, after: StorefrontLighthouseSummary): LighthouseComparison {
   const delta = (from: number, to: number, digits = 0): Delta => ({ before: from, after: to, delta: Number((to - from).toFixed(digits)) });
-  const compared: Partial<Record<Device, { scores: Record<Category, Delta>; metrics: Record<Metric, Delta> }>> = {}, rows: string[] = [];
+  const compared: LighthouseComparison["devices"] = {}, rows: string[] = [];
   for (const device of devices) {
-    const from = before.devices[device], to = after.devices[device];
-    if (!from?.scores || !from.metrics || !to?.scores || !to.metrics) continue;
-    const scores = Object.fromEntries(ids.map((id) => [id, delta(from.scores![id], to.scores![id])])) as Record<Category, Delta>;
-    const measured = Object.fromEntries(metricIds.map((id) => [id, delta(from.metrics![id], to.metrics![id], metrics[id].digits)])) as Record<Metric, Delta>;
-    compared[device] = { scores, metrics: measured };
+    const known = [...new Set([...Object.keys(before.pages), ...Object.keys(after.pages)])].filter((page) => before.pages[page]?.[device] || after.pages[page]?.[device]);
+    const matched = known.filter((page) => [before, after].every((side) => side.pages[page]?.[device]?.scores && side.pages[page][device].metrics));
+    if (!known.length) continue;
+    const unmatchedPages = known.filter((page) => !matched.includes(page));
+    if (!matched.length) { compared[device] = { matchedPages: [], unmatchedPages }; continue; }
+    const side = (summary: StorefrontLighthouseSummary) => {
+      const groups = matched.map((page) => summary.pages[page]![device]!), shown = (id: Metric) => Number(mean(groups.map((group) => group.metrics![id])).toFixed(metrics[id].digits));
+      return { scores: average(groups.map((group) => group.scores!)), metrics: Object.fromEntries(metricIds.map((id) => [id, shown(id)])) as Metrics };
+    };
+    const from = side(before), to = side(after);
+    const scores = Object.fromEntries(ids.map((id) => [id, delta(from.scores[id], to.scores[id])])) as Record<Category, Delta>;
+    const measured = Object.fromEntries(metricIds.map((id) => [id, delta(from.metrics[id], to.metrics[id], metrics[id].digits)])) as Record<Metric, Delta>;
+    compared[device] = { matchedPages: matched, unmatchedPages, scores, metrics: measured };
     rows.push(...ids.map((id) => `| ${capitalised(device)} | ${categories[id]} | ${scores[id].before} | ${scores[id].after} | ${signed(scores[id].delta)} |`));
     rows.push(...metricIds.map((id) => `| ${capitalised(device)} | ${metrics[id].label} | ${formatMetric(id, measured[id].before)} | ${formatMetric(id, measured[id].after)} | ${signed(measured[id].delta, metrics[id].digits)} |`));
   }

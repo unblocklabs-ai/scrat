@@ -155,7 +155,7 @@ type PageLike = {
 };
 type ContextLike = { route(pattern: string, handler: (route: RouteLike) => Promise<void>): Promise<void>; newPage(): Promise<PageLike>; close(): Promise<void> };
 type BrowserLike = { newContext(options: Record<string, unknown>): Promise<ContextLike>; close(): Promise<void> };
-type Playwright = { chromium: { launch(options: { headless: boolean; channel: string; chromiumSandbox: boolean; args: string[] }): Promise<BrowserLike>; executablePath(): string; connectOverCDP(endpoint: string): Promise<{ contexts(): { newPage(): Promise<PageLike & { close(): Promise<void> }>; newCDPSession(page: PageLike): Promise<{ send(method: string): Promise<unknown> }> }[]; close(): Promise<void> }> } };
+type Playwright = { chromium: { launch(options: { headless: boolean; channel: string; chromiumSandbox: boolean; args: string[] }): Promise<BrowserLike>; executablePath(): string; connectOverCDP(endpoint: string): Promise<{ contexts(): { newPage(): Promise<PageLike & { close(): Promise<void> }>; newCDPSession(page: PageLike): Promise<{ send(method: string, params?: Record<string, unknown>): Promise<unknown> }> }[]; close(): Promise<void> }> } };
 
 export async function loadPlaywright(): Promise<Playwright> {
   const specifier = "playwright-core";

@@ -13,7 +13,7 @@ import type { EventReferences } from "./events.ts";
 import { freshness, savedEvaluation } from "./freshness.ts";
 import { git } from "./git.ts";
 import { botName, botSlug } from "./identity.ts";
-import { type LighthouseOptions, runStorefrontLighthouse, type StorefrontLighthouseSummary } from "./lighthouse.ts";
+import { compareLighthouseSummaries, type LighthouseComparison, type LighthouseOptions, runStorefrontLighthouse, type StorefrontLighthouseSummary } from "./lighthouse.ts";
 import { GitHubRepository } from "./github.ts";
 import type { GithubContext, GithubIssue, GithubPullRequest } from "./github-types.ts";
 import { categoriesFor, itemLabelKey } from "./item-labels.ts";
@@ -128,6 +128,7 @@ export type WorkflowContext = {
     siteMap: () => Promise<string | undefined>;
     previewOfPr: (prNumber: number) => { url: string | null; themeId: number | null; headSha: string | null; available: boolean; problems: string[] } | undefined;
     lighthouse: (options?: LighthouseOptions) => Promise<StorefrontLighthouseSummary>;
+    compareLighthouse: (before: StorefrontLighthouseSummary, after: StorefrontLighthouseSummary) => LighthouseComparison;
   };
   signal: AbortSignal;
   log: Logger;
@@ -1015,6 +1016,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         devices: config.storefront.devices,
         siteMap: readSiteMap,
         previewOfPr: (prNumber) => previewOfPr(subject.repository, prNumber),
+        compareLighthouse: compareLighthouseSummaries,
         async lighthouse(options = {}) {
           assertNotAborted(signal, "storefront.lighthouse");
           if (!config.storefront.enabled || !config.storefront.publicHost) throw new Error(`Workflow ${workflow.name} called ctx.storefront.lighthouse but the storefront is not enabled (storefront.enabled and storefront.publicHost)`);

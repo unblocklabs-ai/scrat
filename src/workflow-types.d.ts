@@ -4,4 +4,5 @@ declare module "scrat" {
   export type D1ExtractAnswer = import("./workflow-ctx.ts").D1ExtractAnswer;
   export type LighthouseOptions = import("./lighthouse.ts").LighthouseOptions;
   export type StorefrontLighthouseSummary = import("./lighthouse.ts").StorefrontLighthouseSummary;
+  export type LighthouseComparison = import("./lighthouse.ts").LighthouseComparison;
 }

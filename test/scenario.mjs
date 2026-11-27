@@ -156,7 +156,7 @@ const mainStorefront = async () => {
     pending[device].push(...entries.map((entry) => typeof entry === "string" ? entry : { scores: { ...entry }, metrics: entry.metrics, extra: entry.extra }));
     writeFileSync(scriptPath, JSON.stringify(pending));
   } });
-  const fakes = globalThis.storefrontFakes = { launches: [], launchOptions: [], visits: [], cdp: [], cdpVisits: [], servedTheme: undefined, get audits() { return readFileSync(auditsPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)); }, scores: { mobile: script("mobile"), desktop: script("desktop") }, look: "v1" };
+  const fakes = globalThis.storefrontFakes = { launches: [], launchOptions: [], visits: [], cdp: [], cdpVisits: [], cdpParams: [], servedTheme: undefined, serve: (served) => { const pending = JSON.parse(readFileSync(scriptPath, "utf8")); pending.served = served; writeFileSync(scriptPath, JSON.stringify(pending)); }, get audits() { return readFileSync(auditsPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)); }, scores: { mobile: script("mobile"), desktop: script("desktop") }, look: "v1" };
   const pkg = (name, source) => {
     const directory = resolve("app/src/node_modules", name); mkdirSync(directory, { recursive: true });
     writeFileSync(resolve(directory, "package.json"), JSON.stringify({ name, type: "module", main: "index.js" })); writeFileSync(resolve(directory, "index.js"), source);
@@ -167,8 +167,9 @@ export const chromium = {
   executablePath: () => process.execPath,
   async connectOverCDP(endpoint) {
     fakes.cdp.push(endpoint);
-    const newPage = async () => ({ goto: async (url) => { fakes.cdpVisits.push(url); }, evaluate: async () => fakes.servedTheme, close: async () => {} });
-    const newCDPSession = async () => ({ send: async (method) => { fakes.cdpVisits.push(method); } });
+    let current = "about:blank";
+    const newPage = async () => ({ goto: async (url) => { current = url; fakes.cdpVisits.push(url); }, url: () => current, evaluate: async () => fakes.servedTheme, close: async () => {} });
+    const newCDPSession = async () => ({ send: async (method, params) => { fakes.cdpVisits.push(method); if (params) fakes.cdpParams.push(params); } });
     return { contexts: () => [{ newPage, newCDPSession }], close: async () => {} };
   },
   async launch({ args, ...options }) {
@@ -185,16 +186,24 @@ export const chromium = {
   },
 };
 `);
+  pkg("puppeteer-core", `import { readFileSync } from "node:fs";
+export const connect = async () => ({
+  newPage: async () => ({ current: "about:blank", url() { return this.current; }, evaluate: async () => JSON.parse(readFileSync(process.env.SCRAT_TEST_LIGHTHOUSE, "utf8")).served?.themeId, close: async () => {} }),
+  disconnect: async () => {},
+});
+`);
   pkg("lighthouse", `import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 export const desktopConfig = { extends: "lighthouse:default", settings: { formFactor: "desktop" } };
-export default async function lighthouse(url, flags, settings) {
-  const path = process.env.SCRAT_TEST_LIGHTHOUSE, pending = JSON.parse(readFileSync(path, "utf8"));
+export default async function lighthouse(url, flags, settings, page) {
+  const path = process.env.SCRAT_TEST_LIGHTHOUSE, pending = JSON.parse(readFileSync(path, "utf8")), served = pending.served ?? {};
+  if (flags.onlyCategories.includes("agentic-browsing") && served.rejectAgentic) { appendFileSync(path + ".audits.jsonl", JSON.stringify({ url, categories: flags.onlyCategories, rejected: true }) + "\\n"); throw new Error("unrecognized category in 'onlyCategories': agentic-browsing"); }
+  page.current = served.url ?? url;
   const device = settings === desktopConfig ? "desktop" : "mobile", next = pending[device].shift();
   writeFileSync(path, JSON.stringify(pending));
   appendFileSync(path + ".audits.jsonl", JSON.stringify({ url, device, port: flags.port, output: flags.output, categories: flags.onlyCategories, screenshot: !flags.disableFullPageScreenshot, disableStorageReset: flags.disableStorageReset }) + "\\n");
   if (next === "hang") { setInterval(() => {}, 1000); return new Promise(() => {}); }
   if (typeof next === "string") throw new Error(next);
-  return { lhr: { categories: { ...Object.fromEntries(Object.entries(next.scores).map(([id, score]) => [id, { score }])), ...next.extra?.categories }, audits: { ...Object.fromEntries(Object.entries(next.metrics).map(([id, numericValue]) => [id, { numericValue }])), ...next.extra?.audits } }, report: JSON.stringify({ url, device, next: next.scores }) };
+  return { lhr: { categories: { ...Object.fromEntries(Object.entries(next.scores).map(([id, score]) => [id, { score }])), ...next.extra?.categories }, audits: { ...Object.fromEntries(Object.entries(next.metrics).map(([id, numericValue]) => [id, { numericValue }])), ...next.extra?.audits }, finalDisplayedUrl: served.finalDisplayedUrl ?? page.current, mainDocumentUrl: page.current }, report: JSON.stringify({ url, device, next: next.scores }) };
 }
 `);
   const dns = createRequire(import.meta.url)("node:dns/promises"), lookup = dns.lookup;
@@ -5369,32 +5378,64 @@ fi
       "cache-insight": { title: "Cache", score: null, scoreDisplayMode: "metricSavings", metricSavings: { LCP: 50 } },
       "font-display-insight": { title: "Fonts", score: 1, scoreDisplayMode: "numeric", metricSavings: { FCP: 10 } },
       "viewport-insight": { title: "Viewport", score: null, scoreDisplayMode: "notApplicable", metricSavings: { INP: 10 } },
+      "ab-95": { title: "Almost", score: 0.95, scoreDisplayMode: "binary" }, "ab-info": { title: "Info", score: null, scoreDisplayMode: "informative" }, "ab-manual": { title: "Manual", score: null, scoreDisplayMode: "manual" }, "ab-error": { title: "Broke", score: null, scoreDisplayMode: "error" }, "ab-hidden": { title: "Hidden", score: 0, scoreDisplayMode: "binary" },
       "ab-pass": { title: "Passes", score: 1, scoreDisplayMode: "binary" }, "ab-fail": { title: "Fails", score: 0, scoreDisplayMode: "binary", displayValue: "x" }, "ab-skip": { title: "Skipped", score: null, scoreDisplayMode: "notApplicable" },
     };
-    fakes.scores.mobile.push(entry({ audits, categories: { "agentic-browsing": { score: 0.5, auditRefs: [{ id: "ab-pass" }, { id: "ab-fail" }, { id: "ab-skip" }] } } }), storefrontScores(0.6, 0.9, 0.96, 1), storefrontScores(0.6, 0.9, 0.96, 1));
+    live.storefront.lighthouse.insights.max = 10;
+    const shapes = {
+      "image-delivery-insight": { title: "Checks", score: 0, scoreDisplayMode: "binary", details: { type: "checklist", items: { a: { value: true, label: "Has a" }, b: { value: false, label: "Has b" } } } },
+      "third-parties-insight": { title: "Sections", score: 0.1, scoreDisplayMode: "binary", details: { type: "list", items: [{ type: "list-section", title: "t", value: { type: "table", items: [{ k: "v1" }] } }, { type: "checklist", items: { c: { value: true, label: "Has c" } } }, { type: "node", selector: "x" }] } },
+      "forced-reflow-insight": { title: "Broken", score: 0.2, scoreDisplayMode: "binary", details: { type: "checklist", items: null } },
+    };
+    fakes.scores.mobile.push(entry({ audits: shapes }));
+    const [shaped] = await runLighthouse(origin, resolve("lh-shaped"), {}, undefined, mobile);
+    assert.deepEqual(shaped.insights.map(({ id, items }) => [id, items]), [
+      ["image-delivery-insight", [{ id: "a", label: "Has a", value: true }, { id: "b", label: "Has b", value: false }]],
+      ["third-parties-insight", [{ k: "v1" }, { id: "c", label: "Has c", value: true }]],
+      ["forced-reflow-insight", undefined],
+    ]);
+    live.storefront.lighthouse.insights.max = 2;
+    fakes.scores.mobile.push(entry({ audits, categories: { "agentic-browsing": { score: 0.5, auditRefs: [{ id: "ab-pass" }, { id: "ab-95" }, { id: "ab-fail" }, { id: "ab-skip" }, { id: "ab-info" }, { id: "ab-manual" }, { id: "ab-error" }, { id: "ab-hidden", group: "hidden" }] } } }), storefrontScores(0.6, 0.9, 0.96, 1), storefrontScores(0.6, 0.9, 0.96, 1));
     const [first] = await runLighthouse(origin, resolve("lh-first"), {}, undefined, mobile);
     assert.deepEqual(first.insights, [
       { id: "render-blocking-insight", title: "Render blocking", score: 0.3, displayValue: "Est savings of 300 ms", metricSavings: { FCP: 300 }, items: [
         { url: "https://shop", node: "div.hero > i", wastedBytes: 1234.57, source: "https://shop" }, { url: "https://shop", node: "div.hero > i", wastedBytes: 2, source: "https://shop" }] },
       { id: "cache-insight", title: "Cache", score: null, metricSavings: { LCP: 50 } },
     ]);
-    assert.deepEqual(first.agenticBrowsing, { passed: 1, total: 2, failed: [{ id: "ab-fail", title: "Fails", displayValue: "x" }] });
+    assert.deepEqual(first.agenticBrowsing, { passed: 2, total: 4, failed: [{ id: "ab-fail", title: "Fails", displayValue: "x" }, { id: "ab-error", title: "Broke" }] });
     const [absent] = await runLighthouse(origin, resolve("lh-absent"), {}, undefined, mobile);
     assert.equal(absent.agenticBrowsing, undefined); assert.equal(absent.scores.performance, 60); assert.deepEqual(absent.insights, []);
     await runLighthouse(origin, resolve("lh-plain"), {}, undefined, { ...mobile, includeAgenticBrowsing: false });
-    assert.deepEqual(fakes.audits.map(({ categories }) => categories.at(-1)), ["agentic-browsing", "agentic-browsing", "seo"]);
-    assert.deepEqual([fakes.cdp, fakes.audits.map(({ disableStorageReset }) => disableStorageReset)], [[], [undefined, undefined, undefined]]);
+    assert.deepEqual(fakes.audits.map(({ categories }) => categories.at(-1)), ["agentic-browsing", "agentic-browsing", "agentic-browsing", "seo"]);
+    assert.deepEqual([fakes.cdp, fakes.audits.map(({ disableStorageReset }) => disableStorageReset)], [[], [undefined, undefined, undefined, undefined]]);
+    fakes.serve({ rejectAgentic: true }); fakes.scores.mobile.push(storefrontScores(0.5, 0.9, 0.96, 1)); const rejected = fakes.audits.length;
+    const [retried] = await runLighthouse(origin, resolve("lh-retried"), {}, undefined, mobile);
+    assert.deepEqual([retried.scores.performance, retried.agenticBrowsing, fakes.audits.slice(rejected).map(({ rejected: refused, categories }) => [refused, categories.includes("agentic-browsing")])], [50, undefined, [[true, true], [undefined, false]]]);
+    fakes.serve({});
 
-    fakes.servedTheme = 123; fakes.scores.mobile.push(storefrontScores(0.7, 0.9, 0.96, 1));
+    fakes.servedTheme = 123; fakes.serve({ themeId: 123 }); fakes.scores.mobile.push(storefrontScores(0.7, 0.9, 0.96, 1));
     const [preview] = await runLighthouse(origin, resolve("lh-preview"), {}, undefined, { ...mobile, previewThemeId: 123 });
     assert.equal(preview.scores.performance, 70);
     const [launched] = fakes.launches.at(-1);
-    assert.deepEqual([fakes.cdp, fakes.cdpVisits, fakes.audits.at(-1).disableStorageReset], [[`http://127.0.0.1:${launched.split("=")[1]}`], ["https://shop.example.test/?preview_theme_id=123", "Network.clearBrowserCache"], true]);
+    assert.deepEqual([fakes.cdp, fakes.cdpVisits, fakes.audits.at(-1).disableStorageReset], [[`http://127.0.0.1:${launched.split("=")[1]}`], ["https://shop.example.test/?preview_theme_id=123", "Network.clearBrowserCache", "Storage.clearDataForOrigin"], true]);
+    assert.deepEqual(fakes.cdpParams, [{ origin: "https://shop.example.test", storageTypes: "cache_storage,service_workers" }]);
+    fakes.serve({ themeId: 7 }); fakes.scores.mobile.push(storefrontScores(0.7, 0.9, 0.96, 1));
+    const [other] = await runLighthouse(origin, resolve("lh-other"), {}, undefined, { ...mobile, previewThemeId: 123 });
+    assert.equal(other.scores, undefined); assert.match(other.error, /Preview theme 123 did not apply on \/; got theme 7/);
+    fakes.serve({ themeId: 123, url: "https://evil.example.test/" }); fakes.scores.mobile.push(storefrontScores(0.7, 0.9, 0.96, 1));
+    const [foreign] = await runLighthouse(origin, resolve("lh-foreign"), {}, undefined, { ...mobile, previewThemeId: 123 });
+    assert.match(foreign.error, /outside https:\/\/shop\.example\.test/);
+    fakes.serve({ finalDisplayedUrl: "https://evil.example.test/" }); fakes.scores.mobile.push(storefrontScores(0.7, 0.9, 0.96, 1));
+    const [shown] = await runLighthouse(origin, resolve("lh-shown"), {}, undefined, mobile);
+    assert.match(shown.error, /outside https:\/\/shop\.example\.test/);
+    fakes.serve({});
     fakes.servedTheme = 7; const audited = fakes.audits.length;
     const [refused] = await runLighthouse(origin, resolve("lh-refused"), {}, undefined, { ...mobile, previewThemeId: 123 });
     assert.equal(refused.scores, undefined); assert.match(refused.error, /preview theme 123 was not served.*theme 7/);
-    assert.equal(fakes.cdpVisits.length, 4, "the warmup is retried once"); assert.equal(fakes.audits.length, audited, "no Lighthouse run measures the wrong theme");
-    await assert.rejects(runLighthouse(origin, resolve("lh-bad"), {}, undefined, { pages: ["//evil"] }), /single \//);
+    assert.equal(fakes.cdpVisits.length, 11, "the warmup is retried once"); assert.equal(fakes.audits.length, audited, "no Lighthouse run measures the wrong theme");
+    await assert.rejects(runLighthouse(origin, resolve("lh-bad"), {}, undefined, { pages: ["//evil.test/"] }), /single \//);
+    await assert.rejects(runLighthouse(origin, resolve("lh-bad"), {}, undefined, { pages: ["/\\evil.test/"] }), /must stay on https:\/\/shop\.example\.test/);
+    await assert.rejects(runLighthouse(origin, resolve("lh-bad"), {}, undefined, { timeoutSeconds: 3e6 }), /Node timer limit/);
     await assert.rejects(runLighthouse(origin, resolve("lh-bad"), {}, undefined, { devices: ["tablet"] }), /devices must be/);
     await assert.rejects(runLighthouse(origin, resolve("lh-bad"), {}, undefined, { previewThemeId: "123" }), /previewThemeId must be a positive integer/);
 
@@ -5409,6 +5450,16 @@ fi
     assert.deepEqual(devices.mobile.scores.performance, { before: 62, after: 66, delta: 4 });
     assert.deepEqual(markdown.split("\n").filter((line) => /Performance|LCP|CLS|TBT/.test(line)), ["| Mobile | Performance | 62 | 66 | +4 |", "| Mobile | LCP | 3.1 s | 2.8 s | -0.3 |", "| Mobile | TBT | 210 ms | 210 ms | ±0 |", "| Mobile | CLS | 0.05 | 0.05 | ±0.00 |"]);
     assert.equal(compareLighthouseSummaries(before, summarizeLighthouseRuns([])).markdown, "");
+    const withAgentic = (found) => ({ ...raw(60, 3100, { id: "x", title: "t", score: 0.4 }), agenticBrowsing: found });
+    const agentic = summarizeLighthouseRuns([withAgentic({ passed: 2, total: 4, failed: [{ id: "a", title: "A", displayValue: "x" }, { id: "b", title: "B" }] }), { ...withAgentic({ passed: 3, total: 4, failed: [{ id: "a", title: "A2" }] }), run: 2 }, { ...raw(60, 3100, { id: "x", title: "t", score: 0.4 }), run: 3 }]);
+    assert.deepEqual(agentic.devices.mobile.agenticBrowsing, { passed: 5, total: 8, failed: [{ id: "a", title: "A", displayValue: "x", runs: 2 }, { id: "b", title: "B", runs: 1 }] });
+    assert.equal(summarizeLighthouseRuns([raw(60, 3100, { id: "x", title: "t", score: 0.4 })]).devices.mobile.agenticBrowsing, undefined);
+    const twoPages = summarizeLighthouseRuns([raw(60, 3100, { id: "x", title: "t", score: 0.4 }), { ...raw(40, 5100, { id: "x", title: "t", score: 0.4 }), page: "/a" }]);
+    const partial = summarizeLighthouseRuns([raw(70, 2900, { id: "x", title: "t", score: 0.4 }), { device: "mobile", page: "/a", run: 1, error: "boom" }]);
+    const matched = compareLighthouseSummaries(twoPages, partial);
+    assert.deepEqual([matched.devices.mobile.matchedPages, matched.devices.mobile.unmatchedPages, matched.devices.mobile.scores.performance, matched.devices.mobile.metrics["largest-contentful-paint"]], [["/"], ["/a"], { before: 60, after: 70, delta: 10 }, { before: 3.1, after: 2.9, delta: -0.2 }]);
+    assert.deepEqual(compareLighthouseSummaries(partial, twoPages).devices.mobile.matchedPages, ["/"]);
+    assert.deepEqual(compareLighthouseSummaries(twoPages, summarizeLighthouseRuns([{ device: "mobile", page: "/a", run: 1, error: "boom" }])).devices.mobile, { matchedPages: [], unmatchedPages: ["/", "/a"] });
   } },
   storefront_preview: { title: "an enabled storefront gives each Scrat PR review one recorded MAIN duplicate through Loggie, adopts a duplicate whose reply was lost, resumes its processing wait, replaces a theme that vanished, reuses it and deletes it when the PR closes, retrying a failed delete; a refused Loggie call only logs, and a disabled storefront or a human PR makes no Loggie call", configure: [(config) => { Object.assign(config.storefront, { store: "fixture.myshopify.com", publicHost: "shop.example.test" }); Object.assign(config.storefront.preview, { processingPollSeconds: 1, filesPageSize: 2 }); }], run: async () => {
     const { config: live } = await f.app("config.ts"), { loggie } = await f.app("loggie.ts"), { childEnvironment, containsSecret } = await f.app("secrets.ts");

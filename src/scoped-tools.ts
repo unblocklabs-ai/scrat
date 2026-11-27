@@ -155,7 +155,7 @@ type PageLike = {
 };
 type ContextLike = { route(pattern: string, handler: (route: RouteLike) => Promise<void>): Promise<void>; newPage(): Promise<PageLike>; close(): Promise<void> };
 type BrowserLike = { newContext(options: Record<string, unknown>): Promise<ContextLike>; close(): Promise<void> };
-type Playwright = { chromium: { launch(options: { headless: boolean; channel: string; chromiumSandbox: boolean; args: string[] }): Promise<BrowserLike>; executablePath(): string; connectOverCDP(endpoint: string): Promise<{ contexts(): { newPage(): Promise<PageLike & { close(): Promise<void> }> }[]; close(): Promise<void> }> } };
+type Playwright = { chromium: { launch(options: { headless: boolean; channel: string; chromiumSandbox: boolean; args: string[] }): Promise<BrowserLike>; executablePath(): string; connectOverCDP(endpoint: string): Promise<{ contexts(): { newPage(): Promise<PageLike & { close(): Promise<void> }>; newCDPSession(page: PageLike): Promise<{ send(method: string): Promise<unknown> }> }[]; close(): Promise<void> }> } };
 
 export async function loadPlaywright(): Promise<Playwright> {
   const specifier = "playwright-core";
@@ -182,7 +182,7 @@ const decodeXmlEntities = (value: string) => value
   .replaceAll("&quot;", '"')
   .replaceAll("&apos;", "'");
 
-const diagnosticsScript = `(limits) => {
+const diagnosticsScript = `async (limits) => {
   const width = window.innerWidth, height = window.innerHeight, scrollY = window.scrollY || 0;
   const classesOf = (el, count) => String(el.className && el.className.baseVal !== undefined ? el.className.baseVal : el.className || "").split(/\\s+/).filter(Boolean).slice(0, count).map((name) => "." + name).join("");
   const tag = (el) => el.tagName.toLowerCase();
@@ -195,7 +195,7 @@ const diagnosticsScript = `(limits) => {
   for (const el of found) {
     const rect = el.getBoundingClientRect(), style = getComputedStyle(el);
     const visible = style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) !== 0 && rect.width > 0 && rect.height > 0;
-    const entry = { text: textOf(el), selectorHint: hintOf(el), top: Math.round(rect.top + scrollY), bottom: Math.round(rect.bottom + scrollY), height: Math.round(rect.height), isAboveFold: visible && rect.top < height, visible };
+    const entry = { text: textOf(el), selectorHint: hintOf(el), top: Math.round(rect.top + scrollY), bottom: Math.round(rect.bottom + scrollY), height: Math.round(rect.height), isAboveFold: visible && rect.top < height && rect.bottom > 0, visible };
     const centerX = rect.left + rect.width / 2, centerY = rect.top + rect.height / 2;
     if (visible && centerX >= 0 && centerX < width && centerY >= 0 && centerY < height) {
       const hit = document.elementFromPoint(centerX, centerY);
@@ -205,14 +205,21 @@ const diagnosticsScript = `(limits) => {
     if (!seen.has(key)) { seen.add(key); ctas.push(entry); }
   }
   ctas.sort((a, b) => (b.isAboveFold ? 1 : 0) - (a.isAboveFold ? 1 : 0) || a.top - b.top);
-  const entriesOf = (type) => {
+  const watched = new Map();
+  for (const type of ["largest-contentful-paint", "layout-shift", "longtask"]) {
     try {
-      const observer = new PerformanceObserver(() => {});
+      const records = [], observer = new PerformanceObserver((list) => records.push(...list.getEntries()));
       observer.observe({ type, buffered: true });
-      const records = observer.takeRecords();
-      observer.disconnect();
-      if (records.length) return records;
+      watched.set(type, { observer, records });
     } catch (error) {}
+  }
+  await new Promise((done) => setTimeout(done, 0));
+  const entriesOf = (type) => {
+    const found = watched.get(type);
+    if (found) {
+      try { found.records.push(...found.observer.takeRecords()); found.observer.disconnect(); } catch (error) {}
+      if (found.records.length) return found.records;
+    }
     try { return performance.getEntriesByType(type); } catch (error) { return []; }
   };
   const guarded = (read) => { try { return read(); } catch (error) { return undefined; } };
@@ -228,7 +235,14 @@ const diagnosticsScript = `(limits) => {
   const cls = guarded(() => {
     const shifts = entriesOf("layout-shift").filter((entry) => !entry.hadRecentInput), hints = [];
     for (const entry of shifts) for (const source of entry.sources || []) if (source.node && !hints.includes(hintOf(source.node))) hints.push(hintOf(source.node));
-    return { value: Math.round(shifts.reduce((sum, entry) => sum + entry.value, 0) * 10000) / 10000, shifts: hints.slice(0, limits.ctas) };
+    let current = 0, largest = 0, first = 0, last = 0;
+    for (const entry of shifts) {
+      if (current && entry.startTime - last < 1000 && entry.startTime - first < 5000) current += entry.value;
+      else { current = entry.value; first = entry.startTime; }
+      last = entry.startTime;
+      largest = Math.max(largest, current);
+    }
+    return { value: Math.round(largest * 10000) / 10000, shifts: hints.slice(0, limits.ctas) };
   });
   const longTasks = guarded(() => entriesOf("longtask"));
   const resourceSummary = guarded(() => {
@@ -476,10 +490,10 @@ export function createBrowserTool({ settings, binding, contextDir, runId, prefix
       const page = await context.newPage(), consoleErrors: BrowserSession["consoleErrors"] = [], failedRequests: BrowserSession["failedRequests"] = [];
       const keep = <T>(list: T[], entry: T, cap: number) => { list.push(entry); list.splice(0, list.length - cap); };
       const kept = () => config.tools.browser.diagnostics;
-      page.on("console", (message: { type(): string; text(): string }) => { if (message.type() === "error") keep(consoleErrors, { source: "console", text: message.text() }, kept().consoleEntries); });
-      page.on("pageerror", (error: { message?: string }) => keep(consoleErrors, { source: "pageerror", text: String(error?.message ?? error) }, kept().consoleEntries));
-      page.on("response", (response: { status(): number; url(): string; request(): { method(): string } }) => { if (response.status() >= 400) keep(failedRequests, { url: response.url(), status: response.status(), method: response.request().method() }, kept().failedRequests); });
-      page.on("requestfailed", (request: { url(): string; method(): string; failure(): { errorText: string } | null }) => keep(failedRequests, { url: request.url(), method: request.method(), failure: request.failure()?.errorText }, kept().failedRequests));
+      page.on("console", (message: { type(): string; text(): string }) => { if (message.type() === "error") keep(consoleErrors, { source: "console", text: message.text().slice(0, kept().entryChars) }, kept().consoleEntries); });
+      page.on("pageerror", (error: { message?: string }) => keep(consoleErrors, { source: "pageerror", text: String(error?.message ?? error).slice(0, kept().entryChars) }, kept().consoleEntries));
+      page.on("response", (response: { status(): number; url(): string; request(): { method(): string } }) => { if (response.status() >= 400) keep(failedRequests, { url: response.url().slice(0, kept().entryChars), status: response.status(), method: response.request().method() }, kept().failedRequests); });
+      page.on("requestfailed", (request: { url(): string; method(): string; failure(): { errorText: string } | null }) => keep(failedRequests, { url: request.url().slice(0, kept().entryChars), method: request.method(), failure: request.failure()?.errorText?.slice(0, kept().entryChars) }, kept().failedRequests));
       session = { context, page, consoleErrors, failedRequests };
       startedAt ??= Date.now();
       return session;

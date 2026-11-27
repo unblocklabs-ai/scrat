@@ -168,7 +168,8 @@ export const chromium = {
   async connectOverCDP(endpoint) {
     fakes.cdp.push(endpoint);
     const newPage = async () => ({ goto: async (url) => { fakes.cdpVisits.push(url); }, evaluate: async () => fakes.servedTheme, close: async () => {} });
-    return { contexts: () => [{ newPage }], close: async () => {} };
+    const newCDPSession = async () => ({ send: async (method) => { fakes.cdpVisits.push(method); } });
+    return { contexts: () => [{ newPage, newCDPSession }], close: async () => {} };
   },
   async launch({ args, ...options }) {
     fakes.launches.push(args); fakes.launchOptions.push(options);
@@ -4758,7 +4759,7 @@ fi
         innerHTML: async (_selector, { timeout }) => { state.timeouts.push(timeout); return state.html; }, waitForLoadState: async () => {},
         on: (event, listener) => { if (event === "popup") state.listeners.push(listener); else (state.events[event] ??= []).push(listener); },
         off: (event, listener) => { if (event === "popup") state.listeners = state.listeners.filter((entry) => entry !== listener); else state.events[event] = (state.events[event] ?? []).filter((entry) => entry !== listener); },
-        evaluate: async (expression) => /^\(\(limits\)/.test(expression) ? runInNewContext(expression, state.world) : undefined,
+        evaluate: async (expression) => /^\(async \(limits\)/.test(expression) ? runInNewContext(expression, state.world) : undefined,
         setViewportSize: async (size) => { state.viewport = size; },
         locator: (selector) => ({
           ariaSnapshot: async ({ timeout }) => { state.timeouts.push(timeout); state.snapshots.push(selector); return state.aria(selector); },
@@ -4792,13 +4793,13 @@ fi
     const entries = {
       navigation: [{ startTime: 0, responseStart: 120.4, domContentLoadedEventEnd: 900.2, loadEventEnd: 1500.6 }],
       "largest-contentful-paint": [{ startTime: 1800.4, element: element({ tag: "IMG", id: "hero" }), url: "https://shop.example.test/hero.jpg" }],
-      "layout-shift": [{ value: 0.1234, hadRecentInput: false, sources: [{ node: element({ tag: "DIV", className: "announcement bar" }) }] }, { value: 0.5, hadRecentInput: true, sources: [] }, { value: 0.05, hadRecentInput: false, sources: [] }],
+      "layout-shift": [{ startTime: 100, value: 0.1234, hadRecentInput: false, sources: [{ node: element({ tag: "DIV", className: "announcement bar" }) }] }, { startTime: 300, value: 0.5, hadRecentInput: true, sources: [] }, { startTime: 400, value: 0.05, hadRecentInput: false, sources: [] }, { startTime: 3000, value: 0.1, hadRecentInput: false, sources: [] }],
       longtask: [{ duration: 80.4 }, { duration: 120.2 }],
       resource: [["https://shop.example.test/app.js", "script", 50000], ["https://shop.example.test/a.jpg", "img", 30000], ["https://cdn.thirdparty.test/t.js", "script", 20000], ["https://cdn.thirdparty.test/p.gif", "img", 100], ["https://other.test/x", "fetch", 500]].map(([name, initiatorType, transferSize]) => ({ name, initiatorType, transferSize })),
     };
     const documentFake = (all) => ({ querySelectorAll: () => all, elementFromPoint: (x, y) => y >= 560 && y < 660 ? sticky : null });
     const domWorld = () => ({
-      window: { innerWidth: 390, innerHeight: 844, scrollY: 100 }, document: documentFake([addToCart, checkoutLink, hiddenSubmit]), getComputedStyle: (el) => el.style, location: { hostname: "shop.example.test" }, URL,
+      window: { innerWidth: 390, innerHeight: 844, scrollY: 100 }, document: documentFake([addToCart, checkoutLink, hiddenSubmit]), getComputedStyle: (el) => el.style, location: { hostname: "shop.example.test" }, URL, setTimeout,
       performance: { getEntriesByType: (type) => entries[type === "resource" ? "resource" : type] ?? [] },
       PerformanceObserver: class { observe({ type }) { this.type = type; if (type === "longtask") throw new Error("unsupported"); } takeRecords() { return this.type === "navigation" || this.type === "resource" ? [] : entries[this.type]; } disconnect() {} },
     });
@@ -5363,13 +5364,14 @@ fi
     const [preview] = await runLighthouse(origin, resolve("lh-preview"), {}, undefined, { ...mobile, previewThemeId: 123 });
     assert.equal(preview.scores.performance, 70);
     const [launched] = fakes.launches.at(-1);
-    assert.deepEqual([fakes.cdp, fakes.cdpVisits, fakes.audits.at(-1).disableStorageReset], [[`http://127.0.0.1:${launched.split("=")[1]}`], ["https://shop.example.test/?preview_theme_id=123"], true]);
+    assert.deepEqual([fakes.cdp, fakes.cdpVisits, fakes.audits.at(-1).disableStorageReset], [[`http://127.0.0.1:${launched.split("=")[1]}`], ["https://shop.example.test/?preview_theme_id=123", "Network.clearBrowserCache"], true]);
     fakes.servedTheme = 7; const audited = fakes.audits.length;
     const [refused] = await runLighthouse(origin, resolve("lh-refused"), {}, undefined, { ...mobile, previewThemeId: 123 });
     assert.equal(refused.scores, undefined); assert.match(refused.error, /preview theme 123 was not served.*theme 7/);
-    assert.equal(fakes.cdpVisits.length, 3, "the warmup is retried once"); assert.equal(fakes.audits.length, audited, "no Lighthouse run measures the wrong theme");
+    assert.equal(fakes.cdpVisits.length, 4, "the warmup is retried once"); assert.equal(fakes.audits.length, audited, "no Lighthouse run measures the wrong theme");
     await assert.rejects(runLighthouse(origin, resolve("lh-bad"), {}, undefined, { pages: ["//evil"] }), /single \//);
     await assert.rejects(runLighthouse(origin, resolve("lh-bad"), {}, undefined, { devices: ["tablet"] }), /devices must be/);
+    await assert.rejects(runLighthouse(origin, resolve("lh-bad"), {}, undefined, { previewThemeId: "123" }), /previewThemeId must be a positive integer/);
 
     const raw = (performance, lcp, insight) => ({ device: "mobile", page: "/", run: 1, report: "r", scores: { performance, accessibility: 90, "best-practices": 96, seo: 100 }, metrics: { "first-contentful-paint": 1800, "largest-contentful-paint": lcp, "total-blocking-time": 210, "cumulative-layout-shift": 0.05, "speed-index": 2900 }, insights: [insight] });
     const before = summarizeLighthouseRuns([raw(60, 3100, { id: "x", title: "old", score: 0.4, metricSavings: { LCP: 100 } }), { ...raw(64, 3100, { id: "x", title: "new", score: 0.6, metricSavings: { LCP: 200 } }), run: 2, report: "r2" }, { device: "mobile", page: "/", run: 3, error: "boom" }]);

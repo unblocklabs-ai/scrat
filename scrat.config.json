@@ -77,7 +77,7 @@
       "inlineBytes": 10240
     },
     "http": { "timeoutSeconds": 30, "maxRequestBytes": 65536 },
-    "browser": { "steps": 40, "sessionSeconds": 300, "navigationSeconds": 30, "actionSeconds": 12, "textCaptureBytes": 524288, "domScoping": true, "sitemapSamplesPerGroup": 5, "sitemapMaxGroups": 20, "diagnostics": { "consoleEntries": 30, "failedRequests": 30, "ctas": 10, "thirdPartyHosts": 10 }, "defaultViewport": "desktop", "viewports": { "desktop": { "width": 1280, "height": 800 }, "mobile": { "width": 390, "height": 844 } } },
+    "browser": { "steps": 40, "sessionSeconds": 300, "navigationSeconds": 30, "actionSeconds": 12, "textCaptureBytes": 524288, "domScoping": true, "sitemapSamplesPerGroup": 5, "sitemapMaxGroups": 20, "diagnostics": { "consoleEntries": 30, "failedRequests": 30, "ctas": 10, "thirdPartyHosts": 10, "entryChars": 500 }, "defaultViewport": "desktop", "viewports": { "desktop": { "width": 1280, "height": 800 }, "mobile": { "width": 390, "height": 844 } } },
     "search": { "pageSize": 20, "excerptChars": 300, "maxQueryLength": 256 },
     "codemode": { "review": true, "change": true, "mode": "on", "inlineBudget": 3000, "maxWorkers": 4, "models": false },
     "redactionMarginBytes": 4096

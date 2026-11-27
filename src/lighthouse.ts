@@ -69,17 +69,19 @@ const childAudit = (input: string, signal: AbortSignal) => new Promise<{ scores:
   });
 });
 
-async function warmPreviewTheme(port: number, origin: string, themeId: number) {
+async function warmPreviewTheme(port: number, origin: string, themeId: number, signal: AbortSignal) {
   const client = await (await loadPlaywright()).chromium.connectOverCDP(`http://127.0.0.1:${port}`);
   try {
-    const page = await client.contexts()[0]!.newPage();
+    const context = client.contexts()[0]!, page = await context.newPage();
     let served: unknown;
     for (let attempt = 0; attempt < 2 && served !== themeId; attempt++) {
+      signal.throwIfAborted();
       await page.goto(`${origin}/?preview_theme_id=${themeId}`, { waitUntil: "load", timeout: config.tools.browser.navigationSeconds * 1000 });
       served = await page.evaluate!<unknown>("window.Shopify?.theme?.id");
       if (typeof served === "string") served = Number(served);
     }
     if (served !== themeId) throw new Error(`The preview theme ${themeId} was not served: the store served ${typeof served === "number" ? `theme ${served}` : "no theme"}`);
+    await (await context.newCDPSession(page)).send("Network.clearBrowserCache");
     await page.close();
   } finally {
     await client.close().catch(() => undefined);
@@ -89,7 +91,7 @@ async function warmPreviewTheme(port: number, origin: string, themeId: number) {
 async function audited(url: string, device: Device, reportPath: string, signal: AbortSignal, { includeAgenticBrowsing, previewThemeId }: { includeAgenticBrowsing: boolean; previewThemeId?: number }) {
   const port = await freePort(), browser = await launchChromium([`--remote-debugging-port=${port}`]), { max, items, valueChars } = config.storefront.lighthouse.insights;
   try {
-    if (previewThemeId !== undefined) await warmPreviewTheme(port, new URL(url).origin, previewThemeId);
+    if (previewThemeId !== undefined) await warmPreviewTheme(port, new URL(url).origin, previewThemeId, signal);
     const flags = { port, output: "json", logLevel: "error", onlyCategories: includeAgenticBrowsing ? [...ids, "agentic-browsing"] : ids, disableFullPageScreenshot: true, ...previewThemeId !== undefined ? { disableStorageReset: true } : {} };
     return await childAudit(JSON.stringify({ url, device, reportPath, flags, categories, metrics: labelled(metrics), insightIds, agentic: includeAgenticBrowsing, maxInsights: max, maxItems: items, valueChars }), signal);
   } finally {
@@ -103,6 +105,7 @@ export async function runLighthouse(origin: string, directory: string, reference
   if (!Number.isInteger(runs) || runs < 1) throw new Error("Lighthouse runs must be a positive integer");
   if (!wanted.length || wanted.some((device) => !devices.includes(device))) throw new Error(`Lighthouse devices must be from ${devices.join(", ")}`);
   if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0) throw new Error("Lighthouse timeoutSeconds must be 0 or more");
+  if (previewThemeId !== undefined && (!Number.isSafeInteger(previewThemeId) || previewThemeId < 1)) throw new Error("Lighthouse previewThemeId must be a positive integer");
   await loadLighthouse();
   await mkdir(directory, { recursive: true });
   return withValidationSlot(async () => {

@@ -68,10 +68,10 @@ async function fetchAuth(url: string, github: unknown) {
   let token = process.env.SCRAT_WORKFLOWS_TOKEN;
   let app = false;
   if (!token) {
-    if (remote.origin !== "https://github.com") throw new Error(`Non-GitHub HTTPS workflow repositories require SCRAT_WORKFLOWS_TOKEN; ${appAuthHelp}`);
+    if (remote.origin !== "https://github.com") return {};
     if (isObject(github) && github.auth === "pat") {
       token = process.env.GITHUB_PAT;
-      if (!token) throw new Error("Set SCRAT_WORKFLOWS_TOKEN or GITHUB_PAT for the HTTPS workflow repository");
+      if (!token) return {};
     } else {
       try {
         const repo = /^\/[\w.-]+\/([\w.-]+?)(?:\.git)?\/?$/.exec(remote.pathname)?.[1];
@@ -83,7 +83,7 @@ async function fetchAuth(url: string, github: unknown) {
         }));
         app = true;
       } catch {
-        throw new Error(`GitHub App cannot access the workflows repository. ${appAuthHelp}`);
+        return { app: true };
       }
     }
   }

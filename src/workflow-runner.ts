@@ -2,10 +2,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
 import { trustLocalWorkflowScripts } from "./config.ts";
 import { db } from "./db.ts";
-import { eq } from "drizzle-orm";
 import type { EventReferences } from "./events.ts";
 import { git } from "./git.ts";
 import type { Item } from "./items.ts";
@@ -18,10 +18,9 @@ import type { ResolvedWorkflow } from "./workflows.ts";
 type WorkflowFn = (ctx: WorkflowContext) => Promise<unknown>;
 function completedItem(parsed: TriggerInput) {
   if (parsed.kind !== "workflow_completed") return {};
-  const found = parsed.subjectId && parsed.item?.title !== undefined ? undefined
-    : db.select({ id: items.id, kind: items.kind, payload: items.payload }).from(tasks).innerJoin(items, eq(items.id, tasks.subjectId)).where(eq(tasks.id, parsed.taskId)).get();
-  const item = found ? { id: found.id, kind: found.kind, number: found.payload.number, title: found.payload.title } : parsed.item && parsed.subjectId && parsed.item.title !== undefined ? { id: parsed.subjectId, kind: parsed.item.kind, number: parsed.item.number, title: parsed.item.title } : undefined;
-  return item ? { item } : {};
+  if (parsed.subjectId && parsed.item?.title !== undefined) return { item: { id: parsed.subjectId, kind: parsed.item.kind, number: parsed.item.number, title: parsed.item.title } };
+  const found = db.select({ id: items.id, kind: items.kind, payload: items.payload }).from(tasks).innerJoin(items, eq(items.id, tasks.subjectId)).where(eq(tasks.id, parsed.taskId)).get();
+  return found ? { item: { id: found.id, kind: found.kind, number: found.payload.number, title: found.payload.title } } : {};
 }
 
 const loadedModules = new Map<string, WorkflowFn>();

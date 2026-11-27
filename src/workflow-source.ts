@@ -47,12 +47,13 @@ function pollFollower({ name: follower, trigger, enabled }: Action, operation: O
   let queued = 0;
   for (const { run, task, subject, item } of completed) {
     if (run.input.dryRun === true || "replayOf" in run.input) continue;
+    const headSha = run.headSha ?? run.context?.headSha;
     const followerSubject = upsertSubject({ repository, kind: "workflow", key: `${follower}:${run.id}` });
     queued += enqueueOnce(followerSubject, follower, `${parent} run ${run.id} completed`, {
       source: "workflow", kind: "workflow_completed", triggerKey: run.id, workflow: parent, runId: run.id, taskId: task.id,
       subject: { kind: subject.kind, key: subject.key }, subjectId: subject.id,
       ...item ? { item: { kind: item.kind, number: item.payload.number, title: item.payload.title } } : {},
-      ...run.result?.grade ? { grade: run.result.grade } : {}, ...run.headSha ?? run.context?.headSha ? { headSha: run.headSha ?? run.context?.headSha } : {},
+      ...run.result?.grade ? { grade: run.result.grade } : {}, ...headSha ? { headSha } : {},
       outcome: run.result?.outcome ?? "complete", publication: run.publication.status,
     });
   }

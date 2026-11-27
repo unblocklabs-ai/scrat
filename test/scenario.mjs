@@ -4446,13 +4446,14 @@ fi
     assert.equal(verdicts().length, 1); assert.match(verdicts()[0].body, /Drops the users table/);
     assert.deepEqual(pr201.labels, [], "advisory writes no grade or ready labels");
     assert.equal(prReviewHistory(first.subjectId).length, 0, "advisory runs never enter PR review history");
+    db.update(s.runs).set({ result: { ...flagged.result, grade: "B" } }).where(eq(s.runs.id, flagged.id)).run();
 
     assert.equal(await pollWorkflowCompletions(), 1);
     const [digestTask] = ofAction("advisory_digest", "queued");
     const prTitle = all(s.items).find((item) => item.id === first.subjectId).payload.title;
     assert.equal(digestTask.input.runId, flagged.id); assert.deepEqual(digestTask.input.item, { kind: "pr", number: 201, title: prTitle }); assert.equal(digestTask.input.publication, "published");
     assert.equal(digestTask.input.subjectId, first.subjectId); assert.equal(digestTask.input.headSha, pr201.head.sha);
-    assert.equal(digestTask.input.grade, flagged.result?.grade);
+    assert.equal(digestTask.input.grade, "B");
     const previewRow = { subjectId: first.subjectId, pullRequestNumber: 201, themeId: 4242, name: "pr-201", headSha: pr201.head.sha };
     db.insert(s.themePreviews).values([{ ...previewRow, createdAt: "2026-01-01T00:00:00.000Z" }, { ...previewRow, themeId: 9999, name: "pr-201-old", createdAt: "2026-02-01T00:00:00.000Z", deletedAt: "2026-02-02T00:00:00.000Z" }, { ...previewRow, subjectId: all(s.items).find((item) => item.payload.number === 202).id, pullRequestNumber: 203, name: "pr-203", headSha: null }]).run();
     const { subjectId: _subject, item: _item, ...legacy } = digestTask.input;

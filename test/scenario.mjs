@@ -3763,6 +3763,12 @@ fi
     await startup((c) => { c.github.auth = "pat"; }, /github\.auth is "pat" but GITHUB_PAT is not set/);
     process.env.GITHUB_PAT = "ghp_x"; await validateStaticConfig(variant((c) => { c.github.auth = "pat"; })); delete process.env.GITHUB_PAT;
     process.env.GITHUB_APP_PRIVATE_KEY = key;
+    const images = (patch) => (c) => { Object.assign(c.media.cloudflareImages, { enabled: true, accountId: "acct", accountHash: "hash" }, patch); };
+    process.env.CLOUDFLARE_IMAGES_TOKEN = "cfimg-validation";
+    await startup(images({ baseUrl: "https://api.example.test/v4?x=1" }), /media\.cloudflareImages\.baseUrl must be an absolute http\(s\) URL without a query or fragment/);
+    await startup(images({ deliveryBaseUrl: "http://cdn.example.test" }), /media\.cloudflareImages\.deliveryBaseUrl must use https unless it is a loopback address/);
+    await validateStaticConfig(variant(images({ deliveryBaseUrl: "http://127.0.0.1:9/cdn" })));
+    delete process.env.CLOUDFLARE_IMAGES_TOKEN;
 
     const token = ["xoxb", "1111", "2222", "fixturetoken"].join("-");
     const status = (change) => variant((c) => { c.slack = { enabled: true, channel: "C0123456789" }; change(c.slack); });
@@ -5942,11 +5948,12 @@ fi
     assert.equal(f.issues.get(row("cf-f").number).title, lostTitle, "the title is redacted");
   } },
   cloudflare_images: { title: "with Cloudflare Images on, a published assessment links only the run's referenced screenshots as table thumbnails and prose links, leaves code blocks, unlisted names and oversized images as written, uploads each once across reconciles so the body stays unchanged, works through Loggie, and keeps the token secret", run: async () => {
-    const token = "cfimg-" + "Qw7Er9Ty3U".repeat(3), loggieKey = "loggie-" + "Pk4Lm8Nb2V".repeat(3), uploads = [];
+    const token = "cfimg-" + "Qw7Er9Ty3U".repeat(3), loggieKey = "loggie-" + "Pk4Lm8Nb2V".repeat(3), uploads = [], refused = [];
     process.env.CLOUDFLARE_IMAGES_TOKEN = token; process.env.LOGGIE_API_KEY = loggieKey;
     const server = createServer(async (req, res) => {
       const chunks = []; for await (const chunk of req) chunks.push(chunk);
       const form = await new Response(Buffer.concat(chunks), { headers: { "content-type": req.headers["content-type"] } }).formData(), file = form.get("file");
+      if (file.name === "screenshot-mobile-14.png") { refused.push(file.name); res.writeHead(500, { "content-type": "application/json" }); res.end(JSON.stringify({ success: false, errors: [{ message: "internal" }] })); return; }
       uploads.push({ path: req.url, authorization: req.headers.authorization, key: req.headers["x-api-key"], name: file.name, size: file.size, metadata: JSON.parse(form.get("metadata")), signed: form.get("requireSignedURLs") });
       res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ success: true, result: { id: "id-" + file.name.replace(/\.png$/, ""), variants: [] } }));
     });
@@ -5957,15 +5964,16 @@ fi
       const { contextDirOf } = await f.app("agent-input.ts"), { getRun, inferenceRunOf, updateRun } = await f.app("run-history.ts"), { reconcilePrReview } = await f.app("pr-review-publication.ts");
       const { embedRunScreenshots } = await f.app("cloudflare-images.ts"), { GitHubRepository } = await f.app("github.ts");
       const png = (width, height, bytes = 64) => { const b = Buffer.alloc(bytes); Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b); b.writeUInt32BE(13, 8); b.write("IHDR", 12, "latin1"); b.writeUInt32BE(width, 16); b.writeUInt32BE(height, 20); return b; };
-      const stage = (dir, shots) => {
+      const stage = (dir, shots, outside = []) => {
         mkdirSync(dir, { recursive: true });
         for (const [name, bytes] of Object.entries(shots)) if (bytes) writeFileSync(resolve(dir, name), bytes);
-        writeFileSync(resolve(dir, "screenshots.jsonl"), [...Object.keys(shots).map((name) => resolve(dir, name)), "/etc/passwd"].map((path) => JSON.stringify({ path, viewport: "mobile", url: "https://shop.example.test/" }) + "\n").join(""));
+        writeFileSync(resolve(dir, "screenshots.jsonl"), [...Object.keys(shots).map((name) => resolve(dir, name)), ...outside, "/etc/passwd"].map((path) => JSON.stringify({ path, viewport: "mobile", url: "https://shop.example.test/" }) + "\n").join(""));
       };
       branchOff("feature-a", "src/feature.ts", "export const feature = 1;\n");
       f.addPr(301, "feature-a", "human"); await route();
       const reviewed = await success(), dir = contextDirOf(inferenceRunOf(getRun(reviewed.id)).id);
-      stage(dir, { "screenshot-mobile-6.png": png(390, 844), "screenshot-reviewer-1-desktop-7.png": png(1440, 900), "screenshot-mobile-12.png": png(390, 2000), "screenshot-desktop-8.png": png(20000, 900), "screenshot-mobile-9.png": png(390, 844, 5000), "screenshot-mobile-13.png": null });
+      mkdirSync(resolve(dir, "../outside"), { recursive: true }); writeFileSync(resolve(dir, "../outside/screenshot-mobile-99.png"), png(390, 844));
+      stage(dir, { "screenshot-mobile-6.png": png(390, 844), "screenshot-reviewer-1-desktop-7.png": png(1440, 900), "screenshot-mobile-12.png": png(390, 2000), "screenshot-desktop-8.png": png(20000, 900), "screenshot-mobile-9.png": png(390, 844, 5000), "screenshot-mobile-13.png": null, "screenshot-mobile-14.png": png(390, 844) }, [resolve(dir, "../outside/screenshot-mobile-99.png")]);
       const fence = "```text\nls screenshot-mobile-6.png\n```";
       const text = ["## Storefront", "", "| Page | Preview | Live |", "| --- | --- | --- |", "| Home | `screenshot-mobile-6.png` | screenshot-reviewer-1-desktop-7.png |", "| Big | `screenshot-desktop-8.png` | `screenshot-mobile-9.png` |", "",
         "The drawer overlaps in `screenshot-mobile-12.png`, as ![cart drawer](screenshot-mobile-6.png) shows.", "", fence, "",
@@ -5984,19 +5992,52 @@ fi
         assert.equal(upload.path, "/client/v4/accounts/acct-img/images/v1"); assert.equal(upload.authorization, "Bearer " + token); assert.equal(upload.key, undefined);
         assert.deepEqual(upload.metadata, { source: "scrat", runId: reviewed.id, file: upload.name }); assert.equal(upload.signed, "false");
       }
-      assert.deepEqual(Object.keys(JSON.parse(readFileSync(resolve(dir, "uploaded-images.json"), "utf8"))).sort(), ["screenshot-mobile-12.png", "screenshot-mobile-6.png", "screenshot-reviewer-1-desktop-7.png"]);
+      assert.deepEqual(readdirSync(dir).filter((name) => name.startsWith(".cf-image-")).sort(), [".cf-image-screenshot-mobile-12.png.json", ".cf-image-screenshot-mobile-6.png.json", ".cf-image-screenshot-reviewer-1-desktop-7.png.json"]);
+      assert.deepEqual(JSON.parse(readFileSync(resolve(dir, ".cf-image-screenshot-mobile-6.png.json"), "utf8")), { accountHash: "HASH", id: "id-screenshot-mobile-6" });
       const writes = f.writes.length, logs = captureLogs();
       try { await reconcilePrReview(github, subjectId, 301, references); } finally { restoreLogs(); }
       assert.equal(uploads.length, 3, "a later reconcile reuses the recorded uploads"); assert.equal(f.writes.length, writes, "and leaves the comment alone");
       assert.ok(logs.some((line) => line.event === "review.unchanged"));
       assert.equal(f.comments.get(301).at(-1).body, body);
 
+      updateRun(reviewed.id, { result: { ...getRun(reviewed.id).result, text: text.replace("SCRAT_GRADE: B", "The badge is clipped in `screenshot-mobile-14.png`.\n\nSCRAT_GRADE: B") } });
+      await reconcilePrReview(github, subjectId, 301, references);
+      const failedOpen = f.comments.get(301).at(-1).body;
+      assert.deepEqual(refused, ["screenshot-mobile-14.png"], "an HTTP 500 upload is attempted once");
+      assert.ok(failedOpen.includes("The badge is clipped in `screenshot-mobile-14.png`.") && failedOpen.includes(cell("screenshot-mobile-6")), "and its name stays as written while the comment is still published");
+      assert.ok(!existsSync(resolve(dir, ".cf-image-screenshot-mobile-14.png.json")));
+      writeFileSync(resolve(dir, ".cf-image-screenshot-mobile-14.png.json"), JSON.stringify({ accountHash: "HASH", id: ".." }));
+      execFileSync("mkfifo", [resolve(dir, "screenshot-mobile-15.png")]);
+      writeFileSync(resolve(dir, "screenshots.jsonl"), JSON.stringify({ path: resolve(dir, "screenshot-mobile-15.png") }) + "\n", { flag: "a" });
+      assert.equal(await embedRunScreenshots("`screenshot-mobile-14.png` and `screenshot-mobile-15.png`", dir), "`screenshot-mobile-14.png` and `screenshot-mobile-15.png`", "a forged receipt id is ignored and a FIFO is skipped without blocking");
+      assert.deepEqual(refused, ["screenshot-mobile-14.png", "screenshot-mobile-14.png"]);
+
       Object.assign(images, { auth: "loggie", thumbnailVariant: "", thumbnailWidth: 0 });
       const other = resolve("data/runs/loggie-run");
       stage(other, { "screenshot-desktop-3.png": png(1440, 900) });
-      assert.equal(await embedRunScreenshots("| x | `screenshot-desktop-3.png` |", other, { runId: "loggie-run" }),
-        `| x | <a href="${full("screenshot-desktop-3")}"><img src="${full("screenshot-desktop-3")}" alt="screenshot-desktop-3.png" /></a> |`);
+      assert.equal(await embedRunScreenshots("| Page | Shot |\n| --- | --- |\n| x | `screenshot-desktop-3.png` |", other, { runId: "loggie-run" }),
+        `| Page | Shot |\n| --- | --- |\n| x | <a href="${full("screenshot-desktop-3")}"><img src="${full("screenshot-desktop-3")}" alt="screenshot-desktop-3.png" /></a> |`);
       assert.deepEqual(uploads.slice(3).map(({ path, key, authorization }) => ({ path, key, authorization })), [{ path: "/api/proxy/cf-images/accounts/acct-img/images/v1", key: loggieKey, authorization: undefined }]);
+      assert.equal(await embedRunScreenshots("See `screenshot-desktop-3.png`.", [resolve("data/runs/missing-run"), other]), `See [\`screenshot-desktop-3.png\`](${full("screenshot-desktop-3")}).`, "a later run directory in the list resolves the screenshot");
+
+      const untouched = ['<a href="https://example.test/">screenshot-desktop-3.png</a>', "[shot]: screenshot-desktop-3.png", "> ```", "> screenshot-desktop-3.png", "> ```", "", "    screenshot-desktop-3.png", ""].join("\n");
+      assert.equal(await embedRunScreenshots(`${untouched}\n| no delimiter row: screenshot-desktop-3.png\n`, other),
+        `${untouched}\n| no delimiter row: [\`screenshot-desktop-3.png\`](${full("screenshot-desktop-3")})\n`, "anchors, reference definitions and quoted or indented code stay as written, and a pipe line without a delimiter row is prose");
+      assert.equal(uploads.length, 4, "the recorded upload is reused");
+
+      const { uploadCloudflareImage } = await f.app("cloudflare-images.ts");
+      const jpeg = (width, height) => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xff, 0xff, 0xc0, 0x00, 0x11, 0x08]), Buffer.from([height >> 8, height & 0xff, width >> 8, width & 0xff]), Buffer.alloc(13), Buffer.from([0xff, 0xd9])]);
+      writeFileSync(resolve(other, "photo-fill.jpg"), jpeg(640, 480)); writeFileSync(resolve(other, "photo-wide.jpg"), jpeg(20000, 480));
+      assert.equal((await uploadCloudflareImage(resolve(other, "photo-fill.jpg"), { contextDir: other }))?.id, "id-photo-fill.jpg", "a JPEG with 0xff fill bytes before its markers is measured and uploaded");
+      assert.equal(await uploadCloudflareImage(resolve(other, "photo-wide.jpg"), { contextDir: other }), undefined, "and its parsed width still meets maxDimension");
+      assert.equal(uploads.length, 5);
+
+      const { createWorkflowContext } = await f.app("workflow-ctx.ts"), { logger } = await f.app("logging.ts");
+      stage(contextDirOf("dry-media-run"), { "screenshot-mobile-1.png": png(390, 844) });
+      const { ctx: dry } = createWorkflowContext({ workflow: { name: "media-dry" }, task: { id: "dry-media-task" }, run: { id: "dry-media-run" }, subject: { repository: "fixture/project" }, references: {}, repositoryPath: ".", log: logger, signal: new AbortController().signal, dryRun: true, trigger: { kind: "manual" } });
+      assert.equal(dry.media.enabled, false);
+      assert.equal(await dry.media.uploadImage("screenshot-mobile-1.png"), undefined);
+      assert.equal(uploads.length + refused.length, 7, "a dry run uploads nothing");
 
       const { childEnvironment, containsSecret } = await f.app("secrets.ts"), { redactSecrets } = await f.app("errors.ts");
       assert.equal("CLOUDFLARE_IMAGES_TOKEN" in childEnvironment(), false);

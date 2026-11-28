@@ -139,7 +139,7 @@ const comment = {
     const marker = context.action.mode === "review" ? reviewMarker : taskMarker(task.id);
     const observation = observed(context);
     const existing = findBotMarkedComment(observation.own, marker);
-    const text = await embedRunScreenshots(run.result.text, contextDirOf(inferenceRunOf(run).id), { runId: run.id, references });
+    const text = await embedRunScreenshots(run.result.text, [contextDirOf(run.id), contextDirOf(inferenceRunOf(run).id)], { runId: run.id, references });
     const commentId = await upsertComment(github, run.context.item.number, existing, withMarker(`${text}\n\n${validationLine(run)}`, marker), references);
     saveReceipt({ commentId });
   },
@@ -170,7 +170,7 @@ const issue = {
     for (const { title, body, fingerprint } of missing) {
       if (publication().issues?.[fingerprint] !== undefined) continue;
       const existing = findBotFingerprintedIssue(open, fingerprint);
-      const number = existing?.number ?? (await github.createIssue({ title, body: await embedRunScreenshots(body, contextDirOf(inferenceRunOf(run).id), { runId: run.id, references }), fingerprint }, references)).number;
+      const number = existing?.number ?? (await github.createIssue({ title, body: await embedRunScreenshots(body, [contextDirOf(run.id), contextDirOf(inferenceRunOf(run).id)], { runId: run.id, references }), fingerprint }, references)).number;
       saveReceipt({ issues: { ...publication().issues, [fingerprint]: number } });
     }
   },

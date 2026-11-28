@@ -191,7 +191,7 @@ export function auditStorefront(ctx: Ctx, sha: string, result: AgentResult): Pro
 export async function publishStorefront({ github, subject, task, run, references, publication, saveReceipt }: EffectContext) {
   const { slack, blocks, report } = run.result.storefrontReview!;
   if (report && !publication().storefrontReportUrl) {
-    const url = await bestEffort(logger, "storefront.report_failed", references, async () => github.upsertCommitComment(commitInput(run.input).sha, await embedRunScreenshots(report, contextDirOf(inferenceRunOf(run).id), { runId: run.id, references }), storefrontMarker, references));
+    const url = await bestEffort(logger, "storefront.report_failed", references, async () => github.upsertCommitComment(commitInput(run.input).sha, await embedRunScreenshots(report, [contextDirOf(run.id), contextDirOf(inferenceRunOf(run).id)], { runId: run.id, references }), storefrontMarker, references));
     if (url) saveReceipt({ storefrontReportUrl: url });
   }
   const url = publication().storefrontReportUrl;

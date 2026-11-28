@@ -243,7 +243,9 @@ export async function validateStaticConfig(settings: Partial<ScratConfig> & { re
       if (!value.trim()) problems.push(`media.cloudflareImages.${key} must not be empty when media.cloudflareImages.enabled is true`);
     }
     for (const [key, value] of Object.entries({ baseUrl: images.baseUrl, deliveryBaseUrl: images.deliveryBaseUrl, ...images.auth === "loggie" && { "loggie.url": images.loggie.url } })) {
-      if (!URL.canParse(value)) problems.push(`media.cloudflareImages.${key} must be an absolute URL`);
+      const url = URL.canParse(value) ? new URL(value) : undefined, loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url?.hostname ?? "");
+      if (!url || !["http:", "https:"].includes(url.protocol) || /[?#]/.test(value)) problems.push(`media.cloudflareImages.${key} must be an absolute http(s) URL without a query or fragment`);
+      else if (url.protocol !== "https:" && !loopback) problems.push(`media.cloudflareImages.${key} must use https unless it is a loopback address`);
     }
     const secret = images.auth === "loggie" ? "LOGGIE_API_KEY" : "CLOUDFLARE_IMAGES_TOKEN";
     if (!process.env[secret]) problems.push(`media.cloudflareImages.enabled is true with auth "${images.auth}" but ${secret} is not set`);

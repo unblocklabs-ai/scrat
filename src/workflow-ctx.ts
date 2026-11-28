@@ -1051,8 +1051,9 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         },
       },
       media: {
-        enabled: config.media.cloudflareImages.enabled,
+        enabled: Boolean(!dryRun && config.media.cloudflareImages.enabled),
         async uploadImage(path) {
+          if (dryRun) return undefined;
           assertNotAborted(signal, "media.uploadImage");
           return uploadCloudflareImage(resolve(contextDirOf(run.id), path), { contextDir: contextDirOf(run.id), runId: run.id, references });
         },

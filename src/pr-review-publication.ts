@@ -40,6 +40,15 @@ function canonicalComment(own: ItemObservation["own"], reviews: ReturnType<typeo
     .some((id) => taskIds.has(id) && comment.body.trimEnd().endsWith(`${reviewMarker}\n${taskMarker(id)}`)));
 }
 
+function screenshotDirs(run: Run) {
+  const visited = new Set<string>(), ids: string[] = [];
+  for (let next: Run | undefined = run; next && !visited.has(next.id); next = next.retryOfRunId ? getRun(next.retryOfRunId) : undefined) {
+    visited.add(next.id);
+    ids.push(next.id, inferenceRunOf(next).id);
+  }
+  return ids.map(contextDirOf);
+}
+
 const staleReview = "Reviewed code changed or PR context changed; enqueue a fresh review";
 
 async function stillReviewed(github: GitHubRepository, number: number, run: Pick<Run, "headSha"> & { context: Pick<NonNullable<Run["context"]>, "baseBranch"> | null }) {
@@ -150,7 +159,7 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
   let commentId: number | undefined;
   if (shown) {
     let text: string;
-    if (desired) text = await embedRunScreenshots(runText(desired.run.id), contextDirOf(inferenceRunOf(getRun(desired.run.id)!).id), { runId: desired.run.id, references: deliveryReferences });
+    if (desired) text = await embedRunScreenshots(runText(desired.run.id), screenshotDirs(getRun(desired.run.id)!), { runId: desired.run.id, references: deliveryReferences });
     else if (state.kind === "blocked") text = `This PR is behind ${observation.baseBranch} and does not merge cleanly; update the branch and ${botName} will review it.`;
     else {
       let error = getRun(shown.run.id)!.error!;

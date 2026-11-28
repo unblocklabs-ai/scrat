@@ -237,6 +237,17 @@ export async function validateStaticConfig(settings: Partial<ScratConfig> & { re
     if (!cloudflare.services.length) problems.push("cloudflare.services must not be empty when cloudflare.enabled is true");
     if (!URL.canParse(cloudflare.loggie.url)) problems.push("cloudflare.loggie.url must be an absolute URL");
   }
+  const images = settings.media?.cloudflareImages;
+  if (images?.enabled) {
+    for (const [key, value] of Object.entries({ accountId: images.accountId, accountHash: images.accountHash, ...images.auth === "loggie" && { "loggie.slug": images.loggie.slug } })) {
+      if (!value.trim()) problems.push(`media.cloudflareImages.${key} must not be empty when media.cloudflareImages.enabled is true`);
+    }
+    for (const [key, value] of Object.entries({ baseUrl: images.baseUrl, deliveryBaseUrl: images.deliveryBaseUrl, ...images.auth === "loggie" && { "loggie.url": images.loggie.url } })) {
+      if (!URL.canParse(value)) problems.push(`media.cloudflareImages.${key} must be an absolute URL`);
+    }
+    const secret = images.auth === "loggie" ? "LOGGIE_API_KEY" : "CLOUDFLARE_IMAGES_TOKEN";
+    if (!process.env[secret]) problems.push(`media.cloudflareImages.enabled is true with auth "${images.auth}" but ${secret} is not set`);
+  }
   for (const [name, { apiKey }] of Object.entries(settings.providers ?? {})) {
     if (apiKey && !/\$\{\w+\}/.test(apiKey)) logger.warn({ provider: name }, "Provider apiKey is not a ${VAR} placeholder; it will not be redacted from output");
   }

@@ -1,4 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
+import { contextDirOf } from "./agent-input.ts";
+import { embedRunScreenshots } from "./cloudflare-images.ts";
 import { postReply, reactToRoot, verdictReaction } from "./commit-review.ts";
 import { findBotFingerprintedIssue, findBotMarkedComment, upsertComment } from "./comments.ts";
 import { db } from "./db.ts";
@@ -14,6 +16,7 @@ import { fingerprintMarker, reviewMarker, taskMarker, withMarker } from "./marke
 import { observe } from "./observation.ts";
 import { reconcilePrReview } from "./pr-review-publication.ts";
 import { remoteUrl } from "./repository.ts";
+import { inferenceRunOf } from "./run-history.ts";
 import { assertPublishable } from "./secrets.ts";
 import { items, runs, subjects, workspaces, type Run, type Task, type Subject } from "./schema.ts";
 import { parseTriggerInput } from "./triggers.ts";
@@ -136,7 +139,8 @@ const comment = {
     const marker = context.action.mode === "review" ? reviewMarker : taskMarker(task.id);
     const observation = observed(context);
     const existing = findBotMarkedComment(observation.own, marker);
-    const commentId = await upsertComment(github, run.context.item.number, existing, withMarker(`${run.result.text}\n\n${validationLine(run)}`, marker), references);
+    const text = await embedRunScreenshots(run.result.text, contextDirOf(inferenceRunOf(run).id), { runId: run.id, references });
+    const commentId = await upsertComment(github, run.context.item.number, existing, withMarker(`${text}\n\n${validationLine(run)}`, marker), references);
     saveReceipt({ commentId });
   },
 } satisfies Effect;
@@ -166,7 +170,7 @@ const issue = {
     for (const { title, body, fingerprint } of missing) {
       if (publication().issues?.[fingerprint] !== undefined) continue;
       const existing = findBotFingerprintedIssue(open, fingerprint);
-      const number = existing?.number ?? (await github.createIssue({ title, body, fingerprint }, references)).number;
+      const number = existing?.number ?? (await github.createIssue({ title, body: await embedRunScreenshots(body, contextDirOf(inferenceRunOf(run).id), { runId: run.id, references }), fingerprint }, references)).number;
       saveReceipt({ issues: { ...publication().issues, [fingerprint]: number } });
     }
   },

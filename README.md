@@ -37,7 +37,7 @@ Requires Node.js **22.19+**, Git, and the tools used by the target repository's 
 
 1. Run `npm ci`.
 2. Edit `scrat.config.json` (or `scrat.local.json` for deployment overrides): GitHub repository/App installation, model provider, workflow overrides, concurrency, and workspace preparation/validation commands.
-3. Create an untracked `.env` containing `CODEX_LB_API_KEY` and the GitHub credential for the chosen `github.auth` mode: `GITHUB_APP_PRIVATE_KEY` (`"app"`; install the GitHub App on the target repository with the necessary contents, issues, pull-request, and checks (read) permissions, plus deployments (write) for storefront previews) or `GITHUB_PAT` (`"pat"`; see GitHub authentication below). Add `SLACK_BOT_TOKEN` when `review_base_change` is enabled (see Slack status below), and `LOGGIE_API_KEY` when storefront previews are enabled (see Storefront previews below).
+3. Create an untracked `.env` containing `CODEX_LB_API_KEY` and the GitHub credential for the chosen `github.auth` mode: `GITHUB_APP_PRIVATE_KEY` (`"app"`; install the GitHub App on the target repository with the necessary contents, issues, pull-request, and checks (read) permissions, plus deployments (write) for storefront previews) or `GITHUB_PAT` (`"pat"`; see GitHub authentication below). Add `SLACK_BOT_TOKEN` when `review_base_change` is enabled (see Slack status below), `LOGGIE_API_KEY` when storefront previews are enabled (see Storefront previews below), and `CLOUDFLARE_IMAGES_TOKEN` when screenshot thumbnails use `auth: "token"` (see Screenshot thumbnails below).
 4. Initialize the local schema and start the service:
 
    ```sh
@@ -747,3 +747,33 @@ Scrat polls the Issues API; it has no inbound endpoint, and Cloudflare's push Au
 | `cloudflare.context.logWindowSeconds` | 600 | Seconds before and after an occurrence searched for its trace's log events. |
 
 Rollout, scrat host first: keep Issues enabled in the watched Worker's Wrangler config (a Wrangler deploy otherwise turns them off), upload the Worker's source maps so stacks are readable, and give the host a `LOGGIE_API_KEY` in `.env` for a Loggie profile with the Cloudflare integration. The Issues endpoints are undocumented; they pass through Loggie without a catalog entry. Writing back to Cloudflare (marking an issue resolved or ignored when its GitHub issue closes) is not implemented.
+
+### Screenshot thumbnails (Cloudflare Images)
+
+Browser screenshots stay on the host by default, so a review comment can only name them. With `media.cloudflareImages.enabled`, Scrat uploads the screenshots a GitHub comment or issue names to [Cloudflare Images](https://developers.cloudflare.com/images/) just before posting it and links them in place. It is off by default and turned on per host in `scrat.local.json`:
+
+```json
+{ "media": { "cloudflareImages": { "enabled": true, "accountId": "0123456789abcdef0123456789abcdef", "accountHash": "AbCdEf123" } } }
+```
+
+- **What is uploaded.** Only screenshots of the run being published: the allowlist is the base names in the run's `screenshots.jsonl` (`screenshot-<viewport>-<n>.png`, and `screenshot-reviewer-<k>-<viewport>-<n>.png` from a review panel), read from that run's context directory, and only those the text names. Any other file name, a path that leaves the directory, or a name inside a fenced code block is left alone.
+- **How a name is replaced.** A Markdown image of a screenshot, or a name in a table row (a line starting with `|`), becomes `<a href="<full>"><img src="<thumbnail>" width="<thumbnailWidth>" alt="<name>" /></a>`, so preview and live images sit side by side in a comparison table. A name in prose, backticked or bare, becomes a link to the full image. Names already inside a link, an HTML tag or a URL are not touched, and a path ending in a screenshot name (`data/runs/<run>/screenshot-mobile-1.png`) counts as that name.
+- **Where.** The PR assessment (`pr_assessment`), the `comment` and `issue` effects, the storefront commit report, and a workflow script's `ctx.github.comment` and `ctx.github.issue`. Scripts can also call `ctx.media.uploadImage(path)` for a file inside the run's context directory (it returns `{ id, fullUrl, thumbUrl }`, or `undefined` when disabled or the upload fails); `ctx.media.enabled` says whether hosting is on. Files a script agent (`ctx.agent.run`) writes are removed when the agent finishes, so they cannot be uploaded afterwards.
+- **Failing open.** A screenshot larger than `maxBytes`, with a side longer than `maxDimension` (read from the PNG, JPEG or WebP header), or whose upload fails is logged (`media.cloudflare_images.too_large`, `media.cloudflare_images.upload_failed`) and its name stays as written; the comment is still posted.
+- **Once per screenshot.** Each upload is recorded in the run's `uploaded-images.json` (`name -> { id, fullUrl, thumbUrl }`), so a retry or a later reconcile reuses it, the rewritten comment is byte-for-byte the same, and an unchanged assessment is not edited again (`review.unchanged`). The record outlives the screenshot files that `storefront.screenshotRetentionDays` prunes.
+- **Credentials.** `auth: "token"` posts `multipart/form-data` to `<baseUrl>/accounts/<accountId>/images/v1` with `Authorization: Bearer $CLOUDFLARE_IMAGES_TOKEN` (an API token with Images edit permission). `auth: "loggie"` posts the same form to `<loggie.url>/api/proxy/<loggie.slug>/accounts/<accountId>/images/v1` with `x-api-key: $LOGGIE_API_KEY`. Both variables are secrets: redacted from logs and errors, refused in published text, and never passed to workspace commands or the agent. Uploads are public (`requireSignedURLs: false`) and carry `metadata` `{ source: "scrat", runId, file }`. Startup fails when enabled and `accountId` or `accountHash` is empty, `baseUrl` or `deliveryBaseUrl` (or, with `loggie`, `loggie.url`) is not an absolute URL, `loggie.slug` is empty with `loggie`, or the variable for `auth` is not set.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `media.cloudflareImages.enabled` | `false` | Turns uploads and rewriting on. |
+| `media.cloudflareImages.auth` | `token` | `token` (Cloudflare API with `CLOUDFLARE_IMAGES_TOKEN`) or `loggie` (Loggie proxy with `LOGGIE_API_KEY`). |
+| `media.cloudflareImages.accountId` / `.accountHash` | none | The Cloudflare account, and the account hash in delivery URLs (`<deliveryBaseUrl>/<accountHash>/<id>/<variant>`). Required when enabled. |
+| `media.cloudflareImages.variant` | `w=1600,fit=scale-down` | Variant of the full image behind the link: a flexible-variant option string or a named variant such as `public`. |
+| `media.cloudflareImages.thumbnailVariant` | `w=480,fit=scale-down` | Variant of the inline thumbnail; empty uses `variant`. |
+| `media.cloudflareImages.thumbnailWidth` | 280 | `width` of the thumbnail `<img>`; `0` omits it. |
+| `media.cloudflareImages.maxBytes` | 10485760 | Largest file uploaded (Cloudflare's limit is 10 MB); `0` skips the check. |
+| `media.cloudflareImages.maxDimension` | 12000 | Longest side uploaded, in pixels (Cloudflare's limit is 12,000); `0` skips the check. |
+| `media.cloudflareImages.timeoutSeconds` | 30 | Per-upload timeout; `0` waits without one. |
+| `media.cloudflareImages.concurrency` | 4 | Uploads in flight at once for one text. |
+| `media.cloudflareImages.baseUrl` / `.deliveryBaseUrl` | `https://api.cloudflare.com/client/v4` / `https://imagedelivery.net` | API and delivery origins. |
+| `media.cloudflareImages.loggie.url` / `.slug` | `https://app.loggie.ai` / `cloudflare` | Loggie proxy and integration slug for `auth: "loggie"`. |

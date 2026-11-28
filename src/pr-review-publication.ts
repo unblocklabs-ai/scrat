@@ -1,4 +1,6 @@
 import { and, eq, gt } from "drizzle-orm";
+import { contextDirOf } from "./agent-input.ts";
+import { embedRunScreenshots } from "./cloudflare-images.ts";
 import { findBotMarkedComment, upsertComment } from "./comments.ts";
 import { getRepositoryPath, isBotLogin } from "./config.ts";
 import { db } from "./db.ts";
@@ -148,7 +150,7 @@ async function reconcile(github: GitHubRepository, subjectId: string, number: nu
   let commentId: number | undefined;
   if (shown) {
     let text: string;
-    if (desired) text = runText(desired.run.id);
+    if (desired) text = await embedRunScreenshots(runText(desired.run.id), contextDirOf(inferenceRunOf(getRun(desired.run.id)!).id), { runId: desired.run.id, references: deliveryReferences });
     else if (state.kind === "blocked") text = `This PR is behind ${observation.baseBranch} and does not merge cleanly; update the branch and ${botName} will review it.`;
     else {
       let error = getRun(shown.run.id)!.error!;

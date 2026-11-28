@@ -105,6 +105,13 @@ const schema = Type.Object({
     issues: Type.Object({ types: Type.Array(Type.Enum(["exception", "log"]), { minItems: 1, uniqueItems: true }), minOccurrences: positive, maxOpen: positive, label: Type.String({ minLength: 1 }), pageSize: positive, stackFrames: positive, bodyBytes: positive }, strict),
     context: Type.Object({ occurrences: positive, logEvents: positive, maxBytes: positive, logWindowSeconds: positive }, strict),
   }, strict),
+  media: Type.Object({
+    cloudflareImages: Type.Object({
+      enabled: Type.Boolean(), auth: Type.Enum(["token", "loggie"]), accountId: Type.String(), accountHash: Type.String(), variant: Type.String({ minLength: 1 }), thumbnailVariant: Type.String(),
+      thumbnailWidth: Type.Integer({ minimum: 0 }), maxBytes: Type.Integer({ minimum: 0 }), maxDimension: Type.Integer({ minimum: 0 }), timeoutSeconds: Type.Integer({ minimum: 0 }), concurrency: positive,
+      baseUrl: Type.String(), deliveryBaseUrl: Type.String(), loggie: Type.Object({ url: Type.String(), slug: Type.String() }, strict),
+    }, strict),
+  }, strict),
   slack: Type.Object({ enabled: Type.Boolean(), channel: Type.String(), maxRetryAfterSeconds: positive, minimumGapMs: Type.Integer({ minimum: 0 }), maxErrorLength: positive, maxTextLength: positive }, strict),
   workspace: Type.Object({
     sandbox: Type.Boolean(),

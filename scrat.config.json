@@ -158,6 +158,24 @@
     "issues": { "types": ["exception"], "minOccurrences": 5, "maxOpen": 10, "label": "cloudflare", "pageSize": 50, "stackFrames": 10, "bodyBytes": 16384 },
     "context": { "occurrences": 5, "logEvents": 50, "maxBytes": 65536, "logWindowSeconds": 600 }
   },
+  "media": {
+    "cloudflareImages": {
+      "enabled": false,
+      "auth": "token",
+      "accountId": "",
+      "accountHash": "",
+      "variant": "w=1600,fit=scale-down",
+      "thumbnailVariant": "w=480,fit=scale-down",
+      "thumbnailWidth": 280,
+      "maxBytes": 10485760,
+      "maxDimension": 12000,
+      "timeoutSeconds": 30,
+      "concurrency": 4,
+      "baseUrl": "https://api.cloudflare.com/client/v4",
+      "deliveryBaseUrl": "https://imagedelivery.net",
+      "loggie": { "url": "https://app.loggie.ai", "slug": "cloudflare" }
+    }
+  },
   "slack": {
     "enabled": false,
     "channel": "",

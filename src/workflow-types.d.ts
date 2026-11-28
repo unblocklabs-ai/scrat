@@ -5,4 +5,5 @@ declare module "scrat" {
   export type LighthouseOptions = import("./lighthouse.ts").LighthouseOptions;
   export type StorefrontLighthouseSummary = import("./lighthouse.ts").StorefrontLighthouseSummary;
   export type LighthouseComparison = import("./lighthouse.ts").LighthouseComparison;
+  export type UploadedImage = import("./cloudflare-images.ts").UploadedImage;
 }

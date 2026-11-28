@@ -2,6 +2,7 @@ import { copyFile, cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/pr
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { contextDirOf, contextFiles } from "./agent-input.ts";
+import { embedRunScreenshots } from "./cloudflare-images.ts";
 import { inferenceRunOf } from "./run-history.ts";
 import { commitInput, postReply } from "./commit-review.ts";
 import { config } from "./config.ts";
@@ -190,7 +191,7 @@ export function auditStorefront(ctx: Ctx, sha: string, result: AgentResult): Pro
 export async function publishStorefront({ github, subject, task, run, references, publication, saveReceipt }: EffectContext) {
   const { slack, blocks, report } = run.result.storefrontReview!;
   if (report && !publication().storefrontReportUrl) {
-    const url = await bestEffort(logger, "storefront.report_failed", references, () => github.upsertCommitComment(commitInput(run.input).sha, report, storefrontMarker, references));
+    const url = await bestEffort(logger, "storefront.report_failed", references, async () => github.upsertCommitComment(commitInput(run.input).sha, await embedRunScreenshots(report, contextDirOf(inferenceRunOf(run).id), { runId: run.id, references }), storefrontMarker, references));
     if (url) saveReceipt({ storefrontReportUrl: url });
   }
   const url = publication().storefrontReportUrl;

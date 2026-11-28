@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { and, eq } from "drizzle-orm";
 import type { Logger } from "pino";
 import { buildItemAgentInput, contextDirOf, evaluateItemContext, readDiffScope } from "./agent-input.ts";
+import { embedRunScreenshots, type UploadedImage, uploadCloudflareImage } from "./cloudflare-images.ts";
 import { findBotFingerprintedIssue, findBotMarkedComment, upsertComment } from "./comments.ts";
 import { config } from "./config.ts";
 import { type D1ExtractAnswer, type D1ExtractFieldSpec, extractFields, isD1Available, scoreDecisions } from "./d1.ts";
@@ -132,6 +133,10 @@ export type WorkflowContext = {
     previewOfPr: (prNumber: number) => { url: string | null; themeId: number | null; headSha: string | null; available: boolean; problems: string[] } | undefined;
     lighthouse: (options?: LighthouseOptions) => Promise<StorefrontLighthouseSummary>;
     compareLighthouse: (before: StorefrontLighthouseSummary, after: StorefrontLighthouseSummary) => LighthouseComparison;
+  };
+  media: {
+    enabled: boolean;
+    uploadImage: (path: string) => Promise<UploadedImage | undefined>;
   };
   signal: AbortSignal;
   log: Logger;
@@ -713,7 +718,8 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         const marker = workflowCommentMarker(workflow.name, safeKey);
         const ctx = await github.fetchItemContext("issue", number);
         const existing = findBotMarkedComment(ctx.comments, marker);
-        const commentId = await upsertComment(github, number, existing, withMarker(body, ...resolved ? [advisoryResolvedMarker] : [], marker), references);
+        const embedded = await embedRunScreenshots(body, contextDirOf(run.id), { runId: run.id, references });
+        const commentId = await upsertComment(github, number, existing, withMarker(embedded, ...resolved ? [advisoryResolvedMarker] : [], marker), references);
         return { commentId };
       });
     },
@@ -731,7 +737,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         const { issues: open } = await github.fetchOpenItems();
         const existing = findBotFingerprintedIssue(open, fingerprint);
         if (existing) return { number: existing.number, created: false };
-        const created = await github.createIssue({ title, body, fingerprint, labels }, references);
+        const created = await github.createIssue({ title, body: await embedRunScreenshots(body, contextDirOf(run.id), { runId: run.id, references }), fingerprint, labels }, references);
         return { number: created.number, created: true };
       }, { replayOnInputChange: true });
     },
@@ -1042,6 +1048,13 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
           assertNotAborted(signal, "storefront.lighthouse");
           if (!config.storefront.enabled || !config.storefront.publicHost) throw new Error(`Workflow ${workflow.name} called ctx.storefront.lighthouse but the storefront is not enabled (storefront.enabled and storefront.publicHost)`);
           return runStorefrontLighthouse(`https://${config.storefront.publicHost}`, join(contextDirOf(run.id), `lighthouse-${++lighthouseRuns}`), references, signal, options);
+        },
+      },
+      media: {
+        enabled: config.media.cloudflareImages.enabled,
+        async uploadImage(path) {
+          assertNotAborted(signal, "media.uploadImage");
+          return uploadCloudflareImage(resolve(contextDirOf(run.id), path), { contextDir: contextDirOf(run.id), runId: run.id, references });
         },
       },
       signal,

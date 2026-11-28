@@ -5941,6 +5941,68 @@ fi
     assert.equal(filed().length, 4, "the issue created behind a lost response is adopted, not filed again");
     assert.equal(f.issues.get(row("cf-f").number).title, lostTitle, "the title is redacted");
   } },
+  cloudflare_images: { title: "with Cloudflare Images on, a published assessment links only the run's referenced screenshots as table thumbnails and prose links, leaves code blocks, unlisted names and oversized images as written, uploads each once across reconciles so the body stays unchanged, works through Loggie, and keeps the token secret", run: async () => {
+    const token = "cfimg-" + "Qw7Er9Ty3U".repeat(3), loggieKey = "loggie-" + "Pk4Lm8Nb2V".repeat(3), uploads = [];
+    process.env.CLOUDFLARE_IMAGES_TOKEN = token; process.env.LOGGIE_API_KEY = loggieKey;
+    const server = createServer(async (req, res) => {
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      const form = await new Response(Buffer.concat(chunks), { headers: { "content-type": req.headers["content-type"] } }).formData(), file = form.get("file");
+      uploads.push({ path: req.url, authorization: req.headers.authorization, key: req.headers["x-api-key"], name: file.name, size: file.size, metadata: JSON.parse(form.get("metadata")), signed: form.get("requireSignedURLs") });
+      res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ success: true, result: { id: "id-" + file.name.replace(/\.png$/, ""), variants: [] } }));
+    });
+    await new Promise((done) => server.listen(0, "127.0.0.1", done));
+    try {
+      const origin = `http://127.0.0.1:${server.address().port}`, { config: live } = await f.app("config.ts"), images = live.media.cloudflareImages;
+      Object.assign(images, { enabled: true, accountId: "acct-img", accountHash: "HASH", baseUrl: `${origin}/client/v4`, deliveryBaseUrl: `${origin}/cdn/`, maxBytes: 4096, maxDimension: 12000, loggie: { url: origin, slug: "cf-images" } });
+      const { contextDirOf } = await f.app("agent-input.ts"), { getRun, inferenceRunOf, updateRun } = await f.app("run-history.ts"), { reconcilePrReview } = await f.app("pr-review-publication.ts");
+      const { embedRunScreenshots } = await f.app("cloudflare-images.ts"), { GitHubRepository } = await f.app("github.ts");
+      const png = (width, height, bytes = 64) => { const b = Buffer.alloc(bytes); Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b); b.writeUInt32BE(13, 8); b.write("IHDR", 12, "latin1"); b.writeUInt32BE(width, 16); b.writeUInt32BE(height, 20); return b; };
+      const stage = (dir, shots) => {
+        mkdirSync(dir, { recursive: true });
+        for (const [name, bytes] of Object.entries(shots)) if (bytes) writeFileSync(resolve(dir, name), bytes);
+        writeFileSync(resolve(dir, "screenshots.jsonl"), [...Object.keys(shots).map((name) => resolve(dir, name)), "/etc/passwd"].map((path) => JSON.stringify({ path, viewport: "mobile", url: "https://shop.example.test/" }) + "\n").join(""));
+      };
+      branchOff("feature-a", "src/feature.ts", "export const feature = 1;\n");
+      f.addPr(301, "feature-a", "human"); await route();
+      const reviewed = await success(), dir = contextDirOf(inferenceRunOf(getRun(reviewed.id)).id);
+      stage(dir, { "screenshot-mobile-6.png": png(390, 844), "screenshot-reviewer-1-desktop-7.png": png(1440, 900), "screenshot-mobile-12.png": png(390, 2000), "screenshot-desktop-8.png": png(20000, 900), "screenshot-mobile-9.png": png(390, 844, 5000), "screenshot-mobile-13.png": null });
+      const fence = "```text\nls screenshot-mobile-6.png\n```";
+      const text = ["## Storefront", "", "| Page | Preview | Live |", "| --- | --- | --- |", "| Home | `screenshot-mobile-6.png` | screenshot-reviewer-1-desktop-7.png |", "| Big | `screenshot-desktop-8.png` | `screenshot-mobile-9.png` |", "",
+        "The drawer overlaps in `screenshot-mobile-12.png`, as ![cart drawer](screenshot-mobile-6.png) shows.", "", fence, "",
+        "Left alone: `screenshot-mobile-99.png`, `screenshot-mobile-13.png`, ../etc/passwd and https://example.test/screenshot-mobile-6.png.", "", "SCRAT_GRADE: B"].join("\n");
+      updateRun(reviewed.id, { result: { ...getRun(reviewed.id).result, text } });
+      const github = new GitHubRepository("fixture/project"), subjectId = all(s.tasks).find((task) => task.id === reviewed.taskId).subjectId, references = { subjectId };
+      await reconcilePrReview(github, subjectId, 301, references);
+      const body = f.comments.get(301).at(-1).body, full = (name) => `${origin}/cdn/HASH/id-${name}/w=1600,fit=scale-down`, thumb = (name) => `${origin}/cdn/HASH/id-${name}/w=480,fit=scale-down`;
+      const cell = (name, alt = `${name}.png`) => `<a href="${full(name)}"><img src="${thumb(name)}" width="280" alt="${alt}" /></a>`;
+      assert.ok(body.includes(`| Home | ${cell("screenshot-mobile-6")} | ${cell("screenshot-reviewer-1-desktop-7")} |`), body);
+      assert.ok(body.includes("| Big | `screenshot-desktop-8.png` | `screenshot-mobile-9.png` |"), "images over maxDimension or maxBytes keep their names");
+      assert.ok(body.includes(`The drawer overlaps in [\`screenshot-mobile-12.png\`](${full("screenshot-mobile-12")}), as ${cell("screenshot-mobile-6", "cart drawer")} shows.`));
+      assert.ok(body.includes(fence) && body.includes("Left alone: `screenshot-mobile-99.png`, `screenshot-mobile-13.png`, ../etc/passwd and https://example.test/screenshot-mobile-6.png."));
+      assert.deepEqual(uploads.map((upload) => upload.name).sort(), ["screenshot-mobile-12.png", "screenshot-mobile-6.png", "screenshot-reviewer-1-desktop-7.png"]);
+      for (const upload of uploads) {
+        assert.equal(upload.path, "/client/v4/accounts/acct-img/images/v1"); assert.equal(upload.authorization, "Bearer " + token); assert.equal(upload.key, undefined);
+        assert.deepEqual(upload.metadata, { source: "scrat", runId: reviewed.id, file: upload.name }); assert.equal(upload.signed, "false");
+      }
+      assert.deepEqual(Object.keys(JSON.parse(readFileSync(resolve(dir, "uploaded-images.json"), "utf8"))).sort(), ["screenshot-mobile-12.png", "screenshot-mobile-6.png", "screenshot-reviewer-1-desktop-7.png"]);
+      const writes = f.writes.length, logs = captureLogs();
+      try { await reconcilePrReview(github, subjectId, 301, references); } finally { restoreLogs(); }
+      assert.equal(uploads.length, 3, "a later reconcile reuses the recorded uploads"); assert.equal(f.writes.length, writes, "and leaves the comment alone");
+      assert.ok(logs.some((line) => line.event === "review.unchanged"));
+      assert.equal(f.comments.get(301).at(-1).body, body);
+
+      Object.assign(images, { auth: "loggie", thumbnailVariant: "", thumbnailWidth: 0 });
+      const other = resolve("data/runs/loggie-run");
+      stage(other, { "screenshot-desktop-3.png": png(1440, 900) });
+      assert.equal(await embedRunScreenshots("| x | `screenshot-desktop-3.png` |", other, { runId: "loggie-run" }),
+        `| x | <a href="${full("screenshot-desktop-3")}"><img src="${full("screenshot-desktop-3")}" alt="screenshot-desktop-3.png" /></a> |`);
+      assert.deepEqual(uploads.slice(3).map(({ path, key, authorization }) => ({ path, key, authorization })), [{ path: "/api/proxy/cf-images/accounts/acct-img/images/v1", key: loggieKey, authorization: undefined }]);
+
+      const { childEnvironment, containsSecret } = await f.app("secrets.ts"), { redactSecrets } = await f.app("errors.ts");
+      assert.equal("CLOUDFLARE_IMAGES_TOKEN" in childEnvironment(), false);
+      assert.ok(containsSecret(`token ${token}`)); assert.ok(!redactSecrets(`failed with ${token}`).includes(token));
+    } finally { server.close(); }
+  } },
   database: { title: "real PostgreSQL runs isolate databases, apply new migrations and remove resources", needsDocker: true, configure: [configureDatabase], run: async () => {
     const original = process.env.DATABASE_URL; f.addIssue(1); f.addIssue(2); f.enqueue(1, "implement"); f.enqueue(2, "implement");
     const runs = await Promise.all([f.runNextTask(), f.runNextTask()]);

@@ -27,6 +27,7 @@ import { assertComplete, hasPublicationSnapshot, InterruptedError, SecretLeakErr
 import { retainReviewScope } from "./review-paths.ts";
 import { getRun, latestCompletedRun, updateRun } from "./run-history.ts";
 import { steps, workflowState, type Run, type Subject, type Task } from "./schema.ts";
+import type { BrowserScope } from "./scoped-tools.ts";
 import { assertPublishable, childEnvironment } from "./secrets.ts";
 import { postMessage } from "./slack.ts";
 import { previewOfPr } from "./storefront.ts";
@@ -58,6 +59,8 @@ type WorkflowAgentOptions = {
   tools?: readonly ToolName[];
   codemode?: boolean;
   submitResult?: SubmitResultSpec;
+  browserSteps?: number;
+  browserSeconds?: number;
 };
 
 type WorkflowAgentResult<T = Record<string, unknown>> = {
@@ -198,6 +201,8 @@ export type WorkflowContext = {
         tools?: readonly ToolName[];
         codemode?: boolean;
         submitResult?: SubmitResultSpec;
+        browserSteps?: number;
+        browserSeconds?: number;
       },
     ) => Promise<WorkflowAgentResult>;
     recordResult: (result: Pick<WorkflowAgentResult, "text" | "outcome" | "ready" | "labels" | "paths">) => void;
@@ -245,7 +250,7 @@ function assertPermission<T extends string>(allowed: readonly T[], needed: T, sc
   }
 }
 
-const allowedToolSet = new Set<string>(workflowAllowedTools);
+const allowedToolSet = new Set<string>([...workflowAllowedTools, "browser"]);
 const validEffects = new Set<string>(effectNames);
 const validStartEffects = new Set<string>(startEffectNames);
 
@@ -552,6 +557,20 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
     return { effectiveTools, effectiveRun };
   }
 
+  function scriptBrowser(tools: readonly ToolName[], budget: { browserSteps?: number; browserSeconds?: number }): BrowserScope | undefined {
+    if (!tools.includes("browser")) return undefined;
+    const storefront = config.storefront.enabled;
+    const hosts = workflow.browser ?? (storefront ? { navigationHosts: "any" as const, resourceHosts: "any" as const } : undefined);
+    if (!hosts) throw new Error(`Workflow ${workflow.name} requested the browser tool without a browser setting or an enabled storefront`);
+    const fallback = storefront ? config.storefront.limits : { browserSteps: config.tools.browser.steps, browserSeconds: config.tools.browser.sessionSeconds };
+    const [steps, seconds] = (["browserSteps", "browserSeconds"] as const).map((key) => {
+      const value = budget[key] ?? workflow.config[key] ?? fallback[key];
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 1) throw new Error(`Workflow ${workflow.name} ${key} must be a positive integer`);
+      return value;
+    }) as [number, number];
+    return { ...hosts, limits: { steps, milliseconds: seconds * 1000 } };
+  }
+
   const workspace: WorkflowContext["workspace"] = {
     baseBranch: config.github.baseBranch,
     withCheckout<T>(ref: string, fn: (ws: WorkflowCheckout) => Promise<T>): Promise<T> {
@@ -575,6 +594,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
     async run<T = Record<string, unknown>>(options: WorkflowAgentOptions): Promise<WorkflowAgentResult<T>> {
       assertNotAborted(signal, "agent.run");
       const { effectiveTools, effectiveRun } = prepareScriptAgent({ ...options, forbidReadBase: true });
+      const browser = scriptBrowser(effectiveTools, options);
       const contextDir = await mkdtemp(join(tmpdir(), `scrat-wf-${workflow.name}-`));
       try {
         let contextText = options.context ?? "";
@@ -600,7 +620,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
           run: effectiveRun,
           cwd: options.cwd,
           tools: effectiveTools,
-          scoped: { mode: "review", codemode: options.codemode ?? workflow.defaults.codemode },
+          scoped: { mode: "review", codemode: options.codemode ?? workflow.defaults.codemode, browser },
           contextDir,
           log: log.child({ workflow: workflow.name, model: effectiveRun.model }),
           stop: signal,
@@ -848,6 +868,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
       assertNotAborted(signal, "item.runAgent");
       const currentItem = requireItem();
       const { effectiveTools, effectiveRun } = prepareScriptAgent({ skill: options.skill, tools: options.tools });
+      const browser = scriptBrowser(effectiveTools, options);
       const changeContext = options.contextMode === "change";
       const baseSha = changeContext ? ws.diffBaseSha : undefined;
       if (effectiveTools.includes("read_base") && !baseSha) {
@@ -872,7 +893,7 @@ export function createWorkflowContext(input: CreateWorkflowContextInput): { ctx:
         run: effectiveRun,
         cwd: ws.path,
         tools: effectiveTools,
-        scoped: { mode: "review", codemode: options.codemode ?? workflow.defaults.codemode },
+        scoped: { mode: "review", codemode: options.codemode ?? workflow.defaults.codemode, browser },
         baseSha,
         contextDir,
         revisions,

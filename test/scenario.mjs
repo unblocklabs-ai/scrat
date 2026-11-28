@@ -7416,6 +7416,69 @@ fi
       assert.equal(existsSync(lock), false);
     },
   },
+  script_browser: { title: "a script workflow's ctx.agent.run gets the browser tool from its browser setting with the script's step budget, drives it, closes Chromium after a finished and a failed session, and rejects a bad budget", configure: [(config) => {
+    const directory = resolve("deployment"), dir = resolve(directory, "browse_script");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(resolve(dir, "SKILL.md"), "# Browse the shop\n");
+    writeFileSync(resolve(dir, "workflow.yaml"), ["name: browse_script", "enabled: true", "mode: review", "on: {manual: true}", "permissions: {workspace: [read]}",
+      "browser: { navigationHosts: [shop.example.test], resourceHosts: [cdn.example.test] }",
+      "defaults: {provider: fixture, model: gpt-6.2-sol, thinkingLevel: low, tools: [read, browser]}", ""].join("\n"));
+    writeFileSync(resolve(dir, "run.ts"), [
+      "export default async function (ctx) {",
+      "  return ctx.workspace.withCheckout(ctx.workspace.baseBranch, async (ws) => {",
+      "    const done = await ctx.agent.run({ cwd: ws.path, tools: [\"read\", \"browser\"], browserSteps: 3, context: \"Check the shop.\" });",
+      "    const failed = await ctx.agent.run({ cwd: ws.path, tools: [\"read\", \"browser\"], submitResult: { schema: { type: \"object\" } } }).then(() => null, (error) => error.message);",
+      "    const badBudget = await ctx.agent.run({ cwd: ws.path, tools: [\"read\", \"browser\"], browserSteps: 0 }).then(() => null, (error) => error.message);",
+      "    return { outcome: done.outcome, failed, badBudget };",
+      "  });",
+      "}", "",
+    ].join("\n"));
+    config.workflows.directory = directory;
+    config.workflows.trustLocalScripts = true;
+    config.workflows.browse_script = { provider: "fixture" };
+  }], run: async () => {
+    const fakes = globalThis.scriptBrowserFakes = { launches: 0, closes: 0, visits: [] };
+    const pkg = resolve("app/src/node_modules/playwright-core"); mkdirSync(pkg, { recursive: true });
+    writeFileSync(resolve(pkg, "package.json"), JSON.stringify({ name: "playwright-core", type: "module", main: "index.js" }));
+    writeFileSync(resolve(pkg, "index.js"), `const fakes = globalThis.scriptBrowserFakes;
+export const chromium = {
+  executablePath: () => process.execPath,
+  async launch() {
+    fakes.launches++;
+    let current = "about:blank";
+    const page = {
+      goto: async (url) => { current = url; fakes.visits.push(url); return { status: () => 200 }; },
+      url: () => current, title: async () => "Fixture shop", innerHTML: async () => "<html></html>", waitForLoadState: async () => {}, on: () => {}, off: () => {},
+      locator: () => ({ ariaSnapshot: async () => "- heading \\"Fixture shop\\" [level=1]\\n- button \\"Add to cart\\"" }),
+    };
+    return { newContext: async () => ({ route: async () => {}, newPage: async () => page, close: async () => {} }), close: async () => { fakes.closes++; } };
+  },
+};
+`);
+    const goto = { name: "browser", args: { action: "goto", url: "https://shop.example.test/" } }, snapshot = { name: "browser", args: { action: "snapshot" } };
+    f.reset(0, "normal");
+    f.script = [goto, snapshot, goto, snapshot, undefined, goto];
+    const since = f.requests.length;
+    const task = tasks.enqueueWorkflowRun("browse_script");
+    const result = await f.runNextTask(undefined, task.id);
+    f.script = undefined;
+    assert.equal(result.error, null, JSON.stringify(result.error));
+    const out = JSON.parse(result.result.text);
+    assert.equal(out.outcome, "complete");
+    const sessions = f.requests.slice(since);
+    const browserTool = sessions[0].request.tools.find((tool) => tool.function.name === "browser");
+    assert.ok(browserTool, "ctx.agent.run registers the browser tool");
+    assert.match(browserTool.function.description, /Pages may be visited on: shop\.example\.test\./, "the workflow's browser hosts reach the tool");
+    assert.match(browserTool.function.description, new RegExp(`At most 3 actions and ${f.config.tools.browser.sessionSeconds} seconds per session`), "the script's step budget reaches the tool");
+    const replies = sessions[4].request.messages.filter((message) => message.role === "tool").map((message) => typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join(""));
+    assert.match(replies[1], /"snapshot":"- heading \\"Fixture shop\\" \[level=1\]\\n- button \\"Add to cart\\""/, "the snapshot comes back to the agent");
+    assert.match(replies[3], /limited to 3 actions per session/, "the fourth action is refused");
+    assert.match(out.failed, /submit_result/, "the second session fails after driving the browser");
+    assert.match(out.badBudget, /browse_script browserSteps must be a positive integer/);
+    assert.deepEqual(fakes.visits, ["https://shop.example.test/", "https://shop.example.test/", "https://shop.example.test/"]);
+    assert.equal(fakes.launches, 2, "each session launches its own Chromium");
+    assert.equal(fakes.closes, fakes.launches, "every launched Chromium is closed, including the failed session's");
+  } },
   d1_workflows: { title: "workflow scripts score and extract through ctx.d1 with clean failures, label_items labels from confident d1 decisions without Pi and replays them on publication retry, and review_pr shares one d1 navigation packet across its panel and survives a d1 outage", configure: [(config) => {
     for (const name of ["review_issue", "resolve_conflicts", "address_pr_feedback", "address_review", "review_pr"]) config.workflows[name].enabled = false;
     Object.assign(config.d1, { enabled: true, retryBaseDelayMs: 1, retryJitterMs: 0, retryReserveMs: 0, circuitBreakerCooldownMs: 0 });
